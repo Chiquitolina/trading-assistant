@@ -3,9 +3,9 @@ import pandas as pd
 
 from ta.volatility import AverageTrueRange
 
-from indicators.trend import trend_bias
+from common.indicators.trend import trend_bias
 from indicators.direction import trade_direction
-from indicators.momentum import momentum_5m
+from common.indicators.momentum import momentum_5m
 from config.timeframes import TIMEFRAME_CONFIGS
 
 from colorama import Fore, Style, init

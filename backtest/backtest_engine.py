@@ -1,11 +1,11 @@
 import pandas as pd
 
 from data.market_data import fetch_history
-from indicators.trend import trend_bias
+from common.indicators.trend import trend_bias
 from indicators.direction import trade_direction
-from indicators.momentum import momentum_5m
+from common.indicators.momentum import momentum_5m
 from backtest.metrics import calculate_metrics
-from indicators.atr import add_atr
+from common.indicators.atr import add_atr
 
 from tabulate import tabulate
 
@@ -287,8 +287,15 @@ if __name__ == "__main__":
     
     df_trades = pd.DataFrame(trades)
     
-    df_trades["entry_ts"] = pd.to_datetime(df_trades["entry_ts"], unit="ms")
-    df_trades["exit_ts"]  = pd.to_datetime(df_trades["exit_ts"], unit="ms")
+    df_trades["entry_ts"] = (
+        pd.to_datetime(df_trades["entry_ts"], unit="ms", utc=True)
+        .dt.tz_convert("America/Argentina/Buenos_Aires")
+    )
+
+    df_trades["exit_ts"] = (
+        pd.to_datetime(df_trades["exit_ts"], unit="ms", utc=True)
+        .dt.tz_convert("America/Argentina/Buenos_Aires")
+    )
 
     df_trades["entry_ts"] = df_trades["entry_ts"].dt.strftime("%m-%d %H:%M")
     df_trades["exit_ts"]  = df_trades["exit_ts"].dt.strftime("%m-%d %H:%M")
