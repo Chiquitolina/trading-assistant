@@ -87,5 +87,4 @@ class DataBuffer:
             self.buffers[tf].append(candle)
             self.last_close_time[tf] = close_time
 
-        print("\n")
         print(f"📦 Loaded {len(df)} historical candles for {tf}")

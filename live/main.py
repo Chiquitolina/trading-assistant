@@ -2,6 +2,7 @@ from live.ws.ws_client import WSClient
 from live.data.data_buffer import DataBuffer
 from live.signals.signals_engine import SignalEngine
 from data.market_data import fetch_history
+from ui.banners import print_live_banner
 
 # ---------- CONFIG ----------
 # 
@@ -11,6 +12,8 @@ DAYS = 3
 
 # ---------- INIT BUFFER ----------
 buffer = DataBuffer()
+
+print_live_banner()
 
 # Cargar histórico
 limits = {
@@ -32,12 +35,13 @@ ws = WSClient(buffer.on_ws_message)
 ws.start()
 
 print("🚀 Live Signal Engine started! Ctrl+C to stop.")
+print("\n")
 
 # ---------- EVENT LOOP ----------
 try:
     while True:
         # 🔔 SOLO reaccionamos al cierre de 5m
-        if buffer.new_closed_tf == "5m":
+        if buffer.new_closed_tf == "15m":
             buffer.new_closed_tf = None
 
             signal = signals.generate_signal()

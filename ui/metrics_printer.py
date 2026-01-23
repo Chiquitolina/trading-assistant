@@ -1,0 +1,13 @@
+def print_metrics(title, metrics):
+    print(f"\n📊 {title}")
+    print(f"Trades: {metrics['trades']}")
+    print(f"Winrate: {metrics['winrate']}%")
+    print(f"Gross PnL: {metrics['gross_pnl']}%")
+    print(f"Net PnL: {metrics['net_pnl']}%")
+    print(f"Fees: {metrics['fees']}%")
+    print(f"Fee Impact: {metrics['fee_impact']}%")
+    print(f"Avg Win: {metrics['avg_win']}%")
+    print(f"Avg Loss: {metrics['avg_loss']}%")
+    print(f"Profit Factor: {metrics['profit_factor']}")
+    print(f"Expectancy: {metrics['expectancy']}")
+    print(f"Max Drawdown: {metrics['max_drawdown']}%")

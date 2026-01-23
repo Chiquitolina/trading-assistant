@@ -6,96 +6,47 @@ from ta.volatility import AverageTrueRange
 from common.indicators.trend import trend_bias
 from indicators.direction import trade_direction
 from common.indicators.momentum import momentum_5m
+from common.indicators.volume.volume_metrics import VolumeMetrics
 from config.timeframes import TIMEFRAME_CONFIGS
 
-from colorama import Fore, Style, init
-init(autoreset=True)
+from config.timeframes import TIMEFRAMES
+from config.volume_config import VOLUME_CONFIG
+from config.volatily_config import ATR_CONFIG
 
-# --------------------
-# EXCHANGE
-# --------------------
-exchange = ccxt.binanceusdm({
-    "enableRateLimit": True
-})
+from ui.formatters import color_direction, color_momentum, color_trend
 
-# --------------------
-# DATA
-# --------------------
-def fetch_ohlcv(symbol, timeframe, candles):
-    ohlcv = exchange.fetch_ohlcv(
-        symbol,
-        timeframe=timeframe,
-        limit=candles
-    )
+from data.ohlcv import fetch_ohlcv
+from scanner.filters.volatily import atr_is_expanding
 
-    return pd.DataFrame(
-        ohlcv,
-        columns=["timestamp", "open", "high", "low", "close", "volume"]
-    )
+from infra.exchange import get_exchange
 
-
-# --------------------
-# FILTERS
-# --------------------
-def atr_is_expanding(df, period, expansion_factor):
-    atr = AverageTrueRange(
-        high=df["high"],
-        low=df["low"],
-        close=df["close"],
-        window=period
-    ).average_true_range()
-
-    current_atr = atr.iloc[-1]
-    mean_atr = atr.iloc[-period:].mean()
-
-    return current_atr > mean_atr * expansion_factor
-
-
-def volume_above_average(df, lookback):
-    current_volume = df["volume"].iloc[-1]
-    avg_volume = df["volume"].iloc[-lookback:].mean()
-
-    return current_volume > avg_volume
-
-
-# --------------------
-# FORMATTERS
-# --------------------
-def color_trend(trend: str) -> str:
-    if trend == "bullish":
-        return f"{Fore.GREEN}BULLISH{Style.RESET_ALL}"
-    if trend == "bearish":
-        return f"{Fore.RED}BEARISH{Style.RESET_ALL}"
-    return "neutral"
-
-
-def color_direction(direction: str) -> str:
-    if direction == "up":
-        return f"{Fore.GREEN}UP ⬆{Style.RESET_ALL}"
-    if direction == "down":
-        return f"{Fore.RED}DOWN ⬇{Style.RESET_ALL}"
-    return direction.upper()
-
-
-def color_momentum(m: str) -> str:
-    if m == "breakout_up":
-        return f"{Fore.GREEN}BO ↑{Style.RESET_ALL}"
-    if m == "breakout_down":
-        return f"{Fore.RED}BO ↓{Style.RESET_ALL}"
-    return "—"
-
+exchange = get_exchange()
 
 # --------------------
 # SCANNER
 # --------------------
 def scan_market():
-    cfg_trend = TIMEFRAME_CONFIGS["1h"]
+    
+    
+    TF_TREND = "1h"
+    TF_SETUP = "15m"
+    TF_MOMENTUM = "5m"
+    TF_VOLUME = "1h"   # 👈 clave
+    
+    trend_tf = TIMEFRAMES[TF_TREND]
+    setup_tf = TIMEFRAMES[TF_SETUP]
+    momentum_tf = TIMEFRAMES[TF_MOMENTUM]
+    
     cfg_trade = TIMEFRAME_CONFIGS["15m"]
-    cfg_momentum = TIMEFRAME_CONFIGS["5m"]
+
+    vol_cfg = VOLUME_CONFIG[TF_VOLUME]
+    atr_cfg = ATR_CONFIG[TF_SETUP]
 
     print(
-        f"\n🔎 Scan iniciado | "
-        f"1H → Trend | 15m → Setup | 5m → Momentum\n"
+        f"\n------------------------------------------------------------------------------\n"
+        f"1H → Trend | 15m → Direction (Setup) | 5m → Momentum\n"
+        f"\n------------------------------------------------------------------------------\n"
+        f"\n"
     )
 
     markets = exchange.load_markets()
@@ -119,21 +70,22 @@ def scan_market():
             # -------- DATA --------
             df_trend = fetch_ohlcv(
                 symbol,
-                cfg_trend["timeframe"],
-                cfg_trend["candles"]
+                trend_tf["tf"],
+                trend_tf["candles"]
             )
 
             df_trade = fetch_ohlcv(
                 symbol,
-                cfg_trade["timeframe"],
-                cfg_trade["candles"]
+                setup_tf["tf"],
+                setup_tf["candles"]
             )
 
             df_momentum = fetch_ohlcv(
                 symbol,
-                cfg_momentum["timeframe"],
-                cfg_momentum["candles"]
+                momentum_tf["tf"],
+                momentum_tf["candles"]
             )
+
 
             # -------- INDICATORS --------
             trend = trend_bias(df_trend)
@@ -146,10 +98,12 @@ def scan_market():
                 cfg_trade["atr_expansion"]
             )
 
-            vol_ok = volume_above_average(
+            volume = VolumeMetrics().calc(
                 df_trade,
-                cfg_trade["volume_lookback"]
+                period=cfg_trade["volume_lookback"]
             )
+            
+            vol_ok = volume and volume["state"] in ["growing", "spike"]
 
             # -------- LOGIC --------
             long_ok = (
@@ -159,14 +113,21 @@ def scan_market():
                 and atr_ok
                 and vol_ok
             )
+            
+            vol_str = (
+                f"{volume['state']} ({volume['rvol']})"
+                if volume else "n/a"
+            )
 
             # -------- OUTPUT --------
             print(
-                f"{symbol} | "
-                f"Trend: {color_trend(trend)} | "
-                f"Dir: {color_direction(direction)} | "
-                f"Mom: {color_momentum(momentum)} | "
-                f"ATR: {atr_ok} | VOL: {vol_ok}"
+                f"{symbol} \n"
+                f"    | Trend (1H): {color_trend(trend)} \n"
+                f"    | Direction/Setup (15m): {color_direction(direction)} \n"
+                f"    | Momentum (5m): {color_momentum(momentum)} \n"
+                f"    | VOL: {vol_str} \n"
+                f"    | ATR: {atr_ok} \n"
+
             )
 
             if long_ok:

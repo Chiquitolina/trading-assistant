@@ -12,9 +12,6 @@ def trend_bias(
     adx_min=15,
     slope_lookback=3
 ):
-    if len(df) < slow_ema + slope_lookback:
-        return "neutral"
-
     df = df.copy()
 
     df["ema_fast"] = EMAIndicator(df["close"], fast_ema).ema_indicator()
@@ -26,24 +23,24 @@ def trend_bias(
         window=adx_period
     ).adx()
 
-    last = df.iloc[-1]
-    prev = df.iloc[-1 - slope_lookback]
+    df["ema_slope"] = df["ema_slow"].diff(slope_lookback)
 
-    ema_slope = last["ema_slow"] - prev["ema_slow"]
+    df["trend"] = "neutral"
 
-    if (
-        last["ema_fast"] > last["ema_slow"]
-        and ema_slope > 0
-        and last["adx"] > adx_min
-    ):
-        return "bullish"
+    bullish = (
+        (df["ema_fast"] > df["ema_slow"]) &
+        (df["ema_slope"] > 0) &
+        (df["adx"] > adx_min)
+    )
 
-    if (
-        last["ema_fast"] < last["ema_slow"]
-        and ema_slope < 0
-        and last["adx"] > adx_min
-    ):
-        return "bearish"
+    bearish = (
+        (df["ema_fast"] < df["ema_slow"]) &
+        (df["ema_slope"] < 0) &
+        (df["adx"] > adx_min)
+    )
 
-    return "neutral"
+    df.loc[bullish, "trend"] = "bullish"
+    df.loc[bearish, "trend"] = "bearish"
+
+    return df
 

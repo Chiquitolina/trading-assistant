@@ -2,6 +2,7 @@ import pandas as pd
 from common.indicators.trend import trend_bias
 from common.indicators.momentum import momentum_5m
 from indicators.direction import trade_direction
+from strategy.entries import long_setup, short_setup
 
 
 class SignalEngine:
@@ -37,36 +38,33 @@ class SignalEngine:
     # SIGNAL LOGIC
     # -------------------------
     def generate_signal(self):
-        candles_5m = self.buffer.get_candles("5m")
-        if not candles_5m:
+
+        candles_15m = self.buffer.get_candles("15m")
+        if not candles_15m:
             return None
 
-        last_5m_ts = candles_5m[-1]["timestamp"]
+        last_15m_ts = candles_15m[-1]["timestamp"]
 
-        # ⛔ Ya evaluado
-        if last_5m_ts == self.last_signal_ts:
+        if last_15m_ts == self.last_signal_ts:
             return None
 
-        self.last_signal_ts = last_5m_ts
+        self.last_signal_ts = last_15m_ts
 
-        # ---------- TOMAR DATOS ----------
-        trend = self.get_trend()
+        trend     = self.get_trend()
         direction = self.get_direction()
-        momentum = self.get_momentum()
+        momentum  = self.get_momentum()
 
-        # ---------- DEBUG ----------
         if self.debug:
-            print("\n🕯️ Snapshot (on 5m close)")
+            print("\n🕯️ Snapshot (on 15m close)")
             print(f"1h trend     : {trend}")
             print(f"15m direction: {direction}")
             print(f"5m momentum  : {momentum}\n")
 
-        # ---------- GENERAR SEÑAL ----------
-        if trend == "bullish" and direction == "up" and momentum in ("impulse_up", "breakout_up"):
+        if long_setup(trend, direction, momentum):
             print("💡 SIGNAL GENERATED: LONG")
             return "LONG"
 
-        if trend == "bearish" and direction == "down" and momentum in ("impulse_down", "breakout_down"):
+        if short_setup(trend, direction, momentum):
             print("💡 SIGNAL GENERATED: SHORT")
             return "SHORT"
 

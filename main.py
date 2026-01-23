@@ -2,12 +2,14 @@ import argparse
 from scanner.market_scanner import scan_market
 from config.timeframes import TIMEFRAME_CONFIGS
 
+from ui.banners import print_marketscanner_banner
+
 DEFAULT_TF = "15m"
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Crypto Trading Bot CLI"
+        description="Trading Assistant CLI"
     )
 
     subparsers = parser.add_subparsers(dest="command")
@@ -35,6 +37,8 @@ def main():
 
         # 🔴 SOLO TEXTO, SIN LÓGICA
         side = "LONG / SHORT"
+        
+        print_marketscanner_banner()
 
         print(
             f"\n🔎 Scan iniciado | TF: {args.timeframe} ({source}) | SIDE: {side}\n"

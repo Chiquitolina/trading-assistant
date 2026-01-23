@@ -16,8 +16,10 @@ class WSClient:
                 interval=tf,
                 callback=self.on_message
             )
-
+            
+        print("\n")
         print("📡 Futures WS connected:", SYMBOL, TIMEFRAMES)
+        print("\n")
 
     def stop(self):
         self.twm.stop()
