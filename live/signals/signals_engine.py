@@ -1,6 +1,6 @@
 import pandas as pd
-from common.indicators.trend import trend_bias
-from common.indicators.momentum import momentum_5m
+from indicators.trend import trend_bias
+from indicators.momentum import momentum_5m
 from indicators.direction import trade_direction
 from strategy.entries import long_setup, short_setup
 
@@ -14,25 +14,46 @@ class SignalEngine:
         self.last_signal_ts = None
 
     # -------------------------
-    # INDICATORS
+    # INDICATORS (LIVE SAFE)
     # -------------------------
     def get_trend(self):
         df = pd.DataFrame(self.buffer.get_candles("1h"))
         if len(df) < 20:
             return "neutral"
-        return trend_bias(df)
+
+        df = trend_bias(df)
+
+        # 🔥 SOLO el último valor
+        return df.iloc[-1]["trend"]
+
 
     def get_direction(self):
         df = pd.DataFrame(self.buffer.get_candles("15m"))
         if len(df) < 10:
             return None
-        return trade_direction(df)
+
+        result = trade_direction(df)
+
+        # 🔒 por si devuelve DF
+        if isinstance(result, pd.DataFrame):
+            return result.iloc[-1]["direction"]
+
+        return result
+
 
     def get_momentum(self):
         df = pd.DataFrame(self.buffer.get_candles("5m"))
         if len(df) < 2:
             return "none"
-        return momentum_5m(df)
+
+        result = momentum_5m(df)
+
+        # 🔒 por si devuelve DF
+        if isinstance(result, pd.DataFrame):
+            return result.iloc[-1]["momentum"]
+
+        return result
+
 
     # -------------------------
     # SIGNAL LOGIC

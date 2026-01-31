@@ -7,7 +7,6 @@ class DataBuffer:
         self.new_closed_tf = None
 
         self.buffers = {
-            "1m": deque(maxlen=maxlen),
             "5m": deque(maxlen=maxlen),
             "15m": deque(maxlen=maxlen),
             "1h": deque(maxlen=maxlen),
@@ -15,7 +14,6 @@ class DataBuffer:
 
         # ÚLTIMO CLOSE TIME procesado por TF
         self.last_close_time = {
-            "1m": None,
             "5m": None,
             "15m": None,
             "1h": None,
@@ -69,7 +67,13 @@ class DataBuffer:
             return
 
         for _, row in df.iterrows():
-            close_time = row["timestamp"]
+            ts = row["timestamp"]
+
+            # 🔥 normalizar a epoch ms
+            if hasattr(ts, "timestamp"):  # pandas.Timestamp
+                close_time = int(ts.timestamp() * 1000)
+            else:
+                close_time = int(ts)
 
             if close_time == self.last_close_time[tf]:
                 continue
@@ -88,3 +92,4 @@ class DataBuffer:
             self.last_close_time[tf] = close_time
 
         print(f"📦 Loaded {len(df)} historical candles for {tf}")
+
