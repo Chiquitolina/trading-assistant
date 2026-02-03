@@ -2,6 +2,7 @@ from live.ws.ws_client import WSClient
 from live.data.data_buffer import DataBuffer
 from live.signals.signals_engine import SignalEngine
 from live.strategy.entry_engine import EntryEngine
+from live.trade.trade_manager import TradeManager
 from data.market_data import fetch_history
 from ui.banners import print_live_banner
 
@@ -24,6 +25,7 @@ for tf in TIMEFRAMES:
 # ---------- INIT ENGINES ----------
 signals = SignalEngine(buffer)
 entry_engine = EntryEngine(buffer, debug=True)
+trade_manager = TradeManager(buffer, debug=True)
 
 # ---------- CONNECT WS ----------
 ws = WSClient(buffer.on_ws_message)
@@ -35,25 +37,32 @@ print("🚀 Live Signal Engine started! Ctrl+C to stop.\n")
 try:
     while True:
 
+        # 1️⃣ chequeo continuo de salida (tick o vela)
+        trade_manager.on_price(buffer.last_price())
+
         # 🔔 SOLO reaccionamos al cierre del TF gatillo
         if buffer.new_closed_tf == TRIGGER_TF:
             buffer.new_closed_tf = None
 
-            # 1️⃣ generar señal (LONG / SHORT / None)
+            # 2️⃣ generar señal
             signal = signals.generate_signal()
-
             if not signal:
                 continue
 
             print("💡 SIGNAL:", signal)
 
-            # 2️⃣ generar trade plan (idéntico al backtest)
+            # 3️⃣ generar trade plan
             plan = entry_engine.generate_entry(signal)
 
-            if plan:
-                print("✅ PLAN CONFIRMADO\n")
-            else:
+            if not plan:
                 print("❌ PLAN DESCARTADO\n")
+                continue
+
+            print("📥 TRADE PLAN")
+            print(plan)
+
+            # 4️⃣ enviar plan al TradeManager
+            trade_manager.on_plan(plan)
 
 except KeyboardInterrupt:
     ws.stop()
