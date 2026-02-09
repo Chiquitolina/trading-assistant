@@ -3,10 +3,10 @@ import pandas as pd
 
 from ta.volatility import AverageTrueRange
 
-from indicators.trend import trend_bias
-from indicators.direction import trade_direction
-from indicators.momentum import momentum_5m
-from indicators.volume.volume_metrics import VolumeMetrics
+from signals.indicators.trend import trend_bias
+from signals.indicators.direction import trade_direction
+from signals.indicators.momentum import momentum_5m
+from signals.indicators.volume.volume_metrics import VolumeMetrics
 from config.timeframes import TIMEFRAME_CONFIGS
 
 from config.timeframes import TIMEFRAMES

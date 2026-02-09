@@ -1,8 +1,8 @@
 import pandas as pd
-from indicators.trend import trend_bias
-from indicators.momentum import momentum_5m
-from indicators.direction import trade_direction
-from strategy.entries import long_setup, short_setup
+from signals.indicators.trend import trend_bias
+from signals.indicators.momentum import momentum_5m
+from signals.indicators.direction import trade_direction
+from signals.strategy.entries import long_setup, short_setup
 
 
 class SignalEngine:
@@ -76,7 +76,7 @@ class SignalEngine:
         momentum  = self.get_momentum()
 
         if self.debug:
-            print("\n🕯️ Snapshot (on 15m close)")
+            print("\n📷  Snapshot (on 15m close)")
             print(f"1h trend     : {trend}")
             print(f"15m direction: {direction}")
             print(f"5m momentum  : {momentum}\n")

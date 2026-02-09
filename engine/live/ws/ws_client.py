@@ -1,5 +1,5 @@
 from binance import ThreadedWebsocketManager
-from live.config.settings import SYMBOL, TIMEFRAMES
+from engine.live.config.settings import SYMBOL, TIMEFRAMES
 
 
 class WSClient:

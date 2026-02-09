@@ -1,15 +1,15 @@
 import pandas as pd
 from data.market_data import fetch_history
-from indicators.trend import trend_bias
-from indicators.direction import trade_direction
-from indicators.momentum import momentum_5m
-from backtest.metrics import calculate_metrics
-from indicators.atr import add_atr
-from strategy.filters import min_expected_tp_ok
-from strategy.risk import compute_levels
+from signals.indicators.trend import trend_bias
+from signals.indicators.direction import trade_direction
+from signals.indicators.momentum import momentum_5m
+from engine.backtest.metrics import calculate_metrics
+from signals.indicators.atr import add_atr
+from signals.strategy.filters import min_expected_tp_ok
+from signals.strategy.risk import compute_levels
 from ui.banners import print_backtest_banner
 
-from strategy.entries import long_setup, short_setup
+from signals.strategy.entries import long_setup, short_setup
 
 from config.strategies.v1 import LONG, SHORT, FEES, BACKTEST
 from ui.trade_formatter import format_trade_timestamps

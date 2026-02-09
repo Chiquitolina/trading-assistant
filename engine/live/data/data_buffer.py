@@ -1,10 +1,14 @@
 from collections import deque
 from datetime import datetime
 
+
 class DataBuffer:
     def __init__(self, maxlen=300):
-        
+
         self.new_closed_tf = None
+
+        self._last_price = None
+        self._last_timestamp = None  # 👈 NUEVO
 
         self.buffers = {
             "5m": deque(maxlen=maxlen),
@@ -19,6 +23,9 @@ class DataBuffer:
             "1h": None,
         }
 
+    # ==========================================
+    # WS MESSAGE
+    # ==========================================
     def on_ws_message(self, msg):
         # Solo klines de futures
         if msg.get("e") != "continuous_kline":
@@ -27,16 +34,20 @@ class DataBuffer:
         k = msg["k"]
         tf = k["i"]
 
+        # 🔥 guardar último precio y timestamp SIEMPRE
+        self._last_price = float(k["c"])
+        self._last_timestamp = int(k["T"])  # 👈 NUEVO
+
         if tf not in self.buffers:
             return
 
-    # ⛔ ignorar velas abiertas
+        # ⛔ ignorar velas abiertas
         if not k["x"]:
             return
 
         close_time = k["T"]
 
-    # 🔒 evitar duplicados
+        # 🔒 evitar duplicados
         if close_time == self.last_close_time[tf]:
             return
 
@@ -53,15 +64,26 @@ class DataBuffer:
         self.buffers[tf].append(candle)
         self.last_close_time[tf] = close_time
 
-    # 🔔 EVENTO: se cerró una vela de este timeframe
+        # 🔔 EVENTO: se cerró una vela de este timeframe
         self.new_closed_tf = tf
 
         print(f"🕯️ STORED [{tf}] {candle['close']}")
 
+    # ==========================================
+    # GETTERS
+    # ==========================================
+    def last_price(self):
+        return self._last_price
+
+    def last_timestamp(self):  # 👈 NUEVO
+        return self._last_timestamp
 
     def get_candles(self, tf):
         return list(self.buffers.get(tf, []))
 
+    # ==========================================
+    # HISTORICAL LOAD
+    # ==========================================
     def load_historical(self, tf, df):
         if tf not in self.buffers:
             return
@@ -92,4 +114,3 @@ class DataBuffer:
             self.last_close_time[tf] = close_time
 
         print(f"📦 Loaded {len(df)} historical candles for {tf}")
-

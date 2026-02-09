@@ -1,10 +1,10 @@
 # strategy/entry_engine.py
 import pandas as pd
 
-from indicators.atr import add_atr
-from strategy.filters import min_expected_tp_ok
-from strategy.risk import compute_levels
-from live.strategy.trade_plan import TradePlan
+from signals.indicators.atr import add_atr
+from signals.strategy.filters import min_expected_tp_ok
+from signals.strategy.risk import compute_levels
+from engine.live.strategy.trade_plan import TradePlan
 from config.strategies.v1 import LONG, SHORT
 
 
@@ -69,11 +69,15 @@ class EntryEngine:
             sl_pct=round(sl_pct, 3),
             tp_pct=round(tp_pct, 3),
             atr=round(atr, 2),
+            timestamp=self.buffer.last_timestamp(),  # 👈 ACÁ
             reason="strategy_v1"
         )
 
         if self.debug:
+            print('\n')
             print("📥 TRADE PLAN")
-            print(plan)
+            print('\n')
+            print(plan.pretty())            
+            print('\n')
 
         return plan
