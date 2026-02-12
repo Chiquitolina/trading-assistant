@@ -22,6 +22,9 @@ class DataBuffer:
             "15m": None,
             "1h": None,
         }
+        
+    def last_closed_candle(self, tf: str):
+        return self.buffers[tf][-1]
 
     # ==========================================
     # WS MESSAGE

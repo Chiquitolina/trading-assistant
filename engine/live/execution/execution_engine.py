@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
-
+from engine.live.journal.trade_journal import TradeJournal
 
 # =========================
 # MODELOS
@@ -35,15 +35,15 @@ class ExecutionEngine:
     def __init__(self):
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
+        self.journal = TradeJournal()
 
     # ----------------------------------
-    # 👇 NUEVO: ejecuta TradePlan
+    # 👇 ejecuta TradePlan
     # ----------------------------------
     def execute_plan(self, plan):
 
         if self.position is not None:
-            print("⚠️ Position already open. Plan ignored.")
-            print('\n')
+            print("⚠️ Position already open. Plan ignored.\n")
             return
 
         if plan.side not in ("LONG", "SHORT"):
@@ -64,6 +64,26 @@ Entry: {plan.entry:.2f}
 TP   : {plan.tp:.2f}
 SL   : {plan.sl:.2f}
 """)
+        
+    def on_candle_update(self, high: float, low: float, timestamp: int):
+
+        if self.position is None:
+            return
+
+        pos = self.position
+
+        if pos.side == "LONG":
+            if low <= pos.sl:
+                self._close_position(pos.sl, timestamp, "SL")
+            elif high >= pos.tp:
+                self._close_position(pos.tp, timestamp, "TP")
+
+        elif pos.side == "SHORT":
+            if high >= pos.sl:
+                self._close_position(pos.sl, timestamp, "SL")
+            elif low <= pos.tp:
+                self._close_position(pos.tp, timestamp, "TP")
+
 
     # ----------------------------------
     # Updates de precio (gestión)
@@ -93,6 +113,8 @@ SL   : {plan.sl:.2f}
     def _close_position(self, price: float, timestamp: int, reason: str):
 
         pos = self.position
+        if pos is None:
+            return
 
         if pos.side == "LONG":
             pnl = (price - pos.entry_price) / pos.entry_price
@@ -110,7 +132,6 @@ SL   : {plan.sl:.2f}
         )
 
         self.trades.append(trade)
-        self.position = None
 
         print(f"""
 ❌ POSITION CLOSED
@@ -119,6 +140,20 @@ Exit : {price:.2f}
 PnL  : {pnl*100:.2f}%
 Reason: {reason}
 """)
+
+        # 👇 LOG TRADE (ANTES de limpiar posición)
+        self.journal.log_trade(
+            side=pos.side,
+            entry=pos.entry_price,
+            exit_price=price,
+            tp=pos.tp,
+            sl=pos.sl,
+            pnl_pct=pnl,
+            reason=reason
+        )
+
+        # 👇 recién ahora limpiamos
+        self.position = None
 
     # ----------------------------------
     # STATE
