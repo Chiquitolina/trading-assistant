@@ -1,6 +1,5 @@
 import csv
 import os
-from datetime import datetime
 
 
 class TradeJournal:
@@ -17,7 +16,8 @@ class TradeJournal:
             with open(self.file_path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    "date",
+                    "entry_time",
+                    "exit_time",
                     "side",
                     "entry",
                     "exit",
@@ -30,18 +30,30 @@ class TradeJournal:
     # -------------------------
     # guardar trade
     # -------------------------
-    def log_trade(self, side, entry, exit_price, tp, sl, pnl_pct, reason):
+    def log_trade(
+        self,
+        entry_time,
+        exit_time,
+        side,
+        entry,
+        exit_price,
+        tp,
+        sl,
+        pnl_pct,
+        reason
+    ):
 
         with open(self.file_path, "a", newline="") as f:
             writer = csv.writer(f)
 
             writer.writerow([
-                datetime.utcnow().isoformat(),
+                entry_time,
+                exit_time,
                 side,
                 round(entry, 2),
                 round(exit_price, 2),
                 round(tp, 2),
                 round(sl, 2),
-                round(pnl_pct, 3),
+                round(pnl_pct, 4),
                 reason
             ])

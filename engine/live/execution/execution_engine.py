@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 from engine.live.journal.trade_journal import TradeJournal
+from datetime import datetime
 
 # =========================
 # MODELOS
@@ -140,17 +141,20 @@ Exit : {price:.2f}
 PnL  : {pnl*100:.2f}%
 Reason: {reason}
 """)
+        
+        entry_iso = datetime.utcfromtimestamp(pos.entry_time / 1000).isoformat()
+        exit_iso  = datetime.utcfromtimestamp(timestamp / 1000).isoformat()
 
-        # 👇 LOG TRADE (ANTES de limpiar posición)
         self.journal.log_trade(
+            entry_time=entry_iso,
+            exit_time=exit_iso,
             side=pos.side,
             entry=pos.entry_price,
             exit_price=price,
             tp=pos.tp,
             sl=pos.sl,
             pnl_pct=pnl,
-            reason=reason
-        )
+            reason=reason)
 
         # 👇 recién ahora limpiamos
         self.position = None
