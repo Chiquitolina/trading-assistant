@@ -42,15 +42,14 @@ try:
         price = buffer.last_price()
         timestamp = buffer.last_timestamp()
 
-        # 1️⃣ Execution maneja TP/SL
-        execution.on_price_update(price, timestamp)
+        # 1️⃣ Execution maneja TP / SL (tick-based)
+        if price is not None and timestamp is not None:
+            execution.on_price_update(price, timestamp)
 
-        # opcional: sync estado
-        # trade_manager.sync(execution.get_state())
+        # 2️⃣ SOLO reaccionamos al cierre del TF gatillo (event-based)
+        if buffer.consume_closed_tf(TRIGGER_TF):
 
-        # 🔔 SOLO reaccionamos al cierre del TF gatillo
-        if buffer.new_closed_tf == TRIGGER_TF:
-            buffer.new_closed_tf = None
+            print("📷  Snapshot (on 15m close)")
 
             signal = signals.generate_signal()
             if not signal:
@@ -63,7 +62,6 @@ try:
                 print("❌ PLAN DESCARTADO\n")
                 continue
 
-            # 👇 AHORA ejecuta ExecutionEngine
             execution.execute_plan(plan)
 
 except KeyboardInterrupt:
