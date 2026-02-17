@@ -1,9 +1,12 @@
 import pandas as pd
 from pathlib import Path
-from ui.trade_formatter import format_trade_timestamps
 
+from ui.trade_formatter import format_trade_journal
+
+# 📍 subir hasta la raíz del proyecto
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 TRADES_FILE = BASE_DIR / "trades.csv"
+
 
 def show_trade_journal():
     if not TRADES_FILE.exists():
@@ -16,25 +19,31 @@ def show_trade_journal():
         print("📭 Trade journal vacío")
         return
 
-    # ---- formatear timestamps (Argentina) ----
-    if "entry_ts" in df.columns and "exit_ts" in df.columns:
-        df = format_trade_timestamps(df)
+    # -----------------------------
+    # FORMATEO SOLO PARA JOURNAL
+    # -----------------------------
+    df = format_trade_journal(df)
 
-    # ---- ordenar ----
-    if "entry_ts" in df.columns:
-        df = df.sort_values("entry_ts")
-
-    pd.options.display.float_format = "{:.4f}".format
+    # -----------------------------
+    # ORDENAR (si existe entry_time)
+    # -----------------------------
+    if "entry_time" in df.columns:
+        df = df.sort_values("entry_time")
 
     print("\n📒 TRADE JOURNAL (Live)\n")
-    print(df.to_string(index=False, col_space=10))
+    print(df.to_string(index=False, col_space=12))
 
-    # ---- métricas rápidas ----
-    total = len(df)
-    wins = (df["pnl_pct"] > 0).sum()
-    losses = (df["pnl_pct"] <= 0).sum()
+    # -----------------------------
+    # MÉTRICAS RÁPIDAS
+    # (usar df sin strings)
+    # -----------------------------
+    raw_df = pd.read_csv(TRADES_FILE)
+
+    total = len(raw_df)
+    wins = (raw_df["pnl_pct"] > 0).sum()
+    losses = (raw_df["pnl_pct"] <= 0).sum()
     winrate = wins / total * 100 if total else 0
-    pnl_total = df["pnl_pct"].sum() * 100
+    pnl_total = raw_df["pnl_pct"].sum() * 100
 
     print("\n📊 SUMMARY")
     print(f"Trades     : {total}")
