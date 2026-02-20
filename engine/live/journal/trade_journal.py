@@ -16,15 +16,18 @@ class TradeJournal:
             with open(self.file_path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    "entry_time",
-                    "exit_time",
+                    "entry_ts",
+                    "exit_ts",
                     "side",
                     "entry",
                     "exit",
                     "tp",
                     "sl",
                     "pnl_pct",
-                    "reason"
+                    "pnl",
+                    "pnl_gross",
+                    "fees",
+                    "exit_reason"
                 ])
 
     # -------------------------
@@ -32,28 +35,34 @@ class TradeJournal:
     # -------------------------
     def log_trade(
         self,
-        entry_time,
-        exit_time,
+        entry_ts,
+        exit_ts,
         side,
         entry,
         exit_price,
         tp,
         sl,
         pnl_pct,
-        reason
+        pnl,
+        pnl_gross,
+        fees,
+        exit_reason
     ):
 
         with open(self.file_path, "a", newline="") as f:
             writer = csv.writer(f)
 
             writer.writerow([
-                entry_time,
-                exit_time,
+                entry_ts,
+                exit_ts,
                 side,
                 round(entry, 2),
                 round(exit_price, 2),
                 round(tp, 2),
                 round(sl, 2),
                 round(pnl_pct, 4),
-                reason
+                pnl, 
+                pnl_gross,
+                fees,
+                exit_reason
             ])

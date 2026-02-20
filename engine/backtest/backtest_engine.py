@@ -3,7 +3,7 @@ from data.market_data import fetch_history
 from signals.indicators.trend import trend_bias
 from signals.indicators.direction import trade_direction
 from signals.indicators.momentum import momentum_5m
-from engine.backtest.metrics import calculate_metrics
+from engine.backtest.metrics import calculate_metrics, pretty_metrics
 from signals.indicators.atr import add_atr
 from signals.strategy.filters import min_expected_tp_ok
 from signals.strategy.risk import compute_levels
@@ -245,18 +245,13 @@ if __name__ == "__main__":
     print_backtest_banner()
     print("\n----------------------------------------------------------------------------------------------------------\n")
 
-    print("\n📌 MAIN DATA:\n")
-    table = pd.DataFrame.from_dict(
-        {
-            "ALL": metrics_all,
-            "LONG": metrics_long,
-            "SHORT": metrics_short,
-        },
-        orient="columns"
+    print(
+        pretty_metrics(
+            metrics_all,
+            metrics_long,
+            metrics_short
+        )
     )
-
-    pd.options.display.float_format = "{:.2f}".format
-    print(table.to_string(float_format="{:.2f}".format, col_space=18))
 
     df_trades = pd.DataFrame(trades)
 

@@ -29,7 +29,7 @@ def format_trade_timestamps(df: pd.DataFrame) -> pd.DataFrame:
 def format_journal_dates(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    for col in ["entry_time", "exit_time"]:
+    for col in ["entry_ts", "exit_ts"]:
         if col in df.columns:
             df[col] = (
                 pd.to_datetime(df[col], errors="coerce", utc=True)
