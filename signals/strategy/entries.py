@@ -1,17 +1,18 @@
 def long_setup(trend, direction, momentum) -> bool:
     return (
-        trend == "bullish"
-        and direction == "up"
-        and momentum in ['breakout_up_strong', 'bullish_pressure']
+        trend in ["bullish", "neutral"]
+        # and direction in ["up", "range"]
+        #and momentum in {'breakout_up_strong', 'breakout_up_weak', 'bullish_pressure'}
     )
 
 
 def short_setup(trend, direction, momentum) -> bool:
     return (
-        trend == "bearish"
-        and direction == "down"
-        and momentum in {
-            "breakout_down_strong",
-            "bearish_pressure",
-            }
+        trend in ["bearish", "neutral"]
+       # and direction in ["down", "range"]
+       # and momentum in {
+       #     "breakout_down_strong",
+       #     "breakout_down_weak",
+       #     "bearish_pressure",
+       #    }
     )

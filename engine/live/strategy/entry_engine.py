@@ -74,10 +74,7 @@ class EntryEngine:
         )
 
         if self.debug:
-            print('\n')
-            print("📥 TRADE PLAN")
-            print('\n')
+
             print(plan.pretty())            
-            print('\n')
 
         return plan

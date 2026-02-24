@@ -61,6 +61,10 @@ class SignalEngine:
     def generate_signal(self):
 
         candles_15m = self.buffer.get_candles("15m")
+        last_candle = candles_15m[-1]
+        signal_price = last_candle["close"]
+        signal_ts = last_candle["timestamp"]
+        
         if not candles_15m:
             return None
 

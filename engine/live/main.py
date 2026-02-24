@@ -49,13 +49,9 @@ try:
         # 2️⃣ SOLO reaccionamos al cierre del TF gatillo (event-based)
         if buffer.consume_closed_tf(TRIGGER_TF):
 
-            print("📷  Snapshot (on 15m close)")
-
             signal = signals.generate_signal()
             if not signal:
                 continue
-
-            print("💡 SIGNAL:", signal)
 
             plan = entry_engine.generate_entry(signal)
             if not plan:
