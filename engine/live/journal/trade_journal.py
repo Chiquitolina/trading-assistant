@@ -1,3 +1,5 @@
+# engine/live/journal/trade_journal.py
+
 import csv
 import os
 
@@ -13,9 +15,14 @@ class TradeJournal:
     # -------------------------
     def _ensure_file(self):
         if not os.path.exists(self.file_path):
-            with open(self.file_path, "w", newline="") as f:
+            with open(self.file_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow([
+                    # 🆕 señal
+                    "signal_ts",
+                    "signal_price",
+
+                    # trade
                     "entry_ts",
                     "exit_ts",
                     "side",
@@ -23,10 +30,14 @@ class TradeJournal:
                     "exit",
                     "tp",
                     "sl",
+
+                    # pnl
                     "pnl_pct",
                     "pnl",
                     "pnl_gross",
                     "fees",
+
+                    # meta
                     "exit_reason"
                 ])
 
@@ -35,6 +46,8 @@ class TradeJournal:
     # -------------------------
     def log_trade(
         self,
+        signal_ts,
+        signal_price,
         entry_ts,
         exit_ts,
         side,
@@ -42,17 +55,20 @@ class TradeJournal:
         exit_price,
         tp,
         sl,
-        pnl_pct,
         pnl,
         pnl_gross,
         fees,
         exit_reason
     ):
-
-        with open(self.file_path, "a", newline="") as f:
+        with open(self.file_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
 
             writer.writerow([
+                # señal
+                signal_ts,
+                round(signal_price, 2),
+
+                # trade
                 entry_ts,
                 exit_ts,
                 side,
@@ -60,9 +76,12 @@ class TradeJournal:
                 round(exit_price, 2),
                 round(tp, 2),
                 round(sl, 2),
-                round(pnl_pct, 4),
-                pnl, 
-                pnl_gross,
-                fees,
+
+                # pnl
+                round(pnl, 4),
+                round(pnl_gross, 4),
+                round(fees, 2),
+
+                # meta
                 exit_reason
             ])

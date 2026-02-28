@@ -1,34 +1,50 @@
 import pandas as pd
 from pathlib import Path
 
-from engine.backtest.metrics import calculate_metrics
+from engine.backtest.metrics import calculate_metrics, pretty_metrics
 from ui.trade_formatter import format_trade_journal
 from ui.banners import print_journal_banner
-
-from engine.backtest.metrics import pretty_metrics
 
 # 📍 subir hasta la raíz del proyecto
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 TRADES_FILE = BASE_DIR / "trades.csv"
 
 
+# =====================================================
+# TRADE CARDS
+# =====================================================
+def print_trade_cards(df):
+    for _, row in df.iterrows():
+        print("╔══════════════════════════════════════════════════╗")
+        print(f"║ 🕒 Signal : {row['signal_ts']:<34}   ║")
+        print(f"║ Signal Price : {row['signal_price']:<34}║")
+        print(f"║ 📈 Side   : {row['side']:<34}   ║")
+        print("╠══════════════════════════════════════════════════╣")
+        print(f"║ Entry    : {row['entry']:<34}    ║")
+        print(f"║ Exit     : {row['exit']:<34}    ║")
+        print(f"║ TP / SL  : {row['tp']} / {row['sl']:<25} ║")
+        print("╠══════════════════════════════════════════════════╣")
+        print(f"║ PnL      : {row['pnl']:<37} ║")
+        print(f"║ Fees     : {row['fees']:<37} ║")
+        print(f"║ Result   : {row['reason']:<37} ║")
+        print("╚══════════════════════════════════════════════════╝\n")
+
+
+# =====================================================
+# MAIN JOURNAL VIEW
+# =====================================================
 def show_trade_journal():
     if not TRADES_FILE.exists():
         print(f"❌ No trades.csv found at {TRADES_FILE}")
         return
 
-    # =====================================================
-    # RAW DATA (NUMÉRICO – PARA MÉTRICAS)
-    # =====================================================
     raw_df = pd.read_csv(TRADES_FILE)
 
     if raw_df.empty:
         print("📭 Trade journal vacío")
         return
 
-    # =====================================================
-    # DISPLAY DATA (FORMATEADO – SOLO UI)
-    # =====================================================
+    # UI formatted copy
     df = format_trade_journal(raw_df.copy())
 
     if "entry_ts" in df.columns:
@@ -36,9 +52,7 @@ def show_trade_journal():
 
     print_journal_banner()
 
-    # =====================================================
-    # MÉTRICAS → list[dict] (SIN FORMATO)
-    # =====================================================
+    # ================= METRICS =================
     all_trades = raw_df.to_dict(orient="records")
     long_trades = raw_df[raw_df["side"] == "LONG"].to_dict(orient="records")
     short_trades = raw_df[raw_df["side"] == "SHORT"].to_dict(orient="records")
@@ -47,35 +61,12 @@ def show_trade_journal():
     metrics_long = calculate_metrics(long_trades)
     metrics_short = calculate_metrics(short_trades)
 
-    # =====================================================
-    # SUMMARY SIMPLE
-    # =====================================================
-    #total = len(all_trades)
-    #wins = sum(1 for t in all_trades if t["pnl_pct"] > 0)
-    #losses = total - wins
-    #winrate = wins / total * 100 if total else 0
-    #pnl_total = sum(t["pnl_pct"] for t in all_trades) * 100
+    print(pretty_metrics(metrics_all, metrics_long, metrics_short))
 
-    #    print("\n📊 SUMMARY")
-    #    print(f"Trades     : {total}")
-    #    print(f"Wins       : {wins}")
-    #    print(f"Losses     : {losses}")
-    #    print(f"Winrate    : {winrate:.2f}%")
-    #    print(f"Total PnL  : {pnl_total:.2f}%\n")
+    # ================= CARDS =================
+    print("\n📌 TRADES DETAILS:\n")
+    print_trade_cards(df)
 
-    # =====================================================
-    # TABLA DE MÉTRICAS
-    # =====================================================
-    print(
-        pretty_metrics(
-            metrics_all,
-            metrics_long,
-            metrics_short
-        )
-    )
-    
-    print('📌 TRADES DETAILS:\n')
-    print(df.to_string(index=False, col_space=10))
 
 if __name__ == "__main__":
     show_trade_journal()

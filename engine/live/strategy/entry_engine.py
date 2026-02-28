@@ -27,9 +27,14 @@ class EntryEngine:
 
         df_15m = add_atr(df_15m, period=14)
 
-        signal_candle = df_15m.iloc[-2]   # vela cerrada
-        entry_candle  = df_15m.iloc[-1]   # vela actual
+        signal_candle = df_15m.iloc[-2]   # vela cerrada (donde nace la señal)
+        entry_candle  = df_15m.iloc[-1]   # vela actual (ejecución)
 
+        # 🔹 PRECIO DE SEÑAL
+        signal_price = signal_candle["close"]
+        signal_ts = signal_candle["timestamp"]
+
+        # 🔹 PRECIO DE ENTRADA REAL
         entry = entry_candle["open"]
         atr = signal_candle["atr"]
 
@@ -39,7 +44,7 @@ class EntryEngine:
         cfg = LONG if side == "LONG" else SHORT
 
         # ==========================
-        # FILTER (idéntico)
+        # FILTER
         # ==========================
         if not min_expected_tp_ok(
             entry,
@@ -52,7 +57,7 @@ class EntryEngine:
             return None
 
         # ==========================
-        # LEVELS (idéntico)
+        # LEVELS
         # ==========================
         sl, tp, sl_pct, tp_pct = compute_levels(
             side=side,
@@ -69,12 +74,18 @@ class EntryEngine:
             sl_pct=round(sl_pct, 3),
             tp_pct=round(tp_pct, 3),
             atr=round(atr, 2),
-            timestamp=self.buffer.last_timestamp(),  # 👈 ACÁ
-            reason="strategy_v1"
+
+            # ⏱ timestamp de ejecución
+            timestamp=entry_candle["timestamp"],
+
+            reason="strategy_v1",
+
+            # 🆕 DATA DE SEÑAL
+            signal_price=round(signal_price, 2),
+            signal_ts=signal_ts
         )
 
         if self.debug:
-
-            print(plan.pretty())            
+            print(plan.pretty())
 
         return plan

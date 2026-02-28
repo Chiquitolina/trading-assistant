@@ -14,7 +14,9 @@ class Position:
     entry_price: float
     tp: float
     sl: float
-    entry_ts: int
+    entry_ts: int          # ms
+    signal_price: float
+    signal_ts: int         # ms
 
 
 @dataclass
@@ -56,15 +58,18 @@ class ExecutionEngine:
             entry_price=float(plan.entry),
             tp=float(plan.tp),
             sl=float(plan.sl),
-            entry_ts=int(plan.timestamp)
+            entry_ts=int(plan.timestamp),        # ms
+            signal_price=float(plan.signal_price),
+            signal_ts=int(plan.signal_ts)        # ms
         )
 
         print(f"""
 📈 POSITION OPENED
-Side : {plan.side}
-Entry: {plan.entry:.2f}
-TP   : {plan.tp:.2f}
-SL   : {plan.sl:.2f}
+Side         : {plan.side}
+Signal Price : {plan.signal_price:.2f}
+Entry        : {plan.entry:.2f}
+TP           : {plan.tp:.2f}
+SL           : {plan.sl:.2f}
 """)
 
     # ----------------------------------
@@ -76,6 +81,7 @@ SL   : {plan.sl:.2f}
             return
 
         pos = self.position
+        timestamp = int(timestamp)
 
         if pos.side == "LONG":
             if low <= pos.sl:
@@ -98,6 +104,7 @@ SL   : {plan.sl:.2f}
             return
 
         pos = self.position
+        timestamp = int(timestamp)
 
         if pos.side == "LONG":
             if price >= pos.tp:
@@ -120,11 +127,22 @@ SL   : {plan.sl:.2f}
         if pos is None:
             return
 
-        # --- PnL % (PORCENTAJE REAL)
+        # --- PnL %
         if pos.side == "LONG":
             pnl_pct = ((price - pos.entry_price) / pos.entry_price) * 100
         else:
             pnl_pct = ((pos.entry_price - price) / pos.entry_price) * 100
+
+        # --- FEES
+        fees = 0.08  # 0.08%
+        pnl_gross = pnl_pct
+        pnl_net = pnl_gross - fees
+
+        # --- Round
+        pnl_pct   = round(pnl_pct, 4)
+        pnl_gross = round(pnl_gross, 4)
+        pnl_net   = round(pnl_net, 4)
+        fees      = round(fees, 2)
 
         trade = Trade(
             side=pos.side,
@@ -140,47 +158,49 @@ SL   : {plan.sl:.2f}
 
         print(f"""
 ❌ POSITION CLOSED
-Side   : {trade.side}
-Exit   : {price:.2f}
-PnL    : {pnl_pct:.2f}%
-Reason : {reason}
+Side        : {trade.side}
+Signal      : {pos.signal_price:.2f}
+Entry       : {pos.entry_price:.2f}
+Exit        : {price:.2f}
+PnL Gross   : {pnl_gross:.4f}%
+PnL Net     : {pnl_net:.4f}%
+Reason      : {reason}
 """)
 
-        # --- timestamps ISO
-        entry_iso = datetime.utcfromtimestamp(pos.entry_ts / 1000).isoformat()
-        exit_iso  = datetime.utcfromtimestamp(timestamp / 1000).isoformat()
+        # =========================
+        # GUARDAR EN ISO (NO FORMATO HUMANO)
+        # =========================
 
-        # --- FEES (%)
-        fees = 0.08   # 0.08%
+        signal_iso = datetime.utcfromtimestamp(
+            pos.signal_ts / 1000
+        ).isoformat()
 
-        # --- PNL
-        pnl_gross = pnl_pct
-        pnl_net = pnl_gross - fees
+        entry_iso = datetime.utcfromtimestamp(
+            pos.entry_ts / 1000
+        ).isoformat()
 
-        # --- ROUND (solo presentación / CSV)
-        pnl_pct   = round(pnl_pct, 4)
-        pnl_gross = round(pnl_gross, 4)
-        pnl_net   = round(pnl_net, 4)
-        fees      = round(fees, 2)
+        exit_iso = datetime.utcfromtimestamp(
+            timestamp / 1000
+        ).isoformat()
 
         # --- JOURNAL
         try:
             self.journal.log_trade(
-                entry_ts=entry_iso,
-                exit_ts=exit_iso,
+                signal_ts=signal_iso,
+                signal_price=pos.signal_price,
+                entry_ts=entry_iso,   # ✅ ISO correcto
+                exit_ts=exit_iso,     # ✅ ISO correcto
                 side=pos.side,
                 entry=pos.entry_price,
                 exit_price=price,
                 tp=pos.tp,
                 sl=pos.sl,
-                pnl_pct=pnl_pct,
                 pnl=pnl_net,
                 pnl_gross=pnl_gross,
                 fees=fees,
-                exit_reason=reason
+                exit_reason=reason,
             )
         finally:
-            # 🔒 LIMPIAR ESTADO SIEMPRE
             self.position = None
 
     # ----------------------------------

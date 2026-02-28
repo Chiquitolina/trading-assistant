@@ -258,5 +258,8 @@ if __name__ == "__main__":
     df_trades = format_trade_timestamps(df_trades)
     
     print("\n\n📌 TRADES DETAILS:\n\n")
-    print(df_trades.to_string(col_space=7, justify="center", index=False))
+    text = df_trades.to_string(col_space=7, justify="center", index=False)
+    text = text.replace("\n", "\n\n")
+
+    print(text)
     print("\n")

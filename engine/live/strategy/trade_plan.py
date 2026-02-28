@@ -11,6 +11,10 @@ class TradePlan:
     atr: float
     timestamp: int
     reason: str
+    
+      # 👇 NUEVO
+    signal_price: float
+    signal_ts: int
 
     # 👇 MÉTODO PRETTY (DENTRO DE LA CLASE)
     def pretty(self):

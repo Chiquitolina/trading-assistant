@@ -29,21 +29,31 @@ def calculate_metrics(trades: list) -> dict:
     df = pd.DataFrame(trades)
 
     # --------------------
+    # 🔒 FORZAR TIPOS NUMÉRICOS (CLAVE)
+    # --------------------
+    NUMERIC_COLS = [
+        "pnl",
+        "pnl_gross",
+        "fees",
+    ]
+
+    for col in NUMERIC_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # --------------------
     # CORE STATS
     # --------------------
     wins = df[df["pnl"] > 0]
     losses = df[df["pnl"] < 0]
 
     total_trades = len(df)
-    winrate = len(wins) / total_trades * 100
+    winrate = (len(wins) / total_trades * 100) if total_trades > 0 else 0
 
     gross_profit = wins["pnl"].sum()
     gross_loss = abs(losses["pnl"].sum())
 
-    profit_factor = (
-        gross_profit / gross_loss
-        if gross_loss > 0 else 0
-    )
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
 
     avg_win = wins["pnl"].mean() if not wins.empty else 0
     avg_loss = losses["pnl"].mean() if not losses.empty else 0
@@ -55,7 +65,7 @@ def calculate_metrics(trades: list) -> dict:
 
     equity = df["pnl"].cumsum()
     drawdown = equity - equity.cummax()
-    max_drawdown = drawdown.min()
+    max_drawdown = drawdown.min() if not equity.empty else 0
 
     # --------------------
     # PNL / FEES
@@ -78,7 +88,7 @@ def calculate_metrics(trades: list) -> dict:
         else None
     )
 
-    fees_per_trade = fees / total_trades
+    fees_per_trade = fees / total_trades if total_trades > 0 else 0
 
     fee_to_avg_win = (
         fees_per_trade / avg_win
@@ -110,7 +120,8 @@ def calculate_metrics(trades: list) -> dict:
         "expectancy": round(expectancy, 4),
         "max_drawdown": round(max_drawdown, 2),
     }
-    
+
+
 def pretty_metrics(all_m, long_m, short_m):
     COL_LABEL = 28
     COL_VAL = 18
@@ -124,19 +135,23 @@ def pretty_metrics(all_m, long_m, short_m):
 
     lines = ["📊 SUMMARY\n", header]
 
+    def fmt(v):
+        if v is None:
+            return "N/A"
+        if isinstance(v, str):
+            return v
+        if isinstance(v, (int, float, np.floating)):
+            return f"{v:.2f}"
+        return str(v)
+
     for group in METRIC_GROUPS:
         for key in group:
-            def fmt(v):
-                return f"{v}" if isinstance(v, str) else f"{v:.2f}"
-
             lines.append(
                 f"{key:<{COL_LABEL}}"
                 f"{fmt(all_m.get(key, 'N/A')):>{COL_VAL}}"
                 f"{fmt(long_m.get(key, 'N/A')):>{COL_VAL}}"
                 f"{fmt(short_m.get(key, 'N/A')):>{COL_VAL}}"
             )
-
-        # 👇 línea en blanco entre bloques
         lines.append("")
 
     return "\n".join(lines)

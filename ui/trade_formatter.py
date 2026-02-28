@@ -2,23 +2,23 @@ import pandas as pd
 
 TZ = "America/Argentina/Buenos_Aires"
 
+import pandas as pd
+
+TZ = "America/Argentina/Buenos_Aires"
+
 def format_trade_timestamps(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
     df = df.copy()
 
-    df["entry_ts"] = (
-        pd.to_datetime(df["entry_ts"], unit="ms", utc=True)
-        .dt.tz_convert("America/Argentina/Buenos_Aires")
-        .dt.strftime("%m-%d %H:%M")
-    )
-
-    df["exit_ts"] = (
-        pd.to_datetime(df["exit_ts"], unit="ms", utc=True)
-        .dt.tz_convert("America/Argentina/Buenos_Aires")
-        .dt.strftime("%m-%d %H:%M")
-    )
+    for col in ["signal_ts", "entry_ts", "exit_ts"]:
+        if col in df.columns:
+            df[col] = (
+                pd.to_datetime(df[col], errors="coerce", utc=True)
+                .dt.tz_convert(TZ)
+                .dt.strftime("%m-%d %H:%M")
+            )
 
     return df
 
@@ -29,10 +29,11 @@ def format_trade_timestamps(df: pd.DataFrame) -> pd.DataFrame:
 def format_journal_dates(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    for col in ["entry_ts", "exit_ts"]:
+    for col in ["entry_ts", "exit_ts", "signal_ts"]:
         if col in df.columns:
             df[col] = (
-                pd.to_datetime(df[col], errors="coerce", utc=True)
+                pd.to_datetime(df[col], format="ISO8601")  # 👈 CLAVE
+                .dt.tz_localize("UTC")
                 .dt.tz_convert(TZ)
                 .dt.strftime("%d-%m %H:%M")
             )
