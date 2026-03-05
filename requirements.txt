@@ -4,3 +4,4 @@ numpy
 ta
 colorama>=0.4.6
 python-binance
+streamlit>=1.30.0

@@ -70,4 +70,3 @@ def show_trade_journal():
 
 if __name__ == "__main__":
     show_trade_journal()
-
