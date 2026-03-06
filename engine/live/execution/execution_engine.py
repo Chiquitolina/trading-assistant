@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional
 from engine.live.journal.trade_journal import TradeJournal
 from datetime import datetime
+import random
 
 
 # =========================
@@ -36,6 +37,20 @@ class Trade:
 
 class ExecutionEngine:
 
+    def _apply_slippage(self, price: float, side: str, is_entry: bool = True):
+        """
+        Aplica slippage aleatorio al precio.
+        is_entry=True -> entrada
+        is_entry=False -> salida
+        """
+        slippage_pct = random.uniform(0.01, 0.05) / 100  # 0.01% a 0.05%
+        slippage = price * slippage_pct
+
+        if side == "LONG":
+            return price + slippage if is_entry else price - slippage
+        if side == "SHORT":
+            return price - slippage if is_entry else price + slippage
+
     def __init__(self):
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
@@ -53,70 +68,29 @@ class ExecutionEngine:
         if plan.side not in ("LONG", "SHORT"):
             return
 
+        # -------------------------------
+        # Aplicar slippage a la entrada
+        # -------------------------------
+        entry_price = self._apply_slippage(plan.entry, plan.side, is_entry=True)
+
         self.position = Position(
             side=plan.side,
-            entry_price=float(plan.entry),
+            entry_price=float(entry_price),
             tp=float(plan.tp),
             sl=float(plan.sl),
-            entry_ts=int(plan.timestamp),        # ms
+            entry_ts=int(plan.timestamp),
             signal_price=float(plan.signal_price),
-            signal_ts=int(plan.signal_ts)        # ms
+            signal_ts=int(plan.signal_ts)
         )
 
         print(f"""
 📈 POSITION OPENED
 Side         : {plan.side}
 Signal Price : {plan.signal_price:.2f}
-Entry        : {plan.entry:.2f}
+Entry        : {entry_price:.2f}  ← slippage aplicado
 TP           : {plan.tp:.2f}
 SL           : {plan.sl:.2f}
 """)
-
-    # ----------------------------------
-    # CANDLE UPDATE
-    # ----------------------------------
-    def on_candle_update(self, high: float, low: float, timestamp: int):
-
-        if self.position is None:
-            return
-
-        pos = self.position
-        timestamp = int(timestamp)
-
-        if pos.side == "LONG":
-            if low <= pos.sl:
-                self._close_position(pos.sl, timestamp, "SL")
-            elif high >= pos.tp:
-                self._close_position(pos.tp, timestamp, "TP")
-
-        elif pos.side == "SHORT":
-            if high >= pos.sl:
-                self._close_position(pos.sl, timestamp, "SL")
-            elif low <= pos.tp:
-                self._close_position(pos.tp, timestamp, "TP")
-
-    # ----------------------------------
-    # PRICE UPDATE (tick)
-    # ----------------------------------
-    def on_price_update(self, price: float, timestamp: int):
-
-        if self.position is None:
-            return
-
-        pos = self.position
-        timestamp = int(timestamp)
-
-        if pos.side == "LONG":
-            if price >= pos.tp:
-                self._close_position(price, timestamp, "TP")
-            elif price <= pos.sl:
-                self._close_position(price, timestamp, "SL")
-
-        elif pos.side == "SHORT":
-            if price <= pos.tp:
-                self._close_position(price, timestamp, "TP")
-            elif price >= pos.sl:
-                self._close_position(price, timestamp, "SL")
 
     # ----------------------------------
     # CLOSE POSITION
@@ -126,6 +100,11 @@ SL           : {plan.sl:.2f}
         pos = self.position
         if pos is None:
             return
+
+        # -------------------------------
+        # Aplicar slippage a la salida
+        # -------------------------------
+        price = self._apply_slippage(price, pos.side, is_entry=False)
 
         # --- PnL %
         if pos.side == "LONG":
@@ -161,35 +140,25 @@ SL           : {plan.sl:.2f}
 Side        : {trade.side}
 Signal      : {pos.signal_price:.2f}
 Entry       : {pos.entry_price:.2f}
-Exit        : {price:.2f}
+Exit        : {price:.2f}  ← slippage aplicado
 PnL Gross   : {pnl_gross:.4f}%
 PnL Net     : {pnl_net:.4f}%
 Reason      : {reason}
 """)
 
         # =========================
-        # GUARDAR EN ISO (NO FORMATO HUMANO)
+        # GUARDAR EN ISO
         # =========================
+        signal_iso = datetime.utcfromtimestamp(pos.signal_ts / 1000).isoformat()
+        entry_iso = datetime.utcfromtimestamp(pos.entry_ts / 1000).isoformat()
+        exit_iso = datetime.utcfromtimestamp(timestamp / 1000).isoformat()
 
-        signal_iso = datetime.utcfromtimestamp(
-            pos.signal_ts / 1000
-        ).isoformat()
-
-        entry_iso = datetime.utcfromtimestamp(
-            pos.entry_ts / 1000
-        ).isoformat()
-
-        exit_iso = datetime.utcfromtimestamp(
-            timestamp / 1000
-        ).isoformat()
-
-        # --- JOURNAL
         try:
             self.journal.log_trade(
                 signal_ts=signal_iso,
                 signal_price=pos.signal_price,
-                entry_ts=entry_iso,   # ✅ ISO correcto
-                exit_ts=exit_iso,     # ✅ ISO correcto
+                entry_ts=entry_iso,
+                exit_ts=exit_iso,
                 side=pos.side,
                 entry=pos.entry_price,
                 exit_price=price,
