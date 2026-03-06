@@ -17,27 +17,28 @@ class TradeJournal:
         if not os.path.exists(self.file_path):
             with open(self.file_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
+
                 writer.writerow([
-                    # 🆕 señal
                     "signal_ts",
                     "signal_price",
 
-                    # trade
                     "entry_ts",
                     "exit_ts",
                     "side",
+
                     "entry",
+                    "real_entry",
+
                     "exit",
+                    "real_exit",
+
                     "tp",
                     "sl",
 
-                    # pnl
                     "pnl_pct",
-                    "pnl",
                     "pnl_gross",
                     "fees",
 
-                    # meta
                     "exit_reason"
                 ])
 
@@ -52,7 +53,9 @@ class TradeJournal:
         exit_ts,
         side,
         entry,
+        real_entry,
         exit_price,
+        real_exit,
         tp,
         sl,
         pnl,
@@ -60,28 +63,31 @@ class TradeJournal:
         fees,
         exit_reason
     ):
+
         with open(self.file_path, "a", newline="", encoding="utf-8") as f:
+
             writer = csv.writer(f)
 
             writer.writerow([
-                # señal
                 signal_ts,
                 round(signal_price, 2),
 
-                # trade
                 entry_ts,
                 exit_ts,
                 side,
+
                 round(entry, 2),
+                round(real_entry, 2),
+
                 round(exit_price, 2),
+                round(real_exit, 2),
+
                 round(tp, 2),
                 round(sl, 2),
 
-                # pnl
                 round(pnl, 4),
                 round(pnl_gross, 4),
                 round(fees, 2),
 
-                # meta
                 exit_reason
             ])

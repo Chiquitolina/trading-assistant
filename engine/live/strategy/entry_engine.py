@@ -67,6 +67,9 @@ class EntryEngine:
         )
 
         plan = TradePlan(
+            symbol="BTCUSDT",
+            quantity=0.001,
+
             side=side,
             entry=round(entry, 2),
             sl=round(sl, 2),

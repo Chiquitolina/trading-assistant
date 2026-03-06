@@ -1,21 +1,28 @@
+from dotenv import load_dotenv
+import os
 from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
 from signals.signals_engine import SignalEngine
 from engine.live.strategy.entry_engine import EntryEngine
 from engine.live.execution.execution_engine import ExecutionEngine
 from engine.live.trade.trade_manager import TradeManager
+from exchange.binance_exchange import BinanceExchange
 from data.market_data import fetch_history
 from ui.banners import print_live_banner
 
+load_dotenv()
+
+api_key = os.getenv("API_KEY")
+secret = os.getenv("SECRET_KEY")
+
 # ---------- CONFIG ----------
-SYMBOL = "BTC/USDT:USDT"
+SYMBOL = "BTCUSDT"
 TIMEFRAMES = ["5m", "15m", "1h"]
-TRIGGER_TF = "15m"
+TRIGGER_TF = "5m"
 DAYS = 3
 
 # ---------- INIT BUFFER ----------
 buffer = DataBuffer()
-
 print_live_banner()
 
 # ---------- LOAD HISTORICAL ----------
@@ -23,10 +30,28 @@ for tf in TIMEFRAMES:
     df_hist = fetch_history(SYMBOL, tf, DAYS)
     buffer.load_historical(tf, df_hist)
 
+# ---------- EXCHANGE ----------
+exchange = BinanceExchange(
+    api_key=api_key,
+    api_secret=secret,
+    testnet=True
+)
+
+# ---------- TEST API CONNECTION ----------
+try:
+    print("🔐 Testing Binance API connection...")
+    balance = exchange.get_balance()
+    print("✅ Binance account connected!")
+    print(f"💰 USDT Balance: {balance}")
+except Exception as e:
+    print("❌ Binance API connection failed")
+    print(e)
+    exit()
+
 # ---------- INIT ENGINES ----------
 signals = SignalEngine(buffer)
 entry_engine = EntryEngine(buffer, debug=True)
-execution = ExecutionEngine()
+execution = ExecutionEngine(exchange)
 trade_manager = TradeManager(buffer, debug=True)
 
 # ---------- CONNECT WS ----------
@@ -38,17 +63,13 @@ print("🚀 Live Engine started! Ctrl+C to stop.\n")
 # ---------- EVENT LOOP ----------
 try:
     while True:
-
         price = buffer.last_price()
         timestamp = buffer.last_timestamp()
 
-        # 1️⃣ Execution maneja TP / SL (tick-based)
         if price is not None and timestamp is not None:
             execution.on_price_update(price, timestamp)
 
-        # 2️⃣ SOLO reaccionamos al cierre del TF gatillo (event-based)
         if buffer.consume_closed_tf(TRIGGER_TF):
-
             signal = signals.generate_signal()
             if not signal:
                 continue
@@ -62,4 +83,4 @@ try:
 
 except KeyboardInterrupt:
     ws.stop()
-    print("🛑 Stopped.")
+    print("\n🛑 Live Engine stopped.")
