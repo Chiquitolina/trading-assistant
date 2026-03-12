@@ -194,3 +194,14 @@ class BinanceExchange(BaseExchange):
 
         except Exception as e:
             print(f"⚠️ Cancel error: {e}")
+            
+    def get_futures_fees(self, symbol="BTCUSDT"):
+        data = self.client.futures_commission_rate(symbol=symbol)
+
+        maker = float(data["makerCommissionRate"]) * 100
+        taker = float(data["takerCommissionRate"]) * 100
+
+        return {
+            "maker": maker,
+            "taker": taker
+        }

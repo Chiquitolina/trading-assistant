@@ -18,7 +18,7 @@ secret = os.getenv("SECRET_KEY")
 # ---------- CONFIG ----------
 SYMBOL = "BTCUSDT"
 TIMEFRAMES = ["5m", "15m", "1h"]
-TRIGGER_TF = "5m"
+TRIGGER_TF = "15m"
 DAYS = 3
 
 # ---------- INIT BUFFER ----------
@@ -39,10 +39,10 @@ exchange = BinanceExchange(
 
 # ---------- TEST API CONNECTION ----------
 try:
-    print("🔐 Testing Binance API connection...")
+    print("\n🔐 Testing Binance API connection...")
     balance = exchange.get_balance()
     print("✅ Binance account connected!")
-    print(f"💰 USDT Balance: {balance}")
+    print(f"💰 USDT Balance: {balance}\n")
 except Exception as e:
     print("❌ Binance API connection failed")
     print(e)
@@ -53,6 +53,8 @@ signals = SignalEngine(buffer)
 entry_engine = EntryEngine(buffer, debug=True)
 execution = ExecutionEngine(exchange)
 trade_manager = TradeManager(buffer, debug=True)
+
+execution.restore_state(SYMBOL)
 
 # ---------- CONNECT WS ----------
 ws = WSClient(buffer.on_ws_message)

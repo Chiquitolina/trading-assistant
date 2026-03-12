@@ -4,7 +4,8 @@ from engine.live.journal.trade_journal import TradeJournal
 from datetime import datetime
 import random
 import time
-import json
+from engine.live.state_sync import ExchangeStateSync
+
 
 
 @dataclass
@@ -41,6 +42,7 @@ class ExecutionEngine:
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
         self.journal = TradeJournal()
+        self.fees = self.exchange.get_futures_fees()
 
     def _apply_slippage(self, price: float, side: str, is_entry: bool = True):
 
@@ -100,15 +102,16 @@ class ExecutionEngine:
         return False
 
     def execute_plan(self, plan, leverage: int = 1):
-          # limpiar órdenes viejas SIEMPRE
-        try:
-            self.exchange.cancel_all_orders(plan.symbol)
-        except Exception as e:
-            print(f"⚠️ Failed to clean orders before entry: {e}")
 
         if self.position is not None:
             print("⚠️ Position already open. Plan ignored.\n")
             return
+
+        # limpiar órdenes viejas SOLO si vamos a abrir nueva posición
+        try:
+            self.exchange.cancel_all_orders(plan.symbol)
+        except Exception as e:
+            print(f"⚠️ Failed to clean orders before entry: {e}")
 
         if plan.side not in ("LONG", "SHORT"):
             return
@@ -162,6 +165,8 @@ class ExecutionEngine:
         time.sleep(0.5)
 
         pos = self.exchange.get_position(plan.symbol)
+        
+        print(pos)
 
         if pos and float(pos["amount"]) != 0:
             real_entry = float(pos["entry_price"])
@@ -169,13 +174,13 @@ class ExecutionEngine:
             real_entry = plan.entry
 
         print(f"""
-DEBUG ORDER
-Side        : {plan.side}
-Signal Entry: {plan.entry}
-Real Entry  : {real_entry}
-Signal TP   : {plan.tp}
-Signal SL   : {plan.sl}
-""")
+    DEBUG ORDER
+    Side        : {plan.side}
+    Signal Entry: {plan.entry}
+    Real Entry  : {real_entry}
+    Signal TP   : {plan.tp}
+    Signal SL   : {plan.sl}
+    """)
 
         # ------------------------
         # Recalcular TP / SL
@@ -213,11 +218,11 @@ Signal SL   : {plan.sl}
                 tp_price = mark_price * 1.002
 
         print(f"""
-PRICE VALIDATION
-Mark Price : {mark_price}
-TP Final   : {tp_price}
-SL Final   : {sl_price}
-""")
+    PRICE VALIDATION
+    Mark Price : {mark_price}
+    TP Final   : {tp_price}
+    SL Final   : {sl_price}
+    """)
 
         tp_side = "SELL" if side == "BUY" else "BUY"
         sl_side = tp_side
@@ -244,16 +249,16 @@ SL Final   : {sl_price}
         )
 
         print(f"""
-📈 POSITION OPENED
-Symbol       : {plan.symbol}
-Side         : {plan.side}
-Quantity     : {quantity}
-Signal Price : {plan.signal_price:.2f}
-Entry (bot)  : {self.position.entry_price:.2f}
-Entry (real) : {real_entry:.2f}
-TP           : {tp_price:.2f}
-SL           : {sl_price:.2f}
-""")
+    📈 POSITION OPENED
+    Symbol       : {plan.symbol}
+    Side         : {plan.side}
+    Quantity     : {quantity}
+    Signal Price : {plan.signal_price:.2f}
+    Entry (bot)  : {self.position.entry_price:.2f}
+    Entry (real) : {real_entry:.2f}
+    TP           : {tp_price:.2f}
+    SL           : {sl_price:.2f}
+    """)
 
     def on_price_update(self, price: float, timestamp: int):
 
@@ -285,6 +290,13 @@ SL           : {sl_price:.2f}
 
         if pos is None:
             return
+        
+        pos_exchange = self.exchange.get_position(pos.symbol)
+
+        if not pos_exchange or float(pos_exchange["amount"]) == 0:
+            print("⚠️ Position already closed on exchange")
+            self.position = None
+            return
 
         side = "SELL" if pos.side == "LONG" else "BUY"
 
@@ -294,18 +306,20 @@ SL           : {sl_price:.2f}
             quantity=pos.quantity
         )
 
-        if order and "fills" in order and len(order["fills"]) > 0:
+        if order and float(order.get("avgPrice", 0)) > 0:
+            real_exit = float(order["avgPrice"])
+        elif order and "fills" in order and len(order["fills"]) > 0:
             real_exit = float(order["fills"][0]["price"])
         else:
             real_exit = price
 
         price_with_slippage = self._apply_slippage(price, pos.side, is_entry=False)
 
-        pnl_pct = ((price_with_slippage - pos.entry_price) / pos.entry_price * 100
-                   if pos.side == "LONG"
-                   else (pos.entry_price - price_with_slippage) / pos.entry_price * 100)
+        pnl_pct = ((real_exit - pos.real_entry) / pos.real_entry * 100
+                if pos.side == "LONG"
+                else (pos.real_entry - real_exit) / pos.real_entry * 100)
 
-        fees = 0.08
+        fees = self.fees["taker"] * 2
         pnl_gross = pnl_pct
         pnl_net = pnl_gross - fees
 
@@ -368,14 +382,17 @@ Reason       : {reason}
             )
 
         finally:
-            
-            # limpiar órdenes pendientes
+
             try:
-                self.exchange.cancel_all_orders(pos.symbol)
+
+                # verificar si todavía estamos cerrando la misma posición
+                if self.position and self.position.entry_ts == pos.entry_ts:
+
+                    self.exchange.cancel_all_orders(pos.symbol)
+                    self.position = None
+
             except Exception as e:
                 print(f"⚠️ Failed to cancel orders: {e}")
-
-            self.position = None
 
     def get_state(self):
 
@@ -383,3 +400,68 @@ Reason       : {reason}
             "position": self.position,
             "total_trades": len(self.trades)
         }
+        
+    def restore_state(self, symbol):
+
+        sync = ExchangeStateSync(self.exchange)
+
+        state = sync.restore_position_state(symbol)
+
+        if not state:
+            print("ℹ️ No position to restore")
+            return
+
+        self.position = Position(
+            symbol=state["symbol"],
+            side=state["side"],
+            quantity=state["quantity"],
+            entry_price=state["entry_price"],
+            real_entry=state["entry_price"],
+            tp=state["tp"],
+            sl=state["sl"],
+            entry_ts=int(time.time() * 1000),
+            signal_price=state["entry_price"],
+            signal_ts=int(time.time() * 1000)
+        )
+
+        print("🔁 Position restored from exchange")
+        
+        # Si no hay TP/SL restaurados, recalcular
+        
+        if not self.position.tp or not self.position.sl:
+
+            print("⚠️ Restored position without TP/SL. Recalculating...")
+
+            entry = self.position.real_entry
+            side = self.position.side
+
+            risk_pct = 0.005   # 0.5%
+            reward_pct = 0.01  # 1%
+
+            if side == "LONG":
+                sl_price = entry * (1 - risk_pct)
+                tp_price = entry * (1 + reward_pct)
+
+            else:
+                sl_price = entry * (1 + risk_pct)
+                tp_price = entry * (1 - reward_pct)
+
+            tp_side = "SELL" if side == "LONG" else "BUY"
+
+            self._place_tp_sl(
+                symbol=self.position.symbol,
+                tp_side=tp_side,
+                tp_price=tp_price,
+                sl_side=tp_side,
+                sl_price=sl_price
+            )
+
+            self.position.tp = tp_price
+            self.position.sl = sl_price
+
+            print(f"""
+        🔧 TP/SL recalculated
+        Entry : {entry}
+        TP    : {tp_price}
+        SL    : {sl_price}
+        """)
