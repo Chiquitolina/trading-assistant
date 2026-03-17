@@ -205,3 +205,7 @@ class BinanceExchange(BaseExchange):
             "maker": maker,
             "taker": taker
         }
+        
+    def get_price(self, symbol: str) -> float:
+        data = self.client.futures_symbol_ticker(symbol=symbol)
+        return float(data["price"])

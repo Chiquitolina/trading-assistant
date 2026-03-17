@@ -37,8 +37,10 @@ class Trade:
 
 class ExecutionEngine:
 
-    def __init__(self, exchange):
+    def __init__(self, exchange, position_manager, symbol="BTCUSDT"):
         self.exchange = exchange
+        self.position_manager = position_manager
+        self.symbol = symbol  # 🔥 CLAVE
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
         self.journal = TradeJournal()
@@ -103,11 +105,12 @@ class ExecutionEngine:
 
     def execute_plan(self, plan, leverage: int = 1):
 
-        if self.position is not None:
-            print("⚠️ Position already open. Plan ignored.\n")
+        exchange_pos = self.position_manager.sync(plan.symbol)
+
+        if exchange_pos:
+            print("⚠️ Position already open (exchange). Plan ignored.\n")
             return
 
-        # limpiar órdenes viejas SOLO si vamos a abrir nueva posición
         try:
             self.exchange.cancel_all_orders(plan.symbol)
         except Exception as e:
@@ -132,20 +135,28 @@ class ExecutionEngine:
 
         print(f"✅ Leverage set to {leverage}x for {plan.symbol}")
 
-        usable_balance = balance * 0.90
+        # 🔥 FIX 1: usar precio real (no plan.entry)
+        price = float(self.exchange.get_price(plan.symbol))
+
+        usable_balance = balance * 0.85
         notional = usable_balance * leverage
 
-        quantity = notional / plan.entry
-        quantity = round(quantity, 3)
+        # 🔥 FIX 2: cálculo con precio real
+        quantity = notional / price
+        quantity = round(quantity, 3)  # mantenemos tu lógica
 
-        notional_check = quantity * plan.entry
+        # 🔥 FIX 3: notional real
+        notional_check = quantity * price
 
         if notional_check < 10:
             print(f"❌ Notional too small: {notional_check:.2f} USDT")
             return
 
-        if notional_check > balance * leverage:
-            print(f"❌ Notional exceeds available margin")
+        # 🔥 FIX 4: chequeo correcto de margen
+        required_margin = notional_check / leverage
+
+        if required_margin > usable_balance:
+            print(f"❌ Margin insuficiente")
             return
 
         print(f"✅ Quantity calculada: {quantity:.3f} ({notional_check:.2f} USDT notional)")
@@ -155,18 +166,17 @@ class ExecutionEngine:
             side=side,
             quantity=quantity
         )
-                
+
+        self.position_manager.sync(plan.symbol)
+
         if not order:
             print("❌ Order failed. Position not opened.")
             return
 
         time.sleep(1)
-
         time.sleep(0.5)
 
         pos = self.exchange.get_position(plan.symbol)
-        
-        print(pos)
 
         if pos and float(pos["amount"]) != 0:
             real_entry = float(pos["entry_price"])
@@ -261,7 +271,13 @@ class ExecutionEngine:
     """)
 
     def on_price_update(self, price: float, timestamp: int):
+        
+        exchange_pos = self.position_manager.sync(self.symbol)
 
+        if not exchange_pos and self.position is not None:
+            print("🔄 Sync: posición cerrada en exchange")
+            self.position = None
+    
         if self.position is None:
             return
 
@@ -390,6 +406,8 @@ Reason       : {reason}
 
                     self.exchange.cancel_all_orders(pos.symbol)
                     self.position = None
+                    
+                    self.position_manager.sync(pos.symbol)
 
             except Exception as e:
                 print(f"⚠️ Failed to cancel orders: {e}")
@@ -465,3 +483,11 @@ Reason       : {reason}
         TP    : {tp_price}
         SL    : {sl_price}
         """)
+            
+    def check_exchange_close(self, symbol):
+        pos = self.exchange.get_position(symbol)
+
+        if not pos or float(pos["amount"]) == 0:
+            if self.position is not None:
+                print("🔄 Exchange cerró la posición")
+                self.position = None

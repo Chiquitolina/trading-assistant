@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
 from signals.signals_engine import SignalEngine
@@ -51,8 +52,9 @@ except Exception as e:
 # ---------- INIT ENGINES ----------
 signals = SignalEngine(buffer)
 entry_engine = EntryEngine(buffer, debug=True)
-execution = ExecutionEngine(exchange)
 trade_manager = TradeManager(buffer, debug=True)
+position_manager = PositionManager(exchange)
+execution = ExecutionEngine(exchange, position_manager)
 
 execution.restore_state(SYMBOL)
 
