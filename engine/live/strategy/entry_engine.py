@@ -44,16 +44,16 @@ class EntryEngine:
         cfg = LONG if side == "LONG" else SHORT
 
         # ==========================
-        # FILTER
-        # ==========================
-        if not min_expected_tp_ok(
+        ok, expected_tp_pct = min_expected_tp_ok(
             entry,
             atr,
             cfg["tp_mult"],
             cfg["min_tp"]
-        ):
+        )
+
+        if not ok:
             if self.debug:
-                print("⛔ Entry descartado: TP esperado insuficiente")
+                print(f"⛔ Entry descartado: TP esperado insuficiente ({expected_tp_pct:.2f}% < {cfg['min_tp']}%)")
             return None
 
         # ==========================

@@ -158,12 +158,14 @@ def backtest(symbol: str):
                 i += 1
                 continue
 
-            if not min_expected_tp_ok(
+            ok, expected_tp_pct = min_expected_tp_ok(
                 entry_price,
                 atr,
                 LONG['tp_mult'],
                 LONG['min_tp']
-            ):
+            )
+
+            if not ok:
                 i += 1
                 continue
 

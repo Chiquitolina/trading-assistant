@@ -19,7 +19,7 @@ secret = os.getenv("SECRET_KEY")
 # ---------- CONFIG ----------
 SYMBOL = "BTCUSDT"
 TIMEFRAMES = ["5m", "15m", "1h"]
-TRIGGER_TF = "15m"
+TRIGGER_TF = "5m"
 DAYS = 3
 
 # ---------- INIT BUFFER ----------
