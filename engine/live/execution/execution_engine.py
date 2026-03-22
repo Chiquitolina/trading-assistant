@@ -5,35 +5,10 @@ from datetime import datetime
 import random
 import time
 from engine.live.state_sync import ExchangeStateSync
-
-
-@dataclass
-class Position:
-    symbol: str
-    side: str
-    quantity: float
-    entry_price: float
-    real_entry: float
-    tp: float
-    sl: float
-    entry_ts: int
-    signal_price: float
-    signal_ts: int
-
-
-@dataclass
-class Trade:
-    side: str
-    entry_price: float
-    real_entry: float
-    exit_price: float
-    real_exit: float
-    pnl_pct: float
-    entry_ts: int
-    exit_ts: int
-    exit_reason: str
-
-
+from models.position import Position
+from models.trade import Trade
+from services.position_sizer import PositionSizer
+from services.risk_manager import RiskManager
 class ExecutionEngine:
 
     def __init__(self, exchange, position_manager, symbol="BTCUSDT"):
@@ -44,6 +19,8 @@ class ExecutionEngine:
         self.trades: list[Trade] = []
         self.journal = TradeJournal()
         self.fees = self.exchange.get_futures_fees()
+        self.position_sizer = PositionSizer()
+        self.risk_manager = RiskManager()
 
     def _apply_slippage(self, price: float, side: str, is_entry: bool = True):
         slippage_pct = random.uniform(0.01, 0.05) / 100
@@ -125,49 +102,33 @@ class ExecutionEngine:
 
         print(f"✅ Leverage set to {leverage}x")
 
-        # ==========================
-        # 💰 POSITION SIZING (FIXED)
-        # ==========================
-
         price = float(self.exchange.get_price(plan.symbol))
 
-        usable_balance = balance * 0.90
-        buffer = 0.97
+        size_data = self.position_sizer.calculate(
+            balance=balance,
+            price=price,
+            leverage=leverage
+        )
 
-        raw_notional = usable_balance * leverage * buffer
+        is_valid, msg = self.position_sizer.validate(size_data)
 
-        quantity = raw_notional / price
-        quantity = round(quantity, 3)
-
-        notional_check = quantity * price
-        required_margin = notional_check / leverage
-
-        if required_margin > usable_balance:
-            quantity *= 0.98
-            quantity = round(quantity, 3)
-
-            notional_check = quantity * price
-            required_margin = notional_check / leverage
-
-        if notional_check < 10:
-            print(f"❌ Notional too small: {notional_check:.2f}")
+        if not is_valid:
+            print(msg)
             return
+
+        quantity = size_data["quantity"]
 
         print(f"""
-💰 MARGIN DEBUG
-Balance           : {balance}
-Usable            : {usable_balance}
-Price             : {price}
-Qty               : {quantity}
-Notional real     : {notional_check}
-Leverage          : {leverage}
-Required margin   : {required_margin}
-Check             : {usable_balance >= required_margin}
-""")
-
-        if required_margin > usable_balance:
-            print("❌ Margin insuficiente")
-            return
+        💰 MARGIN DEBUG
+        Balance           : {balance}
+        Usable            : {size_data["usable_balance"]}
+        Price             : {price}
+        Qty               : {quantity}
+        Notional real     : {size_data["notional"]}
+        Leverage          : {leverage}
+        Required margin   : {size_data["required_margin"]}
+        Check             : {size_data["usable_balance"] >= size_data["required_margin"]}
+        """)
 
         print(f"✅ Quantity: {quantity}")
 
@@ -197,24 +158,13 @@ Check             : {usable_balance >= required_margin}
         # 🎯 TP / SL
         # ==========================
 
-        risk = abs(plan.entry - plan.sl)
-        reward = abs(plan.tp - plan.entry)
-
-        if plan.side == "LONG":
-            sl_price = real_entry - risk
-            tp_price = real_entry + reward
-        else:
-            sl_price = real_entry + risk
-            tp_price = real_entry - reward
-
         mark_price = float(self.exchange.get_mark_price(plan.symbol))
 
-        if plan.side == "LONG":
-            sl_price = min(sl_price, mark_price * 0.998)
-            tp_price = max(tp_price, mark_price * 1.002)
-        else:
-            sl_price = max(sl_price, mark_price * 1.002)
-            tp_price = min(tp_price, mark_price * 0.998)
+        tp_price, sl_price = self.risk_manager.calculate_tp_sl(
+            plan=plan,
+            real_entry=real_entry,
+            mark_price=mark_price
+        )
 
         tp_side = "SELL" if side == "BUY" else "BUY"
 
@@ -327,7 +277,7 @@ Check             : {usable_balance >= required_margin}
         state = sync.restore_position_state(symbol)
 
         if not state:
-            print("ℹ️ No position")
+            print("ℹ️ No position to restore.")
             return
 
         self.position = Position(
