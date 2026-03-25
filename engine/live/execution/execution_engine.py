@@ -31,46 +31,126 @@ class ExecutionEngine:
 
         if side == "SHORT":
             return price - slippage if is_entry else price + slippage
+        
+    def _handle_external_close(self, price, timestamp):
 
-    def _place_tp_sl(self, symbol, tp_side, tp_price, sl_side, sl_price, retries=10, delay=0.5):
+        pos = self.position
+        if not pos:
+            return
+
+        print("⚠️ Detectado cierre externo (TP/SL o manual)")
+
+        # 🔍 detectar si fue TP o SL
+        if pos.side == "LONG":
+            if price >= pos.tp:
+                reason = "TP"
+            elif price <= pos.sl:
+                reason = "SL"
+            else:
+                reason = "UNKNOWN"
+        else:
+            if price <= pos.tp:
+                reason = "TP"
+            elif price >= pos.sl:
+                reason = "SL"
+            else:
+                reason = "UNKNOWN"
+
+        print(f"📊 External close reason: {reason}")
+
+        # 🔥 usar precio correcto (clamp)
+        if reason == "TP":
+            real_exit = pos.tp
+        elif reason == "SL":
+            real_exit = pos.sl
+        else:
+            real_exit = price
+
+        # 🔹 PnL
+        pnl_pct = (
+            (real_exit - pos.real_entry) / pos.real_entry * 100
+            if pos.side == "LONG"
+            else (pos.real_entry - real_exit) / pos.real_entry * 100
+        )
+
+        pnl_pct = round(pnl_pct, 4)
+        fees = round(self.fees["taker"] * 2, 4)
+        pnl_net = round(pnl_pct - fees, 4)
+
+        # 🧠 DEBUG CLAVE
+        print(f"""
+    📊 EXTERNAL CLOSE DEBUG
+    Entry       : {pos.real_entry}
+    Exit        : {real_exit}
+    TP          : {pos.tp}
+    SL          : {pos.sl}
+    Reason      : {reason}
+    PnL net     : {pnl_net}%
+    """)
+
+        print(f"❌ CLOSED (external {reason}) | PnL: {pnl_net}%")
+
+        # 📝 log
+        from datetime import datetime
+
+        def _to_iso(ts):
+            if not ts:
+                return None
+            return datetime.utcfromtimestamp(ts / 1000).isoformat(timespec="milliseconds")
+
+
+        signal_iso = _to_iso(pos.signal_ts)
+        entry_iso  = _to_iso(pos.entry_ts)
+
+        exit_ts  = int(time.time() * 1000)
+        exit_iso = _to_iso(exit_ts)
+
+        self.journal.log_trade(
+            signal_ts=signal_iso,
+            signal_price=pos.signal_price,
+            entry_ts=entry_iso,
+            exit_ts=exit_iso,
+            side=pos.side,
+            entry=pos.entry_price,
+            real_entry=pos.real_entry,
+            exit_price=price,
+            real_exit=real_exit,
+            tp=pos.tp,
+            sl=pos.sl,
+            pnl=pnl_net,
+            pnl_gross=pnl_pct,
+            fees=fees,
+            exit_reason=reason,
+        )
+
+        self.position = None
+
+    def _place_tp_sl(self, symbol, quantity, tp_side, tp_price, sl_side, sl_price):
 
         tp_price = round(tp_price, 2)
         sl_price = round(sl_price, 2)
 
-        for attempt in range(1, retries + 1):
-            try:
-                pos = self.exchange.get_position(symbol)
+        try:
+            self.exchange.place_take_profit(
+                symbol=symbol,
+                side=tp_side,
+                quantity=quantity,
+                stop_price=tp_price
+            )
 
-                if pos and float(pos["amount"]) != 0:
-                    qty = abs(float(pos["amount"]))
+            self.exchange.place_stop_loss(
+                symbol=symbol,
+                side=sl_side,
+                quantity=quantity,
+                stop_price=sl_price
+            )
 
-                    self.exchange.place_take_profit(
-                        symbol=symbol,
-                        side=tp_side,
-                        quantity=qty,
-                        stop_price=tp_price
-                    )
+            print("✅ TP/SL colocados correctamente")
+            return True
 
-                    self.exchange.place_stop_loss(
-                        symbol=symbol,
-                        side=sl_side,
-                        quantity=qty,
-                        stop_price=sl_price
-                    )
-
-                    print("✅ TP/SL colocados correctamente")
-                    return True
-
-                else:
-                    print(f"⚠️ Posición aún no detectada ({attempt}/{retries})...")
-                    time.sleep(delay)
-
-            except Exception as e:
-                print(f"⚠️ Error al verificar la posición: {e}")
-                time.sleep(delay)
-
-        print("❌ No se pudo colocar TP/SL")
-        return False
+        except Exception as e:
+            print(f"❌ Error colocando TP/SL: {e}")
+            return False
 
     def execute_plan(self, plan, leverage: int = 1):
 
@@ -118,19 +198,19 @@ class ExecutionEngine:
 
         quantity = size_data["quantity"]
 
-        print(f"""
-        💰 MARGIN DEBUG
-        Balance           : {balance}
-        Usable            : {size_data["usable_balance"]}
-        Price             : {price}
-        Qty               : {quantity}
-        Notional real     : {size_data["notional"]}
-        Leverage          : {leverage}
-        Required margin   : {size_data["required_margin"]}
-        Check             : {size_data["usable_balance"] >= size_data["required_margin"]}
-        """)
+#        print(f"""
+#        💰 MARGIN DEBUG
+#        Balance           : {balance}
+#        Usable            : {size_data["usable_balance"]}
+#        Price             : {price}
+#        Qty               : {quantity}
+#        Notional real     : {size_data["notional"]}
+#        Leverage          : {leverage}
+#        Required margin   : {size_data["required_margin"]}
+#        Check             : {size_data["usable_balance"] >= size_data["required_margin"]}
+#        """)
 
-        print(f"✅ Quantity: {quantity}")
+#       print(f"✅ Quantity: {quantity}")
 
         # ==========================
         # 🚀 ORDER
@@ -142,13 +222,34 @@ class ExecutionEngine:
             quantity=quantity
         )
 
-        self.position_manager.sync(plan.symbol)
+        # 💣 CASO CRÍTICO: timeout Binance
+        if order and order.get("status") == "UNKNOWN":
 
-        if not order:
+            print("🔎 Orden en estado desconocido, sincronizando...")
+
+            time.sleep(2)
+
+            exchange_pos = self.position_manager.sync(plan.symbol)
+
+            if exchange_pos:
+                print("✅ Orden SI se ejecutó (detectado por sync)")
+            else:
+                print("❌ Orden NO ejecutada")
+                return
+
+        # ❌ fallo real (no UNKNOWN)
+        elif not order:
             print("❌ Order failed")
             return
 
-        time.sleep(1.5)
+        # 🔥 SIEMPRE sync después del order (CLAVE)
+        exchange_pos = self.position_manager.sync(plan.symbol)
+
+        if not exchange_pos:
+            print("❌ No hay posición después del order, abortando")
+            return
+
+        time.sleep(1.0)
 
         pos = self.exchange.get_position(plan.symbol)
 
@@ -170,6 +271,7 @@ class ExecutionEngine:
 
         self._place_tp_sl(
             symbol=plan.symbol,
+            quantity=quantity,  # 🔥 ESTE ES EL CAMBIO
             tp_side=tp_side,
             tp_price=tp_price,
             sl_side=tp_side,
@@ -214,26 +316,13 @@ class ExecutionEngine:
 
         exchange_pos = self.position_manager.sync(self.symbol)
 
+        # 🔥 cierre externo (TP/SL)
         if not exchange_pos and self.position:
-            print("🔄 Sync: closed externally")
-            self.position = None
+            self._handle_external_close(price, timestamp)
+            return
 
         if not self.position:
             return
-
-        pos = self.position
-
-        if pos.side == "LONG":
-            if price >= pos.tp:
-                self._close_position(price, timestamp, "TP")
-            elif price <= pos.sl:
-                self._close_position(price, timestamp, "SL")
-
-        else:
-            if price <= pos.tp:
-                self._close_position(price, timestamp, "TP")
-            elif price >= pos.sl:
-                self._close_position(price, timestamp, "SL")
 
     # ==========================
     # ❌ CLOSE
@@ -253,15 +342,56 @@ class ExecutionEngine:
             quantity=pos.quantity
         )
 
-        real_exit = float(order.get("avgPrice", price)) if order else price
+        if order and float(order.get("avgPrice", 0)) > 0:
+            real_exit = float(order["avgPrice"])
+        elif order and "fills" in order and len(order["fills"]) > 0:
+            real_exit = float(order["fills"][0]["price"])
+        else:
+            print("⚠️ Close order without fills, using fallback price")
+            real_exit = price
 
-        pnl = ((real_exit - pos.real_entry) / pos.real_entry * 100
-               if pos.side == "LONG"
-               else (pos.real_entry - real_exit) / pos.real_entry * 100)
+        # 🔹 precio simulado (con slippage)
+        price_with_slippage = self._apply_slippage(price, pos.side, is_entry=False)
 
-        pnl -= self.fees["taker"] * 2
+        # 🔹 PnL
+        pnl_pct = (
+            (real_exit - pos.real_entry) / pos.real_entry * 100
+            if pos.side == "LONG"
+            else (pos.real_entry - real_exit) / pos.real_entry * 100
+        )
 
-        print(f"❌ CLOSED {reason} | PnL: {round(pnl, 4)}%")
+        fees = self.fees["taker"] * 2
+        pnl_gross = pnl_pct
+        pnl_net = pnl_gross - fees
+
+        pnl_pct = round(pnl_pct, 4)
+        pnl_gross = round(pnl_gross, 4)
+        pnl_net = round(pnl_net, 4)
+        fees = round(fees, 2)
+
+        print(f"❌ CLOSED {reason} | PnL: {round(pnl_net, 4)}%")
+        
+        signal_iso = datetime.utcfromtimestamp(pos.signal_ts / 1000).isoformat()
+        entry_iso = datetime.utcfromtimestamp(pos.entry_ts / 1000).isoformat()
+        exit_iso = datetime.utcfromtimestamp(timestamp / 1000).isoformat()
+
+        self.journal.log_trade(
+            signal_ts=signal_iso,
+            signal_price=pos.signal_price,
+            entry_ts=entry_iso,
+            exit_ts=exit_iso,
+            side=pos.side,
+            entry=pos.entry_price,
+            real_entry=pos.real_entry,
+            exit_price=price_with_slippage,
+            real_exit=real_exit,
+            tp=pos.tp,
+            sl=pos.sl,
+            pnl=pnl_net,
+            pnl_gross=pnl_gross,
+            fees=fees,
+            exit_reason=reason,
+            )
 
         self.position = None
 
