@@ -82,6 +82,9 @@ try:
             if not plan:
                 print("❌ PLAN DESCARTADO\n")
                 continue
+            
+            print(f"🧠 SIGNAL TS: {signal['signal_ts']} | PRICE: {signal['signal_price']}")
+            print(f"📦 ENTRY  TS: {plan.timestamp} | PRICE: {plan.entry}")
 
             execution.execute_plan(plan)
 

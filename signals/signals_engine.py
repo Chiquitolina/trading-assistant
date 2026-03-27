@@ -61,19 +61,19 @@ class SignalEngine:
     def generate_signal(self):
 
         candles_15m = self.buffer.get_candles("15m")
-        last_candle = candles_15m[-1]
-        signal_price = last_candle["close"]
-        signal_ts = last_candle["timestamp"]
-        
+
         if not candles_15m:
             return None
 
-        last_15m_ts = candles_15m[-1]["timestamp"]
+        last_candle = candles_15m[-1]
+        signal_price = last_candle["close"]
+        signal_ts = last_candle["timestamp"]
 
-        if last_15m_ts == self.last_signal_ts:
+        # 🔒 evitar duplicados
+        if signal_ts == self.last_signal_ts:
             return None
 
-        self.last_signal_ts = last_15m_ts
+        self.last_signal_ts = signal_ts
 
         trend     = self.get_trend()
         direction = self.get_direction()
@@ -85,12 +85,34 @@ class SignalEngine:
             print(f"15m direction: {direction}")
             print(f"5m momentum  : {momentum}\n")
 
+        # ==========================
+        # LONG SIGNAL
+        # ==========================
         if long_setup(trend, direction, momentum):
             print("💡 SIGNAL GENERATED: LONG")
-            return "LONG"
 
+            return {
+                "side": "LONG",
+                "signal_price": round(signal_price, 2),
+                "signal_ts": signal_ts,
+                "trend": trend,
+                "direction": direction,
+                "momentum": momentum
+            }
+
+        # ==========================
+        # SHORT SIGNAL
+        # ==========================
         if short_setup(trend, direction, momentum):
             print("💡 SIGNAL GENERATED: SHORT")
-            return "SHORT"
+
+            return {
+                "side": "SHORT",
+                "signal_price": round(signal_price, 2),
+                "signal_ts": signal_ts,
+                "trend": trend,
+                "direction": direction,
+                "momentum": momentum
+            }
 
         return None

@@ -13,10 +13,12 @@ class EntryEngine:
         self.buffer = buffer
         self.debug = debug
 
-    def generate_entry(self, side: str):
-
-        if side not in ("LONG", "SHORT"):
+    def generate_entry(self, signal: dict):
+    
+        if not signal:
             return None
+
+        side = signal["side"]
 
         # ==========================
         # DATA (igual que backtest)
@@ -27,16 +29,17 @@ class EntryEngine:
 
         df_15m = add_atr(df_15m, period=14)
 
-        signal_candle = df_15m.iloc[-2]   # vela cerrada (donde nace la señal)
-        entry_candle  = df_15m.iloc[-1]   # vela actual (ejecución)
+        entry_candle = df_15m.iloc[-1]   # vela actual (ejecución)
 
-        # 🔹 PRECIO DE SEÑAL
-        signal_price = signal_candle["close"]
-        signal_ts = signal_candle["timestamp"]
+        # 🔥 VIENE DEL SIGNAL ENGINE
+        signal_price = signal["signal_price"]
+        signal_ts = signal["signal_ts"]
 
         # 🔹 PRECIO DE ENTRADA REAL
         entry = entry_candle["open"]
-        atr = signal_candle["atr"]
+
+        # 🔹 ATR (lo mantenemos de la vela de señal)
+        atr = df_15m.iloc[-2]["atr"]
 
         if pd.isna(atr):
             return None
