@@ -39,7 +39,12 @@ class TradeJournal:
                     "pnl_gross",
                     "fees",
 
-                    "exit_reason"
+                    "exit_reason",
+                    
+                    "signal_direction",
+                    "signal_trend",
+                    "signal_momentum",
+                    "signal_atr"
                 ])
 
     # -------------------------
@@ -61,7 +66,11 @@ class TradeJournal:
         pnl,
         pnl_gross,
         fees,
-        exit_reason
+        exit_reason,
+        signal_direction,
+        signal_trend,
+        signal_momentum,
+        signal_atr
     ):
 
         with open(self.file_path, "a", newline="", encoding="utf-8") as f:
@@ -89,5 +98,10 @@ class TradeJournal:
                 round(pnl_gross, 4),
                 round(fees, 2),
 
-                exit_reason
+                exit_reason,
+                
+                signal_direction,
+                signal_trend,
+                signal_momentum,
+                signal_atr
             ])

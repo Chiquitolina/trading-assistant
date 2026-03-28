@@ -68,6 +68,16 @@ class EntryEngine:
             atr=atr,
             cfg=cfg
         )
+        
+                # ==========================
+        # 🧠 SIGNAL CONTEXT (NUEVO)
+        # ==========================
+        signal_context = {
+            "trend": signal.get("trend"),
+            "direction": signal.get("direction"),
+            "momentum": signal.get("momentum"),
+            "atr": round(atr, 2),
+        }
 
         plan = TradePlan(
             symbol="BTCUSDT",
@@ -88,7 +98,10 @@ class EntryEngine:
 
             # 🆕 DATA DE SEÑAL
             signal_price=round(signal_price, 2),
-            signal_ts=signal_ts
+            signal_ts=signal_ts,
+            
+            signal_context=signal_context
+
         )
 
         if self.debug:

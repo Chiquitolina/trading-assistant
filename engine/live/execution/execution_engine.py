@@ -90,14 +90,16 @@ class ExecutionEngine:
 
         print(f"❌ CLOSED (external {reason}) | PnL: {pnl_net}%")
 
-        # 📝 log
-        from datetime import datetime
+        # ==========================
+        # 🆕 CONTEXTO DE SIGNAL
+        # ==========================
+        ctx = pos.signal_context or {}
 
+        # 📝 log
         def _to_iso(ts):
             if not ts:
                 return None
             return datetime.utcfromtimestamp(ts / 1000).isoformat(timespec="milliseconds")
-
 
         signal_iso = _to_iso(pos.signal_ts)
         entry_iso  = _to_iso(pos.entry_ts)
@@ -121,6 +123,12 @@ class ExecutionEngine:
             pnl_gross=pnl_pct,
             fees=fees,
             exit_reason=reason,
+
+            # 🆕 CONTEXTO (LO IMPORTANTE)
+            signal_direction=ctx.get("direction"),
+            signal_trend=ctx.get("trend"),
+            signal_momentum=ctx.get("momentum"),
+            signal_atr=ctx.get("atr"),
         )
 
         self.position = None
@@ -292,7 +300,9 @@ class ExecutionEngine:
             sl=sl_price,
             entry_ts=int(plan.timestamp),
             signal_price=float(plan.signal_price),
-            signal_ts=int(plan.signal_ts)
+            signal_ts=int(plan.signal_ts),
+            
+            signal_context=plan.signal_context
         )
 
         
@@ -371,6 +381,8 @@ class ExecutionEngine:
 
         print(f"❌ CLOSED {reason} | PnL: {round(pnl_net, 4)}%")
         
+        ctx = pos.signal_context or {}
+        
         signal_iso = datetime.utcfromtimestamp(pos.signal_ts / 1000).isoformat()
         entry_iso = datetime.utcfromtimestamp(pos.entry_ts / 1000).isoformat()
         exit_iso = datetime.utcfromtimestamp(timestamp / 1000).isoformat()
@@ -391,6 +403,12 @@ class ExecutionEngine:
             pnl_gross=pnl_gross,
             fees=fees,
             exit_reason=reason,
+            
+             # 🧠 CONTEXTO
+            signal_direction=ctx.get("direction"),
+            signal_trend=ctx.get("trend"),
+            signal_momentum=ctx.get("momentum"),
+            signal_atr=ctx.get("atr")
             )
 
         self.position = None
@@ -420,7 +438,8 @@ class ExecutionEngine:
             sl=state["sl"],
             entry_ts=int(time.time() * 1000),
             signal_price=state["entry_price"],
-            signal_ts=int(time.time() * 1000)
+            signal_ts=int(time.time() * 1000),
+            signal_context=None
         )
 
         print("🔁 Position restored")
