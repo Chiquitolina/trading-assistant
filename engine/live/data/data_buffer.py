@@ -68,7 +68,7 @@ class DataBuffer:
         # ✅ registrar cierre de TF (NO se pisa)
         self.closed_tfs.add(tf)
 
-        print(f"🕯️ STORED [{tf}] {candle['close']}")
+        print(f"\033[94m[DATA LAYER]\033[0m🕯️ STORED [{tf}] {candle['close']}")
 
     # ==========================================
     # EVENT CONSUMER
@@ -132,5 +132,5 @@ class DataBuffer:
             self.buffers[tf].append(candle)
             self.last_close_time[tf] = close_time
 
-        print(f"📦 Loaded {len(df)} historical candles for {tf}")
+        print(f"\033[94m[DATA LAYER]\033[0m 📦 Loaded {len(df)} historical candles for {tf}")
 

@@ -80,7 +80,7 @@ class SignalEngine:
         momentum  = self.get_momentum()
 
         if self.debug:
-            print("\n📷  Snapshot (on 15m close)")
+            print("\033[94m[SIGNALS LAYER]\033[0m 📷  Snapshot (on 15m close)")
             print(f"1h trend     : {trend}")
             print(f"15m direction: {direction}")
             print(f"5m momentum  : {momentum}\n")
@@ -89,7 +89,7 @@ class SignalEngine:
         # LONG SIGNAL
         # ==========================
         if long_setup(trend, direction, momentum):
-            print("💡 SIGNAL GENERATED: LONG")
+            print("\033[94m[SIGNALS LAYER]\033[0m 💡 SIGNAL GENERATED: LONG")
 
             return {
                 "side": "LONG",
@@ -104,7 +104,7 @@ class SignalEngine:
         # SHORT SIGNAL
         # ==========================
         if short_setup(trend, direction, momentum):
-            print("💡 SIGNAL GENERATED: SHORT")
+            print("\033[94m[SIGNALS LAYER]\033[0m 💡 SIGNAL GENERATED: SHORT")
 
             return {
                 "side": "SHORT",

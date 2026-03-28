@@ -26,6 +26,7 @@ class TradePlan:
         ctx = self.signal_context or {}
 
         return f"""
+\n\033[94m[ENTRY PLANNER]\033[0m
 📥 TRADE PLAN
 Symbol : {self.symbol}
 Side   : {self.side}

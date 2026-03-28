@@ -165,7 +165,7 @@ class ExecutionEngine:
         exchange_pos = self.position_manager.sync(plan.symbol)
 
         if exchange_pos:
-            print("⚠️ Position already open (exchange). Plan ignored.\n")
+            print("\033[94m[EXECUTION ENGINE]\033[0m ⚠️ Position already open (exchange). Plan ignored.\n")
             return
 
         try:
@@ -307,6 +307,7 @@ class ExecutionEngine:
 
         
         print(f"""
+    \033[94m[EXECUTION ENGINE]\033[0m
     📈 POSITION OPENED
     Symbol       : {plan.symbol}
     Side         : {plan.side}
@@ -379,7 +380,7 @@ class ExecutionEngine:
         pnl_net = round(pnl_net, 4)
         fees = round(fees, 2)
 
-        print(f"❌ CLOSED {reason} | PnL: {round(pnl_net, 4)}%")
+        print(f"\033[94m[EXECUTION ENGINE]\033[0m ❌ CLOSED {reason} | PnL: {round(pnl_net, 4)}%")
         
         ctx = pos.signal_context or {}
         
@@ -442,7 +443,7 @@ class ExecutionEngine:
             signal_context=None
         )
 
-        print("🔁 Position restored")
+        print("\033[94m[EXCHANGE]\033[0m 🔁 Position restored")
 
     def check_exchange_close(self, symbol):
 

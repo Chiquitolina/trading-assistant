@@ -40,12 +40,12 @@ exchange = BinanceExchange(
 
 # ---------- TEST API CONNECTION ----------
 try:
-    print("\n🔐 Testing Binance API connection...")
+    print(f"\033[94m[EXCHANGE]\033[0m 🔐 Testing Binance API connection...")
     balance = exchange.get_balance()
-    print("✅ Binance account connected!")
-    print(f"💰 USDT Balance: {balance}\n")
+    print(f"\033[94m[EXCHANGE]\033[0m ✅ Binance account connected!")
+    print(f"\033[94m[EXCHANGE]\033[0m 💰 USDT Balance: {balance}\n")
 except Exception as e:
-    print("❌ Binance API connection failed")
+    print(f"\033[94m[EXCHANGE]\033[0m ❌ Binance API connection failed")
     print(e)
     exit()
 
@@ -62,7 +62,7 @@ execution.restore_state(SYMBOL)
 ws = WSClient(buffer.on_ws_message)
 ws.start()
 
-print("🚀 Live Engine started! Ctrl+C to stop.\n")
+print("\033[94m[LIVE ENGINE]\033[0m 🚀 Live Engine started! Ctrl+C to stop.\n")
 
 # ---------- EVENT LOOP ----------
 try:
@@ -80,14 +80,11 @@ try:
 
             plan = entry_engine.generate_entry(signal)
             if not plan:
-                print("❌ PLAN DESCARTADO\n")
+                print("\033[94m[ENTRY PLANNER]\033[0m ❌ PLAN DESCARTADO\n")
                 continue
-            
-            print(f"🧠 SIGNAL TS: {signal['signal_ts']} | PRICE: {signal['signal_price']}")
-            print(f"📦 ENTRY  TS: {plan.timestamp} | PRICE: {plan.entry}")
 
             execution.execute_plan(plan)
 
 except KeyboardInterrupt:
     ws.stop()
-    print("\n🛑 Live Engine stopped.")
+    print("\033[94m[LIVE ENGINE]\033[0m 🛑 Live Engine stopped.")

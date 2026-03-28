@@ -45,7 +45,7 @@ class WSClient:
     # INTERNAL
     # =========================
     def _connect(self):
-        print("\n🔌 Connecting WS...\n")
+        print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...\n")
 
         self.twm = ThreadedWebsocketManager()
         self.twm.start()
@@ -61,7 +61,7 @@ class WSClient:
         self.running = True
         self._is_reconnecting = False  # 🔥 reset flag
 
-        print(f"\n📡 Futures WS connected: {SYMBOL} {TIMEFRAMES}\n")
+        print(f"\n\033[94m[WS CLIENT]\033[0m 📡 Futures WS connected: {SYMBOL} {TIMEFRAMES}\n")
 
     def _handle_message(self, msg):
         """

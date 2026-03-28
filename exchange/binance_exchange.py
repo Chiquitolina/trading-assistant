@@ -11,14 +11,14 @@ class BinanceExchange(BaseExchange):
         if testnet:
             self.client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
-        print("\n🔌 Connecting to Binance...")
+        print("\033[94m[EXCHANGE]\033[0m🔌 Connecting to Binance...")
         self.sync_time()
 
     def sync_time(self):
         try:
             server_time = self.client.get_server_time()['serverTime']
             self.client.API_TIME_OFFSET = server_time - int(time() * 1000)
-            print(f"⏱ Binance server time offset: {self.client.API_TIME_OFFSET} ms")
+            print(f"\033[94m[EXCHANGE]\033[0m ⏱ Binance server time offset: {self.client.API_TIME_OFFSET} ms")
         except Exception as e:
             print(f"❌ Error sincronizando tiempo: {e}")
 
@@ -182,7 +182,7 @@ class BinanceExchange(BaseExchange):
             for o in orders:
 
                 print(
-                    f"Cancel {o['orderType']} | trigger:{o['triggerPrice']} | id:{o['algoId']}"
+                    f"\033[94m[EXCHANGE]\033[0m Cancel {o['orderType']} | trigger:{o['triggerPrice']} | id:{o['algoId']}"
                 )
 
                 self.client.futures_cancel_algo_order(
