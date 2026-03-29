@@ -99,6 +99,39 @@ class DataBuffer:
 
     def get_candles(self, tf):
         return list(self.buffers.get(tf, []))
+        
+    from datetime import datetime
+
+    def on_replay_candle(self, candle: dict, tf: str):
+
+        # 🔹 actualizar precio
+        self._last_price = float(candle["close"])
+        self._last_timestamp = int(candle["timestamp"])
+
+        if tf not in self.buffers:
+            return
+
+        close_time = candle["timestamp"]
+
+        # 🔒 evitar duplicados
+        if close_time == self.last_close_time[tf]:
+            return
+
+        formatted = {
+            "timestamp": close_time,
+            "open": float(candle["open"]),
+            "high": float(candle["high"]),
+            "low": float(candle["low"]),
+            "close": float(candle["close"]),
+            "volume": float(candle.get("volume", 0)),
+            "closed_at": datetime.utcfromtimestamp(close_time / 1000),
+        }
+
+        self.buffers[tf].append(formatted)
+        self.last_close_time[tf] = close_time
+        self.closed_tfs.add(tf)
+
+        print(f"\033[95m[REPLAY DATA]\033[0m 🕯️ STORED [{tf}] {formatted['close']}")
 
     # ==========================================
     # HISTORICAL LOAD

@@ -4,6 +4,7 @@ from ta.trend import EMAIndicator, ADXIndicator
 # ======================================================
 # TREND BIAS – TIMEFRAMES GRANDES (1H, 4H)
 # ======================================================
+
 def trend_bias(
     df,
     fast_ema=20,
@@ -14,6 +15,20 @@ def trend_bias(
 ):
     df = df.copy()
 
+    # ⚠️ Validar que hay suficientes filas
+    min_required = max(fast_ema, slow_ema, adx_period, slope_lookback)
+    if len(df) < min_required:
+        # devolver df con trend "neutral" si no alcanza
+        df["ema_fast"] = pd.NA
+        df["ema_slow"] = pd.NA
+        df["adx"] = pd.NA
+        df["ema_slope"] = pd.NA
+        df["trend"] = "neutral"
+        return df
+
+    # -------------------------
+    # Indicadores
+    # -------------------------
     df["ema_fast"] = EMAIndicator(df["close"], fast_ema).ema_indicator()
     df["ema_slow"] = EMAIndicator(df["close"], slow_ema).ema_indicator()
     df["adx"] = ADXIndicator(
@@ -25,6 +40,9 @@ def trend_bias(
 
     df["ema_slope"] = df["ema_slow"].diff(slope_lookback)
 
+    # -------------------------
+    # Trend
+    # -------------------------
     df["trend"] = "neutral"
 
     bullish = (
@@ -43,4 +61,3 @@ def trend_bias(
     df.loc[bearish, "trend"] = "bearish"
 
     return df
-
