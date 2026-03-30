@@ -1,4 +1,5 @@
 import pandas as pd
+
 from data.market_data import fetch_history
 from signals.indicators.trend import trend_bias
 from signals.indicators.direction import trade_direction
@@ -8,18 +9,19 @@ from signals.indicators.atr import add_atr
 from signals.strategy.filters import min_expected_tp_ok
 from signals.strategy.risk import compute_levels
 from ui.banners import print_backtest_banner
-
 from signals.strategy.entries import long_setup, short_setup
-
 from config.strategies.v1 import LONG, SHORT, FEES, BACKTEST
 from ui.trade_formatter import format_trade_timestamps
+
+
+ARG_TZ = "America/Argentina/Cordoba"
+
 
 def align(df, ts):
     return df[df["timestamp"] <= ts]
 
 
 def simulate_trade(side, entry, future_df, atr):
-
     if side == "LONG":
         sl, tp, sl_pct, tp_pct = compute_levels(
             side="LONG",
@@ -29,13 +31,11 @@ def simulate_trade(side, entry, future_df, atr):
         )
 
         for _, row in future_df.iterrows():
-
             if row["low"] <= sl:
                 exit_price = sl
                 pnl_gross = (exit_price - entry) / entry * 100
                 fees = 2 * FEES["taker"] + FEES["funding"]
                 pnl_net = pnl_gross - fees
-
                 return {
                     "pnl": round(pnl_net, 3),
                     "pnl_gross": round(pnl_gross, 3),
@@ -54,7 +54,6 @@ def simulate_trade(side, entry, future_df, atr):
                 pnl_gross = (exit_price - entry) / entry * 100
                 fees = 2 * FEES["taker"] + FEES["funding"]
                 pnl_net = pnl_gross - fees
-
                 return {
                     "pnl": round(pnl_net, 3),
                     "pnl_gross": round(pnl_gross, 3),
@@ -77,13 +76,11 @@ def simulate_trade(side, entry, future_df, atr):
         )
 
         for _, row in future_df.iterrows():
-
             if row["high"] >= sl:
                 exit_price = sl
                 pnl_gross = (entry - exit_price) / entry * 100
                 fees = 2 * FEES["taker"] + FEES["funding"]
                 pnl_net = pnl_gross - fees
-
                 return {
                     "pnl": round(pnl_net, 3),
                     "pnl_gross": round(pnl_gross, 3),
@@ -102,7 +99,6 @@ def simulate_trade(side, entry, future_df, atr):
                 pnl_gross = (entry - exit_price) / entry * 100
                 fees = 2 * FEES["taker"] + FEES["funding"]
                 pnl_net = pnl_gross - fees
-
                 return {
                     "pnl": round(pnl_net, 3),
                     "pnl_gross": round(pnl_gross, 3),
@@ -116,53 +112,82 @@ def simulate_trade(side, entry, future_df, atr):
                     "tp": round(tp, 3),
                 }
 
-    return 0.0
+    return None
 
 
-# ======================
-# BACKTEST ENGINE
-# ======================
 def backtest(symbol: str):
+    df_5m = fetch_history(symbol, "5m", BACKTEST["days"] + BACKTEST["warmup"])
+    df_15m = fetch_history(symbol, "15m", BACKTEST["days"] + BACKTEST["warmup"])
+    df_1h = fetch_history(symbol, "1h", BACKTEST["days"] + BACKTEST["warmup"])
 
-    df_5m  = fetch_history(symbol, "5m",  BACKTEST['days'] + BACKTEST['warmup'])
-    df_15m = fetch_history(symbol, "15m", BACKTEST['days'] + BACKTEST['warmup'])
-    df_1h  = fetch_history(symbol, "1h",  BACKTEST['days'] + BACKTEST['warmup'])
+    # asumir que vienen en UTC y convertir a datetime timezone-aware
+    df_5m["timestamp"] = pd.to_datetime(df_5m["timestamp"], utc=True)
+    df_15m["timestamp"] = pd.to_datetime(df_15m["timestamp"], utc=True)
+    df_1h["timestamp"] = pd.to_datetime(df_1h["timestamp"], utc=True)
 
-    # PRECOMPUTE
     df_15m = add_atr(df_15m, period=14)
-    df_1h  = trend_bias(df_1h)
+    df_1h = trend_bias(df_1h)
+
+    end_ts = df_15m.iloc[-1]["timestamp"]
+    start_ts = end_ts - pd.Timedelta(days=BACKTEST["days"])
+
+    valid_entries = df_15m.index[df_15m["timestamp"] >= start_ts].tolist()
+    if not valid_entries:
+        return []
+
+    first_real_idx = valid_entries[0]
+    start_i = max(BACKTEST["warmup"], first_real_idx - 1)
 
     trades = []
+    all_signals = []
 
-    i = BACKTEST['warmup']
+    i = start_i
     while i < len(df_15m) - 1:
-
         signal_ts = df_15m.iloc[i]["timestamp"]
-        entry_ts  = df_15m.iloc[i + 1]["timestamp"]
+        entry_ts = df_15m.iloc[i + 1]["timestamp"]
 
-        df5  = align(df_5m, signal_ts)
+        if entry_ts < start_ts:
+            i += 1
+            continue
+
+        df5 = align(df_5m, signal_ts)
         df15 = align(df_15m, signal_ts)
         df1h = align(df_1h, signal_ts)
 
-        trend     = df1h.iloc[-1]["trend"]
-        direction = trade_direction(df15)
-        momentum  = momentum_5m(df5)
+        if df5.empty or df15.empty or df1h.empty:
+            i += 1
+            continue
 
-        future = df_15m[df_15m["timestamp"] > entry_ts].head(BACKTEST['lookahead'])
+        trend = df1h.iloc[-1]["trend"]
+        direction = trade_direction(df15) or ""
+        momentum = momentum_5m(df5)
+
+        future = df_15m[df_15m["timestamp"] > entry_ts].head(BACKTEST["lookahead"])
 
         # ---------- LONG ----------
         if long_setup(trend, direction, momentum):
+            all_signals.append({
+                "timestamp": entry_ts,
+                "tf": "15m",
+                "side": "LONG",
+                "signal_price": df_15m.iloc[i]["close"],
+                "dir": direction,
+                "trend": trend,
+                "momentum": momentum,
+            })
+
             entry_price = df_15m.iloc[i + 1]["open"]
             atr = df_15m.iloc[i]["atr"]
+
             if pd.isna(atr):
                 i += 1
                 continue
 
-            ok, expected_tp_pct = min_expected_tp_ok(
+            ok, _ = min_expected_tp_ok(
                 entry_price,
                 atr,
-                LONG['tp_mult'],
-                LONG['min_tp']
+                LONG["tp_mult"],
+                LONG["min_tp"]
             )
 
             if not ok:
@@ -184,26 +209,37 @@ def backtest(symbol: str):
                     "exit_reason": result["exit_reason"],
                 })
 
-                exit_idx = df_15m.index[
-                    df_15m["timestamp"] == result["exit_ts"]
-                ][0]
+                exit_idx = df_15m.index[df_15m["timestamp"] == result["exit_ts"]][0]
                 i = exit_idx
                 continue
 
         # ---------- SHORT ----------
         elif short_setup(trend, direction, momentum):
+            all_signals.append({
+                "timestamp": entry_ts,
+                "tf": "15m",
+                "side": "SHORT",
+                "signal_price": df_15m.iloc[i]["close"],
+                "dir": direction,
+                "trend": trend,
+                "momentum": momentum,
+            })
+
             entry_price = df_15m.iloc[i + 1]["open"]
             atr = df_15m.iloc[i]["atr"]
+
             if pd.isna(atr):
                 i += 1
                 continue
 
-            if not min_expected_tp_ok(
+            ok, _ = min_expected_tp_ok(
                 entry_price,
                 atr,
-                SHORT['tp_mult'],
-                SHORT['min_tp']
-            ):
+                SHORT["tp_mult"],
+                SHORT["min_tp"]
+            )
+
+            if not ok:
                 i += 1
                 continue
 
@@ -222,15 +258,33 @@ def backtest(symbol: str):
                     "exit_reason": result["exit_reason"],
                 })
 
-                exit_idx = df_15m.index[
-                    df_15m["timestamp"] == result["exit_ts"]
-                ][0]
+                exit_idx = df_15m.index[df_15m["timestamp"] == result["exit_ts"]][0]
                 i = exit_idx
                 continue
 
         i += 1
 
+    if all_signals:
+        df_signals = pd.DataFrame(all_signals)
+        df_signals["timestamp"] = pd.to_datetime(df_signals["timestamp"], utc=True)
+
+        # guardar SOLO señales dentro de los últimos `days`
+        df_signals = df_signals[df_signals["timestamp"] >= start_ts].copy()
+        df_signals.sort_values("timestamp", inplace=True)
+
+        # convertir a horario de Argentina para CSV
+        df_signals["timestamp"] = (
+            df_signals["timestamp"]
+            .dt.tz_convert(ARG_TZ)
+            .dt.tz_localize(None)
+        )
+
+        file_name = f"backtest_signals_{symbol.replace('/', '')}.csv"
+        df_signals.to_csv(file_name, index=False)
+        print(f"\033[95m[BACKTEST]\033[0m 💾 Saved replay-style CSV to {file_name}")
+
     return trades
+
 
 if __name__ == "__main__":
     symbol = "BTC/USDT"
@@ -242,7 +296,7 @@ if __name__ == "__main__":
     metrics_all = calculate_metrics(trades)
     metrics_long = calculate_metrics(long_trades)
     metrics_short = calculate_metrics(short_trades)
-    
+
     print("\n----------------------------------------------------------------------------------------------------------\n")
     print_backtest_banner()
     print("\n----------------------------------------------------------------------------------------------------------\n")
@@ -257,11 +311,26 @@ if __name__ == "__main__":
 
     df_trades = pd.DataFrame(trades)
 
-    df_trades = format_trade_timestamps(df_trades)
-    
-    print("\n\n📌 TRADES DETAILS:\n\n")
-    text = df_trades.to_string(col_space=7, justify="center", index=False)
-    text = text.replace("\n", "\n\n")
+    if not df_trades.empty:
+        # si querés también imprimir trades en horario Argentina
+        df_trades["entry_ts"] = (
+            pd.to_datetime(df_trades["entry_ts"], utc=True)
+            .dt.tz_convert(ARG_TZ)
+            .dt.tz_localize(None)
+        )
+        df_trades["exit_ts"] = (
+            pd.to_datetime(df_trades["exit_ts"], utc=True)
+            .dt.tz_convert(ARG_TZ)
+            .dt.tz_localize(None)
+        )
 
-    print(text)
+        df_trades = format_trade_timestamps(df_trades)
+
+        print("\n\n📌 TRADES DETAILS:\n\n")
+        text = df_trades.to_string(col_space=7, justify="center", index=False)
+        text = text.replace("\n", "\n\n")
+        print(text)
+    else:
+        print("\n\n📌 TRADES DETAILS:\n\nNo trades found.")
+
     print("\n")

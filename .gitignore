@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 trades.csv
 replay_signals_BTCUSDT.csv
+backtest_signals_BTCUSDT.csv
+
