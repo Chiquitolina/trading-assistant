@@ -125,8 +125,8 @@ class ExecutionEngine:
             exit_reason=reason,
 
             # 🆕 CONTEXTO (LO IMPORTANTE)
-            signal_direction=ctx.get("direction"),
             signal_trend=ctx.get("trend"),
+            signal_direction=ctx.get("direction"),
             signal_momentum=ctx.get("momentum"),
             signal_atr=ctx.get("atr"),
         )
@@ -406,8 +406,8 @@ class ExecutionEngine:
             exit_reason=reason,
             
              # 🧠 CONTEXTO
-            signal_direction=ctx.get("direction"),
             signal_trend=ctx.get("trend"),
+            signal_direction=ctx.get("direction"),
             signal_momentum=ctx.get("momentum"),
             signal_atr=ctx.get("atr")
             )

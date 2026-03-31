@@ -3,6 +3,7 @@ import os
 from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
+from engine.live.journal.signal_journal import SignalJournal
 from signals.signals_engine import SignalEngine
 from engine.live.strategy.entry_engine import EntryEngine
 from engine.live.execution.execution_engine import ExecutionEngine
@@ -24,6 +25,7 @@ DAYS = 3
 
 # ---------- INIT BUFFER ----------
 buffer = DataBuffer()
+signal_journal = SignalJournal(f"live_signals_{SYMBOL}.csv")
 print_live_banner()
 
 # ---------- LOAD HISTORICAL ----------
@@ -77,6 +79,16 @@ try:
             signal = signals.generate_signal()
             if not signal:
                 continue
+
+            signal_journal.log_signal(
+                timestamp=signal["signal_ts"],
+                tf=TRIGGER_TF,
+                side=signal["side"],
+                signal_price=signal["signal_price"],
+                direction=signal.get("direction"),
+                trend=signal.get("trend"),
+                momentum=signal.get("momentum")
+            )
 
             plan = entry_engine.generate_entry(signal)
             if not plan:

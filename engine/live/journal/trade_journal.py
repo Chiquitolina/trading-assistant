@@ -41,8 +41,8 @@ class TradeJournal:
 
                     "exit_reason",
                     
-                    "signal_direction",
                     "signal_trend",
+                    "signal_direction",
                     "signal_momentum",
                     "signal_atr"
                 ])
@@ -67,8 +67,8 @@ class TradeJournal:
         pnl_gross,
         fees,
         exit_reason,
-        signal_direction,
         signal_trend,
+        signal_direction,
         signal_momentum,
         signal_atr
     ):
@@ -100,8 +100,8 @@ class TradeJournal:
 
                 exit_reason,
                 
-                signal_direction,
                 signal_trend,
+                signal_direction,
                 signal_momentum,
                 signal_atr
             ])
