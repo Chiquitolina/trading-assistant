@@ -1,4 +1,3 @@
-# strategy/entry_engine.py
 import pandas as pd
 
 from signals.indicators.atr import add_atr
@@ -7,6 +6,7 @@ from signals.strategy.risk import compute_levels
 from engine.live.strategy.trade_plan import TradePlan
 from config.strategies.v1 import LONG, SHORT
 
+MIN_ATR = 201
 
 class EntryEngine:
     def __init__(self, buffer, debug=True):
@@ -19,6 +19,9 @@ class EntryEngine:
             return None
 
         side = signal["side"]
+
+        if side not in ("LONG", "SHORT"):
+            return None
 
         # ==========================
         # DATA (igual que backtest)
@@ -44,8 +47,18 @@ class EntryEngine:
         if pd.isna(atr):
             return None
 
+        # ==========================
+        # 🔴 FILTRO ATR
+        # ==========================
+        if atr < MIN_ATR:
+            if self.debug:
+                print(f"⛔ Entry descartado: ATR insuficiente ({atr:.2f} < {MIN_ATR})")
+            return None
+
         cfg = LONG if side == "LONG" else SHORT
 
+        # ==========================
+        # TP ESPERADO
         # ==========================
         ok, expected_tp_pct = min_expected_tp_ok(
             entry,
@@ -68,9 +81,9 @@ class EntryEngine:
             atr=atr,
             cfg=cfg
         )
-        
-                # ==========================
-        # 🧠 SIGNAL CONTEXT (NUEVO)
+
+        # ==========================
+        # 🧠 SIGNAL CONTEXT
         # ==========================
         signal_context = {
             "trend": signal.get("trend"),
@@ -82,7 +95,6 @@ class EntryEngine:
         plan = TradePlan(
             symbol="BTCUSDT",
             quantity=0.001,
-
             side=side,
             entry=round(entry, 2),
             sl=round(sl, 2),
@@ -90,18 +102,11 @@ class EntryEngine:
             sl_pct=round(sl_pct, 3),
             tp_pct=round(tp_pct, 3),
             atr=round(atr, 2),
-
-            # ⏱ timestamp de ejecución
             timestamp=entry_candle["timestamp"],
-
             reason="strategy_v1",
-
-            # 🆕 DATA DE SEÑAL
             signal_price=round(signal_price, 2),
             signal_ts=signal_ts,
-            
             signal_context=signal_context
-
         )
 
         if self.debug:

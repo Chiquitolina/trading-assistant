@@ -298,7 +298,7 @@ class ExecutionEngine:
             real_entry=real_entry,
             tp=tp_price,
             sl=sl_price,
-            entry_ts=int(plan.timestamp),
+            entry_ts=int(time.time() * 1000),
             signal_price=float(plan.signal_price),
             signal_ts=int(plan.signal_ts),
             

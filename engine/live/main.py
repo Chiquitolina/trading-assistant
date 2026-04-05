@@ -76,7 +76,12 @@ try:
             execution.on_price_update(price, timestamp)
 
         if buffer.consume_closed_tf(TRIGGER_TF):
+
+            print("\033[93m[LIVE MAIN]\033[0m ✅ 15m close event consumed")
+
             signal = signals.generate_signal()
+            print(f"\033[93m[LIVE MAIN]\033[0m signal returned: {signal}")
+
             if not signal:
                 continue
 
@@ -89,6 +94,9 @@ try:
                 trend=signal.get("trend"),
                 momentum=signal.get("momentum")
             )
+
+            if signal["side"] == "NONE":
+                continue
 
             plan = entry_engine.generate_entry(signal)
             if not plan:

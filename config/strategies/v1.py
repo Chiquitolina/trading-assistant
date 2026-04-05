@@ -14,13 +14,13 @@ FEES = {
 }
 
 LONG = {
-    "sl_mult": 2,
+    "sl_mult": 2.1,
     "tp_mult": 1.18,
     "min_tp": 0.31,
 }
 
 SHORT = {
-    "sl_mult": 2,
+    "sl_mult": 2.3,
     "tp_mult": 1.56,
     "min_tp": 0.25,
 }

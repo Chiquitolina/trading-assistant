@@ -1,6 +1,6 @@
 class PositionSizer:
 
-    def __init__(self, usage_pct=0.90, buffer=0.97, min_notional=10):
+    def __init__(self, usage_pct=0.88, buffer=0.97, min_notional=10):
         self.usage_pct = usage_pct
         self.buffer = buffer
         self.min_notional = min_notional

@@ -15,7 +15,7 @@ from ui.trade_formatter import format_trade_timestamps
 
 
 ARG_TZ = "America/Argentina/Cordoba"
-
+MIN_ATR = 201
 
 def align(df, ts):
     return df[df["timestamp"] <= ts]
@@ -143,16 +143,17 @@ def backtest(symbol: str):
 
     i = start_i
     while i < len(df_15m) - 1:
-        signal_ts = df_15m.iloc[i]["timestamp"]
-        entry_ts = df_15m.iloc[i + 1]["timestamp"]
+        signal_ts = df_15m.iloc[i]["timestamp"]          # apertura de la vela señal
+        entry_ts = df_15m.iloc[i + 1]["timestamp"]       # apertura de la siguiente vela
+        signal_close_ts = entry_ts - pd.Timedelta(milliseconds=1)  # cierre real de la vela señal
 
         if entry_ts < start_ts:
             i += 1
             continue
 
-        df5 = align(df_5m, signal_ts)
+        df5 = align(df_5m, signal_close_ts)
         df15 = align(df_15m, signal_ts)
-        df1h = align(df_1h, signal_ts)
+        df1h = align(df_1h, signal_close_ts)
 
         if df5.empty or df15.empty or df1h.empty:
             i += 1
@@ -161,6 +162,23 @@ def backtest(symbol: str):
         trend = df1h.iloc[-1]["trend"]
         direction = trade_direction(df15) or ""
         momentum = momentum_5m(df5)
+        
+        print("\033[95m[BACKTEST DEBUG]\033[0m 15m candle used:")
+        print(df15.tail(1)[["timestamp", "open", "high", "low", "close"]])
+
+        print("\033[95m[BACKTEST DEBUG]\033[0m last 5 candles of 5m used for momentum:")
+        print(df5.tail(5)[["timestamp", "open", "high", "low", "close"]])
+
+        if not df5.empty:
+            print(f"\033[95m[BACKTEST DEBUG]\033[0m last 5m used ts: {df5.tail(1).iloc[0]['timestamp']}")
+
+        print("\033[95m[BACKTEST DEBUG]\033[0m indicator result:")
+        print(f"signal_ts(open)  : {signal_ts}")
+        print(f"signal_ts(close) : {signal_close_ts}")
+        print(f"entry_ts(next)   : {entry_ts}")
+        print(f"trend            : {trend}")
+        print(f"direction        : {direction}")
+        print(f"momentum         : {momentum}\n")
 
         future = df_15m[df_15m["timestamp"] > entry_ts].head(BACKTEST["lookahead"])
 
@@ -180,6 +198,11 @@ def backtest(symbol: str):
             atr = df_15m.iloc[i]["atr"]
 
             if pd.isna(atr):
+                i += 1
+                continue
+            
+            # 🔴 FILTRO DE VOLATILIDAD
+            if atr < MIN_ATR:
                 i += 1
                 continue
 
@@ -207,6 +230,10 @@ def backtest(symbol: str):
                     "pnl_gross": result["pnl_gross"],
                     "fees": result["fees"],
                     "exit_reason": result["exit_reason"],
+                    "trend": trend,
+                    "direction": direction,
+                    "momentum": momentum,
+                    "atr": round(atr, 3),
                 })
 
                 exit_idx = df_15m.index[df_15m["timestamp"] == result["exit_ts"]][0]
@@ -231,7 +258,12 @@ def backtest(symbol: str):
             if pd.isna(atr):
                 i += 1
                 continue
-
+            
+            # 🔴 FILTRO DE VOLATILIDAD
+            if atr < MIN_ATR:
+                i += 1
+                continue
+            
             ok, _ = min_expected_tp_ok(
                 entry_price,
                 atr,
@@ -256,6 +288,10 @@ def backtest(symbol: str):
                     "pnl_gross": result["pnl_gross"],
                     "fees": result["fees"],
                     "exit_reason": result["exit_reason"],
+                    "trend": trend,
+                    "direction": direction,
+                    "momentum": momentum,
+                    "atr": round(atr, 3),
                 })
 
                 exit_idx = df_15m.index[df_15m["timestamp"] == result["exit_ts"]][0]
@@ -334,3 +370,37 @@ if __name__ == "__main__":
         print("\n\n📌 TRADES DETAILS:\n\nNo trades found.")
 
     print("\n")
+
+# ================================
+# ATR ANALYSIS
+# ================================
+if not df_trades.empty:
+
+    print("\n📊 ATR PERFORMANCE:\n")
+
+    df_atr = df_trades.copy()
+
+    # crear buckets de ATR
+    df_atr["atr_bucket"] = pd.cut(
+        df_atr["atr"],
+        bins=[0, 100, 200, 300, 10000],
+        labels=["<100", "100-200", "200-300", "300+"]
+    )
+
+    # calcular métricas
+    summary = (
+        df_atr.assign(win=lambda x: x["pnl"] > 0)
+        .groupby(["side", "atr_bucket"], observed=False)
+        .agg(
+            trades=("pnl", "count"),
+            winrate=("win", "mean"),
+            avg_pnl=("pnl", "mean")
+        )
+        .reset_index()
+    )
+
+    # formatear
+    summary["winrate"] = (summary["winrate"] * 100).round(2)
+    summary["avg_pnl"] = summary["avg_pnl"].round(6)
+
+    print(summary.to_string(index=False))

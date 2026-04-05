@@ -9,21 +9,14 @@ class SignalEngine:
     def __init__(self, buffer, debug=True):
         self.buffer = buffer
         self.debug = debug
-
-        # 🔒 Evitar evaluar dos veces la misma vela
         self.last_signal_ts = None
 
-    # -------------------------
-    # INDICATORS (LIVE SAFE)
-    # -------------------------
     def get_trend(self):
         df = pd.DataFrame(self.buffer.get_candles("1h"))
         if len(df) < 20:
             return "neutral"
 
         df = trend_bias(df)
-
-        # 🔥 SOLO el último valor
         return df.iloc[-1]["trend"]
 
     def get_direction(self):
@@ -33,7 +26,6 @@ class SignalEngine:
 
         result = trade_direction(df)
 
-        # 🔒 por si devuelve DF
         if isinstance(result, pd.DataFrame):
             return result.iloc[-1]["direction"]
 
@@ -46,31 +38,24 @@ class SignalEngine:
 
         result = momentum_5m(df)
 
-        # 🔒 por si devuelve DF
         if isinstance(result, pd.DataFrame):
             return result.iloc[-1]["momentum"]
 
         return result
 
-    # -------------------------
-    # SIGNAL LOGIC
-    # -------------------------
     def generate_signal(self):
-
         candles_15m = self.buffer.get_candles("15m")
         if not candles_15m:
             return None
 
         last_candle = candles_15m[-1]
         signal_price = last_candle["close"]
-        signal_ts = last_candle["timestamp"]
 
-        # 🧪 DEBUG: timestamps y últimas velas
+        tf_ms = 15 * 60 * 1000
+        signal_ts = last_candle["timestamp"] + tf_ms - 1
+
         candles_5m = self.buffer.get_candles("5m")
-        if candles_5m:
-            last_5m_ts = candles_5m[-1]["timestamp"]
-        else:
-            last_5m_ts = None
+        last_5m_ts = candles_5m[-1]["timestamp"] if candles_5m else None
 
         print("\033[95m[DEBUG]\033[0m ⏱ TIMESTAMPS")
         print(f"15m signal_ts : {signal_ts}")
@@ -85,47 +70,64 @@ class SignalEngine:
             print(pd.DataFrame(candles_5m).tail(3)[["timestamp", "close"]])
         print()
 
-        # 🔒 evitar duplicados
+        print(f"\033[95m[SIGNAL DEBUG]\033[0m signal_ts={signal_ts} | last_signal_ts={self.last_signal_ts}")
+
         if signal_ts == self.last_signal_ts:
             return None
         self.last_signal_ts = signal_ts
 
-        trend     = self.get_trend()
+        df_15m = pd.DataFrame(candles_15m)
+        df_5m = pd.DataFrame(candles_5m) if candles_5m else pd.DataFrame()
+
+        print("\033[95m[LIVE DEBUG]\033[0m 15m candle used:")
+        if not df_15m.empty:
+            print(df_15m.tail(1)[["timestamp", "open", "high", "low", "close"]])
+
+        print("\033[95m[LIVE DEBUG]\033[0m last 5 candles of 5m used for momentum:")
+        if not df_5m.empty:
+            print(df_5m.tail(5)[["timestamp", "open", "high", "low", "close"]])
+            print(f"\033[95m[LIVE DEBUG]\033[0m last 5m used ts: {df_5m.tail(1).iloc[0]['timestamp']}")
+        else:
+            print("No 5m candles available")
+
+        trend = self.get_trend()
         direction = self.get_direction()
-        momentum  = self.get_momentum()
+        momentum = self.get_momentum()
+
+        print("\033[95m[LIVE DEBUG]\033[0m indicator result:")
+        print(f"trend     : {trend}")
+        print(f"direction : {direction}")
+        print(f"momentum  : {momentum}\n")
+
+        long_ok = long_setup(trend, direction, momentum)
+        short_ok = short_setup(trend, direction, momentum)
 
         if self.debug:
             print("\033[94m[SIGNALS LAYER]\033[0m 📷  Snapshot (on 15m close)")
             print(f"1h trend     : {trend}")
             print(f"15m direction: {direction}")
-            print(f"5m momentum  : {momentum}\n")
+            print(f"5m momentum  : {momentum}")
+            print(f"long_ok      : {long_ok}")
+            print(f"short_ok     : {short_ok}\n")
 
-        # ==========================
-        # LONG SIGNAL
-        # ==========================
-        if long_setup(trend, direction, momentum):
+        side = "NONE"
+
+        if long_ok:
+            side = "LONG"
             print("\033[94m[SIGNALS LAYER]\033[0m 💡 SIGNAL GENERATED: LONG")
-            return {
-                "side": "LONG",
-                "signal_price": round(signal_price, 2),
-                "signal_ts": signal_ts,
-                "trend": trend,
-                "direction": direction,
-                "momentum": momentum
-            }
-
-        # ==========================
-        # SHORT SIGNAL
-        # ==========================
-        if short_setup(trend, direction, momentum):
+        elif short_ok:
+            side = "SHORT"
             print("\033[94m[SIGNALS LAYER]\033[0m 💡 SIGNAL GENERATED: SHORT")
-            return {
-                "side": "SHORT",
-                "signal_price": round(signal_price, 2),
-                "signal_ts": signal_ts,
-                "trend": trend,
-                "direction": direction,
-                "momentum": momentum
-            }
+        else:
+            print("\033[94m[SIGNALS LAYER]\033[0m 🚫 NO SIGNAL")
 
-        return None
+        return {
+            "side": side,
+            "signal_price": round(signal_price, 2),
+            "signal_ts": signal_ts,
+            "trend": trend,
+            "direction": direction,
+            "momentum": momentum,
+            "long_ok": long_ok,
+            "short_ok": short_ok,
+        }

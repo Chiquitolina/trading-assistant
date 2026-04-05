@@ -17,8 +17,15 @@ class DataBuffer:
             "1h": deque(maxlen=maxlen),
         }
 
-        # último close procesado por TF
+        # último timestamp almacenado por TF (open time)
         self.last_close_time = {
+            "5m": None,
+            "15m": None,
+            "1h": None,
+        }
+
+        # último evento WS cerrado procesado por TF (close time)
+        self.last_ws_close_time = {
             "5m": None,
             "15m": None,
             "1h": None,
@@ -37,7 +44,7 @@ class DataBuffer:
 
         # 🔥 último precio SIEMPRE actualizado
         self._last_price = float(k["c"])
-        self._last_timestamp = int(k["T"])
+        self._last_timestamp = int(k["t"])
 
         if tf not in self.buffers:
             return
@@ -46,14 +53,15 @@ class DataBuffer:
         if not k["x"]:
             return
 
-        close_time = k["T"]
+        open_time = int(k["t"])
+        close_time = int(k["T"])
 
-        # 🔒 evitar duplicados
-        if close_time == self.last_close_time[tf]:
+        # 🔒 evitar duplicados SOLO del WS
+        if close_time == self.last_ws_close_time[tf]:
             return
 
         candle = {
-            "timestamp": close_time,
+            "timestamp": open_time,  # ✅ open time
             "open": float(k["o"]),
             "high": float(k["h"]),
             "low": float(k["l"]),
@@ -62,10 +70,16 @@ class DataBuffer:
             "closed_at": datetime.utcfromtimestamp(close_time / 1000),
         }
 
-        self.buffers[tf].append(candle)
-        self.last_close_time[tf] = close_time
+        # si la última vela histórica/live tiene el mismo open_time, la reemplazamos
+        if self.buffers[tf] and self.buffers[tf][-1]["timestamp"] == open_time:
+            self.buffers[tf][-1] = candle
+        else:
+            self.buffers[tf].append(candle)
 
-        # ✅ registrar cierre de TF (NO se pisa)
+        self.last_close_time[tf] = open_time
+        self.last_ws_close_time[tf] = close_time
+
+        # ✅ registrar cierre de TF
         self.closed_tfs.add(tf)
 
         print(f"\033[94m[DATA LAYER]\033[0m🕯️ STORED [{tf}] {candle['close']}")
@@ -74,10 +88,6 @@ class DataBuffer:
     # EVENT CONSUMER
     # ==========================================
     def consume_closed_tf(self, tf: str) -> bool:
-        """
-        Devuelve True una sola vez por cada cierre de vela.
-        Evita perder eventos entre timeframes.
-        """
         if tf in self.closed_tfs:
             self.closed_tfs.remove(tf)
             return True
@@ -99,12 +109,9 @@ class DataBuffer:
 
     def get_candles(self, tf):
         return list(self.buffers.get(tf, []))
-        
-    from datetime import datetime
 
     def on_replay_candle(self, candle: dict, tf: str):
 
-        # 🔹 actualizar precio
         self._last_price = float(candle["close"])
         self._last_timestamp = int(candle["timestamp"])
 
@@ -113,7 +120,6 @@ class DataBuffer:
 
         close_time = candle["timestamp"]
 
-        # 🔒 evitar duplicados
         if close_time == self.last_close_time[tf]:
             return
 
@@ -143,8 +149,7 @@ class DataBuffer:
         for _, row in df.iterrows():
             ts = row["timestamp"]
 
-            # normalizar timestamp a epoch ms
-            if hasattr(ts, "timestamp"):  # pandas.Timestamp
+            if hasattr(ts, "timestamp"):
                 close_time = int(ts.timestamp() * 1000)
             else:
                 close_time = int(ts)
@@ -166,4 +171,3 @@ class DataBuffer:
             self.last_close_time[tf] = close_time
 
         print(f"\033[94m[DATA LAYER]\033[0m 📦 Loaded {len(df)} historical candles for {tf}")
-
