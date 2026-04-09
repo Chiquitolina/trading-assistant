@@ -32,15 +32,60 @@ class ExecutionEngine:
         if side == "SHORT":
             return price - slippage if is_entry else price + slippage
         
-    def _handle_external_close(self, price, timestamp):
+    def _get_last_close_fill(self, symbol, side, quantity, limit=20):
+        fills = self.exchange.get_recent_fills(symbol, limit=limit)
 
+        if not fills:
+            return None
+
+        exit_side = "SELL" if side == "LONG" else "BUY"
+
+        candidates = [f for f in fills if f["side"] == exit_side]
+
+        if not candidates:
+            return None
+
+        grouped = {}
+        for f in candidates:
+            oid = f["orderId"]
+            grouped.setdefault(oid, []).append(f)
+
+        # elegir la orden más reciente según time
+        latest_order_id = max(
+            grouped.keys(),
+            key=lambda oid: max(int(x["time"]) for x in grouped[oid])
+        )
+
+        selected = grouped[latest_order_id]
+
+        total_qty = sum(float(f["qty"]) for f in selected)
+        total_quote = sum(float(f["qty"]) * float(f["price"]) for f in selected)
+        total_commission = sum(float(f["commission"]) for f in selected)
+        total_realized = sum(float(f["realizedPnl"]) for f in selected)
+        last_time = max(int(f["time"]) for f in selected)
+
+        avg_price = total_quote / total_qty if total_qty > 0 else None
+
+        return {
+            "orderId": latest_order_id,
+            "price": avg_price,
+            "qty": total_qty,
+            "commission": total_commission,
+            "realizedPnl": total_realized,
+            "time": last_time,
+            "fills": selected,
+        }
+        
+    def _handle_external_close(self, price, timestamp):
         pos = self.position
         if not pos:
             return
 
         print("⚠️ Detectado cierre externo (TP/SL o manual)")
 
-        # 🔍 detectar si fue TP o SL
+        # ==========================
+        # Detectar reason
+        # ==========================
         if pos.side == "LONG":
             if price >= pos.tp:
                 reason = "TP"
@@ -58,15 +103,45 @@ class ExecutionEngine:
 
         print(f"📊 External close reason: {reason}")
 
-        # 🔥 usar precio correcto (clamp)
-        if reason == "TP":
-            real_exit = pos.tp
-        elif reason == "SL":
-            real_exit = pos.sl
-        else:
-            real_exit = price
+        # ==========================
+        # Buscar fill real de cierre
+        # ==========================
+        close_fill = self._get_last_close_fill(
+            symbol=pos.symbol,
+            side=pos.side,
+            quantity=pos.quantity,
+            limit=20
+        )
 
-        # 🔹 PnL
+        if close_fill:
+            real_exit = float(close_fill["price"])
+            exit_order_id = int(close_fill["orderId"])
+            fees = round(self.fees["taker"] * 2, 4)
+            exchange_realized_pnl = round(float(close_fill["realizedPnl"]), 4)
+
+            print(f"✅ Close fill encontrado | orderId={exit_order_id} | real_exit={real_exit}")
+        else:
+            exit_order_id = None
+            exchange_realized_pnl = None
+
+            # fallback
+            if reason == "TP":
+                real_exit = pos.tp
+            elif reason == "SL":
+                real_exit = pos.sl
+            else:
+                real_exit = price
+
+            fees = round(self.fees["taker"] * 2, 4)
+
+            print("⚠️ No se encontró close fill, usando fallback local")
+
+        # guardar exit order id en la posición si querés rastrearlo
+        pos.exit_order_id = exit_order_id
+
+        # ==========================
+        # PnL calculado por el bot
+        # ==========================
         pnl_pct = (
             (real_exit - pos.real_entry) / pos.real_entry * 100
             if pos.side == "LONG"
@@ -74,37 +149,42 @@ class ExecutionEngine:
         )
 
         pnl_pct = round(pnl_pct, 4)
-        fees = round(self.fees["taker"] * 2, 4)
         pnl_net = round(pnl_pct - fees, 4)
 
-        # 🧠 DEBUG CLAVE
+        # ==========================
+        # DEBUG
+        # ==========================
         print(f"""
     📊 EXTERNAL CLOSE DEBUG
-    Entry       : {pos.real_entry}
-    Exit        : {real_exit}
-    TP          : {pos.tp}
-    SL          : {pos.sl}
-    Reason      : {reason}
-    PnL net     : {pnl_net}%
+    Entry              : {pos.real_entry}
+    Exit market price  : {price}
+    Real exit fill     : {real_exit}
+    TP                 : {pos.tp}
+    SL                 : {pos.sl}
+    Reason             : {reason}
+    Exit order id      : {exit_order_id}
+    Exchange realized  : {exchange_realized_pnl}
+    Fees               : {fees}
+    PnL gross          : {pnl_pct}%
+    PnL net            : {pnl_net}%
     """)
 
         print(f"❌ CLOSED (external {reason}) | PnL: {pnl_net}%")
 
         # ==========================
-        # 🆕 CONTEXTO DE SIGNAL
+        # Contexto de signal
         # ==========================
         ctx = pos.signal_context or {}
 
-        # 📝 log
         def _to_iso(ts):
             if not ts:
                 return None
             return datetime.utcfromtimestamp(ts / 1000).isoformat(timespec="milliseconds")
 
         signal_iso = _to_iso(pos.signal_ts)
-        entry_iso  = _to_iso(pos.entry_ts)
+        entry_iso = _to_iso(pos.entry_ts)
 
-        exit_ts  = int(time.time() * 1000)
+        exit_ts = int(time.time() * 1000)
         exit_iso = _to_iso(exit_ts)
 
         self.journal.log_trade(
@@ -123,8 +203,6 @@ class ExecutionEngine:
             pnl_gross=pnl_pct,
             fees=fees,
             exit_reason=reason,
-
-            # 🆕 CONTEXTO (LO IMPORTANTE)
             signal_trend=ctx.get("trend"),
             signal_direction=ctx.get("direction"),
             signal_momentum=ctx.get("momentum"),
@@ -132,13 +210,22 @@ class ExecutionEngine:
         )
 
         self.position = None
-
+        
     def _place_tp_sl(self, symbol, quantity, tp_side, tp_price, sl_side, sl_price):
-
-        tp_price = round(tp_price, 2)
-        sl_price = round(sl_price, 2)
-
         try:
+            raw_tp = tp_price
+            raw_sl = sl_price
+
+            tp_price = self.exchange.normalize_price(symbol, tp_price)
+            sl_price = self.exchange.normalize_price(symbol, sl_price)
+
+            print(
+                f"📌 TP/SL debug | "
+                f"symbol={symbol} | qty={quantity} | "
+                f"raw_tp={raw_tp} -> tp={tp_price} ({type(tp_price)}) | "
+                f"raw_sl={raw_sl} -> sl={sl_price} ({type(sl_price)})"
+            )
+
             self.exchange.place_take_profit(
                 symbol=symbol,
                 side=tp_side,
@@ -303,6 +390,7 @@ class ExecutionEngine:
             signal_ts=int(plan.signal_ts),
             
             signal_context=plan.signal_context
+            
         )
 
         

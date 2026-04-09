@@ -17,6 +17,7 @@ from ui.trade_formatter import format_trade_timestamps
 ARG_TZ = "America/Argentina/Cordoba"
 MIN_ATR = 201
 
+
 def align(df, ts):
     return df[df["timestamp"] <= ts]
 
@@ -24,6 +25,16 @@ def align(df, ts):
 def align_closed_1h(df, signal_ts):
     last_closed_1h_ts = signal_ts.floor("1h") - pd.Timedelta(hours=1)
     return df[df["timestamp"] <= last_closed_1h_ts]
+
+
+def get_atr_bucket(atr: float) -> str:
+    if atr < 100:
+        return "<100"
+    elif atr < 200:
+        return "100-200"
+    elif atr < 300:
+        return "200-300"
+    return "300+"
 
 
 def simulate_trade(side, entry, future_df, atr):
@@ -125,7 +136,6 @@ def backtest(symbol: str):
     df_15m = fetch_history(symbol, "15m", BACKTEST["days"] + BACKTEST["warmup"])
     df_1h = fetch_history(symbol, "1h", BACKTEST["days"] + BACKTEST["warmup"])
 
-    # asumir que vienen en UTC y convertir a datetime timezone-aware
     df_5m["timestamp"] = pd.to_datetime(df_5m["timestamp"], utc=True)
     df_15m["timestamp"] = pd.to_datetime(df_15m["timestamp"], utc=True)
     df_1h["timestamp"] = pd.to_datetime(df_1h["timestamp"], utc=True)
@@ -148,9 +158,9 @@ def backtest(symbol: str):
 
     i = start_i
     while i < len(df_15m) - 1:
-        signal_ts = df_15m.iloc[i]["timestamp"]          # apertura de la vela señal
-        entry_ts = df_15m.iloc[i + 1]["timestamp"]       # apertura de la siguiente vela
-        signal_close_ts = entry_ts - pd.Timedelta(milliseconds=1)  # cierre real de la vela señal
+        signal_ts = df_15m.iloc[i]["timestamp"]
+        entry_ts = df_15m.iloc[i + 1]["timestamp"]
+        signal_close_ts = entry_ts - pd.Timedelta(milliseconds=1)
 
         if entry_ts < start_ts:
             i += 1
@@ -167,7 +177,7 @@ def backtest(symbol: str):
         trend = df1h.iloc[-1]["trend"]
         direction = trade_direction(df15) or ""
         momentum = momentum_5m(df5)
-        
+
         print("\033[95m[BACKTEST DEBUG]\033[0m 1h candle used:")
         print(df1h.tail(1)[["timestamp", "open", "high", "low", "close"]])
 
@@ -208,8 +218,7 @@ def backtest(symbol: str):
             if pd.isna(atr):
                 i += 1
                 continue
-            
-            # 🔴 FILTRO DE VOLATILIDAD
+
             if atr < MIN_ATR:
                 i += 1
                 continue
@@ -242,6 +251,7 @@ def backtest(symbol: str):
                     "direction": direction,
                     "momentum": momentum,
                     "atr": round(atr, 3),
+                    "atr_bucket": get_atr_bucket(float(atr)),
                 })
 
                 exit_idx = df_15m.index[df_15m["timestamp"] == result["exit_ts"]][0]
@@ -266,12 +276,11 @@ def backtest(symbol: str):
             if pd.isna(atr):
                 i += 1
                 continue
-            
-            # 🔴 FILTRO DE VOLATILIDAD
+
             if atr < MIN_ATR:
                 i += 1
                 continue
-            
+
             ok, _ = min_expected_tp_ok(
                 entry_price,
                 atr,
@@ -300,6 +309,7 @@ def backtest(symbol: str):
                     "direction": direction,
                     "momentum": momentum,
                     "atr": round(atr, 3),
+                    "atr_bucket": get_atr_bucket(float(atr)),
                 })
 
                 exit_idx = df_15m.index[df_15m["timestamp"] == result["exit_ts"]][0]
@@ -312,11 +322,9 @@ def backtest(symbol: str):
         df_signals = pd.DataFrame(all_signals)
         df_signals["timestamp"] = pd.to_datetime(df_signals["timestamp"], utc=True)
 
-        # guardar SOLO señales dentro de los últimos `days`
         df_signals = df_signals[df_signals["timestamp"] >= start_ts].copy()
         df_signals.sort_values("timestamp", inplace=True)
 
-        # convertir a horario de Argentina para CSV
         df_signals["timestamp"] = (
             df_signals["timestamp"]
             .dt.tz_convert(ARG_TZ)
@@ -356,7 +364,6 @@ if __name__ == "__main__":
     df_trades = pd.DataFrame(trades)
 
     if not df_trades.empty:
-        # si querés también imprimir trades en horario Argentina
         df_trades["entry_ts"] = (
             pd.to_datetime(df_trades["entry_ts"], utc=True)
             .dt.tz_convert(ARG_TZ)
@@ -388,14 +395,6 @@ if not df_trades.empty:
 
     df_atr = df_trades.copy()
 
-    # crear buckets de ATR
-    df_atr["atr_bucket"] = pd.cut(
-        df_atr["atr"],
-        bins=[0, 100, 200, 300, 10000],
-        labels=["<100", "100-200", "200-300", "300+"]
-    )
-
-    # calcular métricas
     summary = (
         df_atr.assign(win=lambda x: x["pnl"] > 0)
         .groupby(["side", "atr_bucket"], observed=False)
@@ -407,8 +406,76 @@ if not df_trades.empty:
         .reset_index()
     )
 
-    # formatear
     summary["winrate"] = (summary["winrate"] * 100).round(2)
     summary["avg_pnl"] = summary["avg_pnl"].round(6)
 
     print(summary.to_string(index=False))
+    summary.to_csv("atr_performance.csv", index=False)
+
+# ================================
+# COMBINATION PERFORMANCE
+# ================================
+if not df_trades.empty:
+
+    print("\n📊 COMBINATION PERFORMANCE:\n")
+
+    df_combo = df_trades.copy()
+
+    summary_combo = (
+        df_combo.assign(win=lambda x: x["pnl"] > 0)
+        .groupby(["side", "trend", "direction", "momentum"], dropna=False)
+        .agg(
+            trades=("pnl", "count"),
+            winrate=("win", "mean"),
+            avg_pnl=("pnl", "mean")
+        )
+        .reset_index()
+    )
+
+    summary_combo["winrate"] = (summary_combo["winrate"] * 100).round(2)
+    summary_combo["avg_pnl"] = summary_combo["avg_pnl"].round(6)
+
+    summary_combo = summary_combo[summary_combo["trades"] >= 5]
+    summary_combo = summary_combo.sort_values(
+        ["side", "avg_pnl", "winrate"],
+        ascending=[True, False, False]
+    )
+
+    print(summary_combo.to_string(index=False))
+    summary_combo.to_csv("combo_performance.csv", index=False)
+
+# ================================
+# COMBINATION + ATR PERFORMANCE
+# ================================
+if not df_trades.empty:
+
+    print("\n📊 COMBINATION + ATR PERFORMANCE:\n")
+
+    df_combo_atr = df_trades.copy()
+
+    summary_combo_atr = (
+        df_combo_atr.assign(win=lambda x: x["pnl"] > 0)
+        .groupby(
+            ["side", "trend", "direction", "momentum", "atr_bucket"],
+            observed=False,
+            dropna=False
+        )
+        .agg(
+            trades=("pnl", "count"),
+            winrate=("win", "mean"),
+            avg_pnl=("pnl", "mean")
+        )
+        .reset_index()
+    )
+
+    summary_combo_atr["winrate"] = (summary_combo_atr["winrate"] * 100).round(2)
+    summary_combo_atr["avg_pnl"] = summary_combo_atr["avg_pnl"].round(6)
+
+    summary_combo_atr = summary_combo_atr[summary_combo_atr["trades"] >= 3]
+    summary_combo_atr = summary_combo_atr.sort_values(
+        ["side", "avg_pnl", "winrate"],
+        ascending=[True, False, False]
+    )
+
+    print(summary_combo_atr.to_string(index=False))
+    summary_combo_atr.to_csv("combo_atr_performance.csv", index=False)

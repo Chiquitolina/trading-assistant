@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class Position:
@@ -13,3 +14,6 @@ class Position:
     signal_price: float
     signal_ts: int
     signal_context: dict | None = None
+    
+    exit_order_id: Optional[int] = None
+ 

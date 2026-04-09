@@ -20,7 +20,7 @@ secret = os.getenv("SECRET_KEY")
 # ---------- CONFIG ----------
 SYMBOL = "BTCUSDT"
 TIMEFRAMES = ["5m", "15m", "1h"]
-TRIGGER_TF = "15m"
+TRIGGER_TF = "5m"
 DAYS = 3
 
 # ---------- INIT BUFFER ----------
@@ -65,6 +65,10 @@ ws = WSClient(buffer.on_ws_message)
 ws.start()
 
 print("\033[94m[LIVE ENGINE]\033[0m 🚀 Live Engine started! Ctrl+C to stop.\n")
+
+fills = exchange.get_recent_fills("BTCUSDT", limit=10)
+for f in fills:
+    print(f)
 
 # ---------- EVENT LOOP ----------
 try:

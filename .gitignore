@@ -5,5 +5,8 @@ trades.csv
 replay_signals_BTCUSDT.csv
 backtest_signals_BTCUSDT.csv
 live_signals_BTCUSDT.csv
+combo_atr_performance.csv
+combo_performance.csv
+atr_performance.csv
 
 

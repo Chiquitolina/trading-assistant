@@ -1,7 +1,8 @@
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from time import time, sleep
 from binance.client import Client
 from exchange.base_exchange import BaseExchange
-
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 class BinanceExchange(BaseExchange):
 
@@ -131,10 +132,14 @@ class BinanceExchange(BaseExchange):
             type="MARKET",
             quantity=quantity
         )
-
+        
     def place_take_profit(self, symbol, side, quantity, stop_price):
+        print(
+            f"[EXCHANGE] TP MARKET send | side={side} "
+            f"trigger={stop_price} qty={quantity}"
+        )
 
-        return self._safe_request(
+        response = self._safe_request(
             self.client.futures_create_order,
             symbol=symbol,
             side=side,
@@ -146,9 +151,20 @@ class BinanceExchange(BaseExchange):
             priceProtect=True
         )
 
-    def place_stop_loss(self, symbol, side, quantity, stop_price):
+        print(
+            f"[EXCHANGE] TP MARKET created | side={side} "
+            f"trigger={stop_price} response={response}"
+        )
 
-        return self._safe_request(
+        return response
+
+    def place_stop_loss(self, symbol, side, quantity, stop_price):
+        print(
+            f"[EXCHANGE] SL MARKET send | side={side} "
+            f"trigger={stop_price} qty={quantity}"
+        )
+
+        response = self._safe_request(
             self.client.futures_create_order,
             symbol=symbol,
             side=side,
@@ -159,6 +175,13 @@ class BinanceExchange(BaseExchange):
             workingType="MARK_PRICE",
             priceProtect=True
         )
+
+        print(
+            f"[EXCHANGE] SL MARKET created | side={side} "
+            f"trigger={stop_price} response={response}"
+        )
+
+        return response
 
     def close_position(self, symbol, side, quantity):
 
@@ -209,3 +232,44 @@ class BinanceExchange(BaseExchange):
     def get_price(self, symbol: str) -> float:
         data = self.client.futures_symbol_ticker(symbol=symbol)
         return float(data["price"])
+    
+    def get_recent_fills(self, symbol: str, limit: int = 10):
+        try:
+            trades = self._safe_request(
+                self.client.futures_account_trades,
+                symbol=symbol,
+                limit=limit
+            )
+            return trades or []
+        except Exception as e:
+            print(f"❌ Error obteniendo fills: {e}")
+            return []
+
+    def adjust_price_to_tick(self, price: float, tick_size: float, side: str = "DOWN") -> Decimal:
+        price_dec = Decimal(str(price))
+        tick_dec = Decimal(str(tick_size))
+
+        if side == "DOWN":
+            adjusted = (price_dec / tick_dec).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick_dec
+        else:
+            adjusted = (price_dec / tick_dec).quantize(Decimal("1"), rounding=ROUND_UP) * tick_dec
+
+        return adjusted
+    
+        
+    def get_price_tick_size(self, symbol: str) -> float:
+        info = self.client.futures_exchange_info()
+        for s in info["symbols"]:
+            if s["symbol"] == symbol:
+                for f in s["filters"]:
+                    if f["filterType"] == "PRICE_FILTER":
+                        return float(f["tickSize"])
+        raise ValueError(f"No se encontró tickSize para {symbol}")
+
+    def normalize_price(self, symbol: str, price: float, side: str = "DOWN") -> str:
+        tick = Decimal(str(self.get_price_tick_size(symbol)))
+        adjusted = self.adjust_price_to_tick(price, float(tick), side)
+
+        # cantidad de decimales según tickSize
+        decimals = max(0, -tick.as_tuple().exponent)
+        return f"{adjusted:.{decimals}f}"
