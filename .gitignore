@@ -8,5 +8,6 @@ live_signals_BTCUSDT.csv
 combo_atr_performance.csv
 combo_performance.csv
 atr_performance.csv
+status.json
 
 

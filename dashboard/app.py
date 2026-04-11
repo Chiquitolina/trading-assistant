@@ -1,10 +1,12 @@
 import os
 import sys
+import json
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from streamlit_autorefresh import st_autorefresh
 
 # =========================
 # CONFIG
@@ -15,11 +17,12 @@ sys.path.append(str(BASE_DIR))
 load_dotenv(BASE_DIR / ".env")
 
 from engine.backtest.metrics import calculate_metrics  # noqa
-from exchange.binance_exchange import BinanceExchange  # noqa
 
 TRADES_FILE = BASE_DIR / "trades.csv"
+STATUS_FILE = BASE_DIR / "status.json"
 TZ = "America/Argentina/Buenos_Aires"
 SYMBOL = "BTCUSDT"
+STATUS_TTL_SECONDS = 10
 
 st.set_page_config(
     page_title="Trade Journal",
@@ -27,6 +30,7 @@ st.set_page_config(
 )
 
 st.title("📊 Trade Journal Dashboard")
+st_autorefresh(interval=2000, key="dashboard_refresh")
 
 
 # =========================
@@ -80,75 +84,6 @@ def render_status_dot(label: str, is_online: bool):
     )
 
 
-@st.cache_resource
-def get_exchange():
-    api_key = os.getenv("API_KEY")
-    api_secret = os.getenv("SECRET_KEY")
-
-    if not api_key or not api_secret:
-        raise ValueError("Missing API_KEY or SECRET_KEY in environment")
-
-    return BinanceExchange(
-        api_key=api_key,
-        api_secret=api_secret,
-        testnet=True
-    )
-
-
-def get_position_status(exchange, symbol="BTCUSDT"):
-    try:
-        pos = exchange.get_position(symbol)
-
-        if not pos:
-            return {
-                "is_open": False,
-                "side": "NONE",
-                "qty": 0,
-                "entry_price": 0,
-                "unpnl": 0,
-            }
-
-        amount = float(pos["amount"])
-
-        if amount == 0:
-            return {
-                "is_open": False,
-                "side": "NONE",
-                "qty": 0,
-                "entry_price": 0,
-                "unpnl": 0,
-            }
-
-        side = "LONG" if amount > 0 else "SHORT"
-
-        return {
-            "is_open": True,
-            "side": side,
-            "qty": abs(amount),
-            "entry_price": float(pos["entry_price"]),
-            "unpnl": float(pos["unrealized_pnl"]),
-        }
-
-    except Exception as e:
-        return {
-            "is_open": False,
-            "side": "ERROR",
-            "qty": 0,
-            "entry_price": 0,
-            "unpnl": 0,
-            "error": str(e),
-        }
-
-
-def get_account_balance(exchange):
-    try:
-        balance = exchange.get_balance()
-        return round(float(balance), 2)
-    except Exception as e:
-        st.error(f"❌ Error fetching balance: {e}")
-        return 0.0
-
-
 def get_last_signal(df):
     if df.empty or "side" not in df.columns:
         return "N/A"
@@ -174,6 +109,72 @@ def get_today_pnl(df, tz_name):
     mask = exit_dt.dt.date == today
 
     return round(df.loc[mask, "pnl"].fillna(0).sum(), 2)
+
+
+def get_default_status():
+    return {
+        "engine_online": False,
+        "ws_online": False,
+        "symbol": SYMBOL,
+        "balance": 0.0,
+        "position_side": "NONE",
+        "position_qty": 0.0,
+        "entry_price": 0.0,
+        "unpnl": 0.0,
+        "last_signal": "N/A",
+        "updated_at": None,
+        "is_open": False,
+        "is_stale": True,
+        "error": None,
+    }
+
+
+def load_status():
+    status = get_default_status()
+
+    if not STATUS_FILE.exists():
+        status["error"] = f"status.json not found: {STATUS_FILE}"
+        return status
+
+    try:
+        with open(STATUS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        updated_at_raw = raw.get("updated_at")
+        updated_at = pd.to_datetime(updated_at_raw, errors="coerce")
+
+        is_stale = True
+        if pd.notnull(updated_at):
+            now = pd.Timestamp.now()
+            if getattr(updated_at, "tzinfo", None) is not None:
+                updated_at = updated_at.tz_localize(None)
+            age_seconds = (now - updated_at).total_seconds()
+            is_stale = age_seconds > STATUS_TTL_SECONDS
+
+        position_side = raw.get("position_side", "NONE")
+        position_qty = float(raw.get("position_qty", 0.0) or 0.0)
+
+        status.update({
+            "engine_online": bool(raw.get("engine_online", False)) and not is_stale,
+            "ws_online": bool(raw.get("ws_online", False)) and not is_stale,
+            "symbol": raw.get("symbol", SYMBOL),
+            "balance": round(float(raw.get("balance", 0.0) or 0.0), 2),
+            "position_side": position_side,
+            "position_qty": position_qty,
+            "entry_price": float(raw.get("entry_price", 0.0) or 0.0),
+            "unpnl": float(raw.get("unpnl", 0.0) or 0.0),
+            "last_signal": raw.get("last_signal", "N/A"),
+            "updated_at": updated_at_raw,
+            "is_open": position_side not in ("NONE", "ERROR") and position_qty > 0,
+            "is_stale": is_stale,
+            "error": None,
+        })
+
+        return status
+
+    except Exception as e:
+        status["error"] = str(e)
+        return status
 
 
 # =========================
@@ -227,36 +228,29 @@ for col in ["signal_ts", "entry_ts", "exit_ts"]:
             pass
 
 # =========================
-# EXCHANGE / STATUS PANEL
+# STATUS PANEL DATA
 # =========================
-exchange_error = None
+status = load_status()
 
-try:
-    exchange = get_exchange()
-    position_status = get_position_status(exchange, SYMBOL)
-    balance = get_account_balance(exchange)
-except Exception as e:
-    exchange = None
-    balance = 0.0
-    exchange_error = str(e)
-    position_status = {
-        "is_open": False,
-        "side": "ERROR",
-        "qty": 0,
-        "entry_price": 0,
-        "unpnl": 0,
-        "error": str(e),
-    }
+engine_online = status["engine_online"]
+ws_online = status["ws_online"]
+balance = status["balance"]
+symbol_from_status = status["symbol"] or SYMBOL
+position_side = status["position_side"]
+position_qty = status["position_qty"]
+entry_price = status["entry_price"]
+unpnl = status["unpnl"]
+last_signal = status["last_signal"]
+updated_at = status["updated_at"]
 
-last_signal = get_last_signal(df_raw)
+if last_signal in (None, "", "N/A"):
+    last_signal = get_last_signal(df_raw)
+
 pnl_today = get_today_pnl(df_raw, TZ)
 
 # =========================
-# SIMPLE STATUS FLAGS
+# SYSTEM STATUS
 # =========================
-engine_online = exchange is not None
-ws_online = exchange is not None
-
 st.markdown("## 🧠 System Status")
 
 with st.container(border=True):
@@ -268,29 +262,32 @@ with st.container(border=True):
     with c2:
         render_status_dot("WS", ws_online)
 
-    c3.metric("POSITION", position_status["side"])
-    c4.metric("uPnL", round(position_status["unpnl"], 2))
+    c3.metric("POSITION", position_side)
+    c4.metric("uPnL", round(unpnl, 2))
     c5.metric("BALANCE", f"{balance} USDT")
     c6.metric("PNL TODAY", pnl_today)
 
     c7, c8 = st.columns(2)
     c7.metric("LAST SIGNAL", last_signal)
-    c8.metric("SYMBOL", SYMBOL)
+    c8.metric("SYMBOL", symbol_from_status)
 
-    if exchange_error:
-        st.error(f"❌ Exchange init error: {exchange_error}")
+    if status["error"]:
+        st.error(f"❌ Status file error: {status['error']}")
+    elif status["is_stale"]:
+        st.warning("⚠️ Bot heartbeat stale or stopped")
 
-    if position_status["is_open"]:
+    if updated_at:
+        st.caption(f"Last heartbeat: {updated_at}")
+
+    if status["is_open"]:
         st.success(
             f"🟢 Open position on exchange | "
-            f"{SYMBOL} | "
-            f"{position_status['side']} | "
-            f"Qty: {position_status['qty']} | "
-            f"Entry: {position_status['entry_price']} | "
-            f"uPnL: {round(position_status['unpnl'], 2)}"
+            f"{symbol_from_status} | "
+            f"{position_side} | "
+            f"Qty: {position_qty} | "
+            f"Entry: {entry_price} | "
+            f"uPnL: {round(unpnl, 2)}"
         )
-    elif position_status["side"] == "ERROR":
-        st.error(f"❌ Could not fetch exchange data: {position_status.get('error', 'Unknown error')}")
     else:
         st.info("⚪ No open position on exchange")
 

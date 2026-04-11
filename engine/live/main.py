@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+import time
 from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
@@ -11,6 +12,7 @@ from engine.live.trade.trade_manager import TradeManager
 from exchange.binance_exchange import BinanceExchange
 from data.market_data import fetch_history
 from ui.banners import print_live_banner
+from engine.live.status_writer import StatusWriter
 
 load_dotenv()
 
@@ -22,6 +24,7 @@ SYMBOL = "BTCUSDT"
 TIMEFRAMES = ["5m", "15m", "1h"]
 TRIGGER_TF = "15m"
 DAYS = 3
+STATUS_INTERVAL = 3
 
 # ---------- INIT BUFFER ----------
 buffer = DataBuffer()
@@ -37,7 +40,7 @@ for tf in TIMEFRAMES:
 exchange = BinanceExchange(
     api_key=api_key,
     api_secret=secret,
-    testnet=True
+    testnet=False
 )
 
 # ---------- TEST API CONNECTION ----------
@@ -57,6 +60,19 @@ entry_engine = EntryEngine(buffer, debug=True)
 trade_manager = TradeManager(buffer, debug=True)
 position_manager = PositionManager(exchange)
 execution = ExecutionEngine(exchange, position_manager)
+status_writer = StatusWriter()
+
+status_writer.write({
+    "engine_online": True,
+    "ws_online": False,
+    "symbol": SYMBOL,
+    "balance": 0.0,
+    "position_side": "NONE",
+    "position_qty": 0.0,
+    "entry_price": 0.0,
+    "unpnl": 0.0,
+    "last_signal": "N/A",
+})
 
 execution.restore_state(SYMBOL)
 
@@ -70,9 +86,54 @@ fills = exchange.get_recent_fills("BTCUSDT", limit=10)
 for f in fills:
     print(f)
 
+last_status_ts = 0
+last_signal_side = "N/A"
+
+
+def write_heartbeat():
+    try:
+        balance = exchange.get_balance()
+    except Exception:
+        balance = 0.0
+
+    try:
+        position = exchange.get_position(SYMBOL)
+    except Exception:
+        position = None
+
+    if position:
+        amount = float(position["amount"])
+        position_side = "LONG" if amount > 0 else "SHORT"
+        position_qty = abs(amount)
+        entry_price = float(position["entry_price"])
+        unpnl = float(position["unrealized_pnl"])
+    else:
+        position_side = "NONE"
+        position_qty = 0.0
+        entry_price = 0.0
+        unpnl = 0.0
+
+    status_writer.write({
+        "engine_online": True,
+        "ws_online": ws.is_connected,
+        "symbol": SYMBOL,
+        "balance": balance,
+        "position_side": position_side,
+        "position_qty": position_qty,
+        "entry_price": entry_price,
+        "unpnl": unpnl,
+        "last_signal": last_signal_side,
+    })
+
+
 # ---------- EVENT LOOP ----------
 try:
     while True:
+        now = time.time()
+        if now - last_status_ts >= STATUS_INTERVAL:
+            write_heartbeat()
+            last_status_ts = now
+
         price = buffer.last_price()
         timestamp = buffer.last_timestamp()
 
@@ -88,6 +149,8 @@ try:
 
             if not signal:
                 continue
+
+            last_signal_side = signal["side"]
 
             signal_journal.log_signal(
                 timestamp=signal["signal_ts"],
@@ -111,4 +174,15 @@ try:
 
 except KeyboardInterrupt:
     ws.stop()
+    status_writer.write({
+        "engine_online": False,
+        "ws_online": False,
+        "symbol": SYMBOL,
+        "balance": 0.0,
+        "position_side": "NONE",
+        "position_qty": 0.0,
+        "entry_price": 0.0,
+        "unpnl": 0.0,
+        "last_signal": "STOPPED",
+    })
     print("\033[94m[LIVE ENGINE]\033[0m 🛑 Live Engine stopped.")

@@ -10,8 +10,9 @@ class WSClient:
         self.twm = None
         self.running = False
         self.retries = 0
+        self.is_connected = False
 
-        # 🔥 control interno
+        # control interno
         self._is_reconnecting = False
 
     # =========================
@@ -34,11 +35,13 @@ class WSClient:
 
             except Exception as e:
                 print(f"❌ WS loop error: {e}")
+                self.is_connected = False
                 time.sleep(5)
 
     def stop(self):
         self.running = False
         self._is_reconnecting = False
+        self.is_connected = False
         self._stop_ws()
 
     # =========================
@@ -59,44 +62,42 @@ class WSClient:
 
         self.retries = 0
         self.running = True
-        self._is_reconnecting = False  # 🔥 reset flag
+        self._is_reconnecting = False
 
+        self.is_connected = True
         print(f"\n\033[94m[WS CLIENT]\033[0m 📡 Futures WS connected: {SYMBOL} {TIMEFRAMES}\n")
 
     def _handle_message(self, msg):
         """
-        ⚠️ NO reiniciar desde acá
+        NO reiniciar desde acá
         """
 
-        # 🔥 detectar error WS (ej: ReadLoopClosed)
+        # detectar error WS
         if msg.get("e") == "error" or "error" in msg:
 
-            # 👇 evitar spam infinito
             if self._is_reconnecting:
                 return
 
             print(f"⚠️ WS error: {msg}")
 
+            self.is_connected = False
             self.running = False
-            self._is_reconnecting = True  # 🔥 bloquear nuevos errores
+            self._is_reconnecting = True
 
             return
 
-        # mensaje válido
         self.on_message(msg)
 
     def _reconnect(self):
         """
-        🔁 Reconexión controlada
+        Reconexión controlada
         """
-
-        # 👇 evitar reconexiones múltiples simultáneas
         if not self._is_reconnecting:
             return
 
+        self.is_connected = False
         self._stop_ws()
 
-        # 🔁 backoff exponencial
         self.retries += 1
         delay = min(2 ** self.retries, 30)
 
@@ -107,13 +108,14 @@ class WSClient:
 
     def _stop_ws(self):
         """
-        🧹 cerrar WS correctamente (threads)
+        cerrar WS correctamente (threads)
         """
         try:
             if self.twm:
                 self.twm.stop()
-                time.sleep(1)  # 🔥 dar tiempo a cerrar threads
+                time.sleep(1)
         except Exception as e:
             print(f"⚠️ Error stopping WS: {e}")
 
         self.twm = None
+        self.is_connected = False
