@@ -1,6 +1,8 @@
 from dotenv import load_dotenv
 import os
 import time
+import threading
+
 from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
@@ -52,7 +54,7 @@ try:
 except Exception as e:
     print(f"\033[94m[EXCHANGE]\033[0m ❌ Binance API connection failed")
     print(e)
-    exit()
+    raise SystemExit(1)
 
 # ---------- INIT ENGINES ----------
 signals = SignalEngine(buffer)
@@ -61,6 +63,13 @@ trade_manager = TradeManager(buffer, debug=True)
 position_manager = PositionManager(exchange)
 execution = ExecutionEngine(exchange, position_manager)
 status_writer = StatusWriter()
+
+# ---------- STATUS DEFAULT ----------
+last_status_ts = 0
+last_signal_side = "N/A"
+last_signal_trend = None
+last_signal_direction = None
+last_signal_momentum = None
 
 status_writer.write({
     "engine_online": True,
@@ -77,23 +86,18 @@ status_writer.write({
     "signal_momentum": None,
 })
 
+# ---------- RESTORE STATE ----------
 execution.restore_state(SYMBOL)
 
 # ---------- CONNECT WS ----------
 ws = WSClient(buffer.on_ws_message)
 ws.start()
 
+# correr heartbeat/reconnect loop del WS en background
+ws_thread = threading.Thread(target=ws.run, daemon=True)
+ws_thread.start()
+
 print("\033[94m[LIVE ENGINE]\033[0m 🚀 Live Engine started! Ctrl+C to stop.\n")
-
-fills = exchange.get_recent_fills("BTCUSDT", limit=10)
-for f in fills:
-    print(f)
-
-last_status_ts = 0
-last_signal_side = "N/A"
-last_signal_trend = None
-last_signal_direction = None
-last_signal_momentum = None
 
 
 def write_heartbeat():
@@ -139,6 +143,7 @@ def write_heartbeat():
 try:
     while True:
         now = time.time()
+
         if now - last_status_ts >= STATUS_INTERVAL:
             write_heartbeat()
             last_status_ts = now
@@ -150,7 +155,6 @@ try:
             execution.on_price_update(price, timestamp)
 
         if buffer.consume_closed_tf(TRIGGER_TF):
-
             print("\033[93m[LIVE MAIN]\033[0m ✅ 15m close event consumed")
 
             signal = signals.generate_signal()
@@ -171,7 +175,7 @@ try:
                 signal_price=signal["signal_price"],
                 direction=signal.get("direction"),
                 trend=signal.get("trend"),
-                momentum=signal.get("momentum")
+                momentum=signal.get("momentum"),
             )
 
             if signal["side"] == "NONE":
@@ -184,8 +188,11 @@ try:
 
             execution.execute_plan(plan)
 
+        time.sleep(0.2)
+
 except KeyboardInterrupt:
     ws.stop()
+
     status_writer.write({
         "engine_online": False,
         "ws_online": False,
@@ -200,4 +207,5 @@ except KeyboardInterrupt:
         "signal_direction": None,
         "signal_momentum": None,
     })
+
     print("\033[94m[LIVE ENGINE]\033[0m 🛑 Live Engine stopped.")

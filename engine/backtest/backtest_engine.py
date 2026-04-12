@@ -178,25 +178,25 @@ def backtest(symbol: str):
         direction = trade_direction(df15) or ""
         momentum = momentum_5m(df5)
 
-        print("\033[95m[BACKTEST DEBUG]\033[0m 1h candle used:")
-        print(df1h.tail(1)[["timestamp", "open", "high", "low", "close"]])
+        #print("\033[95m[BACKTEST DEBUG]\033[0m 1h candle used:")
+        #print(df1h.tail(1)[["timestamp", "open", "high", "low", "close"]])
 
-        print("\033[95m[BACKTEST DEBUG]\033[0m 15m candle used:")
-        print(df15.tail(1)[["timestamp", "open", "high", "low", "close"]])
+        #print("\033[95m[BACKTEST DEBUG]\033[0m 15m candle used:")
+        #print(df15.tail(1)[["timestamp", "open", "high", "low", "close"]])
 
-        print("\033[95m[BACKTEST DEBUG]\033[0m last 5 candles of 5m used for momentum:")
-        print(df5.tail(5)[["timestamp", "open", "high", "low", "close"]])
+        #print("\033[95m[BACKTEST DEBUG]\033[0m last 5 candles of 5m used for momentum:")
+        #print(df5.tail(5)[["timestamp", "open", "high", "low", "close"]])
 
-        if not df5.empty:
-            print(f"\033[95m[BACKTEST DEBUG]\033[0m last 5m used ts: {df5.tail(1).iloc[0]['timestamp']}")
+        #if not df5.empty:
+        #    print(f"\033[95m[BACKTEST DEBUG]\033[0m last 5m used ts: {df5.tail(1).iloc[0]['timestamp']}")
 
-        print("\033[95m[BACKTEST DEBUG]\033[0m indicator result:")
-        print(f"signal_ts(open)  : {signal_ts}")
-        print(f"signal_ts(close) : {signal_close_ts}")
-        print(f"entry_ts(next)   : {entry_ts}")
-        print(f"trend            : {trend}")
-        print(f"direction        : {direction}")
-        print(f"momentum         : {momentum}\n")
+        #print("\033[95m[BACKTEST DEBUG]\033[0m indicator result:")
+        #print(f"signal_ts(open)  : {signal_ts}")
+        #print(f"signal_ts(close) : {signal_close_ts}")
+        #print(f"entry_ts(next)   : {entry_ts}")
+        #print(f"trend            : {trend}")
+        #print(f"direction        : {direction}")
+        #print(f"momentum         : {momentum}\n")
 
         future = df_15m[df_15m["timestamp"] > entry_ts].head(BACKTEST["lookahead"])
 

@@ -8,7 +8,7 @@ BACKTEST = {
 }
 
 FEES = {
-    "taker": 0.04,
+    "taker": 0.05,
     "maker": 0.02,
     "funding": 0.0,
 }

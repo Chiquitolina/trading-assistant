@@ -101,7 +101,7 @@ def render_signal_text(signal: str, trend: str, direction: str, momentum: str):
     st.markdown(
         f"""
         <div style="line-height: 1.1;">
-            <div style="font-size: 0.80rem; opacity: 0.7; color: white">
+            <div style="font-size: 0.90rem; opacity: 1; color: white">
                 LAST SIGNAL
             </div>
             <div style="font-size: 2.25rem; font-weight: 800; color: {color}; margin-top: 8px;">
@@ -111,8 +111,53 @@ def render_signal_text(signal: str, trend: str, direction: str, momentum: str):
         """,
         unsafe_allow_html=True
     )
-    
+
     st.caption(f"{trend} / {direction} / {momentum}")
+
+
+def render_plan_text(status: str, reason: str, side: str, entry, tp, sl):
+    status = str(status or "N/A").upper().strip()
+    reason = reason if reason not in (None, "", "N/A") else "-"
+    side = side if side not in (None, "", "N/A") else "-"
+
+    if status == "EXECUTED":
+        color = "#00c853"
+    elif status == "DISCARDED":
+        color = "#ff5252"
+    elif status == "READY":
+        color = "#ffd54f"
+    elif status == "SKIPPED":
+        color = "#90caf9"
+    else:
+        color = "#b0bec5"
+
+    def fmt_price(x):
+        if x in (None, "", "N/A"):
+            return "-"
+        try:
+            return f"{float(x):.2f}"
+        except Exception:
+            return str(x)
+
+    st.markdown(
+        f"""
+        <div style="line-height: 1.1;">
+            <div style="font-size: 0.90rem; opacity: 1; color: white">
+                LAST PLAN
+            </div>
+            <div style="font-size: 2.25rem; font-weight: 800; color: {color}; margin-top: 8px;">
+                {status}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    st.caption(reason)
+
+    st.caption(
+        f"{side} | entry: {fmt_price(entry)} | tp: {fmt_price(tp)} | sl: {fmt_price(sl)}"
+    )
 
 
 def get_last_signal(df):
@@ -152,10 +197,19 @@ def get_default_status():
         "position_qty": 0.0,
         "entry_price": 0.0,
         "unpnl": 0.0,
+
         "last_signal": "N/A",
         "signal_trend": "N/A",
         "signal_direction": "N/A",
         "signal_momentum": "N/A",
+
+        "last_plan_status": "N/A",
+        "last_plan_reason": "N/A",
+        "last_plan_side": "N/A",
+        "last_plan_entry": None,
+        "last_plan_tp": None,
+        "last_plan_sl": None,
+
         "updated_at": None,
         "is_open": False,
         "is_stale": True,
@@ -197,10 +251,19 @@ def load_status():
             "position_qty": position_qty,
             "entry_price": float(raw.get("entry_price", 0.0) or 0.0),
             "unpnl": float(raw.get("unpnl", 0.0) or 0.0),
+
             "last_signal": str(raw.get("last_signal", "N/A") or "N/A").upper(),
             "signal_trend": raw.get("signal_trend", "N/A"),
             "signal_direction": raw.get("signal_direction", "N/A"),
             "signal_momentum": raw.get("signal_momentum", "N/A"),
+
+            "last_plan_status": raw.get("last_plan_status", "N/A"),
+            "last_plan_reason": raw.get("last_plan_reason", "N/A"),
+            "last_plan_side": raw.get("last_plan_side", "N/A"),
+            "last_plan_entry": raw.get("last_plan_entry"),
+            "last_plan_tp": raw.get("last_plan_tp"),
+            "last_plan_sl": raw.get("last_plan_sl"),
+
             "updated_at": updated_at_raw,
             "is_open": position_side not in ("NONE", "ERROR") and position_qty > 0,
             "is_stale": is_stale,
@@ -277,10 +340,19 @@ position_side = status["position_side"]
 position_qty = status["position_qty"]
 entry_price = status["entry_price"]
 unpnl = status["unpnl"]
+
 last_signal = status["last_signal"]
 signal_trend = status["signal_trend"]
 signal_direction = status["signal_direction"]
 signal_momentum = status["signal_momentum"]
+
+last_plan_status = status["last_plan_status"]
+last_plan_reason = status["last_plan_reason"]
+last_plan_side = status["last_plan_side"]
+last_plan_entry = status["last_plan_entry"]
+last_plan_tp = status["last_plan_tp"]
+last_plan_sl = status["last_plan_sl"]
+
 updated_at = status["updated_at"]
 
 if last_signal in (None, "", "N/A"):
@@ -307,7 +379,7 @@ with st.container(border=True):
     c5.metric("BALANCE", f"{balance} USDT")
     c6.metric("PNL TODAY", pnl_today)
 
-    c7, c8 = st.columns(2)
+    c7, c8, c9 = st.columns(3)
 
     with c7:
         render_signal_text(
@@ -318,6 +390,16 @@ with st.container(border=True):
         )
 
     with c8:
+        render_plan_text(
+            status=last_plan_status,
+            reason=last_plan_reason,
+            side=last_plan_side,
+            entry=last_plan_entry,
+            tp=last_plan_tp,
+            sl=last_plan_sl,
+        )
+
+    with c9:
         st.metric("SYMBOL", symbol_from_status)
 
     if status["error"]:
@@ -467,35 +549,3 @@ if "entry_ts_dt" in df_equity.columns and "pnl" in df_equity.columns:
         df_equity.set_index("entry_ts_dt")["equity"],
         use_container_width=True
     )
-
-# =========================
-# SLIPPAGE GRAPH
-# =========================
-st.markdown("---")
-st.subheader("📏 Entry Slippage (%)")
-
-df_slip = df_raw.copy()
-
-if "entry_ts_dt" in df_slip.columns and "entry_distance_pct" in df_slip.columns:
-    df_slip = df_slip.sort_values("entry_ts_dt")
-
-    st.line_chart(
-        df_slip.set_index("entry_ts_dt")["entry_distance_pct"],
-        use_container_width=True
-    )
-
-# =========================
-# SIGNAL vs ENTRY SCATTER
-# =========================
-st.markdown("---")
-st.subheader("🎯 Signal vs Entry Price")
-
-if "signal_price" in df_raw.columns and "entry" in df_raw.columns:
-    scatter_df = df_raw[["signal_price", "entry"]].dropna()
-
-    if not scatter_df.empty:
-        st.scatter_chart(
-            scatter_df,
-            x="signal_price",
-            y="entry"
-        )

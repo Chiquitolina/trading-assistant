@@ -101,7 +101,7 @@ class ExecutionEngine:
             else:
                 reason = "UNKNOWN"
 
-        print(f"📊 External close reason: {reason}")
+        print("\033[94m[SYNC]\033[0m 📊 External close reason: {reason}")
 
         # ==========================
         # Buscar fill real de cierre
@@ -154,20 +154,20 @@ class ExecutionEngine:
         # ==========================
         # DEBUG
         # ==========================
-        print(f"""
-    📊 EXTERNAL CLOSE DEBUG
-    Entry              : {pos.real_entry}
-    Exit market price  : {price}
-    Real exit fill     : {real_exit}
-    TP                 : {pos.tp}
-    SL                 : {pos.sl}
-    Reason             : {reason}
-    Exit order id      : {exit_order_id}
-    Exchange realized  : {exchange_realized_pnl}
-    Fees               : {fees}
-    PnL gross          : {pnl_pct}%
-    PnL net            : {pnl_net}%
-    """)
+    #    print(f"""
+    #📊 EXTERNAL CLOSE DEBUG
+    #Entry              : {pos.real_entry}
+    #Exit market price  : {price}
+    #Real exit fill     : {real_exit}
+    #TP                 : {pos.tp}
+    #SL                 : {pos.sl}
+    #Reason             : {reason}
+    #Exit order id      : {exit_order_id}
+    #Exchange realized  : {exchange_realized_pnl}
+    #Fees               : {fees}
+    #PnL gross          : {pnl_pct}%
+    #PnL net            : {pnl_net}%
+    #""")
 
         print(f"❌ CLOSED (external {reason}) | PnL: {pnl_net}%")
 
@@ -247,7 +247,7 @@ class ExecutionEngine:
             print(f"❌ Error colocando TP/SL: {e}")
             return False
 
-    def execute_plan(self, plan, leverage: int = 1):
+    def execute_plan(self, plan, leverage: int = 2):
 
         exchange_pos = self.position_manager.sync(plan.symbol)
 
@@ -284,6 +284,18 @@ class ExecutionEngine:
             price=price,
             leverage=leverage
         )
+        
+                # 🔥 👉 ACÁ VA EL DEBUG
+        print(f"""
+        [POSITION SIZER]
+        Balance         : {balance}
+        Price           : {price}
+        Leverage        : {leverage}
+        Quantity        : {size_data['quantity']}
+        Notional        : {size_data['notional']:.2f}
+        Required margin : {size_data['required_margin']:.2f}
+        Usable balance  : {size_data['usable_balance']:.2f}
+        """)
 
         is_valid, msg = self.position_sizer.validate(size_data)
 
@@ -514,7 +526,7 @@ class ExecutionEngine:
         state = sync.restore_position_state(symbol)
 
         if not state:
-            print("ℹ️ No position to restore.")
+            print("\033[94m[SYNC]\033[0m ℹ️ No position to restore.")
             return
 
         self.position = Position(
@@ -531,7 +543,7 @@ class ExecutionEngine:
             signal_context=None
         )
 
-        print("\033[94m[EXCHANGE]\033[0m 🔁 Position restored")
+        print("\033[94m[SYNC]\033[0m 🔁 Position restored")
 
     def check_exchange_close(self, symbol):
 
