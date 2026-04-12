@@ -84,6 +84,37 @@ def render_status_dot(label: str, is_online: bool):
     )
 
 
+def render_signal_text(signal: str, trend: str, direction: str, momentum: str):
+    signal = str(signal or "N/A").upper().strip()
+
+    if signal == "LONG":
+        color = "#00c853"
+    elif signal == "SHORT":
+        color = "#ff5252"
+    else:
+        color = "#b0bec5"
+
+    trend = trend if trend not in (None, "", "N/A") else "-"
+    direction = direction if direction not in (None, "", "N/A") else "-"
+    momentum = momentum if momentum not in (None, "", "N/A") else "-"
+
+    st.markdown(
+        f"""
+        <div style="line-height: 1.1;">
+            <div style="font-size: 0.80rem; opacity: 0.7; color: white">
+                LAST SIGNAL
+            </div>
+            <div style="font-size: 2.25rem; font-weight: 800; color: {color}; margin-top: 8px;">
+                {signal}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    st.caption(f"{trend} / {direction} / {momentum}")
+
+
 def get_last_signal(df):
     if df.empty or "side" not in df.columns:
         return "N/A"
@@ -122,6 +153,9 @@ def get_default_status():
         "entry_price": 0.0,
         "unpnl": 0.0,
         "last_signal": "N/A",
+        "signal_trend": "N/A",
+        "signal_direction": "N/A",
+        "signal_momentum": "N/A",
         "updated_at": None,
         "is_open": False,
         "is_stale": True,
@@ -163,7 +197,10 @@ def load_status():
             "position_qty": position_qty,
             "entry_price": float(raw.get("entry_price", 0.0) or 0.0),
             "unpnl": float(raw.get("unpnl", 0.0) or 0.0),
-            "last_signal": raw.get("last_signal", "N/A"),
+            "last_signal": str(raw.get("last_signal", "N/A") or "N/A").upper(),
+            "signal_trend": raw.get("signal_trend", "N/A"),
+            "signal_direction": raw.get("signal_direction", "N/A"),
+            "signal_momentum": raw.get("signal_momentum", "N/A"),
             "updated_at": updated_at_raw,
             "is_open": position_side not in ("NONE", "ERROR") and position_qty > 0,
             "is_stale": is_stale,
@@ -241,6 +278,9 @@ position_qty = status["position_qty"]
 entry_price = status["entry_price"]
 unpnl = status["unpnl"]
 last_signal = status["last_signal"]
+signal_trend = status["signal_trend"]
+signal_direction = status["signal_direction"]
+signal_momentum = status["signal_momentum"]
 updated_at = status["updated_at"]
 
 if last_signal in (None, "", "N/A"):
@@ -268,8 +308,17 @@ with st.container(border=True):
     c6.metric("PNL TODAY", pnl_today)
 
     c7, c8 = st.columns(2)
-    c7.metric("LAST SIGNAL", last_signal)
-    c8.metric("SYMBOL", symbol_from_status)
+
+    with c7:
+        render_signal_text(
+            signal=last_signal,
+            trend=signal_trend,
+            direction=signal_direction,
+            momentum=signal_momentum,
+        )
+
+    with c8:
+        st.metric("SYMBOL", symbol_from_status)
 
     if status["error"]:
         st.error(f"❌ Status file error: {status['error']}")

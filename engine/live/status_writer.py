@@ -6,8 +6,6 @@ from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 STATUS_FILE = BASE_DIR / "status.json"
-
-
 class StatusWriter:
     def __init__(self, status_file: Path | None = None):
         self.status_file = status_file or STATUS_FILE
@@ -23,6 +21,12 @@ class StatusWriter:
             "entry_price": 0.0,
             "unpnl": 0.0,
             "last_signal": "N/A",
+
+            # 🔥 NUEVO CONTEXTO
+            "signal_trend": None,
+            "signal_direction": None,
+            "signal_momentum": None,
+
             "updated_at": datetime.now().isoformat(timespec="seconds"),
             **payload,
         }

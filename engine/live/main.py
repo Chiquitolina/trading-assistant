@@ -72,6 +72,9 @@ status_writer.write({
     "entry_price": 0.0,
     "unpnl": 0.0,
     "last_signal": "N/A",
+    "signal_trend": None,
+    "signal_direction": None,
+    "signal_momentum": None,
 })
 
 execution.restore_state(SYMBOL)
@@ -88,6 +91,9 @@ for f in fills:
 
 last_status_ts = 0
 last_signal_side = "N/A"
+last_signal_trend = None
+last_signal_direction = None
+last_signal_momentum = None
 
 
 def write_heartbeat():
@@ -123,6 +129,9 @@ def write_heartbeat():
         "entry_price": entry_price,
         "unpnl": unpnl,
         "last_signal": last_signal_side,
+        "signal_trend": last_signal_trend,
+        "signal_direction": last_signal_direction,
+        "signal_momentum": last_signal_momentum,
     })
 
 
@@ -151,6 +160,9 @@ try:
                 continue
 
             last_signal_side = signal["side"]
+            last_signal_trend = signal.get("trend")
+            last_signal_direction = signal.get("direction")
+            last_signal_momentum = signal.get("momentum")
 
             signal_journal.log_signal(
                 timestamp=signal["signal_ts"],
@@ -184,5 +196,8 @@ except KeyboardInterrupt:
         "entry_price": 0.0,
         "unpnl": 0.0,
         "last_signal": "STOPPED",
+        "signal_trend": None,
+        "signal_direction": None,
+        "signal_momentum": None,
     })
     print("\033[94m[LIVE ENGINE]\033[0m 🛑 Live Engine stopped.")
