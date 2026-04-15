@@ -112,12 +112,14 @@ class ExecutionEngine:
             quantity=pos.quantity,
             limit=20
         )
+        
+        pnl_usd = 0.0
 
         if close_fill:
             real_exit = float(close_fill["price"])
             exit_order_id = int(close_fill["orderId"])
             fees = round(self.fees["taker"] * 2, 4)
-            exchange_realized_pnl = round(float(close_fill["realizedPnl"]), 4)
+            pnl_usd = float(close_fill.get("realizedPnl", 0) or 0)
 
             print(f"✅ Close fill encontrado | orderId={exit_order_id} | real_exit={real_exit}")
         else:
@@ -201,6 +203,7 @@ class ExecutionEngine:
             sl=pos.sl,
             pnl=pnl_net,
             pnl_gross=pnl_pct,
+            pnl_usd=pnl_usd,
             fees=fees,
             exit_reason=reason,
             signal_trend=ctx.get("trend"),

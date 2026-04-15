@@ -35,8 +35,9 @@ class TradeJournal:
                     "tp",
                     "sl",
 
-                    "pnl_pct",
+                    "pnl",
                     "pnl_gross",
+                    "pnl_usd",
                     "fees",
 
                     "exit_reason",
@@ -64,6 +65,7 @@ class TradeJournal:
         tp,
         sl,
         pnl,
+        pnl_usd,
         pnl_gross,
         fees,
         exit_reason,
@@ -96,6 +98,7 @@ class TradeJournal:
 
                 round(pnl, 4),
                 round(pnl_gross, 4),
+                round(pnl_usd, 2),
                 round(fees, 2),
 
                 exit_reason,

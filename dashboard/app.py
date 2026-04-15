@@ -23,6 +23,7 @@ STATUS_FILE = BASE_DIR / "status.json"
 TZ = "America/Argentina/Buenos_Aires"
 SYMBOL = "BTCUSDT"
 STATUS_TTL_SECONDS = 10
+CANDLE_MINUTES = 15
 
 st.set_page_config(
     page_title="Trade Journal",
@@ -328,6 +329,22 @@ for col in ["signal_ts", "entry_ts", "exit_ts"]:
             pass
 
 # =========================
+# TRADE DURATION
+# =========================
+if "entry_ts_dt" in df_raw.columns and "exit_ts_dt" in df_raw.columns:
+    duration_minutes = (
+        (df_raw["exit_ts_dt"] - df_raw["entry_ts_dt"]).dt.total_seconds() / 60
+    )
+
+    df_raw["trade_duration_min"] = duration_minutes.round(2)
+    df_raw["trade_duration_bars"] = (
+        duration_minutes / CANDLE_MINUTES
+    ).round().astype("Int64")
+else:
+    df_raw["trade_duration_min"] = None
+    df_raw["trade_duration_bars"] = None
+
+# =========================
 # STATUS PANEL DATA
 # =========================
 status = load_status()
@@ -523,6 +540,11 @@ if "entry_ts_dt" in table_df.columns:
 if "entry_distance_pct" in table_df.columns:
     table_df["entry_distance_pct"] = table_df["entry_distance_pct"].map(
         lambda x: f"{x:.4f}%" if pd.notnull(x) else "0.0000%"
+    )
+
+if "trade_duration_min" in table_df.columns:
+    table_df["trade_duration_min"] = table_df["trade_duration_min"].map(
+        lambda x: f"{x:.2f}" if pd.notnull(x) else "-"
     )
 
 drop_cols = [c for c in ["signal_ts_dt", "entry_ts_dt", "exit_ts_dt"] if c in table_df.columns]
