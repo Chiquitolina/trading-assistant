@@ -47,7 +47,7 @@ exchange = BinanceExchange(
 
 # ---------- TEST API CONNECTION ----------
 try:
-    print(f"\033[94m[EXCHANGE]\033[0m 🔐 Testing Binance API connection...")
+    print(f"\033[94m[EXCHANGE]\033[0m 🔐 Testing Binance API connection.")
     balance = exchange.get_balance()
     print(f"\033[94m[EXCHANGE]\033[0m ✅ Binance account connected!")
     print(f"\033[94m[EXCHANGE]\033[0m 💰 USDT Balance: {balance}\n")
@@ -157,8 +157,28 @@ try:
         if buffer.consume_closed_tf(TRIGGER_TF):
             print("\033[93m[LIVE MAIN]\033[0m ✅ 15m close event consumed")
 
+            closed_candle_ts = buffer.last_close_time[TRIGGER_TF]
+            close_price = buffer.last_price()
+
+            # ==========================
+            # 🕒 TIME STOP CHECK
+            # ==========================
+            execution._on_15m_candle_closed(
+                closed_candle_ts=closed_candle_ts,
+                close_price=close_price
+            )
+
             signal = signals.generate_signal()
             print(f"\033[93m[LIVE MAIN]\033[0m signal returned: {signal}")
+            
+            if signal and execution.position:
+
+                execution.update_position_context(
+                    trend=signal.get("trend"),
+                    direction=signal.get("direction"),
+                    momentum=signal.get("momentum"),
+                    current_price=close_price
+                )
 
             if not signal:
                 continue
@@ -186,7 +206,11 @@ try:
                 print("\033[94m[ENTRY PLANNER]\033[0m ❌ PLAN DESCARTADO\n")
                 continue
 
-            execution.execute_plan(plan)
+            try:
+                executed = execution.execute_plan(plan)
+                print(f"[LIVE MAIN] execution result: {executed}")
+            except Exception as e:
+                print(f"[LIVE MAIN] ❌ execution error but loop continues: {e}")
 
         time.sleep(0.2)
 

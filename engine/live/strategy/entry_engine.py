@@ -7,7 +7,7 @@ from engine.live.strategy.trade_plan import TradePlan
 from config.strategies.v1 import LONG, SHORT
 from engine.live.status_writer import StatusWriter
 
-MIN_ATR = 201
+MIN_ATR = 200
 
 
 class EntryEngine:
@@ -129,6 +129,13 @@ class EntryEngine:
             "trend": signal.get("trend"),
             "direction": signal.get("direction"),
             "momentum": signal.get("momentum"),
+
+            # 🔥 contexto de momentum
+            "momentum_prev1": signal.get("momentum_prev1"),
+            "momentum_prev2": signal.get("momentum_prev2"),
+            "momentum_sequence": signal.get("momentum_sequence"),
+
+            # 🔥 volatilidad
             "atr": round(atr, 2),
         }
 

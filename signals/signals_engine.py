@@ -10,6 +10,7 @@ class SignalEngine:
         self.buffer = buffer
         self.debug = debug
         self.last_signal_ts = None
+        self.momentum_history = []
 
     def get_trend(self):
         df = pd.DataFrame(self.buffer.get_candles("1h"))
@@ -93,11 +94,24 @@ class SignalEngine:
         trend = self.get_trend()
         direction = self.get_direction()
         momentum = self.get_momentum()
+        
+        # 🧠 guardar historial de momentum
+        self.momentum_history.append(momentum)
+
+        # mantener tamaño chico (opcional pero recomendado)
+        if len(self.momentum_history) > 10:
+            self.momentum_history.pop(0)
+            
+        prev1 = self.momentum_history[-2] if len(self.momentum_history) >= 2 else None
+        prev2 = self.momentum_history[-3] if len(self.momentum_history) >= 3 else None
 
         print("\033[95m[LIVE DEBUG]\033[0m indicator result:")
         print(f"trend     : {trend}")
         print(f"direction : {direction}")
         print(f"momentum  : {momentum}\n")
+        
+        print(f"prev1     : {prev1}")
+        print(f"prev2     : {prev2}")
 
         long_ok = long_setup(trend, direction, momentum)
         short_ok = short_setup(trend, direction, momentum)
@@ -120,7 +134,7 @@ class SignalEngine:
             print("\033[94m[SIGNALS LAYER]\033[0m 💡 SIGNAL GENERATED: SHORT")
         else:
             print("\033[94m[SIGNALS LAYER]\033[0m 🚫 NO SIGNAL")
-
+            
         return {
             "side": side,
             "signal_price": round(signal_price, 2),
@@ -128,6 +142,14 @@ class SignalEngine:
             "trend": trend,
             "direction": direction,
             "momentum": momentum,
+
+            # 🔥 NUEVO (research)
+            "momentum_prev1": prev1,
+            "momentum_prev2": prev2,
+
+            # opcional (MUY útil)
+            "momentum_sequence": [prev2, prev1, momentum],
+
             "long_ok": long_ok,
             "short_ok": short_ok,
         }

@@ -51,6 +51,30 @@ def safe_metric(metrics_dict, key, is_percent=False):
     return round(value, 2)
 
 
+def safe_sum(df, col):
+    if col not in df.columns or df.empty:
+        return 0.0
+    return round(pd.to_numeric(df[col], errors="coerce").fillna(0).sum(), 2)
+
+
+def safe_mean(df, col):
+    if col not in df.columns or df.empty:
+        return 0.0
+    series = pd.to_numeric(df[col], errors="coerce").dropna()
+    if series.empty:
+        return 0.0
+    return round(series.mean(), 2)
+
+
+def safe_max(df, col):
+    if col not in df.columns or df.empty:
+        return 0.0
+    series = pd.to_numeric(df[col], errors="coerce").dropna()
+    if series.empty:
+        return 0.0
+    return round(series.max(), 2)
+
+
 def render_status_dot(label: str, is_online: bool):
     color = "#00c853" if is_online else "#ff5252"
     text = "ONLINE" if is_online else "OFFLINE"
@@ -188,6 +212,19 @@ def get_today_pnl(df, tz_name):
     return round(df.loc[mask, "pnl"].fillna(0).sum(), 2)
 
 
+def get_today_pnl_usd(df, tz_name):
+    if df.empty or "exit_ts" not in df.columns or "pnl_usd" not in df.columns:
+        return 0.0
+
+    exit_dt = pd.to_datetime(df["exit_ts"], utc=True, errors="coerce")
+    exit_dt = exit_dt.dt.tz_convert(tz_name)
+
+    today = pd.Timestamp.now(tz=tz_name).date()
+    mask = exit_dt.dt.date == today
+
+    return round(df.loc[mask, "pnl_usd"].fillna(0).sum(), 2)
+
+
 def get_default_status():
     return {
         "engine_online": False,
@@ -291,6 +328,7 @@ else:
 # =========================
 numeric_cols = [
     "pnl",
+    "pnl_usd",
     "signal_price",
     "entry",
     "real_entry",
@@ -376,6 +414,7 @@ if last_signal in (None, "", "N/A"):
     last_signal = get_last_signal(df_raw)
 
 pnl_today = get_today_pnl(df_raw, TZ)
+pnl_today_usd = get_today_pnl_usd(df_raw, TZ)
 
 # =========================
 # SYSTEM STATUS
@@ -383,7 +422,7 @@ pnl_today = get_today_pnl(df_raw, TZ)
 st.markdown("## 🧠 System Status")
 
 with st.container(border=True):
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 
     with c1:
         render_status_dot("ENGINE", engine_online)
@@ -394,11 +433,12 @@ with st.container(border=True):
     c3.metric("POSITION", position_side)
     c4.metric("uPnL", round(unpnl, 2))
     c5.metric("BALANCE", f"{balance} USDT")
-    c6.metric("PNL TODAY", pnl_today)
+    c6.metric("PNL TODAY %", pnl_today)
+    c7.metric("PNL TODAY USD", f"{pnl_today_usd} USDT")
 
-    c7, c8, c9 = st.columns(3)
+    c8, c9, c10 = st.columns(3)
 
-    with c7:
+    with c8:
         render_signal_text(
             signal=last_signal,
             trend=signal_trend,
@@ -406,7 +446,7 @@ with st.container(border=True):
             momentum=signal_momentum,
         )
 
-    with c8:
+    with c9:
         render_plan_text(
             status=last_plan_status,
             reason=last_plan_reason,
@@ -416,7 +456,7 @@ with st.container(border=True):
             sl=last_plan_sl,
         )
 
-    with c9:
+    with c10:
         st.metric("SYMBOL", symbol_from_status)
 
     if status["error"]:
@@ -452,24 +492,29 @@ if df_raw.empty:
 # =========================
 st.markdown("## Overview")
 
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 total_trades = len(df_raw)
-net_pnl = round(df_raw["pnl"].sum(), 2) if "pnl" in df_raw.columns else 0
+net_pnl_pct = safe_sum(df_raw, "pnl")
+net_pnl_usd = safe_sum(df_raw, "pnl_usd")
 winrate = round((df_raw["pnl"] > 0).mean() * 100, 2) if len(df_raw) and "pnl" in df_raw.columns else 0
 
 col1.metric("Trades", total_trades)
-col2.metric("Net PnL", net_pnl)
-col3.metric("Winrate", f"{winrate}%")
-col4.metric("Avg PnL", round(df_raw["pnl"].mean(), 2) if len(df_raw) and "pnl" in df_raw.columns else 0)
-col5.metric("Best Trade", round(df_raw["pnl"].max(), 2) if len(df_raw) and "pnl" in df_raw.columns else 0)
+col2.metric("Net PnL %", f"{net_pnl_pct}%")
+col3.metric("Net PnL USD", f"{net_pnl_usd} USDT")
+col4.metric("Winrate", f"{winrate}%")
+col5.metric("Avg PnL %", safe_mean(df_raw, "pnl"))
+col6.metric("Best Trade %", safe_max(df_raw, "pnl"))
 
 # =========================
 # METRICS CALCULATION
 # =========================
 all_trades = df_raw.to_dict(orient="records")
-long_trades = df_raw[df_raw["side"] == "LONG"].to_dict(orient="records") if "side" in df_raw.columns else []
-short_trades = df_raw[df_raw["side"] == "SHORT"].to_dict(orient="records") if "side" in df_raw.columns else []
+long_df = df_raw[df_raw["side"] == "LONG"] if "side" in df_raw.columns else pd.DataFrame()
+short_df = df_raw[df_raw["side"] == "SHORT"] if "side" in df_raw.columns else pd.DataFrame()
+
+long_trades = long_df.to_dict(orient="records")
+short_trades = short_df.to_dict(orient="records")
 
 metrics_all = calculate_metrics(all_trades)
 metrics_long = calculate_metrics(long_trades)
@@ -486,34 +531,36 @@ col_long, col_short = st.columns(2)
 with col_long:
     st.markdown("## 🟢 LONG")
 
-    l1, l2, l3 = st.columns(3)
+    l1, l2, l3, l4 = st.columns(4)
     l1.metric("Trades", safe_metric(metrics_long, "trades"))
     l2.metric("Winrate", safe_metric(metrics_long, "winrate", True))
-    l3.metric("Net PnL", safe_metric(metrics_long, "net_pnl"))
+    l3.metric("Net PnL %", safe_metric(metrics_long, "net_pnl"))
+    l4.metric("Net PnL USD", f"{safe_sum(long_df, 'pnl_usd')} USDT")
 
-    l4, l5 = st.columns(2)
-    l4.metric("Avg Win", safe_metric(metrics_long, "avg_win"))
-    l5.metric("Avg Loss", safe_metric(metrics_long, "avg_loss"))
+    l5, l6 = st.columns(2)
+    l5.metric("Avg Win", safe_metric(metrics_long, "avg_win"))
+    l6.metric("Avg Loss", safe_metric(metrics_long, "avg_loss"))
 
-    l6, l7 = st.columns(2)
-    l6.metric("Expectancy", safe_metric(metrics_long, "expectancy"))
-    l7.metric("Max Drawdown", safe_metric(metrics_long, "max_drawdown"))
+    l7, l8 = st.columns(2)
+    l7.metric("Expectancy", safe_metric(metrics_long, "expectancy"))
+    l8.metric("Max Drawdown", safe_metric(metrics_long, "max_drawdown"))
 
 with col_short:
     st.markdown("## 🔴 SHORT")
 
-    s1, s2, s3 = st.columns(3)
+    s1, s2, s3, s4 = st.columns(4)
     s1.metric("Trades", safe_metric(metrics_short, "trades"))
     s2.metric("Winrate", safe_metric(metrics_short, "winrate", True))
-    s3.metric("Net PnL", safe_metric(metrics_short, "net_pnl"))
+    s3.metric("Net PnL %", safe_metric(metrics_short, "net_pnl"))
+    s4.metric("Net PnL USD", f"{safe_sum(short_df, 'pnl_usd')} USDT")
 
-    s4, s5 = st.columns(2)
-    s4.metric("Avg Win", safe_metric(metrics_short, "avg_win"))
-    s5.metric("Avg Loss", safe_metric(metrics_short, "avg_loss"))
+    s5, s6 = st.columns(2)
+    s5.metric("Avg Win", safe_metric(metrics_short, "avg_win"))
+    s6.metric("Avg Loss", safe_metric(metrics_short, "avg_loss"))
 
-    s6, s7 = st.columns(2)
-    s6.metric("Expectancy", safe_metric(metrics_short, "expectancy"))
-    s7.metric("Max Drawdown", safe_metric(metrics_short, "max_drawdown"))
+    s7, s8 = st.columns(2)
+    s7.metric("Expectancy", safe_metric(metrics_short, "expectancy"))
+    s8.metric("Max Drawdown", safe_metric(metrics_short, "max_drawdown"))
 
 # =========================
 # FORMAT DATES FOR DISPLAY ONLY
@@ -540,6 +587,11 @@ if "entry_ts_dt" in table_df.columns:
 if "entry_distance_pct" in table_df.columns:
     table_df["entry_distance_pct"] = table_df["entry_distance_pct"].map(
         lambda x: f"{x:.4f}%" if pd.notnull(x) else "0.0000%"
+    )
+
+if "pnl" in table_df.columns:
+    table_df["pnl"] = table_df["pnl"].map(
+        lambda x: f"{x:.4f}%" if pd.notnull(x) else "-"
     )
 
 if "trade_duration_min" in table_df.columns:
@@ -569,5 +621,20 @@ if "entry_ts_dt" in df_equity.columns and "pnl" in df_equity.columns:
 
     st.line_chart(
         df_equity.set_index("entry_ts_dt")["equity"],
+        use_container_width=True
+    )
+
+# =========================
+# EQUITY CURVE USD
+# =========================
+if "entry_ts_dt" in df_raw.columns and "pnl_usd" in df_raw.columns:
+    st.markdown("---")
+    st.subheader("💵 Equity Curve USD")
+
+    df_equity_usd = df_raw.copy().sort_values("entry_ts_dt")
+    df_equity_usd["equity_usd"] = df_equity_usd["pnl_usd"].fillna(0).cumsum()
+
+    st.line_chart(
+        df_equity_usd.set_index("entry_ts_dt")["equity_usd"],
         use_container_width=True
     )

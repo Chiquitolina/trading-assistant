@@ -37,12 +37,10 @@ class WSClient:
             try:
                 now = time.time()
 
-                # si estamos reconectando, ejecutar reconexión
                 if self._is_reconnecting:
                     self._reconnect()
                     continue
 
-                # heartbeat: si no llegan mensajes por mucho tiempo, reconectar
                 if self.is_connected and self.last_message_at > 0:
                     if now - self.last_message_at > self.stale_after:
                         print(
@@ -73,37 +71,36 @@ class WSClient:
     def _connect(self):
         print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...")
 
-        # limpiar SIEMPRE cualquier manager previo
         self._stop_ws()
 
         try:
             twm = ThreadedWebsocketManager()
             twm.start()
 
-            for tf in TIMEFRAMES:
-                twm.start_kline_futures_socket(
-                    symbol=SYMBOL.lower(),
-                    interval=tf,
-                    callback=self._handle_message
-                )
+            streams = [
+                f"{SYMBOL.lower()}@kline_{tf}"
+                for tf in TIMEFRAMES
+            ]
 
-            # recién si todo salió bien, asignamos
+            twm.start_multiplex_socket(
+                streams=streams,
+                callback=self._handle_message
+            )
+
             self.twm = twm
 
             self.retries = 0
             self._is_reconnecting = False
 
-            # socket inicializado, pero todavía no confirmado por mensajes reales
             self.is_connected = False
             self.last_message_at = 0.0
 
             print(
-                f"\n\033[94m[WS CLIENT]\033[0m 📡 Futures WS initialized: "
-                f"{SYMBOL} {TIMEFRAMES}\n"
+                f"\n\033[94m[WS CLIENT]\033[0m 📡 Futures WS multiplex initialized: "
+                f"{streams}\n"
             )
 
         except Exception:
-            # importantísimo: limpiar cualquier estado parcial
             self._stop_ws()
             self.is_connected = False
             self.last_message_at = 0.0
@@ -111,18 +108,15 @@ class WSClient:
 
     def _handle_message(self, msg):
         try:
-            # error del socket reportado por la librería
             if isinstance(msg, dict) and msg.get("e") == "error":
                 print(f"\033[94m[WS CLIENT]\033[0m ⚠️ WS error: {msg}")
                 self.is_connected = False
                 self._is_reconnecting = True
                 return
 
-            # heartbeat real
             self.last_message_at = time.time()
             self.is_connected = True
 
-            # pasar mensaje al motor
             self.on_message(msg)
 
         except Exception as e:
@@ -135,7 +129,6 @@ class WSClient:
         self.is_connected = False
         self.last_message_at = 0.0
 
-        # evitar reentradas raras
         self._stop_ws()
 
         self.retries += 1

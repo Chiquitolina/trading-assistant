@@ -41,11 +41,32 @@ class TradeJournal:
                     "fees",
 
                     "exit_reason",
-                    
+
                     "signal_trend",
                     "signal_direction",
                     "signal_momentum",
-                    "signal_atr"
+
+                    # 🔥 NUEVO CONTEXTO
+                    "signal_momentum_prev1",
+                    "signal_momentum_prev2",
+                    "signal_momentum_sequence",
+
+                    "signal_atr",
+
+                    # =========================
+                    # POST ENTRY ANALYSIS
+                    # =========================
+                    "current_trend",
+                    "current_direction",
+                    "current_momentum",
+
+                    "direction_t1",
+                    "momentum_t1",
+
+                    "pnl_t1",
+
+                    "mae",
+                    "mfe"
                 ])
 
     # -------------------------
@@ -72,7 +93,28 @@ class TradeJournal:
         signal_trend,
         signal_direction,
         signal_momentum,
-        signal_atr
+
+        # 🔥 NUEVO CONTEXTO
+        signal_momentum_prev1=None,
+        signal_momentum_prev2=None,
+        signal_momentum_sequence=None,
+
+        signal_atr=None,
+
+        # =========================
+        # POST ENTRY ANALYSIS
+        # =========================
+        current_trend=None,
+        current_direction=None,
+        current_momentum=None,
+
+        direction_t1=None,
+        momentum_t1=None,
+
+        pnl_t1=None,
+
+        mae=None,
+        mfe=None
     ):
 
         with open(self.file_path, "a", newline="", encoding="utf-8") as f:
@@ -102,9 +144,30 @@ class TradeJournal:
                 round(fees, 2),
 
                 exit_reason,
-                
+
                 signal_trend,
                 signal_direction,
                 signal_momentum,
-                signal_atr
+
+                # 🔥 NUEVO CONTEXTO
+                signal_momentum_prev1,
+                signal_momentum_prev2,
+                signal_momentum_sequence,
+
+                signal_atr,
+
+                # =========================
+                # POST ENTRY ANALYSIS
+                # =========================
+                current_trend,
+                current_direction,
+                current_momentum,
+
+                direction_t1,
+                momentum_t1,
+
+                round(pnl_t1, 4) if pnl_t1 is not None else None,
+
+                round(mae, 4) if mae is not None else None,
+                round(mfe, 4) if mfe is not None else None
             ])

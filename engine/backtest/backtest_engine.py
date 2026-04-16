@@ -13,9 +13,13 @@ from signals.strategy.entries import long_setup, short_setup
 from config.strategies.v1 import LONG, SHORT, FEES, BACKTEST
 from ui.trade_formatter import format_trade_timestamps
 
+from signals.state.regime_detector import RegimeDetector
+from signals.state.market_state import MarketStateBuilder
+
+from ta.trend import EMAIndicator
 
 ARG_TZ = "America/Argentina/Cordoba"
-MIN_ATR = 201
+MIN_ATR = 250
 
 
 def align(df, ts):
@@ -142,6 +146,12 @@ def backtest(symbol: str):
 
     df_15m = add_atr(df_15m, period=14)
     df_1h = trend_bias(df_1h)
+    
+    df_1h["ema20"] = EMAIndicator(df_1h["close"], window=20).ema_indicator()
+    df_1h["ema50"] = EMAIndicator(df_1h["close"], window=50).ema_indicator()
+    
+    df_15m["ema20"] = EMAIndicator(df_15m["close"], window=20).ema_indicator()
+    df_15m["ema50"] = EMAIndicator(df_15m["close"], window=50).ema_indicator()
 
     end_ts = df_15m.iloc[-1]["timestamp"]
     start_ts = end_ts - pd.Timedelta(days=BACKTEST["days"])
@@ -155,7 +165,24 @@ def backtest(symbol: str):
 
     trades = []
     all_signals = []
+    market_states = []
 
+    market_state_builder = MarketStateBuilder()
+    regime_state_builder = MarketStateBuilder()
+
+    regime_detector_1h = RegimeDetector(
+        max_states=24,          # bloque máximo: 24 velas 1h
+        min_states=8,           # mínimo: 8 velas 1h para decidir
+        min_shifts=2,
+        fail_rate_threshold=0.50,
+        ema_memory_threshold=0.55,
+        structure_threshold=0.50,
+        regime_confirm_bars=2,
+    )
+
+    last_regime = "UNKNOWN"
+    last_regime_ts = None
+    
     i = start_i
     while i < len(df_15m) - 1:
         signal_ts = df_15m.iloc[i]["timestamp"]
@@ -178,6 +205,49 @@ def backtest(symbol: str):
         direction = trade_direction(df15) or ""
         momentum = momentum_5m(df5)
 
+        # ================================
+        # REGIME 1H
+        # ================================
+        current_1h_ts = df1h.iloc[-1]["timestamp"]
+
+        if last_regime_ts != current_1h_ts:
+            regime_state = regime_state_builder.build(
+                candle=df1h.iloc[-1],
+                trend=trend,
+                direction=direction,
+                momentum=momentum,
+            )
+
+            last_regime = regime_detector_1h.update(regime_state)
+            last_regime_ts = current_1h_ts
+            
+            print(
+                    f"[REGIME 1H] ts={last_regime_ts} "
+                    f"regime={last_regime} "
+                    f"trend={trend} "
+                    f"direction={direction} "
+                    f"momentum={momentum}"
+                )   
+
+        # ================================
+        # MARKET STATE 15M
+        # ================================
+        state = market_state_builder.build(
+            candle=df_15m.iloc[i],
+            trend=trend,
+            direction=direction,
+            momentum=momentum,
+        )
+
+        state["regime"] = last_regime
+        state["regime_tf"] = "1h"
+        state["regime_ts"] = last_regime_ts
+        
+        state["regime_window_max"] = 24
+        state["regime_window_min"] = 8
+
+        market_states.append(state)
+        
         #print("\033[95m[BACKTEST DEBUG]\033[0m 1h candle used:")
         #print(df1h.tail(1)[["timestamp", "open", "high", "low", "close"]])
 
@@ -250,6 +320,9 @@ def backtest(symbol: str):
                     "trend": trend,
                     "direction": direction,
                     "momentum": momentum,
+                    "regime": last_regime,
+                    "regime_tf": "1h",
+                    "regime_ts": last_regime_ts,
                     "atr": round(atr, 3),
                     "atr_bucket": get_atr_bucket(float(atr)),
                 })
@@ -308,6 +381,9 @@ def backtest(symbol: str):
                     "trend": trend,
                     "direction": direction,
                     "momentum": momentum,
+                    "regime": last_regime,
+                    "regime_tf": "1h",
+                    "regime_ts": last_regime_ts,
                     "atr": round(atr, 3),
                     "atr_bucket": get_atr_bucket(float(atr)),
                 })
@@ -317,6 +393,64 @@ def backtest(symbol: str):
                 continue
 
         i += 1
+        
+    # ================================
+    # SAVE MARKET STATES
+    # ================================
+    if market_states:
+        df_states = pd.DataFrame(market_states)
+        df_states["timestamp"] = pd.to_datetime(df_states["timestamp"], utc=True)
+
+        df_states = df_states[df_states["timestamp"] >= start_ts].copy()
+        df_states.sort_values("timestamp", inplace=True)
+
+        # ================================
+        # DEBUG DUPLICADOS ANTES DE GUARDAR
+        # ================================
+        dups = df_states[df_states.duplicated(subset=["timestamp"], keep=False)]
+
+        print("\n==============================")
+        print("[DEBUG] MARKET STATES")
+        print("==============================")
+        print("total rows:", len(df_states))
+        print("unique timestamps:", df_states["timestamp"].nunique())
+        print("duplicated rows:", len(dups))
+
+        if not dups.empty:
+            print("\n[DUPLICATED MARKET STATES]")
+            cols = [
+                "timestamp",
+                "regime",
+                "trend",
+                "direction",
+                "momentum",
+                "close",
+                "ema50",
+            ]
+            cols = [c for c in cols if c in df_states.columns]
+
+            print(dups[cols].to_string(index=False))
+
+        # ================================
+        # ANTI-DUPLICADOS
+        # una sola fila por vela
+        # ================================
+        df_states = (
+            df_states
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .copy()
+        )
+
+        df_states["timestamp"] = (
+            df_states["timestamp"]
+            .dt.tz_convert(ARG_TZ)
+            .dt.tz_localize(None)
+        )
+
+        file_name = f"market_states_{symbol.replace('/', '')}.csv"
+        df_states.to_csv(file_name, index=False)
+
+        print(f"\033[95m[BACKTEST]\033[0m 💾 Saved market states CSV to {file_name}")
 
     if all_signals:
         df_signals = pd.DataFrame(all_signals)
@@ -479,3 +613,4 @@ if not df_trades.empty:
 
     print(summary_combo_atr.to_string(index=False))
     summary_combo_atr.to_csv("combo_atr_performance.csv", index=False)
+    

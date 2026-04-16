@@ -5,7 +5,6 @@ from datetime import datetime
 class DataBuffer:
     def __init__(self, maxlen=300):
 
-        # 🔔 timeframes que cerraron vela (NO se pisan)
         self.closed_tfs = set()
 
         self._last_price = None
@@ -17,14 +16,12 @@ class DataBuffer:
             "1h": deque(maxlen=maxlen),
         }
 
-        # último timestamp almacenado por TF (open time)
         self.last_close_time = {
             "5m": None,
             "15m": None,
             "1h": None,
         }
 
-        # último evento WS cerrado procesado por TF (close time)
         self.last_ws_close_time = {
             "5m": None,
             "15m": None,
@@ -35,33 +32,37 @@ class DataBuffer:
     # WS MESSAGE
     # ==========================================
     def on_ws_message(self, msg):
-        # solo klines de futures
-        if msg.get("e") != "continuous_kline":
+        # ✅ multiplex viene envuelto en {"stream": "...", "data": {...}}
+        if isinstance(msg, dict) and "data" in msg:
+            msg = msg["data"]
+
+        if not isinstance(msg, dict):
+            return
+
+        # ✅ aceptar kline normal/multiplex y continuous_kline
+        if msg.get("e") not in ("continuous_kline", "kline"):
             return
 
         k = msg["k"]
         tf = k["i"]
 
-        # 🔥 último precio SIEMPRE actualizado
         self._last_price = float(k["c"])
         self._last_timestamp = int(k["t"])
 
         if tf not in self.buffers:
             return
 
-        # ⛔ ignorar velas abiertas
         if not k["x"]:
             return
 
         open_time = int(k["t"])
         close_time = int(k["T"])
 
-        # 🔒 evitar duplicados SOLO del WS
         if close_time == self.last_ws_close_time[tf]:
             return
 
         candle = {
-            "timestamp": open_time,  # ✅ open time
+            "timestamp": open_time,
             "open": float(k["o"]),
             "high": float(k["h"]),
             "low": float(k["l"]),
@@ -70,7 +71,6 @@ class DataBuffer:
             "closed_at": datetime.utcfromtimestamp(close_time / 1000),
         }
 
-        # si la última vela histórica/live tiene el mismo open_time, la reemplazamos
         if self.buffers[tf] and self.buffers[tf][-1]["timestamp"] == open_time:
             self.buffers[tf][-1] = candle
         else:
@@ -78,8 +78,6 @@ class DataBuffer:
 
         self.last_close_time[tf] = open_time
         self.last_ws_close_time[tf] = close_time
-
-        # ✅ registrar cierre de TF
         self.closed_tfs.add(tf)
 
         print(f"\033[94m[DATA LAYER]\033[0m🕯️ STORED [{tf}] {candle['close']}")

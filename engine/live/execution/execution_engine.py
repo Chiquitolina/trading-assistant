@@ -9,6 +9,7 @@ from models.position import Position
 from models.trade import Trade
 from services.position_sizer import PositionSizer
 from services.risk_manager import RiskManager
+from binance.exceptions import BinanceAPIException
 class ExecutionEngine:
 
     def __init__(self, exchange, position_manager, symbol="BTCUSDT"):
@@ -76,6 +77,168 @@ class ExecutionEngine:
             "fills": selected,
         }
         
+    def _calc_candles_in_trade(self, current_candle_ts: int, tf_minutes: int = 15) -> int:
+        if not self.position or self.position.entry_candle_ts is None:
+            return 0
+
+        tf_ms = tf_minutes * 60 * 1000
+        diff_ms = current_candle_ts - self.position.entry_candle_ts
+
+        return int(diff_ms // tf_ms) + 1
+    
+    def update_position_context(
+        self,
+        trend: str,
+        direction: str,
+        momentum: str,
+        current_price: float
+    ):
+        if not self.position:
+            return
+
+        pos = self.position
+
+        # ==========================
+        # LIVE MARKET CONTEXT
+        # ==========================
+
+        pos.current_trend = trend
+        pos.current_direction = direction
+        pos.current_momentum = momentum
+
+        # ==========================
+        # CURRENT PNL
+        # ==========================
+
+        if pos.side == "LONG":
+            pnl = (
+                (current_price - pos.real_entry)
+                / pos.real_entry
+            ) * 100
+        else:
+            pnl = (
+                (pos.real_entry - current_price)
+                / pos.real_entry
+            ) * 100
+
+        pnl = round(pnl, 4)
+
+        pos.current_pnl = pnl
+
+        # ==========================
+        # MAE / MFE
+        # ==========================
+
+        pos.mae = min(pos.mae, pnl)
+        pos.mfe = max(pos.mfe, pnl)
+
+        # ==========================
+        # T+1 SNAPSHOT
+        # ==========================
+
+        if (
+            pos.candles_in_trade == 2
+            and pos.momentum_t1 is None
+        ):
+            pos.momentum_t1 = momentum
+            pos.direction_t1 = direction
+            pos.pnl_t1 = pnl
+
+            print(
+                f"\033[96m[POSITION EVOLUTION]\033[0m "
+                f"T+1 snapshot | "
+                f"momentum={momentum} | "
+                f"direction={direction} | "
+                f"pnl={pnl}%"
+            )
+
+        # ==========================
+        # DEBUG
+        # ==========================
+
+        print(
+            f"\033[96m[POSITION CONTEXT]\033[0m "
+            f"side={pos.side} | "
+            f"pnl={pnl}% | "
+            f"mae={pos.mae}% | "
+            f"mfe={pos.mfe}% | "
+            f"trend={trend} | "
+            f"direction={direction} | "
+            f"momentum={momentum}"
+        )
+
+
+    def _on_15m_candle_closed(self, closed_candle_ts: int, close_price: float):
+        if not self.position:
+            return
+
+        prev_candles = self.position.candles_in_trade
+
+        candles = self._calc_candles_in_trade(closed_candle_ts, tf_minutes=15)
+        self.position.candles_in_trade = candles
+
+        # 🔥 SOLO imprime si cambió la vela
+        if candles != prev_candles:
+            print(
+                f"[CANDLE COUNT] {self.position.side} | "
+                f"candles={candles} / max={self.position.plan_max_hold_candles} | "
+                f"entry_ts={self.position.entry_candle_ts} | "
+                f"current_ts={closed_candle_ts}"
+            )
+
+        # 🔴 TIME STOP
+        if candles >= (self.position.plan_max_hold_candles + 1):
+            print(
+                f"[TIME STOP] Closing {self.position.side} | "
+                f"candles={candles}"
+            )
+
+            self.close_position(
+                current_price=close_price,
+                reason="TIME_STOP"
+            )
+            
+    def update_position_risk(self, price: float):
+
+        pos = self.position
+        if not pos:
+            return
+
+        # =========================
+        # PnL actual
+        # =========================
+        pnl = (
+            (price - pos.real_entry) / pos.real_entry * 100
+            if pos.side == "LONG"
+            else (pos.real_entry - price) / pos.real_entry * 100
+        )
+
+        pos.current_pnl = pnl
+
+        # =========================
+        # MAE / MFE
+        # =========================
+        pos.mae = min(pos.mae, pnl)
+        pos.mfe = max(pos.mfe, pnl)
+
+        # =========================
+        # BREAK EVEN RULE
+        # =========================
+        BE_TRIGGER = 0.20
+
+        if pnl < BE_TRIGGER:
+            return
+
+        if pos.side == "LONG":
+            if pos.sl < pos.real_entry:
+                print("[BE] moving SL to entry (LONG)")
+                pos.sl = pos.real_entry
+
+        elif pos.side == "SHORT":
+            if pos.sl > pos.real_entry:
+                print("[BE] moving SL to entry (SHORT)")
+                pos.sl = pos.real_entry
+            
     def _handle_external_close(self, price, timestamp):
         pos = self.position
         if not pos:
@@ -92,14 +255,14 @@ class ExecutionEngine:
             elif price <= pos.sl:
                 reason = "SL"
             else:
-                reason = "UNKNOWN"
+                reason = "MANUAL_CLOSE"
         else:
             if price <= pos.tp:
                 reason = "TP"
             elif price >= pos.sl:
                 reason = "SL"
             else:
-                reason = "UNKNOWN"
+                reason = "MANUAL_CLOSE"
 
         print("\033[94m[SYNC]\033[0m 📊 External close reason: {reason}")
 
@@ -192,24 +355,62 @@ class ExecutionEngine:
         self.journal.log_trade(
             signal_ts=signal_iso,
             signal_price=pos.signal_price,
+
             entry_ts=entry_iso,
             exit_ts=exit_iso,
+
             side=pos.side,
+
             entry=pos.entry_price,
             real_entry=pos.real_entry,
+
             exit_price=price,
             real_exit=real_exit,
+
             tp=pos.tp,
             sl=pos.sl,
+
             pnl=pnl_net,
             pnl_gross=pnl_pct,
             pnl_usd=pnl_usd,
             fees=fees,
+
             exit_reason=reason,
+
+            # ==========================
+            # SIGNAL CONTEXT
+            # ==========================
             signal_trend=ctx.get("trend"),
             signal_direction=ctx.get("direction"),
             signal_momentum=ctx.get("momentum"),
+
+            # 🔥 NUEVO CONTEXTO
+            signal_momentum_prev1=ctx.get("momentum_prev1"),
+            signal_momentum_prev2=ctx.get("momentum_prev2"),
+            signal_momentum_sequence=ctx.get("momentum_sequence"),
+
             signal_atr=ctx.get("atr"),
+
+            # ==========================
+            # LIVE POSITION CONTEXT
+            # ==========================
+            current_trend=pos.current_trend,
+            current_direction=pos.current_direction,
+            current_momentum=pos.current_momentum,
+
+            # ==========================
+            # FIRST POST-ENTRY STATE
+            # ==========================
+            direction_t1=pos.direction_t1,
+            momentum_t1=pos.momentum_t1,
+
+            pnl_t1=pos.pnl_t1,
+
+            # ==========================
+            # TRADE EVOLUTION
+            # ==========================
+            mae=pos.mae,
+            mfe=pos.mfe
         )
 
         self.position = None
@@ -250,166 +451,194 @@ class ExecutionEngine:
             print(f"❌ Error colocando TP/SL: {e}")
             return False
 
-    def execute_plan(self, plan, leverage: int = 2):
-
-        exchange_pos = self.position_manager.sync(plan.symbol)
-
-        if exchange_pos:
-            print("\033[94m[EXECUTION ENGINE]\033[0m ⚠️ Position already open (exchange). Plan ignored.\n")
-            return
+    def execute_plan(self, plan, leverage: int = 3):
 
         try:
-            self.exchange.cancel_all_orders(plan.symbol)
-        except Exception as e:
-            print(f"⚠️ Failed to clean orders: {e}")
-
-        if plan.side not in ("LONG", "SHORT"):
-            return
-
-        side = "BUY" if plan.side == "LONG" else "SELL"
-
-        balance = float(self.exchange.get_balance())
-
-        if balance <= 0:
-            print("❌ No balance")
-            return
-
-        if self.exchange.set_leverage(plan.symbol, leverage) is None:
-            print("❌ Error setting leverage")
-            return
-
-        print(f"✅ Leverage set to {leverage}x")
-
-        price = float(self.exchange.get_price(plan.symbol))
-
-        size_data = self.position_sizer.calculate(
-            balance=balance,
-            price=price,
-            leverage=leverage
-        )
-        
-                # 🔥 👉 ACÁ VA EL DEBUG
-        print(f"""
-        [POSITION SIZER]
-        Balance         : {balance}
-        Price           : {price}
-        Leverage        : {leverage}
-        Quantity        : {size_data['quantity']}
-        Notional        : {size_data['notional']:.2f}
-        Required margin : {size_data['required_margin']:.2f}
-        Usable balance  : {size_data['usable_balance']:.2f}
-        """)
-
-        is_valid, msg = self.position_sizer.validate(size_data)
-
-        if not is_valid:
-            print(msg)
-            return
-
-        quantity = size_data["quantity"]
-
-#        print(f"""
-#        💰 MARGIN DEBUG
-#        Balance           : {balance}
-#        Usable            : {size_data["usable_balance"]}
-#        Price             : {price}
-#        Qty               : {quantity}
-#        Notional real     : {size_data["notional"]}
-#        Leverage          : {leverage}
-#        Required margin   : {size_data["required_margin"]}
-#        Check             : {size_data["usable_balance"] >= size_data["required_margin"]}
-#        """)
-
-#       print(f"✅ Quantity: {quantity}")
-
-        # ==========================
-        # 🚀 ORDER
-        # ==========================
-
-        order = self.exchange.place_market_order(
-            symbol=plan.symbol,
-            side=side,
-            quantity=quantity
-        )
-
-        # 💣 CASO CRÍTICO: timeout Binance
-        if order and order.get("status") == "UNKNOWN":
-
-            print("🔎 Orden en estado desconocido, sincronizando...")
-
-            time.sleep(2)
-
             exchange_pos = self.position_manager.sync(plan.symbol)
 
             if exchange_pos:
-                print("✅ Orden SI se ejecutó (detectado por sync)")
-            else:
-                print("❌ Orden NO ejecutada")
-                return
+                print("\033[94m[EXECUTION ENGINE]\033[0m ⚠️ Position already open (exchange). Plan ignored.\n")
+                return False
 
-        # ❌ fallo real (no UNKNOWN)
-        elif not order:
-            print("❌ Order failed")
-            return
+            try:
+                self.exchange.cancel_all_orders(plan.symbol)
+            except Exception as e:
+                print(f"⚠️ Failed to clean orders: {e}")
 
-        # 🔥 SIEMPRE sync después del order (CLAVE)
-        exchange_pos = self.position_manager.sync(plan.symbol)
+            if plan.side not in ("LONG", "SHORT"):
+                return False
 
-        if not exchange_pos:
-            print("❌ No hay posición después del order, abortando")
-            return
+            side = "BUY" if plan.side == "LONG" else "SELL"
 
-        time.sleep(1.0)
+            balance = float(self.exchange.get_balance())
 
-        pos = self.exchange.get_position(plan.symbol)
+            if balance <= 0:
+                print("❌ No balance")
+                return False
 
-        real_entry = float(pos["entry_price"]) if pos else plan.entry
+            if self.exchange.set_leverage(plan.symbol, leverage) is None:
+                print("❌ Error setting leverage")
+                return False
 
-        # ==========================
-        # 🎯 TP / SL
-        # ==========================
+            print(f"✅ Leverage set to {leverage}x")
 
-        mark_price = float(self.exchange.get_mark_price(plan.symbol))
+            price = float(self.exchange.get_price(plan.symbol))
 
-        tp_price, sl_price = self.risk_manager.calculate_tp_sl(
-            plan=plan,
-            real_entry=real_entry,
-            mark_price=mark_price
-        )
+            size_data = self.position_sizer.calculate(
+                balance=balance,
+                price=price,
+                leverage=leverage
+            )
 
-        tp_side = "SELL" if side == "BUY" else "BUY"
+            print(f"""
+    [POSITION SIZER]
+    Balance         : {balance}
+    Price           : {price}
+    Leverage        : {leverage}
+    Quantity        : {size_data['quantity']}
+    Notional        : {size_data['notional']:.2f}
+    Required margin : {size_data['required_margin']:.2f}
+    Usable balance  : {size_data['usable_balance']:.2f}
+    """)
 
-        self._place_tp_sl(
-            symbol=plan.symbol,
-            quantity=quantity,  # 🔥 ESTE ES EL CAMBIO
-            tp_side=tp_side,
-            tp_price=tp_price,
-            sl_side=tp_side,
-            sl_price=sl_price
-        )
+            is_valid, msg = self.position_sizer.validate(size_data)
 
-        # ==========================
-        # 📈 SAVE POSITION
-        # ==========================
+            if not is_valid:
+                print(msg)
+                return False
 
-        self.position = Position(
-            symbol=plan.symbol,
-            side=plan.side,
-            quantity=quantity,
-            entry_price=self._apply_slippage(plan.entry, plan.side, True),
-            real_entry=real_entry,
-            tp=tp_price,
-            sl=sl_price,
-            entry_ts=int(time.time() * 1000),
-            signal_price=float(plan.signal_price),
-            signal_ts=int(plan.signal_ts),
-            
-            signal_context=plan.signal_context
-            
-        )
+            quantity = size_data["quantity"]
 
-        
-        print(f"""
+            # colchón extra para evitar órdenes demasiado al límite
+            required_margin = float(size_data["required_margin"])
+            usable_balance = float(size_data["usable_balance"])
+
+            if required_margin > usable_balance * 0.95:
+                print(
+                    f"⚠️ Margin too tight. "
+                    f"required={required_margin:.2f} usable={usable_balance:.2f}. Trade skipped."
+                )
+                return False
+
+            # ==========================
+            # 🚀 ORDER
+            # ==========================
+            try:
+                order = self.exchange.place_market_order(
+                    symbol=plan.symbol,
+                    side=side,
+                    quantity=quantity
+                )
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -2019 or "Margin is insufficient" in str(e):
+                    print("❌ Margin insufficient. Trade skipped. Engine continues running.")
+                    return False
+
+                if getattr(e, "code", None) == -1007:
+                    print("⚠️ Binance timeout / UNKNOWN status while placing order. Syncing position...")
+                    time.sleep(2)
+
+                    exchange_pos = self.position_manager.sync(plan.symbol)
+                    if exchange_pos:
+                        print("✅ Position detected after timeout sync")
+                        order = {"status": "FILLED_AFTER_SYNC"}
+                    else:
+                        print("❌ No position found after timeout sync")
+                        return False
+                else:
+                    print(f"❌ Binance API error placing market order: {e}")
+                    return False
+
+            except Exception as e:
+                print(f"❌ Unexpected error placing market order: {e}")
+                return False
+
+            # 💣 CASO CRÍTICO: timeout Binance
+            if order and order.get("status") == "UNKNOWN":
+
+                print("🔎 Orden en estado desconocido, sincronizando...")
+
+                time.sleep(2)
+
+                exchange_pos = self.position_manager.sync(plan.symbol)
+
+                if exchange_pos:
+                    print("✅ Orden SI se ejecutó (detectado por sync)")
+                else:
+                    print("❌ Orden NO ejecutada")
+                    return False
+
+            elif not order:
+                print("❌ Order failed")
+                return False
+
+            # 🔥 SIEMPRE sync después del order
+            exchange_pos = self.position_manager.sync(plan.symbol)
+
+            if not exchange_pos:
+                print("❌ No hay posición después del order, abortando")
+                return False
+
+            time.sleep(1.0)
+
+            pos = self.exchange.get_position(plan.symbol)
+            real_entry = float(pos["entry_price"]) if pos else plan.entry
+
+            # ==========================
+            # 🎯 TP / SL
+            # ==========================
+            mark_price = float(self.exchange.get_mark_price(plan.symbol))
+
+            tp_price, sl_price = self.risk_manager.calculate_tp_sl(
+                plan=plan,
+                real_entry=real_entry,
+                mark_price=mark_price
+            )
+
+            tp_side = "SELL" if side == "BUY" else "BUY"
+
+            tp_sl_ok = self._place_tp_sl(
+                symbol=plan.symbol,
+                quantity=quantity,
+                tp_side=tp_side,
+                tp_price=tp_price,
+                sl_side=tp_side,
+                sl_price=sl_price
+            )
+
+            if not tp_sl_ok:
+                print("⚠️ TP/SL placement failed, but engine continues.")
+                # no rompemos el engine
+                # podés decidir si querés cerrar mercado acá o dejar sync manual
+                # return False
+                
+            TF_MS = 15 * 60 * 1000
+            entry_candle_ts = int(plan.signal_ts + TF_MS)
+
+            # ==========================
+            # 📈 SAVE POSITION
+            # ==========================
+            self.position = Position(
+                symbol=plan.symbol,
+                side=plan.side,
+                quantity=quantity,
+                entry_price=self._apply_slippage(plan.entry, plan.side, True),
+                real_entry=real_entry,
+                tp=tp_price,
+                sl=sl_price,
+                entry_ts=int(time.time() * 1000),
+                signal_price=float(plan.signal_price),
+                signal_ts=int(plan.signal_ts),
+                signal_context=plan.signal_context,
+                
+                current_momentum=plan.signal_context.get("momentum"),
+                current_direction=plan.signal_context.get("direction"),
+                
+                plan_max_hold_candles=int(plan.max_hold_candles),
+                entry_candle_ts=int(entry_candle_ts),
+                candles_in_trade=1
+            )
+            print(f"""
     \033[94m[EXECUTION ENGINE]\033[0m
     📈 POSITION OPENED
     Symbol       : {plan.symbol}
@@ -422,6 +651,11 @@ class ExecutionEngine:
     SL           : {sl_price:.2f}
     """)
 
+            return True
+
+        except Exception as e:
+            print(f"\033[94m[EXECUTION ENGINE]\033[0m ❌ execute_plan crashed safely: {e}")
+            return False
     # ==========================
     # 🔄 PRICE UPDATE
     # ==========================
@@ -437,6 +671,12 @@ class ExecutionEngine:
 
         if not self.position:
             return
+        
+    
+        # ==========================
+        # 🧠 RISK ENGINE (AQUÍ)
+        # ==========================
+        self.update_position_risk(price)
 
     # ==========================
     # ❌ CLOSE
@@ -494,26 +734,63 @@ class ExecutionEngine:
         self.journal.log_trade(
             signal_ts=signal_iso,
             signal_price=pos.signal_price,
+
             entry_ts=entry_iso,
             exit_ts=exit_iso,
+
             side=pos.side,
+
             entry=pos.entry_price,
             real_entry=pos.real_entry,
-            exit_price=price_with_slippage,
+
+            exit_price=price,
             real_exit=real_exit,
+
             tp=pos.tp,
             sl=pos.sl,
+
             pnl=pnl_net,
-            pnl_gross=pnl_gross,
+            pnl_gross=pnl_pct,
+            pnl_usd=pnl_usd,
             fees=fees,
+
             exit_reason=reason,
-            
-             # 🧠 CONTEXTO
+
+            # ==========================
+            # SIGNAL CONTEXT
+            # ==========================
             signal_trend=ctx.get("trend"),
             signal_direction=ctx.get("direction"),
             signal_momentum=ctx.get("momentum"),
-            signal_atr=ctx.get("atr")
-            )
+
+            # 🔥 NUEVO CONTEXTO
+            signal_momentum_prev1=ctx.get("momentum_prev1"),
+            signal_momentum_prev2=ctx.get("momentum_prev2"),
+            signal_momentum_sequence=ctx.get("momentum_sequence"),
+
+            signal_atr=ctx.get("atr"),
+
+            # ==========================
+            # LIVE POSITION CONTEXT
+            # ==========================
+            current_trend=pos.current_trend,
+            current_direction=pos.current_direction,
+            current_momentum=pos.current_momentum,
+
+            # ==========================
+            # FIRST POST-ENTRY STATE
+            # ==========================
+            direction_t1=pos.direction_t1,
+            momentum_t1=pos.momentum_t1,
+
+            pnl_t1=pos.pnl_t1,
+
+            # ==========================
+            # TRADE EVOLUTION
+            # ==========================
+            mae=pos.mae,
+            mfe=pos.mfe
+        )
 
         self.position = None
 
@@ -532,21 +809,77 @@ class ExecutionEngine:
             print("\033[94m[SYNC]\033[0m ℹ️ No position to restore.")
             return
 
+        # ==========================
+        # REAL POSITION DATA
+        # ==========================
+        entry_price = float(state["entry_price"])
+        quantity = float(state["quantity"])
+        side = state["side"]
+
+        tp = state.get("tp")
+        sl = state.get("sl")
+
+        # ==========================
+        # REBUILD TP / SL IF MISSING
+        # ==========================
+        if not tp or not sl:
+            print("\033[94m[SYNC]\033[0m ⚠️ TP/SL missing → rebuilding from position entry price")
+
+            mark_price = float(self.exchange.get_mark_price(symbol))
+
+            tp, sl = self.risk_manager.calculate_tp_sl_from_position(
+                side=side,
+                entry_price=entry_price,
+                mark_price=mark_price
+            )
+
+            tp_side = "SELL" if side == "LONG" else "BUY"
+
+            tp_sl_ok = self._place_tp_sl(
+                symbol=symbol,
+                quantity=quantity,
+                tp_side=tp_side,
+                tp_price=tp,
+                sl_side=tp_side,
+                sl_price=sl
+            )
+
+            if not tp_sl_ok:
+                print("\033[94m[SYNC]\033[0m ❌ Could not rebuild TP/SL")
+            else:
+                print("\033[94m[SYNC]\033[0m ✅ TP/SL rebuilt successfully")
+
+        else:
+            tp = float(tp)
+            sl = float(sl)
+            print("\033[94m[SYNC]\033[0m ✅ Existing TP/SL found")
+
+        # ==========================
+        # RESTORE LOCAL POSITION
+        # ==========================
         self.position = Position(
-            symbol=state["symbol"],
-            side=state["side"],
-            quantity=state["quantity"],
-            entry_price=state["entry_price"],
-            real_entry=state["entry_price"],
-            tp=state["tp"],
-            sl=state["sl"],
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            entry_price=entry_price,
+            real_entry=entry_price,
+            tp=float(tp),
+            sl=float(sl),
             entry_ts=int(time.time() * 1000),
-            signal_price=state["entry_price"],
+            signal_price=entry_price,
             signal_ts=int(time.time() * 1000),
             signal_context=None
         )
 
-        print("\033[94m[SYNC]\033[0m 🔁 Position restored")
+        print(f"""
+    \033[94m[SYNC]\033[0m 🔁 POSITION RESTORED
+    Symbol   : {symbol}
+    Side     : {side}
+    Quantity : {quantity}
+    Entry    : {entry_price}
+    TP       : {tp}
+    SL       : {sl}
+    """)
 
     def check_exchange_close(self, symbol):
 

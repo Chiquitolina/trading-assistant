@@ -21,6 +21,8 @@ class TradePlan:
     
     # 🆕 contexto de señal (seguro y escalable)
     signal_context: Dict[str, Any] = field(default_factory=dict)
+    
+    max_hold_candles: int = 10
 
     def pretty(self):
         ctx = self.signal_context or {}
