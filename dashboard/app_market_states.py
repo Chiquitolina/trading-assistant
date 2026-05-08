@@ -5,6 +5,19 @@ import pandas as pd
 import streamlit as st
 from streamlit_lightweight_charts import renderLightweightCharts
 
+from dashboard.edge_analysis import (
+    direction_performance,
+    momentum_performance,
+    trend_performance,
+    shift_performance,
+    shift_frequency,
+    combined_signal_performance,
+    regime_summary,
+    regime_shift_performance,
+    regime_momentum_performance,
+    regime_combo_performance,
+)
+
 
 # =========================
 # CONFIG
@@ -18,6 +31,13 @@ from config.strategies.v1 import BACKTEST  # noqa
 SYMBOL = "BTCUSDT"
 FETCH_SYMBOL = "BTC/USDT"
 
+SHIFT_TYPES = [
+    "bullish_value_shift",
+    "bullish_extreme_shift",
+    "bearish_value_shift",
+    "bearish_extreme_shift",
+]
+
 STATES_FILE = BASE_DIR / f"market_states_{SYMBOL}.csv"
 
 st.set_page_config(
@@ -26,6 +46,7 @@ st.set_page_config(
 )
 
 st.title("📈 Market State Chart")
+
 
 def add_momentum_stats(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -109,8 +130,8 @@ def add_direction_stats(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[idx, "fe_pct"] = round(fe, 3)
         df.loc[idx, "ae_pct"] = round(ae, 3)
         df.loc[idx, "direction_window_bars"] = len(future)
-
     return df
+
 
 def add_trend_stats(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -168,6 +189,50 @@ def add_trend_stats(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[idx, "trend_window_bars"] = len(future)
 
     return df
+
+
+def add_shift_stats(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    if "trend_shift" not in df.columns:
+        df["trend_shift"] = "no_shift"
+
+    df["shift_fe_pct"] = pd.NA
+    df["shift_ae_pct"] = pd.NA
+    df["shift_window_bars"] = pd.NA
+
+    idxs = df.index[df["trend_shift"].isin(SHIFT_TYPES)].tolist()
+    
+    for idx in idxs:
+        shift = df.loc[idx, "trend_shift"]
+        entry = float(df.loc[idx, "close"])
+
+        next_idx = min(idx + 20, len(df) - 1)
+        future = df.loc[idx:next_idx]
+
+        if len(future) < 2:
+            continue
+
+        max_price = future["high"].max()
+        min_price = future["low"].min()
+
+        if str(shift).startswith("bullish"):
+            fe = (max_price - entry) / entry * 100
+            ae = (entry - min_price) / entry * 100
+
+        elif str(shift).startswith("bearish"):
+            fe = (entry - min_price) / entry * 100
+            ae = (max_price - entry) / entry * 100
+
+        else:
+            continue
+
+        df.loc[idx, "shift_fe_pct"] = round(fe, 3)
+        df.loc[idx, "shift_ae_pct"] = round(ae, 3)
+        df.loc[idx, "shift_window_bars"] = len(future)
+
+    return df
+
 
 def marker_time_for_chart(state_ts: pd.Timestamp, tf: str) -> int:
     if tf == "1h":
@@ -235,10 +300,34 @@ def get_momentum_marker(momentum: str):
 
     return {"label": "M?", "color": "#b0bec5", "position": "aboveBar"}
 
+def get_regime_marker(regime: str):
+    regime = str(regime)
 
-@st.cache_data(ttl=300)
-def load_chart_data(symbol: str, tf: str, days: int):
-    df = fetch_history(symbol, tf, days)
+    if regime == "SELL_RIPS":
+        return {"label": "SELL RIPS", "color": "#ff1744", "position": "aboveBar"}
+
+    if regime == "BUY_DIPS":
+        return {"label": "BUY DIPS", "color": "#00e676", "position": "belowBar"}
+
+    if regime == "CHOP":
+        return {"label": "CHOP", "color": "#ffd54f", "position": "aboveBar"}
+
+    if regime == "MIXED":
+        return {"label": "MIXED", "color": "#b0bec5", "position": "aboveBar"}
+
+    return {"label": "UNKNOWN", "color": "#78909c", "position": "aboveBar"}
+
+CHART_CACHE_DIR = BASE_DIR / "data" / "chart_cache"
+
+@st.cache_data(show_spinner="Cargando velas locales...")
+def load_chart_data_from_csv(tf: str):
+    path = CHART_CACHE_DIR / f"{SYMBOL}_{tf}.csv"
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    df = pd.read_csv(path)
+
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
     df["timestamp"] = (
@@ -249,7 +338,6 @@ def load_chart_data(symbol: str, tf: str, days: int):
 
     return df.sort_values("timestamp").reset_index(drop=True)
 
-
 # =========================
 # LOAD MARKET STATES
 # =========================
@@ -257,17 +345,42 @@ if not STATES_FILE.exists():
     st.error(f"No existe el archivo: {STATES_FILE}")
     st.stop()
 
-df_states = pd.read_csv(STATES_FILE)
+@st.cache_data(show_spinner="Procesando market states...")
+def load_processed_states(states_file: str):
+    df = pd.read_csv(states_file)
+
+    if df.empty:
+        return df
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    df = add_direction_stats(df)
+    df = add_trend_stats(df)
+    df = add_momentum_stats(df)
+    df = add_shift_stats(df)
+
+    if "regime" not in df.columns:
+        df["regime"] = "UNKNOWN"
+
+    df["regime_changed"] = df["regime"] != df["regime"].shift(1)
+    df.loc[df.index[0], "regime_changed"] = False
+
+    df["time"] = df["timestamp"].astype("int64") // 10**9
+
+    return df
+
+df_states = load_processed_states(str(STATES_FILE))
 
 if df_states.empty:
     st.warning("El archivo market_states está vacío.")
     st.stop()
 
-df_states["timestamp"] = pd.to_datetime(df_states["timestamp"])
-df_states = df_states.sort_values("timestamp").reset_index(drop=True)
-df_states = add_direction_stats(df_states)
-df_states = add_trend_stats(df_states)
-df_states = add_momentum_stats(df_states)
+if "regime" not in df_states.columns:
+    df_states["regime"] = "UNKNOWN"
+
+df_states["regime_changed"] = df_states["regime"] != df_states["regime"].shift(1)
+df_states.loc[df_states.index[0], "regime_changed"] = False
 
 # =========================
 # SIDEBAR CONTROLS
@@ -276,15 +389,17 @@ st.sidebar.title("⚙️ Visualización")
 
 chart_tf = st.sidebar.selectbox(
     "Chart timeframe",
-    ["15m", "5m", "1h"],
+    ["15m", "5m", "1h", "4h", "1d"],
     index=0
 )
 
-show_trend = st.sidebar.checkbox("Trend changes 1h", value=True)
-show_direction = st.sidebar.checkbox("Direction changes 15m", value=True)
+show_trend = st.sidebar.checkbox("Trend changes 1h", value=False)
+show_shift = st.sidebar.checkbox("Trend Shift", value=False)
+show_regime = st.sidebar.checkbox("Regime changes", value=True)
+show_direction = st.sidebar.checkbox("Direction changes 15m", value=False)
 show_direction_stats = st.sidebar.checkbox(
     "Mostrar FE/AE en Direction",
-    value=True
+    value=False
 )
 show_momentum = st.sidebar.checkbox("Momentum 5m", value=False)
 
@@ -318,6 +433,12 @@ if show_momentum:
 st.sidebar.markdown("---")
 st.sidebar.write("Tip: activá solo una capa a la vez para debuggear.")
 
+# =========================
+# EMA OPTIONS
+# =========================
+show_ema20 = st.sidebar.checkbox("EMA 20", value=False)
+show_ema50 = st.sidebar.checkbox("EMA 50", value=True)
+
 
 # =========================
 # LOAD CHART CANDLES
@@ -327,8 +448,8 @@ days = BACKTEST["days"] + BACKTEST["warmup"]
 if chart_tf == "15m":
     df_chart = df_states[["timestamp", "open", "high", "low", "close"]].copy()
 else:
-    df_chart = load_chart_data(FETCH_SYMBOL, chart_tf, days)
-
+    df_chart = load_chart_data_from_csv(chart_tf)
+    
 if df_chart.empty:
     st.warning("No hay velas para mostrar.")
     st.stop()
@@ -336,6 +457,13 @@ if df_chart.empty:
 df_chart["time"] = df_chart["timestamp"].astype("int64") // 10**9
 df_states["time"] = df_states["timestamp"].astype("int64") // 10**9
 
+from ta.trend import EMAIndicator
+
+if show_ema20:
+    df_chart["ema20"] = EMAIndicator(df_chart["close"], window=20).ema_indicator()
+
+if show_ema50:
+    df_chart["ema50"] = EMAIndicator(df_chart["close"], window=50).ema_indicator()
 
 # =========================
 # FILTER SAME RANGE
@@ -368,106 +496,126 @@ for _, row in df_chart.iterrows():
     })
 
 
-# =========================
-# MARKERS
-# =========================
-markers = []
+@st.cache_data(show_spinner="Construyendo markers...")
+def build_markers(
+    df_states,
+    valid_chart_times,
+    chart_tf,
+    show_trend,
+    show_shift,
+    show_regime,
+    show_direction,
+    show_direction_stats,
+    show_momentum,
+    selected_momentums,
+):
+    markers = []
 
-valid_chart_times = set(df_chart["time"].astype(int).tolist())
+    def add_marker(time, position, shape, color, text):
+        markers.append({
+            "time": int(time),
+            "position": position,
+            "shape": shape,
+            "color": color,
+            "text": text,
+        })
 
-for _, row in df_states.iterrows():
-    state_ts = row["timestamp"]
-    time = marker_time_for_chart(state_ts, chart_tf)
+    valid_chart_times = set(valid_chart_times)
+    selected_momentums = set(selected_momentums)
 
-    if time not in valid_chart_times:
-        continue
+    for _, row in df_states.iterrows():
+        state_ts = row["timestamp"]
+        time = marker_time_for_chart(state_ts, chart_tf)
 
-    # ======================
-    # TREND CHANGES
-    # ======================
-    if show_trend and bool(row["trend_changed"]):
-        trend = row["trend_1h"]
+        if time not in valid_chart_times:
+            continue
 
-        if trend == "bullish":
-            add_marker(time, "belowBar", "arrowUp", "#26a69a", "Trend ↑")
+        if show_trend and bool(row["trend_changed"]):
+            trend = row["trend_1h"]
 
-        elif trend == "bearish":
-            add_marker(time, "aboveBar", "arrowDown", "#ef5350", "Trend ↓")
+            if trend == "bullish":
+                add_marker(time, "belowBar", "arrowUp", "#26a69a", "Trend ↑")
+            elif trend == "bearish":
+                add_marker(time, "aboveBar", "arrowDown", "#ef5350", "Trend ↓")
+            else:
+                add_marker(time, "aboveBar", "circle", "#b0bec5", "Trend →")
 
-        else:
-            add_marker(time, "aboveBar", "circle", "#b0bec5", "Trend →")
+        if show_shift and row.get("trend_shift", "no_shift") != "no_shift":
+            shift = row["trend_shift"]
 
-    # ======================
-    # DIRECTION CHANGES + STATS
-    # ======================
-    if show_direction and bool(row["direction_changed"]):
-        direction = row["direction_15m"]
+            if str(shift).startswith("bullish"):
+                label = "E SHIFT ↑" if "extreme" in shift else "SHIFT ↑"
+                add_marker(row["time"], "belowBar", "arrowUp", "green", label)
 
-        fe = row.get("fe_pct")
-        ae = row.get("ae_pct")
+            elif str(shift).startswith("bearish"):
+                label = "E SHIFT ↓" if "extreme" in shift else "SHIFT ↓"
+                add_marker(row["time"], "aboveBar", "arrowDown", "red", label)
 
-        stats_txt = ""
-        if show_direction_stats and pd.notna(fe) and pd.notna(ae):
-            stats_txt = f" FE {float(fe):.2f}% / AE {float(ae):.2f}%"
+        if show_regime and bool(row.get("regime_changed", False)):
+            regime = row.get("regime", "UNKNOWN")
 
-        if direction == "up":
+            if regime != "UNKNOWN":
+                marker = get_regime_marker(regime)
+                add_marker(
+                    time,
+                    marker["position"],
+                    "circle",
+                    marker["color"],
+                    marker["label"],
+                )
+
+        if show_direction and bool(row["direction_changed"]):
+            direction = row["direction_15m"]
+
+            fe = row.get("fe_pct")
+            ae = row.get("ae_pct")
+
+            stats_txt = ""
+            if show_direction_stats and pd.notna(fe) and pd.notna(ae):
+                stats_txt = f" FE {float(fe):.2f}% / AE {float(ae):.2f}%"
+
+            if direction == "up":
+                add_marker(time, "belowBar", "circle", "#00c853", f"Dir ↑{stats_txt}")
+            elif direction == "down":
+                add_marker(time, "aboveBar", "circle", "#ff1744", f"Dir ↓{stats_txt}")
+            else:
+                add_marker(time, "aboveBar", "circle", "#ffd54f", f"Dir →{stats_txt}")
+
+        momentum = str(row["momentum_5m"])
+
+        if show_momentum and momentum in selected_momentums:
+            marker = get_momentum_marker(momentum)
             add_marker(
-                time=time,
-                position="belowBar",
-                shape="circle",
-                color="#00c853",
-                text=f"Dir ↑{stats_txt}",
+                time,
+                marker["position"],
+                "circle",
+                marker["color"],
+                marker["label"],
             )
 
-        elif direction == "down":
-            add_marker(
-                time=time,
-                position="aboveBar",
-                shape="circle",
-                color="#ff1744",
-                text=f"Dir ↓{stats_txt}",
-            )
+    unique_markers = []
+    seen = set()
 
-        else:
-            add_marker(
-                time=time,
-                position="aboveBar",
-                shape="circle",
-                color="#ffd54f",
-                text=f"Dir →{stats_txt}",
-            )
+    for marker in markers:
+        key = (marker["time"], marker["text"])
+        if key not in seen:
+            unique_markers.append(marker)
+            seen.add(key)
 
-    # ======================
-    # MOMENTUM STATES
-    # ======================
-    momentum = str(row["momentum_5m"])
+    return unique_markers
 
-    if show_momentum and momentum in selected_momentums:
-        marker = get_momentum_marker(momentum)
-
-        add_marker(
-            time=time,
-            position=marker["position"],
-            shape="circle",
-            color=marker["color"],
-            text=marker["label"],
-        )
-
-
-# =========================
-# REMOVE DUPLICATE MARKERS SAME TIME/TEXT
-# =========================
-unique_markers = []
-seen = set()
-
-for marker in markers:
-    key = (marker["time"], marker["text"])
-    if key not in seen:
-        unique_markers.append(marker)
-        seen.add(key)
-
-markers = unique_markers
-
+markers = build_markers(
+    df_states=df_states,
+    valid_chart_times=df_chart["time"].astype(int).tolist(),
+    chart_tf=chart_tf,
+    show_trend=show_trend,
+    show_shift=show_shift,
+    show_regime=show_regime,
+    show_direction=show_direction,
+    show_direction_stats=show_direction_stats,
+    show_momentum=show_momentum,
+    selected_momentums=selected_momentums,
+)
 
 # =========================
 # CHART OPTIONS
@@ -511,6 +659,42 @@ series = [
     }
 ]
 
+# =========================
+# EMA SERIES
+# =========================
+
+if show_ema20:
+    ema20_data = [
+        {"time": int(row["time"]), "value": float(row["ema20"])}
+        for _, row in df_chart.iterrows()
+        if pd.notna(row.get("ema20"))
+    ]
+
+    series.append({
+        "type": "Line",
+        "data": ema20_data,
+        "options": {
+            "color": "#00e5ff",
+            "lineWidth": 1,
+        },
+    })
+
+if show_ema50:
+    ema50_data = [
+        {"time": int(row["time"]), "value": float(row["ema50"])}
+        for _, row in df_chart.iterrows()
+        if pd.notna(row.get("ema50"))
+    ]
+
+    series.append({
+        "type": "Line",
+        "data": ema50_data,
+        "options": {
+            "color": "#ff9800",
+            "lineWidth": 2,
+        },
+    })
+
 
 # =========================
 # RENDER
@@ -525,7 +709,7 @@ renderLightweightCharts([
         "chart": chart_options,
         "series": series,
     }
-], key=f"market_states_chart_{chart_tf}_{show_trend}_{show_direction}_{show_direction_stats}_{show_momentum}_{'_'.join(selected_momentums)}")
+], key=f"market_states_chart_{chart_tf}_{show_trend}_{show_shift}_{show_regime}_{show_direction}_{show_direction_stats}_{show_momentum}_{show_ema20}_{show_ema50}_{'_'.join(selected_momentums)}")
 
 
 # =========================
@@ -534,101 +718,37 @@ renderLightweightCharts([
 if show_direction:
     st.markdown("### 📊 Direction Performance")
 
-    direction_changes = df_states[
-        (df_states["direction_changed"] == True) &
-        (df_states["direction_15m"].isin(["up", "down"])) &
-        (df_states["fe_pct"].notna()) &
-        (df_states["ae_pct"].notna())
-    ].copy()
+    summary = direction_performance(df_states)
 
-    if not direction_changes.empty:
-        summary = (
-            direction_changes
-            .groupby("direction_15m")
-            .agg(
-                signals=("direction_15m", "count"),
-                avg_fe_pct=("fe_pct", "mean"),
-                avg_ae_pct=("ae_pct", "mean"),
-                max_fe_pct=("fe_pct", "max"),
-                max_ae_pct=("ae_pct", "max"),
-                avg_window_bars=("direction_window_bars", "mean"),
-            )
-            .reset_index()
-        )
-
-        summary["avg_fe_pct"] = summary["avg_fe_pct"].astype(float).round(3)
-        summary["avg_ae_pct"] = summary["avg_ae_pct"].astype(float).round(3)
-        summary["max_fe_pct"] = summary["max_fe_pct"].astype(float).round(3)
-        summary["max_ae_pct"] = summary["max_ae_pct"].astype(float).round(3)
-        summary["avg_window_bars"] = summary["avg_window_bars"].astype(float).round(2)
-
+    if not summary.empty:
         st.dataframe(summary, use_container_width=True)
     else:
         st.info("No hay suficientes cambios de direction para calcular estadísticas.")
-        
+
+
+# =========================
+# MOMENTUM PERFORMANCE SUMMARY
+# =========================
 if show_momentum:
     st.markdown("### 📊 Momentum Performance")
 
-    mom_changes = df_states[
-        df_states["mom_fe_pct"].notna()
-    ].copy()
+    summary = momentum_performance(df_states)
 
-    if not mom_changes.empty:
-        summary = (
-            mom_changes
-            .groupby("momentum_5m")
-            .agg(
-                signals=("momentum_5m", "count"),
-                avg_fe=("mom_fe_pct", "mean"),
-                avg_ae=("mom_ae_pct", "mean"),
-                max_fe=("mom_fe_pct", "max"),
-                max_ae=("mom_ae_pct", "max"),
-            )
-            .reset_index()
-        )
-
-        # opcional: formatear
-        summary["avg_fe"] = summary["avg_fe"].round(3)
-        summary["avg_ae"] = summary["avg_ae"].round(3)
-
+    if not summary.empty:
         st.dataframe(summary, use_container_width=True)
     else:
         st.info("No hay datos de momentum para mostrar.")
-        
+
+
 # =========================
 # TREND PERFORMANCE SUMMARY
 # =========================
 if show_trend:
     st.markdown("### 📊 Trend Performance")
 
-    trend_changes = df_states[
-        (df_states["trend_changed"] == True) &
-        (df_states["trend_1h"].isin(["bullish", "bearish", "neutral"])) &
-        (df_states["trend_fe_pct"].notna()) &
-        (df_states["trend_ae_pct"].notna())
-    ].copy()
+    summary = trend_performance(df_states)
 
-    if not trend_changes.empty:
-        summary = (
-            trend_changes
-            .groupby("trend_1h")
-            .agg(
-                signals=("trend_1h", "count"),
-                avg_fe_pct=("trend_fe_pct", "mean"),
-                avg_ae_pct=("trend_ae_pct", "mean"),
-                max_fe_pct=("trend_fe_pct", "max"),
-                max_ae_pct=("trend_ae_pct", "max"),
-                avg_window_bars=("trend_window_bars", "mean"),
-            )
-            .reset_index()
-        )
-
-        summary["avg_fe_pct"] = summary["avg_fe_pct"].astype(float).round(3)
-        summary["avg_ae_pct"] = summary["avg_ae_pct"].astype(float).round(3)
-        summary["max_fe_pct"] = summary["max_fe_pct"].astype(float).round(3)
-        summary["max_ae_pct"] = summary["max_ae_pct"].astype(float).round(3)
-        summary["avg_window_bars"] = summary["avg_window_bars"].astype(float).round(2)
-
+    if not summary.empty:
         st.caption(
             "Para bullish/bearish: FE = movimiento a favor, AE = movimiento en contra. "
             "Para neutral: FE = rango total, AE = desplazamiento del cierre."
@@ -637,6 +757,41 @@ if show_trend:
         st.dataframe(summary, use_container_width=True)
     else:
         st.info("No hay suficientes cambios de trend para calcular estadísticas.")
+
+
+# =========================
+# SHIFT PERFORMANCE SUMMARY
+# =========================
+if show_shift:
+    st.markdown("### 📊 Trend Shift Performance")
+
+    summary = shift_performance(df_states)
+
+    if not summary.empty:
+        st.dataframe(summary, use_container_width=True)
+    else:
+        st.info("No hay suficientes shifts para calcular estadísticas.")
+
+
+# =========================
+# SHIFT FREQUENCY ANALYSIS
+# =========================
+if show_shift:
+    st.markdown("### ⏱️ Shift Frequency")
+
+    summary = shift_frequency(df_states)
+
+    if not summary.empty:
+        st.dataframe(summary, use_container_width=True)
+
+        st.caption(
+            "Cuántas velas pasan entre shifts. "
+            "Muy bajo = demasiados shifts (ruido). "
+            "Muy alto = llega tarde."
+        )
+    else:
+        st.info("No hay suficientes shifts para analizar frecuencia.")
+
 
 # =========================
 # MOMENTUM LEGEND
@@ -662,36 +817,64 @@ if show_momentum:
 | INSIDE | Inside bar / compresión |
 | IND | Indecisión |
 """)
-    
-    st.markdown("### 📊 Combined Signal Performance")
 
-combo = df_states[
-    (df_states["mom_fe_pct"].notna()) &
-    (df_states["trend_1h"].notna()) &
-    (df_states["direction_15m"].notna())
-].copy()
 
-summary = (
-    combo
-    .groupby(["trend_1h", "direction_15m", "momentum_5m"])
-    .agg(
-        signals=("momentum_5m", "count"),
-        avg_fe=("mom_fe_pct", "mean"),
-        avg_ae=("mom_ae_pct", "mean"),
-    )
-    .reset_index()
-)
+# =========================
+# COMBINED SIGNAL PERFORMANCE
+# =========================
+st.markdown("### 📊 Combined Signal Performance")
 
-summary["edge"] = summary["avg_fe"] - summary["avg_ae"]
+summary = combined_signal_performance(df_states, min_signals=30)
 
-# opcional: filtrar ruido
-summary = summary[summary["signals"] > 30]
+if not summary.empty:
+    st.dataframe(summary, use_container_width=True)
+else:
+    st.info("No hay suficientes combinaciones para calcular edge.")
 
-# ordenar por edge
-summary = summary.sort_values("edge", ascending=False)
 
-st.dataframe(summary, use_container_width=True)
+# =========================
+# REGIME SUMMARY
+# =========================
+if show_regime:
+    st.markdown("### 🧠 Regime Summary")
 
+    summary = regime_summary(df_states)
+
+    if not summary.empty:
+        st.dataframe(summary, use_container_width=True)
+    else:
+        st.info("No hay datos de régimen para mostrar.")
+        
+# =========================
+# REGIME EDGE TESTS
+# =========================
+if show_regime:
+    st.markdown("### 🧪 Regime + Shift Edge")
+
+    summary = regime_shift_performance(df_states)
+
+    if not summary.empty:
+        st.dataframe(summary, use_container_width=True)
+    else:
+        st.info("No hay suficientes shifts por régimen.")
+
+    st.markdown("### 🧪 Regime + Momentum Edge")
+
+    summary = regime_momentum_performance(df_states, min_signals=30)
+
+    if not summary.empty:
+        st.dataframe(summary, use_container_width=True)
+    else:
+        st.info("No hay suficiente momentum por régimen.")
+
+    st.markdown("### 🧪 Regime + Combo Edge")
+
+    summary = regime_combo_performance(df_states, min_signals=20)
+
+    if not summary.empty:
+        st.dataframe(summary, use_container_width=True)
+    else:
+        st.info("No hay suficientes combinaciones por régimen.")
 
 # =========================
 # DEBUG TABLE
@@ -700,7 +883,8 @@ st.subheader("Últimos cambios detectados")
 
 changes = df_states[
     (df_states["trend_changed"] == True) |
-    (df_states["direction_changed"] == True)
+    (df_states["direction_changed"] == True) |
+    (df_states["trend_shift"] != "no_shift")
 ].copy()
 
 st.dataframe(
@@ -710,11 +894,16 @@ st.dataframe(
         "trend_1h",
         "direction_15m",
         "momentum_5m",
+        "regime",
         "trend_changed",
         "direction_changed",
+        "trend_shift",
         "fe_pct",
         "ae_pct",
         "direction_window_bars",
+        "shift_fe_pct",
+        "shift_ae_pct",
+        "shift_window_bars",
     ]].tail(80),
     use_container_width=True
 )
