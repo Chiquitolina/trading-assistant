@@ -2,7 +2,7 @@
 # ====================
 
 BACKTEST = {
-    "days": 31,
+    "days": 600,
     "lookahead": 1,
     "warmup": 100,
 }
@@ -14,7 +14,7 @@ FEES = {
 }
 
 LONG = {
-    "sl_mult": 1.8,
+    "sl_mult": 2.1,
     "tp_mult": 1.28,
     "min_tp": 0.31,
 }

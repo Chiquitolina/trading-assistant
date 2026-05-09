@@ -8,7 +8,6 @@ SHIFT_TYPES = [
     "bearish_extreme_shift",
 ]
 
-
 def direction_performance(df: pd.DataFrame) -> pd.DataFrame:
     data = df[
         (df["direction_changed"] == True) &
@@ -34,7 +33,15 @@ def direction_performance(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    return round_numeric(summary)
+    summary["edge"] = (
+        summary["avg_fe_pct"] -
+        summary["avg_ae_pct"]
+    )
+
+    return (
+        round_numeric(summary)
+        .sort_values("edge", ascending=False)
+    )
 
 
 def momentum_performance(df: pd.DataFrame) -> pd.DataFrame:

@@ -10,7 +10,7 @@ SYMBOL = "BTCUSDT"
 FETCH_SYMBOL = "BTC/USDT"
 TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 
-DAYS = 800
+DAYS = 650
 OUTPUT_DIR = BASE_DIR / "data" / "chart_cache"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 import os
 import time
 import threading
+import argparse
 
 from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
@@ -18,6 +19,22 @@ from engine.live.status_writer import StatusWriter
 
 load_dotenv()
 
+parser = argparse.ArgumentParser()
+
+parser.add_argument(
+    "--strategy",
+    type=str,
+    default="default",
+    choices=[
+        "default",
+        "direction",
+    ],
+)
+
+args = parser.parse_args()
+
+STRATEGY_MODE = args.strategy
+
 api_key = os.getenv("API_KEY")
 secret = os.getenv("SECRET_KEY")
 
@@ -32,6 +49,11 @@ STATUS_INTERVAL = 3
 buffer = DataBuffer()
 signal_journal = SignalJournal(f"live_signals_{SYMBOL}.csv")
 print_live_banner()
+
+print(
+    f"\033[95m[STRATEGY]\033[0m "
+    f"mode={STRATEGY_MODE}\n"
+)
 
 # ---------- LOAD HISTORICAL ----------
 for tf in TIMEFRAMES:
