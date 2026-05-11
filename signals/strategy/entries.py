@@ -1,64 +1,124 @@
-# signals/strategy/entries.py
+from enums.trend import Trend
+from enums.direction import Direction
+from enums.momentum import Momentum
 
-# ------------------------------
-# LONG COMBINATIONS
-# ------------------------------
-# signals/strategy/entries.py
-
-# signals/strategy/entries.py
 
 # ------------------------------
 # LONG COMBINATIONS
 # ------------------------------
 
 LONG_RULES = {
+
     # 🟢 Trend following limpio
-    ("bullish", "up", "breakout_up_strong"),
-    ("bullish", "up", "trend_continuation_up"),
-    #("bullish", "up", "bullish_pressure"),
+    (
+        Trend.BULLISH,
+        Direction.UP,
+        Momentum.BREAKOUT_UP_STRONG
+    ),
+
+    (
+        Trend.BULLISH,
+        Direction.UP,
+        Momentum.TREND_CONTINUATION_UP
+    ),
 
     # 🟢 Pullback en tendencia alcista
-    ("bullish", "down", "exhaustion_down"),
-    ("bullish", "down", "inside_bar"),
-    ("bullish", "down", "breakout_down_weak"),
+    (
+        Trend.BULLISH,
+        Direction.DOWN,
+        Momentum.EXHAUSTION_DOWN
+    ),
+
+    (
+        Trend.BULLISH,
+        Direction.DOWN,
+        Momentum.INSIDE_BAR
+    ),
+
+    (
+        Trend.BULLISH,
+        Direction.DOWN,
+        Momentum.BREAKOUT_DOWN_WEAK
+    ),
 
     # 🟢 Pullback dentro de uptrend
-    ("bullish", "up", "exhaustion_down"),
-    ("bullish", "up", "breakout_down_weak"),
-    ("bullish", "up", "inside_bullish_weak"),
+    (
+        Trend.BULLISH,
+        Direction.UP,
+        Momentum.EXHAUSTION_DOWN
+    ),
 
-    # 🟡 Neutral con impulso claro
-    #("neutral", "up", "breakout_up_strong"),
-    #("neutral", "up", "exhaustion_down"),
+    (
+        Trend.BULLISH,
+        Direction.UP,
+        Momentum.BREAKOUT_DOWN_WEAK
+    ),
 
-    # 🟡 Neutral pullback / reversal controlado
-    #("neutral", "down", "breakout_down_strong"),
-    #("neutral", "down", "exhaustion_down"),
-    #("neutral", "down", "inside_bar"),
+    (
+        Trend.BULLISH,
+        Direction.UP,
+        Momentum.INSIDE_BULLISH_WEAK
+    ),
 }
 
-# SOLO PARA BACKTEST / INVESTIGACIÓN
+
+# ------------------------------
+# SHORT COMBINATIONS
+# ------------------------------
+
 SHORT_RULES = {
 
-    # 🔥 core (los mejores)
-    ("bearish", "down", "breakout_down_strong"),
-    ("bearish", "down", "trend_continuation_down"),
+    # 🔥 core
+    (
+        Trend.BEARISH,
+        Direction.DOWN,
+        Momentum.BREAKOUT_DOWN_STRONG
+    ),
 
-    # 🟡 opcionales pero buenos
-    ("bearish", "down", "bearish_pressure"),
-    
+    (
+        Trend.BEARISH,
+        Direction.DOWN,
+        Momentum.TREND_CONTINUATION_DOWN
+    ),
+
+    # 🟡 adicionales
+    (
+        Trend.BEARISH,
+        Direction.DOWN,
+        Momentum.BEARISH_PRESSURE
+    ),
 }
+
 
 # ------------------------------
 # LONG SETUP
 # ------------------------------
-def long_setup(trend, direction, momentum) -> bool:
-    return (trend, direction, momentum) in LONG_RULES
+
+def long_setup(
+    trend,
+    direction,
+    momentum
+) -> bool:
+
+    return (
+        trend,
+        direction,
+        momentum
+    ) in LONG_RULES
 
 
 # ------------------------------
 # SHORT SETUP
 # ------------------------------
-def short_setup(trend, direction, momentum) -> bool:
-    return (trend, direction, momentum) in SHORT_RULES
 
+def short_setup(
+    trend,
+    direction,
+    momentum
+) -> bool:
+
+    return (
+        trend,
+        direction,
+        momentum
+    ) in SHORT_RULES

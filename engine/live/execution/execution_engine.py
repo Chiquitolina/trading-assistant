@@ -10,9 +10,10 @@ from models.trade import Trade
 from services.position_sizer import PositionSizer
 from services.risk_manager import RiskManager
 from binance.exceptions import BinanceAPIException
+from engine.live.execution.order_executor import OrderExecutor
 class ExecutionEngine:
 
-    def __init__(self, exchange, position_manager, symbol="BTCUSDT"):
+    def __init__(self, exchange, position_manager, strategy, symbol="BTCUSDT"):
         self.exchange = exchange
         self.position_manager = position_manager
         self.symbol = symbol
@@ -22,6 +23,8 @@ class ExecutionEngine:
         self.fees = self.exchange.get_futures_fees()
         self.position_sizer = PositionSizer()
         self.risk_manager = RiskManager()
+        self.order_executor = OrderExecutor(exchange)
+        self.strategy = strategy
 
     def _apply_slippage(self, price: float, side: str, is_entry: bool = True):
         slippage_pct = random.uniform(0.01, 0.05) / 100
@@ -85,160 +88,7 @@ class ExecutionEngine:
         diff_ms = current_candle_ts - self.position.entry_candle_ts
 
         return int(diff_ms // tf_ms) + 1
-    
-    def update_position_context(
-        self,
-        trend: str,
-        direction: str,
-        momentum: str,
-        current_price: float
-    ):
-        if not self.position:
-            return
-
-        pos = self.position
-
-        # ==========================
-        # LIVE MARKET CONTEXT
-        # ==========================
-
-        pos.current_trend = trend
-        pos.current_direction = direction
-        pos.current_momentum = momentum
-
-        # ==========================
-        # CURRENT PNL
-        # ==========================
-
-        if pos.side == "LONG":
-            pnl = (
-                (current_price - pos.real_entry)
-                / pos.real_entry
-            ) * 100
-        else:
-            pnl = (
-                (pos.real_entry - current_price)
-                / pos.real_entry
-            ) * 100
-
-        pnl = round(pnl, 4)
-
-        pos.current_pnl = pnl
-
-        # ==========================
-        # MAE / MFE
-        # ==========================
-
-        pos.mae = min(pos.mae, pnl)
-        pos.mfe = max(pos.mfe, pnl)
-
-        # ==========================
-        # T+1 SNAPSHOT
-        # ==========================
-
-        if (
-            pos.candles_in_trade == 2
-            and pos.momentum_t1 is None
-        ):
-            pos.momentum_t1 = momentum
-            pos.direction_t1 = direction
-            pos.pnl_t1 = pnl
-
-            print(
-                f"\033[96m[POSITION EVOLUTION]\033[0m "
-                f"T+1 snapshot | "
-                f"momentum={momentum} | "
-                f"direction={direction} | "
-                f"pnl={pnl}%"
-            )
-
-        # ==========================
-        # DEBUG
-        # ==========================
-
-        print(
-            f"\033[96m[POSITION CONTEXT]\033[0m "
-            f"side={pos.side} | "
-            f"pnl={pnl}% | "
-            f"mae={pos.mae}% | "
-            f"mfe={pos.mfe}% | "
-            f"trend={trend} | "
-            f"direction={direction} | "
-            f"momentum={momentum}"
-        )
-
-
-    def _on_15m_candle_closed(self, closed_candle_ts: int, close_price: float):
-        if not self.position:
-            return
-
-        prev_candles = self.position.candles_in_trade
-
-        candles = self._calc_candles_in_trade(closed_candle_ts, tf_minutes=15)
-        self.position.candles_in_trade = candles
-
-        # 🔥 SOLO imprime si cambió la vela
-        if candles != prev_candles:
-            print(
-                f"[CANDLE COUNT] {self.position.side} | "
-                f"candles={candles} / max={self.position.plan_max_hold_candles} | "
-                f"entry_ts={self.position.entry_candle_ts} | "
-                f"current_ts={closed_candle_ts}"
-            )
-
-        # 🔴 TIME STOP
-        if candles >= (self.position.plan_max_hold_candles + 1):
-            print(
-                f"[TIME STOP] Closing {self.position.side} | "
-                f"candles={candles}"
-            )
-
-            self.close_position(
-                current_price=close_price,
-                reason="TIME_STOP"
-            )
-            
-    def update_position_risk(self, price: float):
-
-        pos = self.position
-        if not pos:
-            return
-
-        # =========================
-        # PnL actual
-        # =========================
-        pnl = (
-            (price - pos.real_entry) / pos.real_entry * 100
-            if pos.side == "LONG"
-            else (pos.real_entry - price) / pos.real_entry * 100
-        )
-
-        pos.current_pnl = pnl
-
-        # =========================
-        # MAE / MFE
-        # =========================
-        pos.mae = min(pos.mae, pnl)
-        pos.mfe = max(pos.mfe, pnl)
-
-        # =========================
-        # BREAK EVEN RULE
-        # =========================
-        BE_TRIGGER = 0.20
-
-        if pnl < BE_TRIGGER:
-            return
-
-        if pos.side == "LONG":
-            if pos.sl < pos.real_entry:
-                print("[BE] moving SL to entry (LONG)")
-                pos.sl = pos.real_entry
-
-        elif pos.side == "SHORT":
-            if pos.sl > pos.real_entry:
-                print("[BE] moving SL to entry (SHORT)")
-                pos.sl = pos.real_entry
-            
+                
     def _handle_external_close(self, price, timestamp):
         pos = self.position
         if not pos:
@@ -451,7 +301,7 @@ class ExecutionEngine:
             print(f"❌ Error colocando TP/SL: {e}")
             return False
 
-    def execute_plan(self, plan, leverage: int = 3):
+    def open_position(self, plan, leverage: int = 3):
 
         try:
             exchange_pos = self.position_manager.sync(plan.symbol)
@@ -461,7 +311,7 @@ class ExecutionEngine:
                 return False
 
             try:
-                self.exchange.cancel_all_orders(plan.symbol)
+                self.order_executor.cancel_all(plan.symbol)
             except Exception as e:
                 print(f"⚠️ Failed to clean orders: {e}")
 
@@ -476,7 +326,7 @@ class ExecutionEngine:
                 print("❌ No balance")
                 return False
 
-            if self.exchange.set_leverage(plan.symbol, leverage) is None:
+            if self.order_executor.set_leverage(plan.symbol, leverage) is None:
                 print("❌ Error setting leverage")
                 return False
 
@@ -524,7 +374,7 @@ class ExecutionEngine:
             # 🚀 ORDER
             # ==========================
             try:
-                order = self.exchange.place_market_order(
+                order = self.order_executor.market_order(
                     symbol=plan.symbol,
                     side=side,
                     quantity=quantity
@@ -659,24 +509,28 @@ class ExecutionEngine:
     # ==========================
     # 🔄 PRICE UPDATE
     # ==========================
+    
+    def update_position_context(self, trend, direction, momentum, price):
+        self.strategy.update_position_context(self, trend, direction, momentum, price)
+    
+    def on_signal(self, trade_action, plan):
+        return self.strategy.on_signal(self, trade_action, plan)
+    
+    def on_candle_close(self, ts, price):
+        self.strategy.on_candle_close(self, ts, price)
 
     def on_price_update(self, price: float, timestamp: int):
 
         exchange_pos = self.position_manager.sync(self.symbol)
 
-        # 🔥 cierre externo (TP/SL)
         if not exchange_pos and self.position:
             self._handle_external_close(price, timestamp)
             return
 
         if not self.position:
             return
-        
-    
-        # ==========================
-        # 🧠 RISK ENGINE (AQUÍ)
-        # ==========================
-        self.update_position_risk(price)
+
+        self.strategy.on_price_update(self, price, timestamp)
 
     # ==========================
     # ❌ CLOSE

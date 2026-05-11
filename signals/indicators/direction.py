@@ -1,5 +1,6 @@
 from ta.trend import EMAIndicator
 
+from enums.direction import Direction
 
 def trade_direction(
     df,
@@ -8,7 +9,7 @@ def trade_direction(
     buffer_pct=0.0008,  # 0.08%
 ):
     if len(df) < slow_ema:
-        return "range"
+        return Direction.NEUTRAL
 
     df = df.copy()
 
@@ -30,9 +31,9 @@ def trade_direction(
     diff_pct = (fast - slow) / slow
 
     if diff_pct > buffer_pct:
-        return "up"
+        return Direction.UP
 
     if diff_pct < -buffer_pct:
-        return "down"
+        return Direction.DOWN
 
-    return "range"
+    return Direction.NEUTRAL

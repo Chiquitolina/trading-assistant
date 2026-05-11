@@ -11,25 +11,88 @@ class ShiftDetector:
         ema20: Optional[float] = None,
         ema50: Optional[float] = None,
     ) -> str:
-        near_ema20 = self._near_ema(close, ema20, max_distance=0.006)
-        near_ema50 = self._near_ema(close, ema50, max_distance=0.010)
 
-        far_from_ema50 = self._far_from_ema(close, ema50, min_distance=0.012)
-        very_far_from_ema50 = self._far_from_ema(close, ema50, min_distance=0.012)
+        # =========================================
+        # NORMALIZE ENUMS -> STRINGS
+        # =========================================
+
+        trend = (
+            str(trend)
+            .replace("Trend.", "")
+            .lower()
+        )
+
+        momentum = (
+            str(momentum)
+            .replace("Momentum.", "")
+            .lower()
+        )
+
+        prev_direction = (
+            str(prev_direction)
+            .replace("Direction.", "")
+            .lower()
+            if prev_direction is not None
+            else None
+        )
+
+        print(
+            "[SHIFT DEBUG]",
+            prev_direction,
+            trend,
+            momentum,
+        )
+
+        near_ema20 = self._near_ema(
+            close,
+            ema20,
+            max_distance=0.006,
+        )
+
+        near_ema50 = self._near_ema(
+            close,
+            ema50,
+            max_distance=0.010,
+        )
+
+        far_from_ema50 = self._far_from_ema(
+            close,
+            ema50,
+            min_distance=0.012,
+        )
+
+        very_far_from_ema50 = self._far_from_ema(
+            close,
+            ema50,
+            min_distance=0.012,
+        )
 
         above_ema50 = self._is_above(close, ema50)
         below_ema50 = self._is_below(close, ema50)
 
-        bullish_value_zone = (near_ema20 or near_ema50) and above_ema50
-        bearish_value_zone = near_ema50 and below_ema50
+        bullish_value_zone = (
+            (near_ema20 or near_ema50)
+            and above_ema50
+        )
 
-        bullish_breakout_zone = above_ema50 and far_from_ema50
-        bearish_breakout_zone = below_ema50 and far_from_ema50
+        bearish_value_zone = (
+            near_ema50
+            and below_ema50
+        )
 
-        # =========================
+        bullish_breakout_zone = (
+            above_ema50
+            and far_from_ema50
+        )
+
+        bearish_breakout_zone = (
+            below_ema50
+            and far_from_ema50
+        )
+
+        # =========================================
         # EXTREME POTENTIAL SHIFTS
-        # Solo advertencia: necesita confirmación en la próxima vela
-        # =========================
+        # =========================================
 
         if (
             prev_direction == "down"
@@ -46,10 +109,9 @@ class ShiftDetector:
         ):
             return "potential_bearish_extreme_shift"
 
-        # =========================
+        # =========================================
         # VALUE POTENTIAL SHIFTS
-        # Cerca de EMA o continuación del lado correcto
-        # =========================
+        # =========================================
 
         if (
             prev_direction == "down"
@@ -60,8 +122,17 @@ class ShiftDetector:
                 "breakout_down_weak",
             ]
             and (
-                (trend != "bullish" and above_ema50)
-                or (trend == "bullish" and (bullish_value_zone or bullish_breakout_zone))
+                (
+                    trend != "bullish"
+                    and above_ema50
+                )
+                or (
+                    trend == "bullish"
+                    and (
+                        bullish_value_zone
+                        or bullish_breakout_zone
+                    )
+                )
             )
         ):
             return "potential_bullish_value_shift"
@@ -75,8 +146,17 @@ class ShiftDetector:
                 "breakout_up_weak",
             ]
             and (
-                (trend != "bearish" and below_ema50)
-                or (trend == "bearish" and (bearish_value_zone or bearish_breakout_zone))
+                (
+                    trend != "bearish"
+                    and below_ema50
+                )
+                or (
+                    trend == "bearish"
+                    and (
+                        bearish_value_zone
+                        or bearish_breakout_zone
+                    )
+                )
             )
         ):
             return "potential_bearish_value_shift"
@@ -88,9 +168,28 @@ class ShiftDetector:
         potential_shift: str,
         current_momentum: str,
     ) -> str:
-        # =========================
+
+        # =========================================
+        # NORMALIZE ENUMS -> STRINGS
+        # =========================================
+
+        potential_shift = str(potential_shift)
+
+        current_momentum = (
+            str(current_momentum)
+            .replace("Momentum.", "")
+            .lower()
+        )
+
+        print(
+            "[SHIFT CONFIRM]",
+            potential_shift,
+            current_momentum,
+        )
+
+        # =========================================
         # VALUE CONFIRMATION
-        # =========================
+        # =========================================
 
         if (
             potential_shift == "potential_bullish_value_shift"
@@ -112,10 +211,9 @@ class ShiftDetector:
         ):
             return "bearish_value_shift"
 
-        # =========================
+        # =========================================
         # EXTREME CONFIRMATION
-        # Más estricta: sin pressure, solo reversión fuerte
-        # =========================
+        # =========================================
 
         if (
             potential_shift == "potential_bullish_extreme_shift"
@@ -136,23 +234,45 @@ class ShiftDetector:
 
         return "no_shift"
 
-    def _near_ema(self, close, ema, max_distance=0.01) -> bool:
+    def _near_ema(
+        self,
+        close,
+        ema,
+        max_distance=0.01,
+    ) -> bool:
         try:
             close = float(close)
             ema = float(ema)
+
             if close <= 0 or ema <= 0:
                 return False
-            return abs(close - ema) / close <= max_distance
+
+            return (
+                abs(close - ema) / close
+                <= max_distance
+            )
+
         except Exception:
             return False
 
-    def _far_from_ema(self, close, ema, min_distance=0.012) -> bool:
+    def _far_from_ema(
+        self,
+        close,
+        ema,
+        min_distance=0.012,
+    ) -> bool:
         try:
             close = float(close)
             ema = float(ema)
+
             if close <= 0 or ema <= 0:
                 return False
-            return abs(close - ema) / close >= min_distance
+
+            return (
+                abs(close - ema) / close
+                >= min_distance
+            )
+
         except Exception:
             return False
 

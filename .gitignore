@@ -10,4 +10,8 @@ combo_performance.csv
 atr_performance.csv
 status.json
 market_states_BTCUSDT.csv
+data/chart_cache/BTCUSDT_1d.csv
+data/chart_cache/BTCUSDT_1h.csv
+data/chart_cache/BTCUSDT_4h.csv
+data/chart_cache/BTCUSDT_5m.csv
 

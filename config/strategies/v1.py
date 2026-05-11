@@ -2,7 +2,7 @@
 # ====================
 
 BACKTEST = {
-    "days": 600,
+    "days": 60,
     "lookahead": 1,
     "warmup": 100,
 }

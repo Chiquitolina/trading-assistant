@@ -1,7 +1,9 @@
+from enums.momentum import Momentum
+
 def momentum_5m(df):
 
     if len(df) < 2:
-        return "no_data"
+        return Momentum.NO_DATA
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -10,7 +12,7 @@ def momentum_5m(df):
     range_ = last["high"] - last["low"]
 
     if range_ == 0:
-        return "flat_zero_range"
+        return Momentum.FLAT_ZERO_RANGE
 
     body_ratio = body / range_
 
@@ -21,50 +23,50 @@ def momentum_5m(df):
 
     # ---------- TRUE INSIDE BAR ----------
     if last["high"] <= prev["high"] and last["low"] >= prev["low"]:
-        return "inside_bar"
+        return Momentum.INSIDE_BAR
 
     # ---------- BREAKOUT UP ----------
     if last["close"] > prev["high"]:
         if body_ratio > 0.6:
-            return "breakout_up_strong"
+            return Momentum.BREAKOUT_UP_STRONG
         else:
-            return "breakout_up_weak"
+            return Momentum.BREAKOUT_UP_WEAK
 
     # ---------- BREAKOUT DOWN ----------
     if last["close"] < prev["low"]:
         if body_ratio > 0.6:
-            return "breakout_down_strong"
+            return Momentum.BREAKOUT_DOWN_STRONG
         else:
-            return "breakout_down_weak"
+            return Momentum.BREAKOUT_DOWN_WEAK
 
     # ---------- WICK EXHAUSTION ----------
     if wick_ratio > 0.6:
         if upper_wick > lower_wick:
-            return "exhaustion_up"
+            return Momentum.EXHAUSTION_UP
         else:
-            return "exhaustion_down"
+            return Momentum.EXHAUSTION_DOWN
 
     # ---------- CONTINUATION ----------
     if body_ratio > 0.5:
         if last["close"] > prev["close"]:
-            return "trend_continuation_up"
+            return Momentum.TREND_CONTINUATION_UP
         else:
-            return "trend_continuation_down"
+            return Momentum.TREND_CONTINUATION_DOWN
 
     # ---------- BULLISH PRESSURE ----------
     if last["close"] > last["open"] and body_ratio > 0.4:
-        return "bullish_pressure"
+        return Momentum.BULLISH_PRESSURE
 
     # ---------- BEARISH PRESSURE ----------
     if last["close"] < last["open"] and body_ratio > 0.4:
-        return "bearish_pressure"
+        return Momentum.BEARISH_PRESSURE
 
     # ---------- INDECISION ----------
     if body_ratio < 0.2:
-        return "indecision"
+        return Momentum.INDECISION
 
     # ---------- WEAK MOVES ----------
     if last["close"] >= last["open"]:
-        return "inside_bullish_weak"
+        return Momentum.INSIDE_BULLISH_WEAK
 
-    return "inside_bearish_weak"
+    return Momentum.INSIDE_BEARISH_WEAK

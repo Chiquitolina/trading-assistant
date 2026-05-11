@@ -38,6 +38,7 @@ class Position:
 
     current_momentum: Optional[str] = None
     current_direction: Optional[str] = None
+    current_trend: Optional[str] = None
 
     momentum_t1: Optional[str] = None
     direction_t1: Optional[str] = None

@@ -7,8 +7,10 @@ from engine.live.strategy.trade_plan import TradePlan
 from config.strategies.v1 import LONG, SHORT
 from engine.live.status_writer import StatusWriter
 
-MIN_ATR = 200
+from models.signals import Signal
+from models.trade_action import TradeAction
 
+MIN_ATR = 100
 
 class EntryEngine:
     def __init__(self, buffer, debug=True, status_writer=None):
@@ -16,15 +18,18 @@ class EntryEngine:
         self.debug = debug
         self.status_writer = status_writer or StatusWriter()
 
-    def generate_entry(self, signal: dict):
-        if not signal:
+    def generate_entry(self, trade_action: TradeAction):
+
+        if not trade_action:
             self.status_writer.write_plan(
                 status="SKIPPED",
                 reason="no_signal",
             )
             return None
 
-        side = signal["side"]
+        signal = trade_action.signal
+
+        side = trade_action.action.value
 
         if side not in ("LONG", "SHORT"):
             self.status_writer.write_plan(
@@ -50,8 +55,8 @@ class EntryEngine:
 
         entry_candle = df_15m.iloc[-1]
 
-        signal_price = signal["signal_price"]
-        signal_ts = signal["signal_ts"]
+        signal_price = signal.signal_price
+        signal_ts = signal.signal_ts
 
         entry = entry_candle["open"]
 
@@ -126,16 +131,28 @@ class EntryEngine:
         # CONTEXT
         # ==========================
         signal_context = {
-            "trend": signal.get("trend"),
-            "direction": signal.get("direction"),
-            "momentum": signal.get("momentum"),
+            "trend": signal.trend.value,
+            "direction": signal.direction.value,
+            "momentum": signal.momentum.value,
 
-            # 🔥 contexto de momentum
-            "momentum_prev1": signal.get("momentum_prev1"),
-            "momentum_prev2": signal.get("momentum_prev2"),
-            "momentum_sequence": signal.get("momentum_sequence"),
+            "strategy_name": trade_action.strategy_name,
+            "strategy_reason": trade_action.reason,
 
-            # 🔥 volatilidad
+            "momentum_prev1": (
+                signal.momentum_prev1.value
+                if signal.momentum_prev1 else None
+            ),
+
+            "momentum_prev2": (
+                signal.momentum_prev2.value
+                if signal.momentum_prev2 else None
+            ),
+
+            "momentum_sequence": [
+                m.value if m else None
+                for m in signal.momentum_sequence
+            ],
+
             "atr": round(atr, 2),
         }
 
@@ -150,7 +167,7 @@ class EntryEngine:
             tp_pct=round(tp_pct, 3),
             atr=round(atr, 2),
             timestamp=entry_candle["timestamp"],
-            reason="strategy_v1",
+            reason=trade_action.strategy_name,
             signal_price=round(signal_price, 2),
             signal_ts=signal_ts,
             signal_context=signal_context

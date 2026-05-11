@@ -80,9 +80,9 @@ class MarketStateBuilder:
             ema20=candle.get("ema20"),
             ema50=candle.get("ema50"),
 
-            trend_1h=trend,
-            direction_15m=direction,
-            momentum_5m=momentum,
+            trend_1h=trend.value if hasattr(trend, "value") else trend,
+            direction_15m=direction.value if hasattr(direction, "value") else direction,
+            momentum_5m=momentum.value if hasattr(momentum, "value") else momentum,
 
             trend_changed=trend_changed,
             direction_changed=direction_changed,

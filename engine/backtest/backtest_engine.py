@@ -234,9 +234,9 @@ def backtest(symbol: str):
         # ================================
         state = market_state_builder.build(
             candle=df_15m.iloc[i],
-            trend=trend,
-            direction=direction,
-            momentum=momentum,
+            trend=trend.value if trend else None,
+            direction=direction.value if direction else None,
+            momentum=momentum.value if momentum else None,
         )
 
         state["regime"] = last_regime
@@ -277,9 +277,9 @@ def backtest(symbol: str):
                 "tf": "15m",
                 "side": "LONG",
                 "signal_price": df_15m.iloc[i]["close"],
-                "dir": direction,
-                "trend": trend,
-                "momentum": momentum,
+                "trend": trend.value if trend else None,
+                "dir": direction.value if direction else None,
+                "momentum": momentum.value if momentum else None,
             })
 
             entry_price = df_15m.iloc[i + 1]["open"]
@@ -317,9 +317,9 @@ def backtest(symbol: str):
                     "pnl_gross": result["pnl_gross"],
                     "fees": result["fees"],
                     "exit_reason": result["exit_reason"],
-                    "trend": trend,
-                    "direction": direction,
-                    "momentum": momentum,
+                    "trend": trend.value if trend else None,
+                    "direction": direction.value if direction else None,
+                    "momentum": momentum.value if momentum else None,
                     "regime": last_regime,
                     "regime_tf": "1h",
                     "regime_ts": last_regime_ts,
@@ -338,9 +338,9 @@ def backtest(symbol: str):
                 "tf": "15m",
                 "side": "SHORT",
                 "signal_price": df_15m.iloc[i]["close"],
-                "dir": direction,
-                "trend": trend,
-                "momentum": momentum,
+                "trend": trend.value if trend else None,
+                "dir": direction.value if direction else None,
+                "momentum": momentum.value if momentum else None,
             })
 
             entry_price = df_15m.iloc[i + 1]["open"]
@@ -378,9 +378,9 @@ def backtest(symbol: str):
                     "pnl_gross": result["pnl_gross"],
                     "fees": result["fees"],
                     "exit_reason": result["exit_reason"],
-                    "trend": trend,
-                    "direction": direction,
-                    "momentum": momentum,
+                    "trend": trend.value if trend else None,
+                    "direction": direction.value if direction else None,
+                    "momentum": momentum.value if momentum else None,
                     "regime": last_regime,
                     "regime_tf": "1h",
                     "regime_ts": last_regime_ts,
