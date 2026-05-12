@@ -38,6 +38,12 @@ class StatusWriter:
             "last_plan_sl": None,
             "last_plan_atr": None,
 
+            # 🧠 STRATEGY / ROUTER (NUEVO)
+            "strategy_mode": None,                # direction | trend_following | mixed
+            "last_executed_strategy": None,       # direction_entry_long, etc
+            "last_router_action": None,           # LONG | SHORT | HOLD | CLOSE
+            "last_router_reason": None,           # explanation of decision
+
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -99,4 +105,19 @@ class StatusWriter:
             "last_plan_tp": tp,
             "last_plan_sl": sl,
             "last_plan_atr": atr,
+        })
+
+    # 🧠 NUEVO: STRATEGY / ROUTER WRITE (IMPORTANTE)
+    def write_strategy(
+        self,
+        strategy_mode: str | None = None,
+        executed_strategy: str | None = None,
+        action: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        self.write({
+            "strategy_mode": strategy_mode,
+            "last_executed_strategy": executed_strategy,
+            "last_router_action": action,
+            "last_router_reason": reason,
         })

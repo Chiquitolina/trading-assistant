@@ -32,6 +32,8 @@ from engine.live.status_writer import StatusWriter
 
 from enums.actions import Action
 
+from engine.live.status_helper import update_status
+
 load_dotenv()
 
 # =========================================================
@@ -220,6 +222,12 @@ status_writer.write({
     "signal_trend": None,
     "signal_direction": None,
     "signal_momentum": None,
+    
+    # 🔥 NUEVO
+    "strategy_mode": STRATEGY_MODE,
+    "last_executed_strategy": None,
+    "last_router_action": None,
+    "last_router_reason": None,
 })
 
 # =========================================================
@@ -306,6 +314,12 @@ def write_heartbeat():
         "signal_trend": last_signal_trend,
         "signal_direction": last_signal_direction,
         "signal_momentum": last_signal_momentum,
+        
+        # 🧠 SAFE SYNC FROM DISK
+        "strategy_mode": status_data.get("strategy_mode"),
+        "last_executed_strategy": status_data.get("last_executed_strategy"),
+        "last_router_action": status_data.get("last_router_action"),
+        "last_router_reason": status_data.get("last_router_reason"),
     })
 
 # =========================================================
@@ -370,7 +384,13 @@ try:
 
             trade_action = strategy_router.evaluate(
                         signal,
-                        previous_direction=status.signal_direction
+                        previous_direction = status_data.get("signal_direction")
+            )
+
+            update_status(
+                status_writer,
+                last_router_action=trade_action.action.value,
+                last_router_reason=trade_action.reason
             )
             
             print(
@@ -447,6 +467,10 @@ try:
                     execution_engine=execution,
                     trade_action=trade_action,
                     plan=plan
+                )
+                
+                update_status(
+                    last_executed_strategy=execution_strategy.__class__.__name__
                 )
 
                 print(f"[LIVE MAIN] execution result: {executed}")

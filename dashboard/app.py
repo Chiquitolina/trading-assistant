@@ -109,7 +109,7 @@ def render_status_dot(label: str, is_online: bool):
     )
 
 
-def render_signal_text(signal: str, trend: str, direction: str, momentum: str):
+def render_signal_text(signal: str, trend: str, direction: str, momentum: str, reason: str):
     signal = str(signal or "N/A").upper().strip()
 
     if signal == "LONG":
@@ -122,7 +122,9 @@ def render_signal_text(signal: str, trend: str, direction: str, momentum: str):
     trend = trend if trend not in (None, "", "N/A") else "-"
     direction = direction if direction not in (None, "", "N/A") else "-"
     momentum = momentum if momentum not in (None, "", "N/A") else "-"
-
+    
+    reason = reason if reason not in (None, "", "N/A") else "-"
+    
     st.markdown(
         f"""
         <div style="line-height: 1.1;">
@@ -138,6 +140,19 @@ def render_signal_text(signal: str, trend: str, direction: str, momentum: str):
     )
 
     st.caption(f"{trend} / {direction} / {momentum}")
+    st.markdown(
+        f"""
+        <div style="line-height: 1.1;">
+            <div style="font-size: 0.90rem; opacity: 1; color: white">
+                REASON
+            </div>
+            <div style="font-size: 1rem; font-weight: 800; color: {color}; margin-top: 8px;">
+                {reason}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
 def render_plan_text(status: str, reason: str, side: str, entry, tp, sl):
@@ -301,6 +316,9 @@ def load_status():
             "last_plan_entry": raw.get("last_plan_entry"),
             "last_plan_tp": raw.get("last_plan_tp"),
             "last_plan_sl": raw.get("last_plan_sl"),
+            
+            "strategy_mode": raw.get("strategy_mode"),
+            "last_router_reason": raw.get("last_router_reason"),
 
             "updated_at": updated_at_raw,
             "is_open": position_side not in ("NONE", "ERROR") and position_qty > 0,
@@ -408,6 +426,9 @@ last_plan_entry = status["last_plan_entry"]
 last_plan_tp = status["last_plan_tp"]
 last_plan_sl = status["last_plan_sl"]
 
+strategy_mode = status["strategy_mode"]
+last_router_reason = status["last_router_reason"]
+
 updated_at = status["updated_at"]
 
 if last_signal in (None, "", "N/A"):
@@ -422,7 +443,8 @@ pnl_today_usd = get_today_pnl_usd(df_raw, TZ)
 st.markdown("## 🧠 System Status")
 
 with st.container(border=True):
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
 
     with c1:
         render_status_dot("ENGINE", engine_online)
@@ -433,20 +455,27 @@ with st.container(border=True):
     c3.metric("POSITION", position_side)
     c4.metric("uPnL", round(unpnl, 2))
     c5.metric("BALANCE", f"{balance} USDT")
-    c6.metric("PNL TODAY %", pnl_today)
-    c7.metric("PNL TODAY USD", f"{pnl_today_usd} USDT")
+    #c6.metric("PNL TODAY %", pnl_today)
+    #c6.metric("PNL TODAY USD", f"{pnl_today_usd} USDT")
 
-    c8, c9, c10 = st.columns(3)
-
+    c8, c9, c10, c11= st.columns(4)
+    
     with c8:
+        st.metric(
+                "STRATEGY",
+                status.get("strategy_mode", "N/A")
+        )
+
+    with c9:
         render_signal_text(
             signal=last_signal,
             trend=signal_trend,
             direction=signal_direction,
             momentum=signal_momentum,
+            reason=last_router_reason
         )
 
-    with c9:
+    with c10:
         render_plan_text(
             status=last_plan_status,
             reason=last_plan_reason,
@@ -455,10 +484,13 @@ with st.container(border=True):
             tp=last_plan_tp,
             sl=last_plan_sl,
         )
-
-    with c10:
+        
+    with c11:
         st.metric("SYMBOL", symbol_from_status)
 
+    # =========================
+    # ENGINE HEALTH
+    # =========================
     if status["error"]:
         st.error(f"❌ Status file error: {status['error']}")
     elif status["is_stale"]:
