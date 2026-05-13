@@ -43,3 +43,8 @@ class Position:
     momentum_t1: Optional[str] = None
     direction_t1: Optional[str] = None
     pnl_t1: Optional[float] = None
+    
+    strategy_mode: Optional[str] = None
+    router_reason: Optional[str] = None
+    
+    

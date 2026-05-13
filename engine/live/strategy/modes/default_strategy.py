@@ -7,10 +7,27 @@ from signals.strategy.entries import (
     SHORT_RULES
 )
 
-
 class DefaultStrategy:
 
-    def evaluate(self, signal, previous_direction=None,):
+    def evaluate(
+        self,
+        signal,
+        previous_direction=None,
+        current_position=None
+    ):
+
+        # =========================
+        # POSITION ALREADY OPEN
+        # =========================
+
+        if current_position:
+
+            return TradeAction(
+                action=Action.HOLD,
+                signal=signal,
+                strategy_name="default_strategy",
+                reason="position_already_open"
+            )
 
         combo = (
             signal.trend,
@@ -19,7 +36,6 @@ class DefaultStrategy:
         )
 
         if combo in LONG_RULES:
-
             return TradeAction(
                 action=Action.LONG,
                 signal=signal,
@@ -28,7 +44,6 @@ class DefaultStrategy:
             )
 
         if combo in SHORT_RULES:
-
             return TradeAction(
                 action=Action.SHORT,
                 signal=signal,

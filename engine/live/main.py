@@ -300,6 +300,8 @@ def write_heartbeat():
         position_qty = 0.0
         entry_price = 0.0
         unpnl = 0.0
+        
+    current_status = status_writer._read_current()
 
     status_writer.write({
         "engine_online": True,
@@ -315,11 +317,10 @@ def write_heartbeat():
         "signal_direction": last_signal_direction,
         "signal_momentum": last_signal_momentum,
         
-        # 🧠 SAFE SYNC FROM DISK
-        "strategy_mode": status_data.get("strategy_mode"),
-        "last_executed_strategy": status_data.get("last_executed_strategy"),
-        "last_router_action": status_data.get("last_router_action"),
-        "last_router_reason": status_data.get("last_router_reason"),
+        "strategy_mode": current_status.get("strategy_mode"),
+        "last_executed_strategy": current_status.get("last_executed_strategy"),
+        "last_router_action": current_status.get("last_router_action"),
+        "last_router_reason": current_status.get("last_router_reason"),
     })
 
 # =========================================================
@@ -381,10 +382,26 @@ try:
 
             if not signal:
                 continue
+            
+            # ================================
+            # DEBUG ROUTER INPUT
+            # ================================
+
+            current_status = status_writer._read_current()
+
+            previous_direction = current_status.get("signal_direction")
+
+            print("\n[ROUTER DEBUG]")
+            print(f"prev_direction (from disk) : {previous_direction}")
+            print(f"signal direction           : {signal.direction.value}")
+            print(f"signal trend              : {signal.trend.value}")
+            print(f"signal momentum           : {signal.momentum.value}")
+            print("===========================\n")
 
             trade_action = strategy_router.evaluate(
-                        signal,
-                        previous_direction = status_data.get("signal_direction")
+                signal,
+                previous_direction=previous_direction,    
+                current_position=execution.position
             )
 
             update_status(
@@ -470,6 +487,7 @@ try:
                 )
                 
                 update_status(
+                    status_writer,
                     last_executed_strategy=execution_strategy.__class__.__name__
                 )
 

@@ -17,6 +17,7 @@ class StrategyRouter:
         self,
         signal,
         previous_direction=None,
+        current_position=None
     ):
 
         strategy = self.strategies[self.mode]
@@ -24,4 +25,5 @@ class StrategyRouter:
         return strategy.evaluate(
             signal=signal,
             previous_direction=previous_direction,
+            current_position=current_position
         )

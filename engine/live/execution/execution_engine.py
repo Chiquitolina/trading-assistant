@@ -260,7 +260,10 @@ class ExecutionEngine:
             # TRADE EVOLUTION
             # ==========================
             mae=pos.mae,
-            mfe=pos.mfe
+            mfe=pos.mfe,
+            
+            strategy_mode=ctx.get("strategy_name"),
+            router_reason=ctx.get("strategy_reason")
         )
 
         self.position = None
@@ -643,7 +646,10 @@ class ExecutionEngine:
             # TRADE EVOLUTION
             # ==========================
             mae=pos.mae,
-            mfe=pos.mfe
+            mfe=pos.mfe,
+            
+            strategy_mode=ctx.get("strategy_name"),
+            router_reason=ctx.get("strategy_reason")
         )
 
         self.position = None

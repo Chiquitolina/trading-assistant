@@ -9,6 +9,7 @@ class DirectionStrategy:
         self,
         signal,
         previous_direction=None,
+        current_position=None
     ):
 
         current_direction = signal.direction.value

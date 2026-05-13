@@ -66,7 +66,10 @@ class TradeJournal:
                     "pnl_t1",
 
                     "mae",
-                    "mfe"
+                    "mfe",
+                    
+                    "strategy_mode",
+                    "router_reason"
                 ])
 
     # -------------------------
@@ -90,6 +93,7 @@ class TradeJournal:
         pnl_gross,
         fees,
         exit_reason,
+        
         signal_trend,
         signal_direction,
         signal_momentum,
@@ -114,7 +118,10 @@ class TradeJournal:
         pnl_t1=None,
 
         mae=None,
-        mfe=None
+        mfe=None,
+        
+        strategy_mode=None,
+        router_reason=None
     ):
 
         with open(self.file_path, "a", newline="", encoding="utf-8") as f:
@@ -169,5 +176,8 @@ class TradeJournal:
                 round(pnl_t1, 4) if pnl_t1 is not None else None,
 
                 round(mae, 4) if mae is not None else None,
-                round(mfe, 4) if mfe is not None else None
+                round(mfe, 4) if mfe is not None else None,
+                
+                strategy_mode,
+                router_reason
             ])
