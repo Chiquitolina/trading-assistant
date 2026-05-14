@@ -7,6 +7,24 @@ BACKTEST = {
     "warmup": 100,
 }
 
+BACKTEST_AGGRESSIVE = {
+    "days": 5,
+    "warmup": 5,
+    "lookahead":10
+}
+
+LONG_AGGRESSIVE = {
+    "sl_mult": 2.1,
+    "tp_mult": 1.7,
+    "min_tp": 0.31,
+}
+
+SHORT_AGGRESSIVE = {
+    "sl_mult": 2.1,
+    "tp_mult": 1.7,
+    "min_tp": 0.25,
+}
+
 FEES = {
     "taker": 0.05,
     "maker": 0.02,

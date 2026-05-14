@@ -35,3 +35,7 @@ class Momentum(Enum):
     # ---------- WEAK INTERNAL MOVES ----------
     INSIDE_BULLISH_WEAK = "inside_bullish_weak"
     INSIDE_BEARISH_WEAK = "inside_bearish_weak"
+    
+    NEUTRAL = "neutral"
+    
+    CHOP = "chop"

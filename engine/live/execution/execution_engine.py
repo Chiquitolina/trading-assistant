@@ -11,6 +11,7 @@ from services.position_sizer import PositionSizer
 from services.risk_manager import RiskManager
 from binance.exceptions import BinanceAPIException
 from engine.live.execution.order_executor import OrderExecutor
+from engine.live.state.snapshot_manager import SnapshotManager
 class ExecutionEngine:
 
     def __init__(self, exchange, position_manager, strategy, symbol="BTCUSDT"):
@@ -23,6 +24,7 @@ class ExecutionEngine:
         self.fees = self.exchange.get_futures_fees()
         self.position_sizer = PositionSizer()
         self.risk_manager = RiskManager()
+        self.snapshot_manager = SnapshotManager()
         self.order_executor = OrderExecutor(exchange)
         self.strategy = strategy
 
@@ -267,6 +269,7 @@ class ExecutionEngine:
         )
 
         self.position = None
+        self.snapshot_manager.clear()
         
     def _place_tp_sl(self, symbol, quantity, tp_side, tp_price, sl_side, sl_price):
         try:
@@ -491,6 +494,52 @@ class ExecutionEngine:
                 entry_candle_ts=int(entry_candle_ts),
                 candles_in_trade=1
             )
+            
+            snapshot = {
+                "position": {
+                    "status": "OPEN",
+                    "side": plan.side,
+                    "entry_price": real_entry,
+                    "qty": quantity,
+                    "opened_ts": int(time.time() * 1000),
+
+                    "signal_ts": plan.signal_ts,
+                    "signal_price": plan.signal_price,
+
+                    "entry_ts": int(time.time() * 1000),
+
+                    "entry": plan.entry,
+                    "real_entry": real_entry,
+
+                    "tp": tp_price,
+                    "sl": sl_price
+                },
+
+                "context": {
+                    "signal_trend": plan.signal_context.get("trend"),
+                    "signal_direction": plan.signal_context.get("direction"),
+                    "signal_momentum": plan.signal_context.get("momentum"),
+
+                    "signal_momentum_prev1": plan.signal_context.get("momentum_prev1"),
+                    "signal_momentum_prev2": plan.signal_context.get("momentum_prev2"),
+                    "signal_momentum_sequence": plan.signal_context.get("momentum_sequence"),
+
+                    "signal_atr": plan.signal_context.get("atr"),
+
+                    "strategy_mode": plan.strategy_mode,
+                    "router_reason": plan.router_reason,
+
+                },
+
+                "post_entry_analysis": {},
+                "engine": {
+                    "last_update_ts": None,
+                    "last_candle_ts": None
+                }
+            }
+
+            self.snapshot_manager.save(snapshot)
+            
             print(f"""
     \033[94m[EXECUTION ENGINE]\033[0m
     📈 POSITION OPENED
@@ -515,6 +564,23 @@ class ExecutionEngine:
     
     def update_position_context(self, trend, direction, momentum, price):
         self.strategy.update_position_context(self, trend, direction, momentum, price)
+        
+        self.snapshot_manager.update(
+            "post_entry_analysis",
+            {
+                "current_trend": trend,
+                "current_direction": direction,
+                "current_momentum": momentum,
+
+                "mae": self.position.mae,
+                "mfe": self.position.mfe,
+
+                "direction_t1": self.position.direction_t1,
+                "momentum_t1": self.position.momentum_t1,
+
+                "pnl_t1": self.position.pnl_t1
+            }
+        )
     
     def on_signal(self, trade_action, plan):
         return self.strategy.on_signal(self, trade_action, plan)
@@ -534,6 +600,13 @@ class ExecutionEngine:
             return
 
         self.strategy.on_price_update(self, price, timestamp)
+        
+        self.snapshot_manager.update(
+            "engine",
+            {
+                "last_update_ts": timestamp
+            }
+        )
 
     # ==========================
     # ❌ CLOSE
@@ -653,6 +726,7 @@ class ExecutionEngine:
         )
 
         self.position = None
+        self.snapshot_manager.clear()
 
     def get_state(self):
         return {
@@ -662,30 +736,54 @@ class ExecutionEngine:
 
     def restore_state(self, symbol):
 
+        # ==========================
+        # EXCHANGE SYNC
+        # ==========================
         sync = ExchangeStateSync(self.exchange)
-        state = sync.restore_position_state(symbol)
+        exchange_state = sync.restore_position_state(symbol)
 
-        if not state:
+        if not exchange_state:
             print("\033[94m[SYNC]\033[0m ℹ️ No position to restore.")
             return
+        
+        exchange_qty = float(exchange_state["quantity"])
+
+        if abs(exchange_qty - quantity) > 0.0001:
+            print("⚠️ Snapshot/exchange quantity mismatch")
 
         # ==========================
-        # REAL POSITION DATA
+        # LOAD SNAPSHOT
         # ==========================
-        entry_price = float(state["entry_price"])
-        quantity = float(state["quantity"])
-        side = state["side"]
+        snapshot = self.snapshot_manager.load()
 
-        tp = state.get("tp")
-        sl = state.get("sl")
+        if not snapshot:
+            print("\033[94m[SYNC]\033[0m ⚠️ Snapshot not found.")
+            return
+
+        position_data = snapshot.get("position", {})
+        context = snapshot.get("context", {})
+        post_analysis = snapshot.get("post_entry_analysis", {})
+
+        # ==========================
+        # REAL EXCHANGE DATA
+        # ==========================
+        entry_price = float(position_data["real_entry"])
+        quantity = float(position_data["qty"])
+        side = position_data["side"]
+
+        tp = exchange_state.get("tp")
+        sl = exchange_state.get("sl")
 
         # ==========================
         # REBUILD TP / SL IF MISSING
         # ==========================
         if not tp or not sl:
-            print("\033[94m[SYNC]\033[0m ⚠️ TP/SL missing → rebuilding from position entry price")
 
-            mark_price = float(self.exchange.get_mark_price(symbol))
+            print("\033[94m[SYNC]\033[0m ⚠️ TP/SL missing → rebuilding")
+
+            mark_price = float(
+                self.exchange.get_mark_price(symbol)
+            )
 
             tp, sl = self.risk_manager.calculate_tp_sl_from_position(
                 side=side,
@@ -704,41 +802,74 @@ class ExecutionEngine:
                 sl_price=sl
             )
 
-            if not tp_sl_ok:
-                print("\033[94m[SYNC]\033[0m ❌ Could not rebuild TP/SL")
+            if tp_sl_ok:
+                print("\033[94m[SYNC]\033[0m ✅ TP/SL rebuilt")
             else:
-                print("\033[94m[SYNC]\033[0m ✅ TP/SL rebuilt successfully")
+                print("\033[94m[SYNC]\033[0m ❌ Failed rebuilding TP/SL")
 
         else:
             tp = float(tp)
             sl = float(sl)
-            print("\033[94m[SYNC]\033[0m ✅ Existing TP/SL found")
 
         # ==========================
-        # RESTORE LOCAL POSITION
+        # RESTORE POSITION
         # ==========================
         self.position = Position(
+
             symbol=symbol,
             side=side,
             quantity=quantity,
-            entry_price=entry_price,
-            real_entry=entry_price,
+
+            entry_price=float(position_data.get("entry", entry_price)),
+            real_entry=float(position_data.get("real_entry", entry_price)),
+
             tp=float(tp),
             sl=float(sl),
-            entry_ts=int(time.time() * 1000),
-            signal_price=entry_price,
-            signal_ts=int(time.time() * 1000),
-            signal_context=None
+
+            entry_ts=int(position_data.get("entry_ts", time.time() * 1000)),
+
+            signal_price=float(
+                position_data.get("signal_price", entry_price)
+            ),
+
+            signal_ts=int(
+                position_data.get("signal_ts", time.time() * 1000)
+            ),
+
+            # 🔥 CONTEXTO RESTAURADO
+            signal_context=context,
+
+            # ==========================
+            # POST ENTRY CONTEXT
+            # ==========================
+            current_trend=post_analysis.get("current_trend"),
+            current_direction=post_analysis.get("current_direction"),
+            current_momentum=post_analysis.get("current_momentum"),
+
+            direction_t1=post_analysis.get("direction_t1"),
+            momentum_t1=post_analysis.get("momentum_t1"),
+
+            pnl_t1=post_analysis.get("pnl_t1"),
+
+            mae=post_analysis.get("mae"),
+            mfe=post_analysis.get("mfe")
         )
 
         print(f"""
     \033[94m[SYNC]\033[0m 🔁 POSITION RESTORED
-    Symbol   : {symbol}
-    Side     : {side}
-    Quantity : {quantity}
-    Entry    : {entry_price}
-    TP       : {tp}
-    SL       : {sl}
+
+    Symbol           : {symbol}
+    Side             : {side}
+    Quantity         : {quantity}
+
+    Entry            : {entry_price}
+    TP               : {tp}
+    SL               : {sl}
+
+    Signal Direction : {context.get("signal_direction")}
+    Signal Momentum  : {context.get("signal_momentum")}
+    Strategy Mode    : {context.get("strategy_mode")}
+    Router Reason    : {context.get("router_reason")}
     """)
 
     def check_exchange_close(self, symbol):
@@ -749,3 +880,4 @@ class ExecutionEngine:
             if self.position:
                 print("🔄 Exchange cerró posición")
                 self.position = None
+                self.snapshot_manager.clear()

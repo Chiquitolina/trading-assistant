@@ -8,7 +8,7 @@ from data.market_data import fetch_history
 
 SYMBOL = "BTCUSDT"
 FETCH_SYMBOL = "BTC/USDT"
-TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
+TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
 
 DAYS = 650
 OUTPUT_DIR = BASE_DIR / "data" / "chart_cache"
