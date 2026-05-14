@@ -68,13 +68,6 @@ LONG_RULES = {
 
 SHORT_RULES = {
 
-    # 🔥 core
-    (
-        Trend.BEARISH,
-        Direction.DOWN,
-        Momentum.BREAKOUT_DOWN_STRONG
-    ),
-
     (
         Trend.BEARISH,
         Direction.DOWN,

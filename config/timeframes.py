@@ -5,18 +5,20 @@
 MODE_CONFIG = {
 
     "default": {
-        "timeframes": ["1h", "15m", "5m"]
+        "timeframes": ["1h", "15m", "5m"],
+        "trigger_tf": "15m"
     },
 
     "direction": {
-        "timeframes": ["1h", "15m", "5m"]
+        "timeframes": ["1h", "15m", "5m"],
+        "trigger_tf": "15m"
     },
 
     "aggressive": {
-        "timeframes": ["5m", "1m"]
+        "timeframes": ["5m", "1m"],
+        "trigger_tf": "5m"
     }
 }
-
 
 # =========================
 # TIMEFRAME CONFIGS
@@ -26,6 +28,7 @@ TIMEFRAME_CONFIGS = {
 
     "1m": {
         "timeframe": "1m",
+        "ms_per_candle": 60_000,
         "candles": 120,
         "atr_period": 14,
         "atr_expansion": 1.08,
@@ -35,6 +38,7 @@ TIMEFRAME_CONFIGS = {
 
     "5m": {
         "timeframe": "5m",
+        "ms_per_candle": 300_000,
         "candles": 100,
         "atr_period": 14,
         "atr_expansion": 1.05,
@@ -44,6 +48,7 @@ TIMEFRAME_CONFIGS = {
 
     "15m": {
         "timeframe": "15m",
+        "ms_per_candle": 900_000,
         "candles": 100,
         "atr_period": 14,
         "atr_expansion": 1.03,
@@ -53,6 +58,7 @@ TIMEFRAME_CONFIGS = {
 
     "1h": {
         "timeframe": "1h",
+        "ms_per_candle": 3_600_000,
         "candles": 200,
         "atr_period": 14,
         "atr_expansion": 1.02,
@@ -60,10 +66,9 @@ TIMEFRAME_CONFIGS = {
         "min_quote_volume": 20_000_000
     },
 
-    # -------- HIGH TF VOLUME SCAN --------
-
     "4h": {
         "timeframe": "4h",
+        "ms_per_candle": 14_400_000,
         "candles": 120,
         "atr_period": 14,
         "atr_expansion": 1.01,
@@ -73,6 +78,7 @@ TIMEFRAME_CONFIGS = {
 
     "1d": {
         "timeframe": "1D",
+        "ms_per_candle": 86_400_000,
         "candles": 90,
         "atr_period": 14,
         "atr_expansion": 1.0,

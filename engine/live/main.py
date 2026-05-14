@@ -34,6 +34,11 @@ from enums.actions import Action
 
 from engine.live.status_helper import update_status
 
+from config.timeframes import (
+    MODE_CONFIG,
+    TIMEFRAME_CONFIGS
+)
+
 load_dotenv()
 
 # =========================================================
@@ -49,12 +54,18 @@ parser.add_argument(
     choices=[
         "default",
         "direction",
+        "aggressive"
     ],
 )
 
 args = parser.parse_args()
 
 STRATEGY_MODE = args.strategy
+
+mode_config = MODE_CONFIG[STRATEGY_MODE]
+
+TIMEFRAMES = mode_config["timeframes"]
+TRIGGER_TF = mode_config["trigger_tf"]
 
 # =========================================================
 # ENV
@@ -69,13 +80,13 @@ secret = os.getenv("SECRET_KEY")
 
 SYMBOL = "BTCUSDT"
 
-TIMEFRAMES = [
-    "5m",
-    "15m",
-    "1h"
-]
+#TIMEFRAMES = [
+#    "5m",
+#    "15m",
+#    "1h"
+#]
 
-TRIGGER_TF = "15m"
+#TRIGGER_TF = "15m"
 
 DAYS = 3
 
@@ -85,7 +96,7 @@ STATUS_INTERVAL = 3
 # INIT BUFFER
 # =========================================================
 
-buffer = DataBuffer()
+buffer = DataBuffer(TIMEFRAMES)
 
 signal_journal = SignalJournal(
     f"live_signals_{SYMBOL}.csv"
@@ -104,16 +115,22 @@ print(
 
 for tf in TIMEFRAMES:
 
+    print(f"[HISTORY] loading tf={tf}")
+
     df_hist = fetch_history(
         SYMBOL,
         tf,
         DAYS
     )
 
+    print(f"[HISTORY] {tf} fetched rows={len(df_hist)}")
+
     buffer.load_historical(
         tf,
         df_hist
     )
+
+    print(f"[HISTORY] {tf} loaded into buffer\n")
 
 # =========================================================
 # EXCHANGE
@@ -240,7 +257,10 @@ execution.restore_state(SYMBOL)
 # CONNECT WS
 # =========================================================
 
-ws = WSClient(buffer.on_ws_message)
+ws = WSClient(
+    buffer.on_ws_message,
+    timeframes=TIMEFRAMES
+)
 
 ws.start()
 
@@ -367,8 +387,8 @@ try:
         if buffer.consume_closed_tf(TRIGGER_TF):
 
             print(
-                "\033[93m[LIVE MAIN]\033[0m "
-                "✅ 15m close event consumed"
+                f"\033[93m[LIVE MAIN]\033[0m "
+                f"✅ {TRIGGER_TF} close event consumed"
             )
 
             closed_candle_ts = buffer.last_close_time[TRIGGER_TF]

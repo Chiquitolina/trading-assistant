@@ -1,11 +1,12 @@
 import time
 from binance import ThreadedWebsocketManager
-from engine.live.config.settings import SYMBOL, TIMEFRAMES
-
+from engine.live.config.settings import SYMBOL
+import threading
 
 class WSClient:
-    def __init__(self, on_message, stale_after=20):
+    def __init__(self, on_message, timeframes, stale_after=20):
         self.on_message = on_message
+        self.timeframes = timeframes
         self.stale_after = stale_after
 
         self.twm = None
@@ -15,6 +16,8 @@ class WSClient:
         self.is_connected = False
         self.last_message_at = 0.0
         self._is_reconnecting = False
+        
+        self._reconnect_lock = threading.Lock()
 
     # =========================
     # PUBLIC
@@ -79,7 +82,7 @@ class WSClient:
 
             streams = [
                 f"{SYMBOL.lower()}@kline_{tf}"
-                for tf in TIMEFRAMES
+                for tf in self.timeframes
             ]
 
             twm.start_multiplex_socket(
@@ -123,40 +126,81 @@ class WSClient:
             print(f"\033[94m[WS CLIENT]\033[0m ❌ Error inside WS callback: {e}")
 
     def _reconnect(self):
-        if not self.running:
-            return
 
-        self.is_connected = False
-        self.last_message_at = 0.0
+        with self._reconnect_lock:
 
-        self._stop_ws()
+            if not self.running:
+                return
 
-        self.retries += 1
-        delay = min(2 ** min(self.retries, 5), 30)
+            if not self._is_reconnecting:
+                return
 
-        print(f"\033[94m[WS CLIENT]\033[0m 🔄 Reconnecting WS in {delay}s...")
-        time.sleep(delay)
+            print("\033[94m[WS CLIENT]\033[0m 🔄 Starting reconnect...")
 
-        if not self.running:
-            return
-
-        try:
-            self._connect()
-        except Exception as e:
-            print(f"\033[94m[WS CLIENT]\033[0m ❌ Reconnect failed: {e}")
-            self._is_reconnecting = True
             self.is_connected = False
             self.last_message_at = 0.0
 
+            self._stop_ws()
+
+            self.retries += 1
+
+            delay = min(2 ** min(self.retries, 5), 30)
+
+            print(
+                f"\033[94m[WS CLIENT]\033[0m "
+                f"🔄 Reconnecting WS in {delay}s..."
+            )
+
+            time.sleep(delay)
+
+            if not self.running:
+                return
+
+            try:
+
+                self._connect()
+
+            except Exception as e:
+
+                print(
+                    f"\033[94m[WS CLIENT]\033[0m "
+                    f"❌ Reconnect failed: {e}"
+                )
+
+                self._is_reconnecting = True
+                self.is_connected = False
+                self.last_message_at = 0.0
+                
     def _stop_ws(self):
+
         twm = self.twm
+
         self.twm = None
 
         if not twm:
             return
 
         try:
+
+            print(
+                "\033[94m[WS CLIENT]\033[0m "
+                "🛑 Stopping WS manager..."
+            )
+
             twm.stop()
-            time.sleep(1)
+
+            # 🔥 IMPORTANTE
+            # darle tiempo al loop/thread a morir
+            time.sleep(5)
+
+            print(
+                "\033[94m[WS CLIENT]\033[0m "
+                "✅ WS manager stopped"
+            )
+
         except Exception as e:
-            print(f"\033[94m[WS CLIENT]\033[0m ⚠️ Error stopping WS: {e}")
+
+            print(
+                f"\033[94m[WS CLIENT]\033[0m "
+                f"⚠️ Error stopping WS: {e}"
+            )

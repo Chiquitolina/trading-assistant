@@ -3,7 +3,9 @@ from datetime import datetime
 
 
 class DataBuffer:
-    def __init__(self, maxlen=300):
+    def __init__(self, timeframes, maxlen=300):
+
+        self.timeframes = set(timeframes)
 
         self.closed_tfs = set()
 
@@ -11,21 +13,16 @@ class DataBuffer:
         self._last_timestamp = None
 
         self.buffers = {
-            "5m": deque(maxlen=maxlen),
-            "15m": deque(maxlen=maxlen),
-            "1h": deque(maxlen=maxlen),
+            tf: deque(maxlen=maxlen)
+            for tf in timeframes
         }
 
         self.last_close_time = {
-            "5m": None,
-            "15m": None,
-            "1h": None,
+            tf: None for tf in timeframes
         }
 
         self.last_ws_close_time = {
-            "5m": None,
-            "15m": None,
-            "1h": None,
+            tf: None for tf in timeframes
         }
 
     # ==========================================
@@ -49,7 +46,7 @@ class DataBuffer:
         self._last_price = float(k["c"])
         self._last_timestamp = int(k["t"])
 
-        if tf not in self.buffers:
+        if tf not in self.timeframes:
             return
 
         if not k["x"]:

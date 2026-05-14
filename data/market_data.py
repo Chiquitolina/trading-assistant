@@ -1,5 +1,6 @@
 import ccxt
 import pandas as pd
+from config.timeframes import TIMEFRAME_CONFIGS
 
 exchange = ccxt.binanceusdm({
     "enableRateLimit": True
@@ -7,13 +8,9 @@ exchange = ccxt.binanceusdm({
 
 def fetch_history(symbol: str, timeframe: str, days: int):
     limit = 1000
-    ms_per_candle = {
-        "5m": 5 * 60 * 1000,
-        "15m": 15 * 60 * 1000,
-        "1h": 60 * 60 * 1000,
-        "4h": 4 * 60 * 60 * 1000,
-        "1d": 24 * 60 * 60 * 1000,
-    }[timeframe]
+
+    tf_config = TIMEFRAME_CONFIGS[timeframe]
+    ms_per_candle = tf_config["ms_per_candle"]
 
     since = int(
         (pd.Timestamp.utcnow() - pd.Timedelta(days=days)).timestamp() * 1000
