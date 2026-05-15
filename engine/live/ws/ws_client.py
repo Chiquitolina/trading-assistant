@@ -1,13 +1,13 @@
 import time
 import threading
 from binance import ThreadedWebsocketManager
-from engine.live.config.settings import SYMBOL
 
 
 class WSClient:
-    def __init__(self, on_message, timeframes, stale_after=20):
+    def __init__(self, on_message, timeframes, symbols, stale_after=20):
         self.on_message = on_message
         self.timeframes = timeframes
+        self.symbols = symbols
         self.stale_after = stale_after
 
         self.twm = None
@@ -20,15 +20,11 @@ class WSClient:
 
         self._reconnect_lock = threading.Lock()
 
-        # 🔥 FIX: global reconnect cooldown
         self._last_reconnect = 0
         self.min_reconnect_interval = 10
 
         self.handshake_failures = 0
 
-    # =========================
-    # PUBLIC
-    # =========================
     def start(self):
         if self.running:
             return
@@ -75,9 +71,6 @@ class WSClient:
         self.last_message_at = 0.0
         self._stop_ws()
 
-    # =========================
-    # INTERNAL
-    # =========================
     def _connect(self):
         print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...")
 
@@ -88,7 +81,8 @@ class WSClient:
             twm.start()
 
             streams = [
-                f"{SYMBOL.lower()}@kline_{tf}"
+                f"{symbol.lower()}@kline_{tf}"
+                for symbol in self.symbols
                 for tf in self.timeframes
             ]
 
@@ -107,8 +101,11 @@ class WSClient:
             self.last_message_at = 0.0
 
             print(
-                f"\n\033[94m[WS CLIENT]\033[0m 📡 WS initialized: {streams}\n"
+                f"\n\033[94m[WS CLIENT]\033[0m "
+                f"📡 WS initialized: {len(streams)} streams\n"
             )
+
+            print(streams)
 
         except Exception:
             self._stop_ws()
@@ -118,13 +115,7 @@ class WSClient:
 
     def _handle_message(self, msg):
         try:
-
-            # =========================
-            # WS ERROR EVENT
-            # =========================
-
             if isinstance(msg, dict) and msg.get("e") == "error":
-
                 print(
                     f"\033[94m[WS CLIENT]\033[0m "
                     f"⚠️ WS error: {msg}"
@@ -132,12 +123,7 @@ class WSClient:
 
                 self.is_connected = False
                 self._is_reconnecting = True
-
                 return
-
-            # =========================
-            # VALID MESSAGE
-            # =========================
 
             self.last_message_at = time.time()
             self.is_connected = True
@@ -145,16 +131,13 @@ class WSClient:
             self.on_message(msg)
 
         except Exception as e:
-
             print(
                 f"\033[94m[WS CLIENT]\033[0m "
                 f"❌ Callback error: {e}"
             )
 
     def _reconnect(self):
-
         with self._reconnect_lock:
-
             if not self.running:
                 return
 
@@ -163,7 +146,6 @@ class WSClient:
 
             now = time.time()
 
-            # 🔥 FIX: reconnect cooldown global
             if now - self._last_reconnect < self.min_reconnect_interval:
                 print("\033[94m[WS CLIENT]\033[0m ⏳ Reconnect cooldown active")
                 return
@@ -179,7 +161,6 @@ class WSClient:
 
             self.retries += 1
 
-            # 🔥 FIX: safer backoff
             delay = min(2 ** min(self.retries, 6), 60)
             delay = max(delay, 8)
 
@@ -209,7 +190,6 @@ class WSClient:
                 self.last_message_at = 0.0
 
     def _stop_ws(self):
-
         twm = self.twm
         self.twm = None
 
@@ -220,8 +200,6 @@ class WSClient:
             print("\033[94m[WS CLIENT]\033[0m 🛑 Stopping WS manager...")
 
             twm.stop()
-
-            # 🔥 importante para evitar overlap de loops
             time.sleep(5)
 
             print("\033[94m[WS CLIENT]\033[0m ✅ WS manager stopped")

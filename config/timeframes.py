@@ -3,21 +3,32 @@
 # =========================
 
 MODE_CONFIG = {
-
     "default": {
         "timeframes": ["1h", "15m", "5m"],
-        "trigger_tf": "15m"
+        "trigger_tf": "15m",
+        "min_atr_pct": 0.26,
+        "min_atr": 200,
+        "entry_tf": "1m",
+        "atr_tf": "15m",
     },
 
     "direction": {
         "timeframes": ["1h", "15m", "5m"],
-        "trigger_tf": "15m"
+        "trigger_tf": "15m",
+        "min_atr_pct": 0.26,
+        "min_atr": 200,
+        "entry_tf": "1m",
+        "atr_tf": "15m",
     },
 
     "aggressive": {
-        "timeframes": ["5m", "1m"],
-        "trigger_tf": "5m"
-    }
+        "timeframes": ["1m", "5m", "15m", "1h", "4h"],
+        "trigger_tf": "1m",
+        "min_atr_pct": 0.15,
+        "entry_tf": "1m",
+        "atr_tf": "5m",
+        "min_atr": 120,
+    },
 }
 
 # =========================

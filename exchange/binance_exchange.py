@@ -84,6 +84,40 @@ class BinanceExchange(BaseExchange):
         )
 
         return float(data["markPrice"])
+        
+    def get_open_positions(self):
+        try:
+            positions = self._safe_request(
+                self.client.futures_position_information
+            )
+
+            result = []
+
+            for pos in positions:
+                amount = float(pos.get("positionAmt", 0))
+
+                if amount == 0:
+                    continue
+
+                side = "LONG" if amount > 0 else "SHORT"
+
+                result.append({
+                    "symbol": pos["symbol"],
+                    "side": side,
+                    "amount": amount,
+                    "quantity": abs(amount),
+                    "entry_price": float(pos.get("entryPrice", 0)),
+                    "mark_price": float(pos.get("markPrice", 0)),
+                    "unrealized_pnl": float(pos.get("unRealizedProfit", 0)),
+                    "leverage": int(pos.get("leverage", 0)),
+                    "isolated": pos.get("isolated", False),
+                })
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Error obteniendo posiciones abiertas: {e}")
+            return []
 
     def get_position(self, symbol: str):
 
@@ -132,6 +166,31 @@ class BinanceExchange(BaseExchange):
             type="MARKET",
             quantity=quantity
         )
+        
+    def place_take_profit_limit(self, symbol, side, quantity, price):
+        print(
+            f"[EXCHANGE] TP LIMIT send | side={side} "
+            f"price={price} qty={quantity}"
+        )
+
+        response = self._safe_request(
+            self.client.futures_create_order,
+            symbol=symbol,
+            side=side,
+            type="LIMIT",
+            quantity=quantity,
+            price=price,
+            timeInForce="GTC",
+            reduceOnly=True
+        )
+
+        print(
+            f"[EXCHANGE] TP LIMIT created | side={side} "
+            f"price={price} response={response}"
+        )
+
+        return response
+        
         
     def place_take_profit(self, symbol, side, quantity, stop_price):
         print(
@@ -207,6 +266,7 @@ class BinanceExchange(BaseExchange):
                 print(
                     f"\033[94m[EXCHANGE]\033[0m Cancel {o['orderType']} | trigger:{o['triggerPrice']} | id:{o['algoId']}"
                 )
+                
 
                 self.client.futures_cancel_algo_order(
                     symbol=symbol,
@@ -265,6 +325,32 @@ class BinanceExchange(BaseExchange):
                     if f["filterType"] == "PRICE_FILTER":
                         return float(f["tickSize"])
         raise ValueError(f"No se encontró tickSize para {symbol}")
+    
+    def get_quantity_step_size(self, symbol: str) -> float:
+        info = self.client.futures_exchange_info()
+
+        for s in info["symbols"]:
+            if s["symbol"] == symbol:
+                for f in s["filters"]:
+                    if f["filterType"] == "LOT_SIZE":
+                        return float(f["stepSize"])
+
+        raise ValueError(f"No se encontró stepSize para {symbol}")
+
+
+    def normalize_quantity(self, symbol: str, quantity: float) -> str:
+        step = Decimal(str(self.get_quantity_step_size(symbol)))
+        quantity_dec = Decimal(str(quantity))
+
+        adjusted = (
+            (quantity_dec / step)
+            .quantize(Decimal("1"), rounding=ROUND_DOWN)
+            * step
+        )
+
+        decimals = max(0, -step.as_tuple().exponent)
+
+        return f"{adjusted:.{decimals}f}"
 
     def normalize_price(self, symbol: str, price: float, side: str = "DOWN") -> str:
         tick = Decimal(str(self.get_price_tick_size(symbol)))

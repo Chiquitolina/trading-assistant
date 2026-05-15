@@ -304,6 +304,7 @@ def load_status():
             "position_qty": position_qty,
             "entry_price": float(raw.get("entry_price", 0.0) or 0.0),
             "unpnl": float(raw.get("unpnl", 0.0) or 0.0),
+            "open_positions": raw.get("open_positions", []),
 
             "last_signal": str(raw.get("last_signal", "N/A") or "N/A").upper(),
             "signal_trend": raw.get("signal_trend", "N/A"),
@@ -413,6 +414,7 @@ position_side = status["position_side"]
 position_qty = status["position_qty"]
 entry_price = status["entry_price"]
 unpnl = status["unpnl"]
+open_positions = status.get("open_positions", [])
 
 last_signal = status["last_signal"]
 signal_trend = status["signal_trend"]
@@ -499,17 +501,35 @@ with st.container(border=True):
     if updated_at:
         st.caption(f"Last heartbeat: {updated_at}")
 
-    if status["is_open"]:
+    if open_positions:
+
         st.success(
-            f"🟢 Open position on exchange | "
-            f"{symbol_from_status} | "
-            f"{position_side} | "
-            f"Qty: {position_qty} | "
-            f"Entry: {entry_price} | "
-            f"uPnL: {round(unpnl, 2)}"
+            f"🟢 {len(open_positions)} open position(s) on exchange"
         )
+
+        positions_df = pd.DataFrame(open_positions)
+
+        numeric_cols = [
+            "quantity",
+            "entry_price",
+            "mark_price",
+            "unrealized_pnl",
+        ]
+
+        for col in numeric_cols:
+            if col in positions_df.columns:
+                positions_df[col] = pd.to_numeric(
+                    positions_df[col],
+                    errors="coerce"
+                ).round(4)
+
+        st.dataframe(
+            positions_df,
+            use_container_width=True
+        )
+
     else:
-        st.info("⚪ No open position on exchange")
+        st.info("⚪ No open positions on exchange")
 
 # =========================
 # NO TRADES YET
@@ -633,6 +653,27 @@ if "trade_duration_min" in table_df.columns:
 
 drop_cols = [c for c in ["signal_ts_dt", "entry_ts_dt", "exit_ts_dt"] if c in table_df.columns]
 table_df = table_df.drop(columns=drop_cols)
+
+# =========================
+# FORMAT BOOLEAN COLUMNS
+# =========================
+
+bool_cols = [
+    "reclaimed_ema20_1m",
+    "reclaimed_ema34_1m",
+    "reclaimed_ema50_1m",
+    "lost_ema20_1m",
+    "lost_ema34_1m",
+    "lost_ema50_1m",
+    "direction_5m_changed",
+]
+
+for col in bool_cols:
+    if col in table_df.columns:
+        table_df[col] = table_df[col].map({
+            True: "TRUE",
+            False: "FALSE"
+        })
 
 st.dataframe(
     table_df,

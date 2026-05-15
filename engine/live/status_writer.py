@@ -37,6 +37,7 @@ class StatusWriter:
             "last_plan_tp": None,
             "last_plan_sl": None,
             "last_plan_atr": None,
+            "last_plan_atr_pct": None,
 
             # 🧠 STRATEGY / ROUTER (NUEVO)
             "strategy_mode": None,                # direction | trend_following | mixed
@@ -96,6 +97,7 @@ class StatusWriter:
         tp: float | None = None,
         sl: float | None = None,
         atr: float | None = None,
+        atr_pct=None,
     ) -> None:
         self.write({
             "last_plan_status": status,
@@ -105,6 +107,7 @@ class StatusWriter:
             "last_plan_tp": tp,
             "last_plan_sl": sl,
             "last_plan_atr": atr,
+            "last_plan_atr_pct": atr_pct,
         })
 
     # 🧠 NUEVO: STRATEGY / ROUTER WRITE (IMPORTANTE)

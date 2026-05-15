@@ -39,6 +39,8 @@ from config.timeframes import (
     TIMEFRAME_CONFIGS
 )
 
+from config.strategies.v1 import SYMBOLS
+
 load_dotenv()
 
 # =========================================================
@@ -78,7 +80,7 @@ secret = os.getenv("SECRET_KEY")
 # CONFIG
 # =========================================================
 
-SYMBOL = "BTCUSDT"
+SYMBOL = "DOGEUSDT"
 
 #TIMEFRAMES = [
 #    "5m",
@@ -90,16 +92,27 @@ SYMBOL = "BTCUSDT"
 
 DAYS = 3
 
+DAYS_BY_TF = {
+    "1m": 1,
+    "5m": 2,
+    "15m": 3,
+    "1h": 7,
+    "4h": 25,
+}
+
 STATUS_INTERVAL = 3
 
 # =========================================================
 # INIT BUFFER
 # =========================================================
 
-buffer = DataBuffer(TIMEFRAMES)
+buffer = DataBuffer(
+    TIMEFRAMES,
+    symbols=SYMBOLS
+)
 
 signal_journal = SignalJournal(
-    f"live_signals_{SYMBOL}.csv"
+    "live_signals_multi_asset.csv"
 )
 
 print_live_banner()
@@ -113,24 +126,28 @@ print(
 # LOAD HISTORICAL
 # =========================================================
 
-for tf in TIMEFRAMES:
+for symbol in SYMBOLS:
+    for tf in TIMEFRAMES:
 
-    print(f"[HISTORY] loading tf={tf}")
+        print(f"[HISTORY] loading symbol={symbol} tf={tf}")
 
-    df_hist = fetch_history(
-        SYMBOL,
-        tf,
-        DAYS
-    )
+        days = DAYS_BY_TF.get(tf, 3)
 
-    print(f"[HISTORY] {tf} fetched rows={len(df_hist)}")
+        df_hist = fetch_history(
+            symbol,
+            tf,
+            days
+        )
 
-    buffer.load_historical(
-        tf,
-        df_hist
-    )
+        print(f"[HISTORY] {symbol} {tf} fetched rows={len(df_hist)}")
 
-    print(f"[HISTORY] {tf} loaded into buffer\n")
+        buffer.load_historical(
+            symbol,
+            tf,
+            df_hist
+        )
+
+        print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
 
 # =========================================================
 # EXCHANGE
@@ -180,11 +197,16 @@ except Exception as e:
 # INIT ENGINES
 # =========================================================
 
-signals = SignalEngine(buffer)
+signals = SignalEngine(
+    buffer,
+    mode=STRATEGY_MODE
+)
 
 entry_engine = EntryEngine(
     buffer,
-    debug=True
+    debug=True,
+    config=mode_config,
+    symbol=SYMBOL,
 )
 
 trade_manager = TradeManager(
@@ -202,7 +224,8 @@ else:
 execution = ExecutionEngine(
     exchange,
     position_manager,
-    execution_strategy   # 👈 ESTO FALTA
+    execution_strategy,
+    symbol=SYMBOL
 )
 
 status_writer = StatusWriter()
@@ -225,6 +248,7 @@ last_signal_side = "N/A"
 
 last_signal_trend = None
 last_signal_momentum = None
+opening_position = False
 
 status_writer.write({
     "engine_online": True,
@@ -251,7 +275,16 @@ status_writer.write({
 # RESTORE STATE
 # =========================================================
 
-execution.restore_state(SYMBOL)
+for symbol in SYMBOLS:
+    pos = exchange.get_position(symbol)
+
+    if pos:
+        execution.restore_state(symbol)
+
+        if len(execution.positions) >= execution.max_global_positions:
+            break
+else:
+    print("\033[94m[SYNC]\033[0m ℹ️ No position to restore.")
 
 # =========================================================
 # CONNECT WS
@@ -259,7 +292,8 @@ execution.restore_state(SYMBOL)
 
 ws = WSClient(
     buffer.on_ws_message,
-    timeframes=TIMEFRAMES
+    timeframes=TIMEFRAMES,
+    symbols=SYMBOLS
 )
 
 ws.start()
@@ -284,65 +318,58 @@ def write_heartbeat():
 
     try:
         balance = exchange.get_balance()
-
     except Exception:
         balance = 0.0
 
     try:
-        position = exchange.get_position(SYMBOL)
-
+        open_positions = exchange.get_open_positions()
     except Exception:
-        position = None
+        open_positions = []
 
-    if position:
+    first_position = open_positions[0] if open_positions else None
 
-        amount = float(position["amount"])
-
-        position_side = (
-            "LONG"
-            if amount > 0
-            else "SHORT"
-        )
-
-        position_qty = abs(amount)
-
-        entry_price = float(
-            position["entry_price"]
-        )
-
-        unpnl = float(
-            position["unrealized_pnl"]
-        )
+    if first_position:
+        position_side = first_position["side"]
+        position_qty = first_position["quantity"]
+        entry_price = first_position["entry_price"]
+        unpnl = first_position["unrealized_pnl"]
+        symbol_status = first_position["symbol"]
 
     else:
-
         position_side = "NONE"
         position_qty = 0.0
         entry_price = 0.0
         unpnl = 0.0
-        
+        symbol_status = SYMBOL
+
     current_status = status_writer._read_current()
 
     status_writer.write({
         "engine_online": True,
         "ws_online": ws.is_connected,
-        "symbol": SYMBOL,
+        "symbol": symbol_status,
         "balance": balance,
+
+        # compat dashboard viejo
         "position_side": position_side,
         "position_qty": position_qty,
         "entry_price": entry_price,
         "unpnl": unpnl,
+
+        # nuevo multi-position
+        "open_positions": open_positions,
+
         "last_signal": last_signal_side,
         "signal_trend": last_signal_trend,
         "signal_direction": last_signal_direction,
         "signal_momentum": last_signal_momentum,
-        
+
         "strategy_mode": current_status.get("strategy_mode"),
         "last_executed_strategy": current_status.get("last_executed_strategy"),
         "last_router_action": current_status.get("last_router_action"),
         "last_router_reason": current_status.get("last_router_reason"),
     })
-
+    
 # =========================================================
 # EVENT LOOP
 # =========================================================
@@ -367,38 +394,39 @@ try:
         # PRICE UPDATE
         # =================================================
 
-        price = buffer.last_price()
+        for pos_symbol in list(execution.positions.keys()):
 
-        timestamp = buffer.last_timestamp()
+            price = buffer.last_price(pos_symbol)
+            timestamp = buffer.last_timestamp(pos_symbol)
 
-        if (
-            price is not None
-            and timestamp is not None
-        ):
-            execution.on_price_update(
-                price,
-                timestamp
-            )
+            if price is not None and timestamp is not None:
+                execution.on_price_update(
+                    pos_symbol,
+                    price,
+                    timestamp
+                )
 
         # =================================================
         # 15m CLOSED
         # =================================================
 
-        if buffer.consume_closed_tf(TRIGGER_TF):
+        symbol = buffer.consume_any_closed_tf(TRIGGER_TF)
+
+        if symbol:
 
             print(
                 f"\033[93m[LIVE MAIN]\033[0m "
                 f"✅ {TRIGGER_TF} close event consumed"
             )
 
-            closed_candle_ts = buffer.last_close_time[TRIGGER_TF]
-            close_price = buffer.last_price()
+            close_price = buffer.last_price(symbol)
+            closed_candle_ts = buffer.last_close_time[symbol][TRIGGER_TF]
 
             # =================================================
             # 1. SNAPSHOT + SIGNAL GENERATION (PRIMERO SIEMPRE)
             # =================================================
 
-            signal = signals.generate_signal()
+            signal = signals.generate_signal(symbol)
 
             if not signal:
                 continue
@@ -421,7 +449,7 @@ try:
             trade_action = strategy_router.evaluate(
                 signal,
                 previous_direction=previous_direction,    
-                current_position=execution.position
+                current_position=execution.get_position(symbol)
             )
 
             update_status(
@@ -445,14 +473,17 @@ try:
             # 2. UPDATE CONTEXT (SI YA HAY POSICIÓN)
             # =================================================
 
-            if execution.position:
+            if execution.get_position(symbol):
 
-                execution_strategy.update_position_context(
-                    execution_engine=execution,
+                execution.update_position_context(
                     trend=signal.trend.value,
                     direction=signal.direction.value,
                     momentum=signal.momentum.value,
-                    current_price=close_price
+                    micro_momentum=signal.momentum.value if signal.momentum else None,
+                    price=close_price,
+                    ema20_1m=getattr(signal, "ema20_1m", None),
+                    ema34_1m=getattr(signal, "ema34_1m", None),
+                    ema50_1m=getattr(signal, "ema50_1m", None),
                 )
 
             # =================================================
@@ -484,6 +515,17 @@ try:
 
             if trade_action.action == Action.HOLD:
                 continue
+            
+            # =================================================
+            # GLOBAL POSITION LOCK
+            # =================================================
+
+            if not execution.can_open_position(symbol) or opening_position:
+                print(
+                    f"\033[93m[LIVE MAIN]\033[0m "
+                    f"⛔ global lock active"
+                )
+                continue
 
             # =================================================
             # 6. ENTRY PLAN
@@ -495,17 +537,26 @@ try:
                 print("\033[94m[ENTRY PLANNER]\033[0m ❌ PLAN DESCARTADO\n")
                 continue
 
+            print(
+                f"[DEBUG PLAN] "
+                f"signal_price={signal.signal_price} "
+                f"plan_symbol={plan.symbol} "
+                f"entry={plan.entry}"
+            )
+
             # =================================================
             # 7. EXECUTION STRATEGY (ULTIMO PASO)
             # =================================================
 
             try:
+                opening_position = True
+
                 executed = execution_strategy.on_signal(
                     execution_engine=execution,
                     trade_action=trade_action,
                     plan=plan
                 )
-                
+
                 update_status(
                     status_writer,
                     last_executed_strategy=execution_strategy.__class__.__name__
@@ -515,6 +566,9 @@ try:
 
             except Exception as e:
                 print(f"[LIVE MAIN] ❌ execution error but loop continues: {e}")
+
+            finally:
+                opening_position = False
 
 # =========================================================
 # STOP

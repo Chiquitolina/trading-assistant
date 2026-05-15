@@ -1,34 +1,48 @@
 import json
-import os
+from pathlib import Path
+from typing import Any
+
 
 class SnapshotManager:
+    def __init__(self, base_dir: Path | None = None):
+        self.base_dir = base_dir or Path("snapshots")
+        self.base_dir.mkdir(parents=True, exist_ok=True)
 
-    def __init__(self, path="state/position_snapshot.json"):
-        self.path = path
+    def _path(self, symbol: str) -> Path:
+        return self.base_dir / f"{symbol}.json"
 
-    # =========================
-    # SAVE FULL SNAPSHOT
-    # =========================
-    def save(self, snapshot: dict):
-        with open(self.path, "w") as f:
-            json.dump(snapshot, f, indent=2)
+    def save(self, symbol: str, data: dict[str, Any]):
+        path = self._path(symbol)
 
-    # =========================
-    # LOAD SNAPSHOT
-    # =========================
-    def load(self):
-        if not os.path.exists(self.path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, default=str)
+
+    def load(self, symbol: str) -> dict[str, Any] | None:
+        path = self._path(symbol)
+
+        if not path.exists():
             return None
 
-        with open(self.path, "r") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
 
-    # =========================
-    # UPDATE PARTIAL (clave)
-    # =========================
-    def update(self, section: str, data: dict):
-        snapshot = self.load() or {}
-        snapshot.setdefault(section, {})
-        snapshot[section].update(data)
+    def update(self, symbol: str, section: str, data: dict[str, Any]):
+        snapshot = self.load(symbol) or {}
 
-        self.save(snapshot)
+        current_section = snapshot.get(section, {})
+        if not isinstance(current_section, dict):
+            current_section = {}
+
+        current_section.update(data)
+        snapshot[section] = current_section
+
+        self.save(symbol, snapshot)
+
+    def clear(self, symbol: str):
+        path = self._path(symbol)
+
+        if path.exists():
+            path.unlink()

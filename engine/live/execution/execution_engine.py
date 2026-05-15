@@ -12,9 +12,11 @@ from services.risk_manager import RiskManager
 from binance.exceptions import BinanceAPIException
 from engine.live.execution.order_executor import OrderExecutor
 from engine.live.state.snapshot_manager import SnapshotManager
+from config.strategies.v1 import SYMBOLS, MAX_GLOBAL_POSITIONS
+
 class ExecutionEngine:
 
-    def __init__(self, exchange, position_manager, strategy, symbol="BTCUSDT"):
+    def __init__(self, exchange, position_manager, strategy, symbol):
         self.exchange = exchange
         self.position_manager = position_manager
         self.symbol = symbol
@@ -27,6 +29,14 @@ class ExecutionEngine:
         self.snapshot_manager = SnapshotManager()
         self.order_executor = OrderExecutor(exchange)
         self.strategy = strategy
+        self.positions: dict[str, Position] = {}
+        self.max_global_positions = MAX_GLOBAL_POSITIONS
+        self.opening_position = False
+        self.last_global_entry_ts = 0
+        self.last_symbol_entry_ts = {}
+
+        self.global_entry_cooldown = 180   # 3 min
+        self.symbol_entry_cooldown = 900   # 15 min
 
     def _apply_slippage(self, price: float, side: str, is_entry: bool = True):
         slippage_pct = random.uniform(0.01, 0.05) / 100
@@ -38,7 +48,7 @@ class ExecutionEngine:
         if side == "SHORT":
             return price - slippage if is_entry else price + slippage
         
-    def _get_last_close_fill(self, symbol, side, quantity, limit=20):
+    def _get_last_close_fill(self, symbol, side, quantity, entry_ts, limit=50):
         fills = self.exchange.get_recent_fills(symbol, limit=limit)
 
         if not fills:
@@ -46,7 +56,11 @@ class ExecutionEngine:
 
         exit_side = "SELL" if side == "LONG" else "BUY"
 
-        candidates = [f for f in fills if f["side"] == exit_side]
+        candidates = [
+            f for f in fills
+            if f["side"] == exit_side
+            and int(f["time"]) >= int(entry_ts)
+        ]
 
         if not candidates:
             return None
@@ -56,13 +70,21 @@ class ExecutionEngine:
             oid = f["orderId"]
             grouped.setdefault(oid, []).append(f)
 
-        # elegir la orden más reciente según time
-        latest_order_id = max(
-            grouped.keys(),
-            key=lambda oid: max(int(x["time"]) for x in grouped[oid])
-        )
+        valid_orders = []
 
-        selected = grouped[latest_order_id]
+        for oid, group in grouped.items():
+            total_qty = sum(float(f["qty"]) for f in group)
+
+            if abs(total_qty - float(quantity)) <= 0.000001:
+                valid_orders.append((oid, group))
+
+        if not valid_orders:
+            return None
+
+        latest_order_id, selected = max(
+            valid_orders,
+            key=lambda item: max(int(x["time"]) for x in item[1])
+        )
 
         total_qty = sum(float(f["qty"]) for f in selected)
         total_quote = sum(float(f["qty"]) * float(f["price"]) for f in selected)
@@ -82,7 +104,7 @@ class ExecutionEngine:
             "fills": selected,
         }
         
-    def _calc_candles_in_trade(self, current_candle_ts: int, tf_minutes: int = 15) -> int:
+    def _calc_candles_in_trade(self, current_candle_ts: int, tf_minutes: int = 1) -> int:
         if not self.position or self.position.entry_candle_ts is None:
             return 0
 
@@ -90,7 +112,41 @@ class ExecutionEngine:
         diff_ms = current_candle_ts - self.position.entry_candle_ts
 
         return int(diff_ms // tf_ms) + 1
-                
+            
+    def _infer_close_reason(self, pos, exit_price):
+        tolerance = abs(pos.real_entry) * 0.001
+
+        pnl_pct = (
+            (exit_price - pos.real_entry) / pos.real_entry * 100
+            if pos.side == "LONG"
+            else (pos.real_entry - exit_price) / pos.real_entry * 100
+        )
+
+        if pos.side == "LONG":
+            if exit_price >= pos.tp - tolerance:
+                return "TP"
+
+            if exit_price <= pos.sl + tolerance:
+                if pnl_pct > 0:
+                    return "TRAILING_SL"
+                elif pnl_pct >= -0.05:
+                    return "BE_SL"
+                return "SL"
+
+        else:
+            if exit_price <= pos.tp + tolerance:
+                return "TP"
+
+            if exit_price >= pos.sl - tolerance:
+                if pnl_pct > 0:
+                    return "TRAILING_SL"
+                elif pnl_pct >= -0.05:
+                    return "BE_SL"
+                return "SL"
+
+        return "MANUAL_PROFIT" if pnl_pct > 0 else "MANUAL_LOSS"
+
+
     def _handle_external_close(self, price, timestamp):
         pos = self.position
         if not pos:
@@ -99,65 +155,46 @@ class ExecutionEngine:
         print("⚠️ Detectado cierre externo (TP/SL o manual)")
 
         # ==========================
-        # Detectar reason
-        # ==========================
-        if pos.side == "LONG":
-            if price >= pos.tp:
-                reason = "TP"
-            elif price <= pos.sl:
-                reason = "SL"
-            else:
-                reason = "MANUAL_CLOSE"
-        else:
-            if price <= pos.tp:
-                reason = "TP"
-            elif price >= pos.sl:
-                reason = "SL"
-            else:
-                reason = "MANUAL_CLOSE"
-
-        print("\033[94m[SYNC]\033[0m 📊 External close reason: {reason}")
-
-        # ==========================
-        # Buscar fill real de cierre
+        # BUSCAR FILL REAL DE CIERRE
         # ==========================
         close_fill = self._get_last_close_fill(
             symbol=pos.symbol,
             side=pos.side,
             quantity=pos.quantity,
-            limit=20
+            entry_ts=int(pos.entry_ts) - 60_000,
+            limit=100
         )
-        
+
         pnl_usd = 0.0
+        fees = round(self.fees["taker"] * 2, 4)
 
         if close_fill:
             real_exit = float(close_fill["price"])
             exit_order_id = int(close_fill["orderId"])
-            fees = round(self.fees["taker"] * 2, 4)
             pnl_usd = float(close_fill.get("realizedPnl", 0) or 0)
 
-            print(f"✅ Close fill encontrado | orderId={exit_order_id} | real_exit={real_exit}")
+            print(
+                f"✅ Close fill encontrado | "
+                f"orderId={exit_order_id} | real_exit={real_exit}"
+            )
+
         else:
             exit_order_id = None
-            exchange_realized_pnl = None
-
-            # fallback
-            if reason == "TP":
-                real_exit = pos.tp
-            elif reason == "SL":
-                real_exit = pos.sl
-            else:
-                real_exit = price
-
-            fees = round(self.fees["taker"] * 2, 4)
+            real_exit = price
 
             print("⚠️ No se encontró close fill, usando fallback local")
 
-        # guardar exit order id en la posición si querés rastrearlo
+        # ==========================
+        # INFERIR REASON CON REAL EXIT
+        # ==========================
+        reason = self._infer_close_reason(pos, real_exit)
+
+        print(f"\033[94m[SYNC]\033[0m 📊 External close reason: {reason}")
+
         pos.exit_order_id = exit_order_id
 
         # ==========================
-        # PnL calculado por el bot
+        # PNL CALCULADO POR EL BOT
         # ==========================
         pnl_pct = (
             (real_exit - pos.real_entry) / pos.real_entry * 100
@@ -168,28 +205,10 @@ class ExecutionEngine:
         pnl_pct = round(pnl_pct, 4)
         pnl_net = round(pnl_pct - fees, 4)
 
-        # ==========================
-        # DEBUG
-        # ==========================
-    #    print(f"""
-    #📊 EXTERNAL CLOSE DEBUG
-    #Entry              : {pos.real_entry}
-    #Exit market price  : {price}
-    #Real exit fill     : {real_exit}
-    #TP                 : {pos.tp}
-    #SL                 : {pos.sl}
-    #Reason             : {reason}
-    #Exit order id      : {exit_order_id}
-    #Exchange realized  : {exchange_realized_pnl}
-    #Fees               : {fees}
-    #PnL gross          : {pnl_pct}%
-    #PnL net            : {pnl_net}%
-    #""")
-
         print(f"❌ CLOSED (external {reason}) | PnL: {pnl_net}%")
 
         # ==========================
-        # Contexto de signal
+        # CONTEXTO DE SIGNAL
         # ==========================
         ctx = pos.signal_context or {}
 
@@ -205,6 +224,7 @@ class ExecutionEngine:
         exit_iso = _to_iso(exit_ts)
 
         self.journal.log_trade(
+            symbol=pos.symbol,
             signal_ts=signal_iso,
             signal_price=pos.signal_price,
 
@@ -236,12 +256,11 @@ class ExecutionEngine:
             signal_direction=ctx.get("direction"),
             signal_momentum=ctx.get("momentum"),
 
-            # 🔥 NUEVO CONTEXTO
             signal_momentum_prev1=ctx.get("momentum_prev1"),
             signal_momentum_prev2=ctx.get("momentum_prev2"),
             signal_momentum_sequence=ctx.get("momentum_sequence"),
 
-            signal_atr=ctx.get("atr"),
+            signal_atr=ctx.get("signal_atr"),
 
             # ==========================
             # LIVE POSITION CONTEXT
@@ -250,47 +269,97 @@ class ExecutionEngine:
             current_direction=pos.current_direction,
             current_momentum=pos.current_momentum,
 
-            # ==========================
-            # FIRST POST-ENTRY STATE
-            # ==========================
             direction_t1=pos.direction_t1,
             momentum_t1=pos.momentum_t1,
-
             pnl_t1=pos.pnl_t1,
 
-            # ==========================
-            # TRADE EVOLUTION
-            # ==========================
+            micro_t1=pos.micro_t1,
+            direction_5m_t1=pos.direction_5m_t1,
+
+            reclaimed_ema20_1m=pos.reclaimed_ema20_1m,
+            reclaimed_ema34_1m=pos.reclaimed_ema34_1m,
+            reclaimed_ema50_1m=pos.reclaimed_ema50_1m,
+
+            lost_ema20_1m=pos.lost_ema20_1m,
+            lost_ema34_1m=pos.lost_ema34_1m,
+            lost_ema50_1m=pos.lost_ema50_1m,
+
+            dist_ema20_1m_pct=pos.dist_ema20_1m_pct,
+            dist_ema34_1m_pct=pos.dist_ema34_1m_pct,
+            dist_ema50_1m_pct=pos.dist_ema50_1m_pct,
+
+            dist_ema50_15m_pct=ctx.get("dist_ema50_15m_pct"),
+            dist_ema99_15m_pct=ctx.get("dist_ema99_15m_pct"),
+
+            dist_ema50_1h_pct=ctx.get("dist_ema50_1h_pct"),
+            dist_ema99_1h_pct=ctx.get("dist_ema99_1h_pct"),
+
+            dist_ema50_4h_pct=ctx.get("dist_ema50_4h_pct"),
+            dist_ema99_4h_pct=ctx.get("dist_ema99_4h_pct"),
+
+            max_favorable_pct=pos.max_favorable_pct,
+            max_adverse_pct=pos.max_adverse_pct,
+
+            direction_5m_changed=pos.direction_5m_changed,
+            direction_5m_after_entry=pos.direction_5m_after_entry,
+
             mae=pos.mae,
             mfe=pos.mfe,
-            
+
             strategy_mode=ctx.get("strategy_name"),
-            router_reason=ctx.get("strategy_reason")
+            router_reason=ctx.get("router_reason")
         )
 
-        self.position = None
-        self.snapshot_manager.clear()
+        try:
+            self.order_executor.cancel_all(pos.symbol)
+            print(f"🧹 Pending orders cancelled for {pos.symbol}")
+        except Exception as e:
+            print(f"⚠️ Failed cancelling pending orders for {pos.symbol}: {e}")
+
+        self.positions.pop(pos.symbol, None)
+
+        if self.position and self.position.symbol == pos.symbol:
+            self.position = None
+
+        self.snapshot_manager.clear(pos.symbol)
         
-    def _place_tp_sl(self, symbol, quantity, tp_side, tp_price, sl_side, sl_price):
+    def _place_tp_sl(self, symbol, quantity, side, tp_side, tp_price, sl_side, sl_price, real_entry):
         try:
             raw_tp = tp_price
             raw_sl = sl_price
 
-            tp_price = self.exchange.normalize_price(symbol, tp_price)
-            sl_price = self.exchange.normalize_price(symbol, sl_price)
+            mark_price = float(self.exchange.get_mark_price(symbol))
+            tick_size = float(self.exchange.get_price_tick_size(symbol))
+
+            min_distance = tick_size * 10
+
+            tp_float = float(tp_price)
+            sl_float = float(sl_price)
+
+            if side == "LONG":
+                tp_float = max(tp_float, mark_price + min_distance)
+                sl_float = min(sl_float, mark_price - min_distance)
+
+            elif side == "SHORT":
+                tp_float = min(tp_float, mark_price - min_distance)
+                sl_float = max(sl_float, mark_price + min_distance)
+
+            tp_price = self.exchange.normalize_price(symbol, tp_float)
+            sl_price = self.exchange.normalize_price(symbol, sl_float)
 
             print(
                 f"📌 TP/SL debug | "
-                f"symbol={symbol} | qty={quantity} | "
-                f"raw_tp={raw_tp} -> tp={tp_price} ({type(tp_price)}) | "
-                f"raw_sl={raw_sl} -> sl={sl_price} ({type(sl_price)})"
+                f"symbol={symbol} | qty={quantity} | side={side} | "
+                f"mark={mark_price} | tick={tick_size} | "
+                f"raw_tp={raw_tp} -> tp={tp_price} | "
+                f"raw_sl={raw_sl} -> sl={sl_price}"
             )
 
-            self.exchange.place_take_profit(
+            self.exchange.place_take_profit_limit(
                 symbol=symbol,
                 side=tp_side,
                 quantity=quantity,
-                stop_price=tp_price
+                price=tp_price
             )
 
             self.exchange.place_stop_loss(
@@ -306,10 +375,75 @@ class ExecutionEngine:
         except Exception as e:
             print(f"❌ Error colocando TP/SL: {e}")
             return False
+        
+    def exchange_open_positions_count(self, symbols):
+        count = 0
 
-    def open_position(self, plan, leverage: int = 3):
+        for symbol in symbols:
+            pos = self.position_manager.sync(symbol)
 
+            if pos:
+                count += 1
+
+        return count
+        
+    def get_position(self, symbol: str):
+        return self.positions.get(symbol)
+
+
+    def open_positions_count(self) -> int:
+        return len(self.positions)
+
+
+    def can_open_position(self, symbol: str) -> bool:
+        if self.opening_position:
+            return False
+
+        if symbol in self.positions:
+            return False
+
+        if self.open_positions_count() >= self.max_global_positions:
+            return False
+
+        now = time.time()
+
+        # ==========================
+        # GLOBAL COOLDOWN
+        # ==========================
+        if now - self.last_global_entry_ts < self.global_entry_cooldown:
+            remaining = self.global_entry_cooldown - (now - self.last_global_entry_ts)
+            print(f"⏳ Global cooldown active | remaining={remaining:.0f}s")
+            return False
+
+        # ==========================
+        # SYMBOL COOLDOWN
+        # ==========================
+        last_symbol_ts = self.last_symbol_entry_ts.get(symbol, 0)
+
+        if now - last_symbol_ts < self.symbol_entry_cooldown:
+            remaining = self.symbol_entry_cooldown - (now - last_symbol_ts)
+            print(f"⏳ Symbol cooldown active | symbol={symbol} | remaining={remaining:.0f}s")
+            return False
+
+        return True
+
+    def open_position(self, plan, leverage: int = 1):
+        
+        if self.opening_position:
+            print("⛔ Opening already in progress. Plan ignored.")
+            return False
+
+        self.opening_position = True
+        
         try:
+            
+            if self.exchange_open_positions_count(SYMBOLS) >= self.max_global_positions:
+                print(
+                    "\033[94m[EXECUTION ENGINE]\033[0m "
+                    "⚠️ Max global exchange positions reached. Plan ignored.\n"
+                )
+                return False
+
             exchange_pos = self.position_manager.sync(plan.symbol)
 
             if exchange_pos:
@@ -363,7 +497,18 @@ class ExecutionEngine:
                 print(msg)
                 return False
 
-            quantity = size_data["quantity"]
+            raw_quantity = size_data["quantity"]
+
+            quantity = self.exchange.normalize_quantity(
+                plan.symbol,
+                raw_quantity
+            )
+
+            print(
+                f"📏 Quantity normalized | "
+                f"symbol={plan.symbol} | "
+                f"raw={raw_quantity} -> qty={quantity}"
+            )
 
             # colchón extra para evitar órdenes demasiado al límite
             required_margin = float(size_data["required_margin"])
@@ -416,14 +561,6 @@ class ExecutionEngine:
 
                 time.sleep(2)
 
-                exchange_pos = self.position_manager.sync(plan.symbol)
-
-                if exchange_pos:
-                    print("✅ Orden SI se ejecutó (detectado por sync)")
-                else:
-                    print("❌ Orden NO ejecutada")
-                    return False
-
             elif not order:
                 print("❌ Order failed")
                 return False
@@ -456,25 +593,40 @@ class ExecutionEngine:
             tp_sl_ok = self._place_tp_sl(
                 symbol=plan.symbol,
                 quantity=quantity,
+                side=plan.side,
                 tp_side=tp_side,
                 tp_price=tp_price,
                 sl_side=tp_side,
-                sl_price=sl_price
+                sl_price=sl_price,
+                real_entry=real_entry
             )
-
+            
             if not tp_sl_ok:
-                print("⚠️ TP/SL placement failed, but engine continues.")
-                # no rompemos el engine
-                # podés decidir si querés cerrar mercado acá o dejar sync manual
-                # return False
+                print("🚨 TP/SL placement failed. Closing position for safety.")
+
+                close_side = "SELL" if plan.side == "LONG" else "BUY"
+
+                try:
+                    self.exchange.close_position(
+                        symbol=plan.symbol,
+                        side=close_side,
+                        quantity=quantity
+                    )
+
+                    print("✅ Position closed because TP/SL failed")
+
+                except Exception as e:
+                    print(f"❌ Failed to close unprotected position: {e}")
+
+                return False
                 
-            TF_MS = 15 * 60 * 1000
+            TF_MS = 1 * 60 * 1000
             entry_candle_ts = int(plan.signal_ts + TF_MS)
 
             # ==========================
             # 📈 SAVE POSITION
             # ==========================
-            self.position = Position(
+            position = Position(
                 symbol=plan.symbol,
                 side=plan.side,
                 quantity=quantity,
@@ -494,6 +646,15 @@ class ExecutionEngine:
                 entry_candle_ts=int(entry_candle_ts),
                 candles_in_trade=1
             )
+            
+            self.positions[plan.symbol] = position
+
+            # compatibilidad temporal
+            self.position = position
+            
+            now = time.time()
+            self.last_global_entry_ts = now
+            self.last_symbol_entry_ts[plan.symbol] = now
             
             snapshot = {
                 "position": {
@@ -524,11 +685,20 @@ class ExecutionEngine:
                     "signal_momentum_prev2": plan.signal_context.get("momentum_prev2"),
                     "signal_momentum_sequence": plan.signal_context.get("momentum_sequence"),
 
-                    "signal_atr": plan.signal_context.get("atr"),
+                    "signal_atr": plan.signal_context.get("signal_atr"),
+                    "signal_atr_pct": plan.signal_context.get("signal_atr_pct"),
+                    
+                    "dist_ema50_15m_pct": plan.signal_context.get("dist_ema50_15m_pct"),
+                    "dist_ema99_15m_pct": plan.signal_context.get("dist_ema99_15m_pct"),
 
-                    "strategy_mode": plan.strategy_mode,
-                    "router_reason": plan.router_reason,
+                    "dist_ema50_1h_pct": plan.signal_context.get("dist_ema50_1h_pct"),
+                    "dist_ema99_1h_pct": plan.signal_context.get("dist_ema99_1h_pct"),
 
+                    "dist_ema50_4h_pct": plan.signal_context.get("dist_ema50_4h_pct"),
+                    "dist_ema99_4h_pct": plan.signal_context.get("dist_ema99_4h_pct"),
+
+                    "strategy_mode": plan.signal_context.get("strategy_name"),
+                    "router_reason": plan.signal_context.get("router_reason")
                 },
 
                 "post_entry_analysis": {},
@@ -538,7 +708,7 @@ class ExecutionEngine:
                 }
             }
 
-            self.snapshot_manager.save(snapshot)
+            self.snapshot_manager.save(plan.symbol, snapshot)
             
             print(f"""
     \033[94m[EXECUTION ENGINE]\033[0m
@@ -558,27 +728,75 @@ class ExecutionEngine:
         except Exception as e:
             print(f"\033[94m[EXECUTION ENGINE]\033[0m ❌ execute_plan crashed safely: {e}")
             return False
+        
+        
+        finally:
+            self.opening_position = False
     # ==========================
     # 🔄 PRICE UPDATE
     # ==========================
     
-    def update_position_context(self, trend, direction, momentum, price):
-        self.strategy.update_position_context(self, trend, direction, momentum, price)
-        
+    def update_position_context(
+        self,
+        trend,
+        direction,
+        momentum,
+        micro_momentum,
+        price,
+        ema20_1m=None,
+        ema34_1m=None,
+        ema50_1m=None
+    ):
+        self.strategy.update_position_context(
+            self,
+            trend,
+            direction,
+            momentum,
+            micro_momentum,
+            price,
+            ema20_1m,
+            ema34_1m,
+            ema50_1m
+        )
+
+        if not self.position:
+            return
+
         self.snapshot_manager.update(
+            self.position.symbol,
             "post_entry_analysis",
             {
-                "current_trend": trend,
-                "current_direction": direction,
-                "current_momentum": momentum,
+                "current_trend": self.position.current_trend,
+                "current_direction": self.position.current_direction,
+                "current_momentum": self.position.current_momentum,
 
                 "mae": self.position.mae,
                 "mfe": self.position.mfe,
 
                 "direction_t1": self.position.direction_t1,
                 "momentum_t1": self.position.momentum_t1,
+                "pnl_t1": self.position.pnl_t1,
 
-                "pnl_t1": self.position.pnl_t1
+                "micro_t1": self.position.micro_t1,
+                "direction_5m_t1": self.position.direction_5m_t1,
+
+                "reclaimed_ema20_1m": self.position.reclaimed_ema20_1m,
+                "reclaimed_ema34_1m": self.position.reclaimed_ema34_1m,
+                "reclaimed_ema50_1m": self.position.reclaimed_ema50_1m,
+
+                "lost_ema20_1m": self.position.lost_ema20_1m,
+                "lost_ema34_1m": self.position.lost_ema34_1m,
+                "lost_ema50_1m": self.position.lost_ema50_1m,
+
+                "dist_ema20_1m_pct": self.position.dist_ema20_1m_pct,
+                "dist_ema34_1m_pct": self.position.dist_ema34_1m_pct,
+                "dist_ema50_1m_pct": self.position.dist_ema50_1m_pct,
+
+                "max_favorable_pct": self.position.max_favorable_pct,
+                "max_adverse_pct": self.position.max_adverse_pct,
+
+                "direction_5m_changed": self.position.direction_5m_changed,
+                "direction_5m_after_entry": self.position.direction_5m_after_entry,
             }
         )
     
@@ -588,20 +806,27 @@ class ExecutionEngine:
     def on_candle_close(self, ts, price):
         self.strategy.on_candle_close(self, ts, price)
 
-    def on_price_update(self, price: float, timestamp: int):
+    def on_price_update(self, symbol: str, price: float, timestamp: int):
 
-        exchange_pos = self.position_manager.sync(self.symbol)
+        position = self.positions.get(symbol)
 
-        if not exchange_pos and self.position:
+        if not position:
+            return
+
+        exchange_pos = self.position_manager.sync(symbol)
+
+        if not exchange_pos:
+            self.position = position
             self._handle_external_close(price, timestamp)
             return
 
-        if not self.position:
-            return
+        # compat temporal
+        self.position = position
 
         self.strategy.on_price_update(self, price, timestamp)
         
         self.snapshot_manager.update(
+            symbol,
             "engine",
             {
                 "last_update_ts": timestamp
@@ -633,6 +858,13 @@ class ExecutionEngine:
         else:
             print("⚠️ Close order without fills, using fallback price")
             real_exit = price
+        
+        qty = float(pos.quantity)
+
+        if pos.side == "LONG":
+            pnl_usd = (real_exit - pos.real_entry) * qty
+        else:
+            pnl_usd = (pos.real_entry - real_exit) * qty
 
         # 🔹 precio simulado (con slippage)
         price_with_slippage = self._apply_slippage(price, pos.side, is_entry=False)
@@ -662,6 +894,7 @@ class ExecutionEngine:
         exit_iso = datetime.utcfromtimestamp(timestamp / 1000).isoformat()
 
         self.journal.log_trade(
+            symbol=pos.symbol,
             signal_ts=signal_iso,
             signal_price=pos.signal_price,
 
@@ -698,7 +931,7 @@ class ExecutionEngine:
             signal_momentum_prev2=ctx.get("momentum_prev2"),
             signal_momentum_sequence=ctx.get("momentum_sequence"),
 
-            signal_atr=ctx.get("atr"),
+            signal_atr=ctx.get("signal_atr"),
 
             # ==========================
             # LIVE POSITION CONTEXT
@@ -714,6 +947,39 @@ class ExecutionEngine:
             momentum_t1=pos.momentum_t1,
 
             pnl_t1=pos.pnl_t1,
+            
+            # ==========================
+            # AGGRESSIVE POST ANALYSIS
+            # ==========================
+            micro_t1=pos.micro_t1,
+            direction_5m_t1=pos.direction_5m_t1,
+
+            reclaimed_ema20_1m=pos.reclaimed_ema20_1m,
+            reclaimed_ema34_1m=pos.reclaimed_ema34_1m,
+            reclaimed_ema50_1m=pos.reclaimed_ema50_1m,
+
+            lost_ema20_1m=pos.lost_ema20_1m,
+            lost_ema34_1m=pos.lost_ema34_1m,
+            lost_ema50_1m=pos.lost_ema50_1m,
+
+            dist_ema20_1m_pct=pos.dist_ema20_1m_pct,
+            dist_ema34_1m_pct=pos.dist_ema34_1m_pct,
+            dist_ema50_1m_pct=pos.dist_ema50_1m_pct,
+
+            dist_ema50_15m_pct=ctx.get("dist_ema50_15m_pct"),
+            dist_ema99_15m_pct=ctx.get("dist_ema99_15m_pct"),
+
+            dist_ema50_1h_pct=ctx.get("dist_ema50_1h_pct"),
+            dist_ema99_1h_pct=ctx.get("dist_ema99_1h_pct"),
+
+            dist_ema50_4h_pct=ctx.get("dist_ema50_4h_pct"),
+            dist_ema99_4h_pct=ctx.get("dist_ema99_4h_pct"),
+
+            max_favorable_pct=pos.max_favorable_pct,
+            max_adverse_pct=pos.max_adverse_pct,
+
+            direction_5m_changed=pos.direction_5m_changed,
+            direction_5m_after_entry=pos.direction_5m_after_entry,
 
             # ==========================
             # TRADE EVOLUTION
@@ -722,11 +988,21 @@ class ExecutionEngine:
             mfe=pos.mfe,
             
             strategy_mode=ctx.get("strategy_name"),
-            router_reason=ctx.get("strategy_reason")
+            router_reason=ctx.get("router_reason")
         )
+        
+        try:
+            self.order_executor.cancel_all(pos.symbol)
+            print(f"🧹 Pending orders cancelled for {pos.symbol}")
+        except Exception as e:
+            print(f"⚠️ Failed cancelling pending orders for {pos.symbol}: {e}")
 
-        self.position = None
-        self.snapshot_manager.clear()
+        self.positions.pop(pos.symbol, None)
+
+        if self.position and self.position.symbol == pos.symbol:
+            self.position = None
+
+        self.snapshot_manager.clear(pos.symbol)
 
     def get_state(self):
         return {
@@ -745,16 +1021,11 @@ class ExecutionEngine:
         if not exchange_state:
             print("\033[94m[SYNC]\033[0m ℹ️ No position to restore.")
             return
-        
-        exchange_qty = float(exchange_state["quantity"])
-
-        if abs(exchange_qty - quantity) > 0.0001:
-            print("⚠️ Snapshot/exchange quantity mismatch")
 
         # ==========================
         # LOAD SNAPSHOT
         # ==========================
-        snapshot = self.snapshot_manager.load()
+        snapshot = self.snapshot_manager.load(symbol)
 
         if not snapshot:
             print("\033[94m[SYNC]\033[0m ⚠️ Snapshot not found.")
@@ -762,15 +1033,68 @@ class ExecutionEngine:
 
         position_data = snapshot.get("position", {})
         context = snapshot.get("context", {})
+                
+        context = {
+            **context,
+
+            "trend": context.get("trend") or context.get("signal_trend"),
+            "direction": context.get("direction") or context.get("signal_direction"),
+            "momentum": context.get("momentum") or context.get("signal_momentum"),
+
+            "momentum_prev1": context.get("momentum_prev1") or context.get("signal_momentum_prev1"),
+            "momentum_prev2": context.get("momentum_prev2") or context.get("signal_momentum_prev2"),
+            "momentum_sequence": context.get("momentum_sequence") or context.get("signal_momentum_sequence"),
+
+            "signal_atr": context.get("signal_atr") or context.get("atr"),
+            "signal_atr_pct": context.get("signal_atr_pct") or context.get("atr_pct"),
+
+            "strategy_name": context.get("strategy_name") or context.get("strategy_mode"),
+            "router_reason": context.get("router_reason"),
+
+            "dist_ema50_15m_pct": context.get("dist_ema50_15m_pct"),
+            "dist_ema99_15m_pct": context.get("dist_ema99_15m_pct"),
+
+            "dist_ema50_1h_pct": context.get("dist_ema50_1h_pct"),
+            "dist_ema99_1h_pct": context.get("dist_ema99_1h_pct"),
+
+            "dist_ema50_4h_pct": context.get("dist_ema50_4h_pct"),
+            "dist_ema99_4h_pct": context.get("dist_ema99_4h_pct"),
+        }
         post_analysis = snapshot.get("post_entry_analysis", {})
 
         # ==========================
-        # REAL EXCHANGE DATA
+        # SNAPSHOT DATA
         # ==========================
-        entry_price = float(position_data["real_entry"])
-        quantity = float(position_data["qty"])
-        side = position_data["side"]
+        entry_price = float(
+            position_data.get("real_entry")
+            or position_data.get("entry_price")
+            or position_data.get("entry")
+            or exchange_state.get("entry_price")
+        )
+        quantity = float(
+            position_data.get("qty")
+            or position_data.get("quantity")
+            or exchange_state.get("quantity")
+        )
+        side = (
+            position_data.get("side")
+            or exchange_state.get("side")
+        )
 
+        # ==========================
+        # EXCHANGE VALIDATION
+        # ==========================
+        exchange_qty = float(exchange_state["quantity"])
+
+        if abs(exchange_qty - quantity) > 0.0001:
+            print(
+                f"\033[93m[SYNC]\033[0m ⚠️ Quantity mismatch | "
+                f"snapshot={quantity} exchange={exchange_qty}"
+            )
+
+        # ==========================
+        # TP / SL
+        # ==========================
         tp = exchange_state.get("tp")
         sl = exchange_state.get("sl")
 
@@ -796,10 +1120,12 @@ class ExecutionEngine:
             tp_sl_ok = self._place_tp_sl(
                 symbol=symbol,
                 quantity=quantity,
+                side=side,
                 tp_side=tp_side,
                 tp_price=tp,
                 sl_side=tp_side,
-                sl_price=sl
+                sl_price=sl,
+                real_entry=entry_price,
             )
 
             if tp_sl_ok:
@@ -814,8 +1140,8 @@ class ExecutionEngine:
         # ==========================
         # RESTORE POSITION
         # ==========================
-        self.position = Position(
-
+        
+        position = Position(
             symbol=symbol,
             side=side,
             quantity=quantity,
@@ -836,24 +1162,58 @@ class ExecutionEngine:
                 position_data.get("signal_ts", time.time() * 1000)
             ),
 
-            # 🔥 CONTEXTO RESTAURADO
             signal_context=context,
 
             # ==========================
-            # POST ENTRY CONTEXT
+            # CURRENT CONTEXT
             # ==========================
             current_trend=post_analysis.get("current_trend"),
             current_direction=post_analysis.get("current_direction"),
             current_momentum=post_analysis.get("current_momentum"),
 
+            # ==========================
+            # FIRST POST ENTRY
+            # ==========================
             direction_t1=post_analysis.get("direction_t1"),
             momentum_t1=post_analysis.get("momentum_t1"),
-
             pnl_t1=post_analysis.get("pnl_t1"),
 
+            micro_t1=post_analysis.get("micro_t1"),
+            direction_5m_t1=post_analysis.get("direction_5m_t1"),
+
+            # ==========================
+            # EMA RECLAIMS / LOSSES
+            # ==========================
+            reclaimed_ema20_1m=post_analysis.get("reclaimed_ema20_1m"),
+            reclaimed_ema34_1m=post_analysis.get("reclaimed_ema34_1m"),
+            reclaimed_ema50_1m=post_analysis.get("reclaimed_ema50_1m"),
+
+            lost_ema20_1m=post_analysis.get("lost_ema20_1m"),
+            lost_ema34_1m=post_analysis.get("lost_ema34_1m"),
+            lost_ema50_1m=post_analysis.get("lost_ema50_1m"),
+
+            # ==========================
+            # EMA DISTANCES
+            # ==========================
+            dist_ema20_1m_pct=post_analysis.get("dist_ema20_1m_pct"),
+            dist_ema34_1m_pct=post_analysis.get("dist_ema34_1m_pct"),
+            dist_ema50_1m_pct=post_analysis.get("dist_ema50_1m_pct"),
+
+            # ==========================
+            # TRADE EXCURSIONS
+            # ==========================
+            max_favorable_pct=post_analysis.get("max_favorable_pct"),
+            max_adverse_pct=post_analysis.get("max_adverse_pct"),
+
+            direction_5m_changed=post_analysis.get("direction_5m_changed"),
+            direction_5m_after_entry=post_analysis.get("direction_5m_after_entry"),
+
             mae=post_analysis.get("mae"),
-            mfe=post_analysis.get("mfe")
+            mfe=post_analysis.get("mfe"),
         )
+        
+        self.positions[symbol] = position
+        self.position = position
 
         print(f"""
     \033[94m[SYNC]\033[0m 🔁 POSITION RESTORED
@@ -866,9 +1226,9 @@ class ExecutionEngine:
     TP               : {tp}
     SL               : {sl}
 
-    Signal Direction : {context.get("signal_direction")}
-    Signal Momentum  : {context.get("signal_momentum")}
-    Strategy Mode    : {context.get("strategy_mode")}
+    Signal Direction : {context.get("direction")}
+    Signal Momentum  : {context.get("momentum")}
+    Strategy Mode    : {context.get("strategy_name")}
     Router Reason    : {context.get("router_reason")}
     """)
 
@@ -880,4 +1240,4 @@ class ExecutionEngine:
             if self.position:
                 print("🔄 Exchange cerró posición")
                 self.position = None
-                self.snapshot_manager.clear()
+                self.snapshot_manager.clear(symbol)

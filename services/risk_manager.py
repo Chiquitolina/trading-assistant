@@ -7,18 +7,18 @@ class RiskManager:
         if plan.side == "LONG":
             sl = real_entry - risk
             tp = real_entry + reward
+
+            sl = min(sl, mark_price * 0.998)
+            tp = max(tp, mark_price * 1.002)
+
         else:
             sl = real_entry + risk
             tp = real_entry - reward
 
-        if plan.side == "LONG":
-            sl = min(sl, mark_price * 0.998)
-            tp = max(tp, mark_price * 1.002)
-        else:
             sl = max(sl, mark_price * 1.002)
             tp = min(tp, mark_price * 0.998)
 
-        return round(tp, 2), round(sl, 2)
+        return tp, sl
 
     def calculate_tp_sl_from_position(
         self,
@@ -42,4 +42,4 @@ class RiskManager:
             tp = min(tp, mark_price * 0.998)
             sl = max(sl, mark_price * 1.002)
 
-        return round(tp, 2), round(sl, 2)
+        return tp, sl

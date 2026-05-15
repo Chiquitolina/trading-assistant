@@ -1,27 +1,60 @@
 # ====================
 # ====================
 
+SYMBOLS = [
+    # majors
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+
+    # momentum / narratives
+    "SEIUSDT",
+    "FETUSDT",
+    "TIAUSDT",
+    "APTUSDT",
+    "OPUSDT",
+    "RAYUSDT",
+    "WIFUSDT",
+    
+    #"ALTUSDT",
+    "NEARUSDT",
+    "DOGEUSDT",
+    #"CUSDT",
+    #"QNTUSDT",
+    #"PLAYUSDT",
+    "ARBUSDT",
+    "SUIUSDT",
+    "INJUSDT",
+    "AVAXUSDT",
+    "LINKUSDT",
+    "XRPUSDT",
+    "TONUSDT",
+]
+
+MAX_GLOBAL_POSITIONS = 2
+
 BACKTEST = {
-    "days": 60,
+    "days": 7,
     "lookahead": 1,
     "warmup": 100,
 }
 
 BACKTEST_AGGRESSIVE = {
-    "days": 5,
+    "days": 7,
     "warmup": 5,
     "lookahead":10
 }
 
 LONG_AGGRESSIVE = {
-    "sl_mult": 2.1,
-    "tp_mult": 1.7,
+    "sl_mult": 1.75,
+    "tp_mult": 1.75,
     "min_tp": 0.31,
 }
 
 SHORT_AGGRESSIVE = {
-    "sl_mult": 2.1,
-    "tp_mult": 1.7,
+    "sl_mult": 1.75,
+    "tp_mult": 1.75,
+    "min_tp": 0.25,
     "min_tp": 0.25,
 }
 
@@ -33,7 +66,7 @@ FEES = {
 
 LONG = {
     "sl_mult": 1.9,
-    "tp_mult": 1.28,
+    "tp_mult": 1.38,
     "min_tp": 0.31,
 }
 

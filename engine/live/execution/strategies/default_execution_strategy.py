@@ -12,7 +12,7 @@ class DefaultExecutionStrategy(BaseExecutionStrategy):
         if trade_action.action == Action.HOLD:
             return False
 
-        pos = execution_engine.position
+        pos = execution_engine.get_position(plan.symbol)
 
         # NO POSITION → OPEN
         if not pos:
@@ -44,8 +44,12 @@ class DefaultExecutionStrategy(BaseExecutionStrategy):
         )
 
         pos.current_pnl = pnl
-        pos.mae = min(pos.mae, pnl)
-        pos.mfe = max(pos.mfe, pnl)
+
+        # ==========================
+        # MAE / MFE SAFE UPDATE
+        # ==========================
+        pos.mae = pnl if pos.mae is None else min(pos.mae, pnl)
+        pos.mfe = pnl if pos.mfe is None else max(pos.mfe, pnl)
 
         # ==========================
         # BREAK EVEN
@@ -118,17 +122,45 @@ class DefaultExecutionStrategy(BaseExecutionStrategy):
         trend,
         direction,
         momentum,
-        current_price
+        micro_momentum=None,
+        current_price=None,
+        ema20_1m=None,
+        ema34_1m=None,
+        ema50_1m=None
     ):
 
         pos = execution_engine.position
         if not pos:
             return
 
+        # ==========================
+        # CURRENT CONTEXT
+        # ==========================
         pos.current_trend = trend
         pos.current_direction = direction
         pos.current_momentum = momentum
 
+        # ==========================
+        # FIRST POST-ENTRY STATE
+        # ==========================
+        if pos.direction_t1 is None:
+            pos.direction_t1 = direction
+
+        if pos.momentum_t1 is None:
+            pos.momentum_t1 = momentum
+
+        if pos.micro_t1 is None:
+            pos.micro_t1 = micro_momentum
+
+        if pos.direction_5m_t1 is None:
+            pos.direction_5m_t1 = direction
+
+        if current_price is None:
+            return
+
+        # ==========================
+        # PNL
+        # ==========================
         pnl = (
             (current_price - pos.real_entry) / pos.real_entry * 100
             if pos.side == "LONG"
@@ -136,5 +168,39 @@ class DefaultExecutionStrategy(BaseExecutionStrategy):
         )
 
         pos.current_pnl = pnl
-        pos.mae = min(pos.mae, pnl)
-        pos.mfe = max(pos.mfe, pnl)
+
+        # ==========================
+        # MAE / MFE
+        # ==========================
+        pos.mae = pnl if pos.mae is None else min(pos.mae, pnl)
+        pos.mfe = pnl if pos.mfe is None else max(pos.mfe, pnl)
+
+        if pos.pnl_t1 is None:
+            pos.pnl_t1 = pnl
+
+        # ==========================
+        # EMA DISTANCES
+        # ==========================
+        if ema20_1m is not None and ema20_1m > 0:
+            pos.dist_ema20_1m_pct = round(
+                ((current_price - ema20_1m) / ema20_1m) * 100,
+                4
+            )
+
+        if ema34_1m is not None and ema34_1m > 0:
+            pos.dist_ema34_1m_pct = round(
+                ((current_price - ema34_1m) / ema34_1m) * 100,
+                4
+            )
+
+        if ema50_1m is not None and ema50_1m > 0:
+            pos.dist_ema50_1m_pct = round(
+                ((current_price - ema50_1m) / ema50_1m) * 100,
+                4
+            )
+
+        # ==========================
+        # TRADE EXCURSIONS
+        # ==========================
+        pos.max_favorable_pct = pos.mfe
+        pos.max_adverse_pct = pos.mae

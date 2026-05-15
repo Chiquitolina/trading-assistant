@@ -13,6 +13,7 @@ class TradePlan:
     sl_pct: float
     tp_pct: float
     atr: float
+    atr_pct: float
     timestamp: int
     reason: str
     
@@ -40,6 +41,7 @@ Dir    : {ctx.get("direction")}
 Trend  : {ctx.get("trend")}
 Mom    : {ctx.get("momentum")}
 ATR    : {ctx.get("atr")}
+ATR%   : {ctx.get("atr_pct")}
 
 📦 EXECUTION
 Entry  : {self.entry:.2f}

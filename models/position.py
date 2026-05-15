@@ -33,8 +33,8 @@ class Position:
 
     current_pnl: float = 0.0
 
-    mae: float = 0.0
-    mfe: float = 0.0
+    mae: float | None = None
+    mfe: float | None = None
 
     current_momentum: Optional[str] = None
     current_direction: Optional[str] = None
@@ -43,6 +43,31 @@ class Position:
     momentum_t1: Optional[str] = None
     direction_t1: Optional[str] = None
     pnl_t1: Optional[float] = None
+    
+    # ========================
+    # AGGRESSIVE POST ANALYSIS
+    # ========================
+
+    micro_t1: Optional[str] = None
+    direction_5m_t1: Optional[str] = None
+
+    reclaimed_ema20_1m: bool = False
+    reclaimed_ema34_1m: bool = False
+    reclaimed_ema50_1m: bool = False
+
+    lost_ema20_1m: bool = False
+    lost_ema34_1m: bool = False
+    lost_ema50_1m: bool = False
+
+    dist_ema20_1m_pct: Optional[float] = None
+    dist_ema34_1m_pct: Optional[float] = None
+    dist_ema50_1m_pct: Optional[float] = None
+
+    max_favorable_pct: Optional[float] = None
+    max_adverse_pct: Optional[float] = None
+
+    direction_5m_changed: bool = False
+    direction_5m_after_entry: Optional[str] = None
     
     strategy_mode: Optional[str] = None
     router_reason: Optional[str] = None

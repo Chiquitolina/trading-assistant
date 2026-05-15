@@ -19,6 +19,7 @@ class TradeJournal:
                 writer = csv.writer(f)
 
                 writer.writerow([
+                    "symbol",
                     "signal_ts",
                     "signal_price",
 
@@ -52,6 +53,17 @@ class TradeJournal:
                     "signal_momentum_sequence",
 
                     "signal_atr",
+                    # =========================
+                    # HTF EXTENSION CONTEXT
+                    # =========================
+                    "dist_ema50_15m_pct",
+                    "dist_ema99_15m_pct",
+
+                    "dist_ema50_1h_pct",
+                    "dist_ema99_1h_pct",
+
+                    "dist_ema50_4h_pct",
+                    "dist_ema99_4h_pct",
 
                     # =========================
                     # POST ENTRY ANALYSIS
@@ -65,9 +77,30 @@ class TradeJournal:
 
                     "pnl_t1",
 
+                    "micro_t1",
+                    "direction_5m_t1",
+
+                    "reclaimed_ema20_1m",
+                    "reclaimed_ema34_1m",
+                    "reclaimed_ema50_1m",
+
+                    "lost_ema20_1m",
+                    "lost_ema34_1m",
+                    "lost_ema50_1m",
+
+                    "dist_ema20_1m_pct",
+                    "dist_ema34_1m_pct",
+                    "dist_ema50_1m_pct",
+
+                    "max_favorable_pct",
+                    "max_adverse_pct",
+
+                    "direction_5m_changed",
+                    "direction_5m_after_entry",
+
                     "mae",
                     "mfe",
-                    
+
                     "strategy_mode",
                     "router_reason"
                 ])
@@ -77,6 +110,7 @@ class TradeJournal:
     # -------------------------
     def log_trade(
         self,
+        symbol,
         signal_ts,
         signal_price,
         entry_ts,
@@ -93,7 +127,7 @@ class TradeJournal:
         pnl_gross,
         fees,
         exit_reason,
-        
+
         signal_trend,
         signal_direction,
         signal_momentum,
@@ -104,6 +138,18 @@ class TradeJournal:
         signal_momentum_sequence=None,
 
         signal_atr=None,
+        
+        # =========================
+        # HTF EXTENSION CONTEXT
+        # =========================
+        dist_ema50_15m_pct=None,
+        dist_ema99_15m_pct=None,
+
+        dist_ema50_1h_pct=None,
+        dist_ema99_1h_pct=None,
+
+        dist_ema50_4h_pct=None,
+        dist_ema99_4h_pct=None,
 
         # =========================
         # POST ENTRY ANALYSIS
@@ -117,9 +163,30 @@ class TradeJournal:
 
         pnl_t1=None,
 
+        micro_t1=None,
+        direction_5m_t1=None,
+
+        reclaimed_ema20_1m=False,
+        reclaimed_ema34_1m=False,
+        reclaimed_ema50_1m=False,
+
+        lost_ema20_1m=False,
+        lost_ema34_1m=False,
+        lost_ema50_1m=False,
+
+        dist_ema20_1m_pct=None,
+        dist_ema34_1m_pct=None,
+        dist_ema50_1m_pct=None,
+
+        max_favorable_pct=None,
+        max_adverse_pct=None,
+
+        direction_5m_changed=False,
+        direction_5m_after_entry=None,
+
         mae=None,
         mfe=None,
-        
+
         strategy_mode=None,
         router_reason=None
     ):
@@ -129,6 +196,7 @@ class TradeJournal:
             writer = csv.writer(f)
 
             writer.writerow([
+                symbol,
                 signal_ts,
                 round(signal_price, 2),
 
@@ -136,19 +204,19 @@ class TradeJournal:
                 exit_ts,
                 side,
 
-                round(entry, 2),
-                round(real_entry, 2),
+                round(entry, 8),
+                round(real_entry, 8),
 
-                round(exit_price, 2),
-                round(real_exit, 2),
+                round(exit_price, 8),
+                round(real_exit, 8),
 
-                round(tp, 2),
-                round(sl, 2),
+                round(tp, 4),
+                round(sl, 4),
 
                 round(pnl, 4),
                 round(pnl_gross, 4),
-                round(pnl_usd, 2),
-                round(fees, 2),
+                round(pnl_usd, 4),
+                round(fees, 4),
 
                 exit_reason,
 
@@ -162,6 +230,15 @@ class TradeJournal:
                 signal_momentum_sequence,
 
                 signal_atr,
+                
+                round(dist_ema50_15m_pct, 4) if dist_ema50_15m_pct is not None else None,
+                round(dist_ema99_15m_pct, 4) if dist_ema99_15m_pct is not None else None,
+
+                round(dist_ema50_1h_pct, 4) if dist_ema50_1h_pct is not None else None,
+                round(dist_ema99_1h_pct, 4) if dist_ema99_1h_pct is not None else None,
+
+                round(dist_ema50_4h_pct, 4) if dist_ema50_4h_pct is not None else None,
+                round(dist_ema99_4h_pct, 4) if dist_ema99_4h_pct is not None else None,
 
                 # =========================
                 # POST ENTRY ANALYSIS
@@ -175,9 +252,30 @@ class TradeJournal:
 
                 round(pnl_t1, 4) if pnl_t1 is not None else None,
 
+                micro_t1,
+                direction_5m_t1,
+
+                reclaimed_ema20_1m,
+                reclaimed_ema34_1m,
+                reclaimed_ema50_1m,
+
+                lost_ema20_1m,
+                lost_ema34_1m,
+                lost_ema50_1m,
+
+                round(dist_ema20_1m_pct, 4) if dist_ema20_1m_pct is not None else None,
+                round(dist_ema34_1m_pct, 4) if dist_ema34_1m_pct is not None else None,
+                round(dist_ema50_1m_pct, 4) if dist_ema50_1m_pct is not None else None,
+
+                round(max_favorable_pct, 4) if max_favorable_pct is not None else None,
+                round(max_adverse_pct, 4) if max_adverse_pct is not None else None,
+
+                direction_5m_changed,
+                direction_5m_after_entry,
+
                 round(mae, 4) if mae is not None else None,
                 round(mfe, 4) if mfe is not None else None,
-                
+
                 strategy_mode,
                 router_reason
             ])
