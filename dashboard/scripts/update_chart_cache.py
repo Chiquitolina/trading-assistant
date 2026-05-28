@@ -6,11 +6,11 @@ sys.path.append(str(BASE_DIR))
 
 from data.market_data import fetch_history
 
-SYMBOL = "BTCUSDT"
-FETCH_SYMBOL = "BTC/USDT"
+SYMBOL = "SUIUSDT"
+FETCH_SYMBOL = "SUI/USDT"
 TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
 
-DAYS = 650
+DAYS = 100
 OUTPUT_DIR = BASE_DIR / "data" / "chart_cache"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

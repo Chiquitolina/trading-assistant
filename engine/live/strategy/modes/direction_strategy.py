@@ -12,10 +12,10 @@ class DirectionStrategy:
         current_position=None
     ):
 
-        current_direction = signal.direction.value
+        current_direction = signal.direction
 
         print(
-            "[DIRECTION STRATEGY]",
+            "[DIRECTION BREAKOUT STRATEGY]",
             f"prev={previous_direction}",
             f"current={current_direction}",
         )
@@ -23,9 +23,7 @@ class DirectionStrategy:
         # =========================================
         # FIRST BOOT / NO PREVIOUS SIGNAL
         # =========================================
-
         if previous_direction is None:
-
             return TradeAction(
                 action=Action.HOLD,
                 signal=signal,
@@ -34,51 +32,47 @@ class DirectionStrategy:
             )
 
         # =========================================
-        # SAME DIRECTION → NO TRADE
+        # NORMALIZE PREVIOUS DIRECTION
         # =========================================
-
-        if current_direction == previous_direction:
-
-            return TradeAction(
-                action=Action.HOLD,
-                signal=signal,
-                strategy_name="direction_strategy",
-                reason="same_direction_as_previous"
-            )
+        if isinstance(previous_direction, str):
+            previous_direction_value = previous_direction.lower()
+        else:
+            previous_direction_value = previous_direction.value
 
         # =========================================
-        # FLIP TO UP
+        # RANGE -> UP = LONG
         # =========================================
-
-        if signal.direction == Direction.UP:
-
+        if (
+            previous_direction_value == Direction.RANGE.value
+            and current_direction == Direction.UP
+        ):
             return TradeAction(
                 action=Action.LONG,
                 signal=signal,
                 strategy_name="direction_strategy",
-                reason="direction_flip_up"
+                reason="range_breakout_up"
             )
 
         # =========================================
-        # FLIP TO DOWN
+        # RANGE -> DOWN = SHORT
         # =========================================
-
-        if signal.direction == Direction.DOWN:
-
+        if (
+            previous_direction_value == Direction.RANGE.value
+            and current_direction == Direction.DOWN
+        ):
             return TradeAction(
                 action=Action.SHORT,
                 signal=signal,
                 strategy_name="direction_strategy",
-                reason="direction_flip_down"
+                reason="range_breakout_down"
             )
 
         # =========================================
-        # NEUTRAL
+        # EVERYTHING ELSE = HOLD
         # =========================================
-
         return TradeAction(
             action=Action.HOLD,
             signal=signal,
             strategy_name="direction_strategy",
-            reason="neutral_direction"
+            reason="not_range_breakout"
         )

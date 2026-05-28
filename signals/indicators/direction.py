@@ -9,7 +9,7 @@ def trade_direction(
     buffer_pct=0.0008,  # 0.08%
 ):
     if len(df) < slow_ema:
-        return Direction.NEUTRAL
+        return Direction.RANGE
 
     df = df.copy()
 
@@ -36,4 +36,4 @@ def trade_direction(
     if diff_pct < -buffer_pct:
         return Direction.DOWN
 
-    return Direction.NEUTRAL
+    return Direction.RANGE

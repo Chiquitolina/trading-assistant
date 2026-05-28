@@ -11,6 +11,7 @@ from config.strategies.v1 import (
     SHORT_AGGRESSIVE,
 )
 from engine.live.status_writer import StatusWriter
+from signals.utils.market_metrics import build_liquidity_context
 
 from models.signals import Signal
 from models.trade_action import TradeAction
@@ -109,7 +110,10 @@ class EntryEngine:
         signal_price = signal.signal_price
         signal_ts = signal.signal_ts
 
-        entry = entry_candle["open"]
+        entry = self.buffer.last_price(plan_symbol)
+
+        if entry is None:
+            entry = signal_price
 
         atr = df_atr.iloc[-1]["atr"]
 
@@ -127,6 +131,19 @@ class EntryEngine:
         atr_pct = self._calculate_atr_pct(
             atr,
             entry
+        )
+        
+        print(
+            f"[ENTRY FILTER DEBUG] "
+            f"symbol={plan_symbol} "
+            f"side={side} "
+            f"entry_tf={self.entry_tf} "
+            f"atr_tf={self.atr_tf} "
+            f"entry={entry:.6f} "
+            f"atr={atr:.6f} "
+            f"atr_pct={atr_pct:.4f}% "
+            f"min_atr={self.min_atr} "
+            f"min_atr_pct={self.min_atr_pct}"
         )
 
         strategy_name = (trade_action.strategy_name or "").lower()
@@ -270,30 +287,134 @@ class EntryEngine:
             # ==========================
             # HTF EXTENSION CONTEXT
             # ==========================
-            "dist_ema50_15m_pct": signal.dist_ema50_15m_pct,
-            "dist_ema99_15m_pct": signal.dist_ema99_15m_pct,
+            "dist_ema50_15m_pct": getattr(signal, "dist_ema50_15m_pct", None),
+            "dist_ema99_15m_pct": getattr(signal, "dist_ema99_15m_pct", None),
 
-            "dist_ema50_1h_pct": signal.dist_ema50_1h_pct,
-            "dist_ema99_1h_pct": signal.dist_ema99_1h_pct,
+            "dist_ema50_1h_pct": getattr(signal, "dist_ema50_1h_pct", None),
+            "dist_ema99_1h_pct": getattr(signal, "dist_ema99_1h_pct", None),
 
-            "dist_ema50_4h_pct": signal.dist_ema50_4h_pct,
-            "dist_ema99_4h_pct": signal.dist_ema99_4h_pct,
+            "dist_ema50_4h_pct": getattr(signal, "dist_ema50_4h_pct", None),
+            "dist_ema99_4h_pct": getattr(signal, "dist_ema99_4h_pct", None),
+            
+            "dist_ema20_15m_pct": getattr(signal, "dist_ema20_15m_pct", None),
+            "dist_ema20_1h_pct": getattr(signal, "dist_ema20_1h_pct", None),
+            "dist_ema20_4h_pct": getattr(signal, "dist_ema20_4h_pct", None),
+            
+            # ==========================
+            # RECENT MOVE CONTEXT - 15m
+            # ==========================
+            "move_5_bars_pct": getattr(signal, "move_5_bars_pct", None),
+            "move_10_bars_pct": getattr(signal, "move_10_bars_pct", None),
+
+            "green_candles_last_10": getattr(signal, "green_candles_last_10", None),
+            "red_candles_last_10": getattr(signal, "red_candles_last_10", None),
+            
+            # ==========================
+            # HTF SWING CONTEXT
+            # ==========================
+            "dist_swing_low_15m_pct": getattr(signal, "dist_swing_low_15m_pct", None),
+            "dist_swing_high_15m_pct": getattr(signal, "dist_swing_high_15m_pct", None),
+
+            "dist_swing_low_1h_pct": getattr(signal, "dist_swing_low_1h_pct", None),
+            "dist_swing_high_1h_pct": getattr(signal, "dist_swing_high_1h_pct", None),
+
+            "dist_swing_low_4h_pct": getattr(signal, "dist_swing_low_4h_pct", None),
+            "dist_swing_high_4h_pct": getattr(signal, "dist_swing_high_4h_pct", None),
+
+            "near_swing_low_15m": getattr(signal, "near_swing_low_15m", None),
+            "near_swing_high_15m": getattr(signal, "near_swing_high_15m", None),
+
+            "near_swing_low_1h": getattr(signal, "near_swing_low_1h", None),
+            "near_swing_high_1h": getattr(signal, "near_swing_high_1h", None),
+
+            "near_swing_low_4h": getattr(signal, "near_swing_low_4h", None),
+            "near_swing_high_4h": getattr(signal, "near_swing_high_4h", None),
+            
+            "swing_low_15m": getattr(signal, "swing_low_15m", None),
+            "swing_high_15m": getattr(signal, "swing_high_15m", None),
+
+            "swing_low_1h": getattr(signal, "swing_low_1h", None),
+            "swing_high_1h": getattr(signal, "swing_high_1h", None),
+
+            "swing_low_4h": getattr(signal, "swing_low_4h", None),
+            "swing_high_4h": getattr(signal, "swing_high_4h", None),
+            
+            # ==========================
+            # BTC SWING CONTEXT
+            # ==========================
+            "btc_dist_swing_low_1h_pct": getattr(signal, "btc_dist_swing_low_1h_pct", None),
+            "btc_dist_swing_high_1h_pct": getattr(signal, "btc_dist_swing_high_1h_pct", None),
+            "btc_near_swing_low_1h": getattr(signal, "btc_near_swing_low_1h", None),
+            "btc_near_swing_high_1h": getattr(signal, "btc_near_swing_high_1h", None),
+
+            "btc_dist_swing_low_4h_pct": getattr(signal, "btc_dist_swing_low_4h_pct", None),
+            "btc_dist_swing_high_4h_pct": getattr(signal, "btc_dist_swing_high_4h_pct", None),
+            "btc_near_swing_low_4h": getattr(signal, "btc_near_swing_low_4h", None),
+            "btc_near_swing_high_4h": getattr(signal, "btc_near_swing_high_4h", None),
+
+            "btc_dist_swing_low_1d_pct": getattr(signal, "btc_dist_swing_low_1d_pct", None),
+            "btc_dist_swing_high_1d_pct": getattr(signal, "btc_dist_swing_high_1d_pct", None),
+            "btc_near_swing_low_1d": getattr(signal, "btc_near_swing_low_1d", None),
+            "btc_near_swing_high_1d": getattr(signal, "btc_near_swing_high_1d", None),
         }
+        
+        
+        # ==========================
+        # LIQUIDITY CONTEXT
+        # ==========================
+        df_15m = pd.DataFrame(
+            self.buffer.get_candles(plan_symbol, "15m")
+        )
+
+        df_1h = pd.DataFrame(
+            self.buffer.get_candles(plan_symbol, "1h")
+        )
+
+        df_4h = pd.DataFrame(
+            self.buffer.get_candles(plan_symbol, "4h")
+        )
+
+        quote_volume_24h = getattr(signal, "quote_volume_24h", None)
+        
+        print(
+            f"\n[LIQUIDITY DEBUG] {plan_symbol}"
+        )
+
+        print(
+            "15m columns:",
+            df_15m.columns.tolist()
+        )
+
+        if not df_15m.empty:
+            print(
+                "15m last candle:",
+                df_15m.tail(1).to_dict("records")[0]
+            )
+
+        liquidity_context = build_liquidity_context(
+            df_15m=df_15m,
+            df_1h=df_1h,
+            df_4h=df_4h,
+            quote_volume_24h=quote_volume_24h,
+            lookback=20,
+        )
+
+        signal_context.update(liquidity_context)
 
         plan = TradePlan(
             symbol=plan_symbol,
             quantity=0.001,
             side=side,
-            entry=round(entry, 2),
-            sl=round(sl, 2),
-            tp=round(tp, 2),
+            entry=float(entry),
+            sl=float(sl),
+            tp=float(tp),
             sl_pct=round(sl_pct, 3),
             tp_pct=round(tp_pct, 3),
-            atr=round(atr, 2),
+            atr=float(atr),
             atr_pct=round(atr_pct, 4),
             timestamp=entry_candle["timestamp"],
             reason=trade_action.strategy_name,
-            signal_price=round(signal_price, 2),
+            signal_price=float(signal_price),
             signal_ts=signal_ts,
             signal_context=signal_context,
             max_hold_candles=self.max_hold_candles

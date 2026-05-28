@@ -1,8 +1,14 @@
 class RiskManager:
 
     def calculate_tp_sl(self, plan, real_entry, mark_price):
-        risk = abs(plan.entry - plan.sl)
-        reward = abs(plan.tp - plan.entry)
+        entry = float(plan.entry)
+        plan_sl = float(plan.sl)
+        plan_tp = float(plan.tp)
+        real_entry = float(real_entry)
+        mark_price = float(mark_price)
+
+        risk = abs(entry - plan_sl)
+        reward = abs(plan_tp - entry)
 
         if plan.side == "LONG":
             sl = real_entry - risk

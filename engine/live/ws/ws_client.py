@@ -4,11 +4,12 @@ from binance import ThreadedWebsocketManager
 
 
 class WSClient:
-    def __init__(self, on_message, timeframes, symbols, stale_after=20):
+    def __init__(self, on_message, timeframes, symbols, stale_after=20, chunk_size=40):
         self.on_message = on_message
         self.timeframes = timeframes
         self.symbols = symbols
         self.stale_after = stale_after
+        self.chunk_size = chunk_size
 
         self.twm = None
         self.running = False
@@ -24,6 +25,10 @@ class WSClient:
         self.min_reconnect_interval = 10
 
         self.handshake_failures = 0
+        
+    def _chunk_list(self, items, size):
+        for i in range(0, len(items), size):
+            yield items[i:i + size]
 
     def start(self):
         if self.running:
@@ -80,16 +85,31 @@ class WSClient:
             twm = ThreadedWebsocketManager()
             twm.start()
 
-            streams = [
-                f"{symbol.lower()}@kline_{tf}"
-                for symbol in self.symbols
-                for tf in self.timeframes
-            ]
+            total_streams = 0
 
-            twm.start_multiplex_socket(
-                streams=streams,
-                callback=self._handle_message
-            )
+            for i, symbols_chunk in enumerate(
+                self._chunk_list(self.symbols, self.chunk_size),
+                start=1
+            ):
+                streams = [
+                    f"{symbol.lower()}@kline_{tf}"
+                    for symbol in symbols_chunk
+                    for tf in self.timeframes
+                ]
+
+                twm.start_multiplex_socket(
+                    streams=streams,
+                    callback=self._handle_message
+                )
+
+                total_streams += len(streams)
+
+                print(
+                    f"\033[94m[WS CLIENT]\033[0m "
+                    f"📡 WS group {i}: symbols={len(symbols_chunk)} streams={len(streams)}"
+                )
+
+                time.sleep(1)
 
             self.twm = twm
 
@@ -102,10 +122,8 @@ class WSClient:
 
             print(
                 f"\n\033[94m[WS CLIENT]\033[0m "
-                f"📡 WS initialized: {len(streams)} streams\n"
+                f"📡 WS initialized total_streams={total_streams}\n"
             )
-
-            print(streams)
 
         except Exception:
             self._stop_ws()

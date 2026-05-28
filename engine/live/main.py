@@ -4,6 +4,9 @@ import time
 import threading
 import argparse
 
+import pandas as pd
+from signals.indicators.direction import trade_direction
+
 from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
@@ -34,6 +37,8 @@ from enums.actions import Action
 
 from engine.live.status_helper import update_status
 
+from services.market_context.btc_velocity_context import BTCVelocityContextService
+
 from config.timeframes import (
     MODE_CONFIG,
     TIMEFRAME_CONFIGS
@@ -42,6 +47,10 @@ from config.timeframes import (
 from config.strategies.v1 import SYMBOLS
 
 load_dotenv()
+
+def chunk_list(items, size):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 # =========================================================
 # CLI
@@ -98,6 +107,7 @@ DAYS_BY_TF = {
     "15m": 3,
     "1h": 7,
     "4h": 25,
+    "1d": 180,
 }
 
 STATUS_INTERVAL = 3
@@ -148,6 +158,29 @@ for symbol in SYMBOLS:
         )
 
         print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
+        
+# =========================================================
+# INIT PREVIOUS DIRECTION FROM HISTORY
+# =========================================================
+
+last_direction_by_symbol = {}
+
+for symbol in SYMBOLS:
+    candles_15m = buffer.get_candles(symbol, "15m")
+
+    if not candles_15m:
+        continue
+
+    df_15m = pd.DataFrame(candles_15m)
+
+    direction = trade_direction(df_15m)
+
+    last_direction_by_symbol[symbol] = direction
+
+    print(
+        f"\033[96m[DIRECTION INIT]\033[0m "
+        f"{symbol} previous_direction={direction}"
+    )
 
 # =========================================================
 # EXCHANGE
@@ -156,7 +189,7 @@ for symbol in SYMBOLS:
 exchange = BinanceExchange(
     api_key=api_key,
     api_secret=secret,
-    testnet=False
+    testnet=True
 )
 
 # =========================================================
@@ -199,6 +232,7 @@ except Exception as e:
 
 signals = SignalEngine(
     buffer,
+    config=mode_config,
     mode=STRATEGY_MODE
 )
 
@@ -235,8 +269,14 @@ status_data = status_writer._read_current()
 last_signal_direction = status_data.get("signal_direction")
 
 strategy_router = StrategyRouter(
-    mode=STRATEGY_MODE
+    mode=STRATEGY_MODE,
+    entry_rules=mode_config.get(
+        "entry_rules",
+        "standard"
+    )
 )
+
+btc_context_service = BTCVelocityContextService()
 
 # =========================================================
 # STATUS DEFAULT
@@ -275,16 +315,43 @@ status_writer.write({
 # RESTORE STATE
 # =========================================================
 
+restored_count = 0
+
 for symbol in SYMBOLS:
-    pos = exchange.get_position(symbol)
+    try:
+        pos = exchange.get_position(symbol)
 
-    if pos:
+    except Exception as e:
+        print(
+            f"\033[94m[SYNC]\033[0m "
+            f"⚠️ Error checking position | symbol={symbol} | error={e}"
+        )
+        continue
+
+    if not pos:
+        continue
+
+    try:
         execution.restore_state(symbol)
+        restored_count += 1
 
-        if len(execution.positions) >= execution.max_global_positions:
-            break
-else:
+    except Exception as e:
+        print(
+            f"\033[94m[SYNC]\033[0m "
+            f"⚠️ Restore failed | symbol={symbol} | error={e}"
+        )
+        continue
+
+    if len(execution.positions) >= execution.max_global_positions:
+        break
+
+if restored_count == 0:
     print("\033[94m[SYNC]\033[0m ℹ️ No position to restore.")
+else:
+    print(
+        f"\033[94m[SYNC]\033[0m "
+        f"✅ Restored {restored_count} positions: {list(execution.positions.keys())}"
+    )
 
 # =========================================================
 # CONNECT WS
@@ -293,7 +360,9 @@ else:
 ws = WSClient(
     buffer.on_ws_message,
     timeframes=TIMEFRAMES,
-    symbols=SYMBOLS
+    symbols=SYMBOLS,
+    chunk_size=25,
+    stale_after=90
 )
 
 ws.start()
@@ -375,6 +444,8 @@ def write_heartbeat():
 # =========================================================
 
 try:
+    
+    max_15m_queue = 0
 
     while True:
 
@@ -405,10 +476,62 @@ try:
                     price,
                     timestamp
                 )
+                
+        # =================================================
+        # 1m CONTEXT UPDATE
+        # =================================================
+
+        context_symbol = buffer.consume_any_closed_tf("1m")
+
+        if context_symbol and execution.get_position(context_symbol):
+
+            context_signal = signals.generate_direction_context(
+                context_symbol
+            )
+
+            if context_signal:
+
+                context_price = buffer.last_price(context_symbol)
+
+                micro = getattr(
+                    context_signal,
+                    "micro",
+                    None
+                )
+
+                execution.update_position_context(
+                    symbol=context_symbol,
+                    trend=context_signal.trend.value,
+                    direction=context_signal.direction.value,
+                    momentum=context_signal.momentum.value,
+                    micro_momentum=(
+                        micro.value
+                        if micro
+                        else context_signal.momentum.value
+                    ),
+                    current_price=context_price,
+                    ema20_1m=getattr(context_signal, "ema20_1m", None),
+                    ema34_1m=getattr(context_signal, "ema34_1m", None),
+                    ema50_1m=getattr(context_signal, "ema50_1m", None),
+                )
 
         # =================================================
         # 15m CLOSED
         # =================================================
+        
+        pending_15m = sum(
+            1
+            for _, tf in buffer.closed_events
+            if tf == TRIGGER_TF
+        )
+
+        if pending_15m > 0:
+            max_15m_queue = max(max_15m_queue, pending_15m)
+
+            print(
+                f"\033[93m[15M QUEUE]\033[0m "
+                f"pending={pending_15m} max={max_15m_queue}"
+            )
 
         symbol = buffer.consume_any_closed_tf(TRIGGER_TF)
 
@@ -419,31 +542,80 @@ try:
                 f"✅ {TRIGGER_TF} close event consumed"
             )
 
-            close_price = buffer.last_price(symbol)
-            closed_candle_ts = buffer.last_close_time[symbol][TRIGGER_TF]
-
             # =================================================
             # 1. SNAPSHOT + SIGNAL GENERATION (PRIMERO SIEMPRE)
             # =================================================
+            close_price = buffer.last_price(symbol)
+            closed_candle_ts = buffer.last_ws_close_time[symbol][TRIGGER_TF]
+
+            if not closed_candle_ts:
+                continue
+
+            closed_ts = closed_candle_ts
+
+            if closed_ts > 10_000_000_000:
+                closed_ts = closed_ts / 1000
+
+            event_delay_sec = time.time() - closed_ts
+
+            print(
+                f"\033[91m[EVENT DELAY]\033[0m "
+                f"{symbol} tf={TRIGGER_TF} "
+                f"delay={event_delay_sec:.2f}s"
+            )
+
+            signal_started = time.perf_counter()
 
             signal = signals.generate_signal(symbol)
 
+            elapsed_ms = (time.perf_counter() - signal_started) * 1000
+
+            print(
+                f"\033[96m[ANALYZE TIME]\033[0m "
+                f"{symbol} {elapsed_ms:.2f}ms"
+            )
+
             if not signal:
                 continue
+
+            signal_delay_sec = (
+                int(time.time() * 1000) - int(signal.signal_ts)
+            ) / 1000
+
+            print(
+                f"\033[91m[SIGNAL DELAY]\033[0m "
+                f"{symbol} delay={signal_delay_sec:.2f}s"
+            )
+            
+            btc_context = btc_context_service.evaluate(buffer)
+
+            print(
+                f"[BTC CONTEXT] "
+                f"state={btc_context.state} | "
+                f"reason={btc_context.reason} | "
+                f"v15={btc_context.velocity_15m} | "
+                f"v1h={btc_context.velocity_1h} | "
+                f"d15={btc_context.direction_15m} | "
+                f"d1h={btc_context.direction_1h}"
+            )
             
             # ================================
             # DEBUG ROUTER INPUT
             # ================================
 
-            current_status = status_writer._read_current()
-
-            previous_direction = current_status.get("signal_direction")
+            previous_direction = last_direction_by_symbol.get(symbol)
 
             print("\n[ROUTER DEBUG]")
-            print(f"prev_direction (from disk) : {previous_direction}")
+            print(f"prev_direction (from memory) : {previous_direction}")
             print(f"signal direction           : {signal.direction.value}")
             print(f"signal trend              : {signal.trend.value}")
             print(f"signal momentum           : {signal.momentum.value}")
+            
+            print(
+                f"[DIRECTION TRANSITION] "
+                f"{symbol} "
+                f"{previous_direction} -> {signal.direction}"
+            )
             print("===========================\n")
 
             trade_action = strategy_router.evaluate(
@@ -451,6 +623,8 @@ try:
                 previous_direction=previous_direction,    
                 current_position=execution.get_position(symbol)
             )
+            
+            last_direction_by_symbol[symbol] = signal.direction
 
             update_status(
                 status_writer,
@@ -476,11 +650,12 @@ try:
             if execution.get_position(symbol):
 
                 execution.update_position_context(
+                    symbol=symbol,
                     trend=signal.trend.value,
                     direction=signal.direction.value,
                     momentum=signal.momentum.value,
                     micro_momentum=signal.momentum.value if signal.momentum else None,
-                    price=close_price,
+                    current_price=close_price,                    
                     ema20_1m=getattr(signal, "ema20_1m", None),
                     ema34_1m=getattr(signal, "ema34_1m", None),
                     ema50_1m=getattr(signal, "ema50_1m", None),
@@ -536,6 +711,17 @@ try:
             if not plan:
                 print("\033[94m[ENTRY PLANNER]\033[0m ❌ PLAN DESCARTADO\n")
                 continue
+            
+            plan.signal_context = {
+                **(plan.signal_context or {}),
+
+                "btc_velocity_15m": btc_context.velocity_15m,
+                "btc_velocity_1h": btc_context.velocity_1h,
+                "btc_direction_15m": btc_context.direction_15m,
+                "btc_direction_1h": btc_context.direction_1h,
+                "btc_context_state": btc_context.state,
+                "btc_context_reason": btc_context.reason,
+            }
 
             print(
                 f"[DEBUG PLAN] "

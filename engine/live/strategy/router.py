@@ -5,13 +5,21 @@ from engine.live.strategy.modes.aggressive_strategy import AggressiveStrategy
 
 class StrategyRouter:
 
-    def __init__(self, mode="default"):
+    def __init__(
+        self,
+        mode="default",
+        entry_rules="standard"
+    ):
 
         self.mode = mode
 
         self.strategies = {
-            "default": DefaultStrategy(),
+            "default": DefaultStrategy(
+                entry_rules=entry_rules
+            ),
+
             "direction": DirectionStrategy(),
+
             "aggressive": AggressiveStrategy(),
         }
 

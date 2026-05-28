@@ -28,8 +28,7 @@ sys.path.append(str(BASE_DIR))
 from data.market_data import fetch_history  # noqa
 from config.strategies.v1 import BACKTEST  # noqa
 
-SYMBOL = "BTCUSDT"
-FETCH_SYMBOL = "BTC/USDT"
+SYMBOL = "DOGEUSDT"
 
 SHIFT_TYPES = [
     "bullish_value_shift",
@@ -39,7 +38,7 @@ SHIFT_TYPES = [
 ]
 
 STATES_FILE = BASE_DIR / f"market_states_{SYMBOL}.csv"
-BACKTEST_TRADES_FILE = BASE_DIR / "trades_BTCUSDT_1m.csv"
+BACKTEST_TRADES_FILE = BASE_DIR / "trades_BUSDT_1m.csv"
 
 st.set_page_config(
     page_title="Market State Chart",
@@ -102,13 +101,28 @@ def add_direction_stats(df: pd.DataFrame) -> pd.DataFrame:
     df["ae_pct"] = pd.NA
     df["direction_window_bars"] = pd.NA
 
-    idxs = df.index[df["direction_changed"] == True].tolist()
+    idxs = df.index[
+        (df["direction_changed"] == True) &
+        (df["direction_15m"].isin(["up", "down"]))
+    ].tolist()
 
-    for i, idx in enumerate(idxs):
+    for idx in idxs:
         direction = df.loc[idx, "direction_15m"]
         entry = float(df.loc[idx, "close"])
 
-        next_idx = idxs[i + 1] if i + 1 < len(idxs) else len(df) - 1
+        opposite = "down" if direction == "up" else "up"
+
+        future_opposites = df[
+            (df.index > idx) &
+            (df["direction_changed"] == True) &
+            (df["direction_15m"] == opposite)
+        ].index
+
+        if len(future_opposites) > 0:
+            next_idx = future_opposites.min()
+        else:
+            next_idx = len(df) - 1
+
         future = df.loc[idx:next_idx]
 
         if len(future) < 2:
@@ -125,12 +139,10 @@ def add_direction_stats(df: pd.DataFrame) -> pd.DataFrame:
             fe = (entry - min_price) / entry * 100
             ae = (max_price - entry) / entry * 100
 
-        else:
-            continue
-
         df.loc[idx, "fe_pct"] = round(fe, 3)
         df.loc[idx, "ae_pct"] = round(ae, 3)
         df.loc[idx, "direction_window_bars"] = len(future)
+
     return df
 
 

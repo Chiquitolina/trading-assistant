@@ -53,7 +53,12 @@ def calculate_metrics(trades: list) -> dict:
     gross_profit = wins["pnl"].sum()
     gross_loss = abs(losses["pnl"].sum())
 
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+    if gross_loss > 0:
+        profit_factor = gross_profit / gross_loss
+    elif gross_profit > 0:
+        profit_factor = float("inf")
+    else:
+        profit_factor = 0
 
     avg_win = wins["pnl"].mean() if not wins.empty else 0
     avg_loss = losses["pnl"].mean() if not losses.empty else 0
@@ -116,7 +121,10 @@ def calculate_metrics(trades: list) -> dict:
         "avg_win": round(avg_win, 3),
         "avg_loss": round(avg_loss, 3),
 
-        "profit_factor": round(profit_factor, 2),
+        "profit_factor": (
+            "INF" if profit_factor == float("inf")
+            else round(profit_factor, 2)
+        ),
         "expectancy": round(expectancy, 4),
         "max_drawdown": round(max_drawdown, 2),
     }

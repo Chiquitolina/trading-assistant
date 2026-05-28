@@ -75,6 +75,17 @@ class BinanceExchange(BaseExchange):
                 return float(p["positionAmt"])
 
         return 0.0
+    
+    def get_futures_symbols(self):
+        info = self.client.futures_exchange_info()
+
+        return [
+            symbol["symbol"]
+            for symbol in info["symbols"]
+            if symbol["status"] == "TRADING"
+            and symbol["contractType"] == "PERPETUAL"
+            and symbol["quoteAsset"] == "USDT"
+        ]
 
     def get_mark_price(self, symbol: str) -> float:
 
@@ -118,6 +129,19 @@ class BinanceExchange(BaseExchange):
         except Exception as e:
             print(f"❌ Error obteniendo posiciones abiertas: {e}")
             return []
+        
+    def get_open_orders(self, symbol: str):
+        try:
+            orders = self._safe_request(
+                self.client.futures_get_open_orders,
+                symbol=symbol
+            )
+
+            return orders or []
+
+        except Exception as e:
+            print(f"❌ Error obteniendo open orders | symbol={symbol} | error={e}")
+            return []
 
     def get_position(self, symbol: str):
 
@@ -146,8 +170,12 @@ class BinanceExchange(BaseExchange):
             }
 
         except Exception as e:
-            print(f"❌ Error obteniendo posición: {e}")
-            return None
+            if "-1121" in str(e) or "Invalid symbol" in str(e):
+                print(f"⚠️ Invalid symbol on get_position | symbol={symbol}")
+                return "INVALID_SYMBOL"
+
+            print(f"❌ Error obteniendo posición | symbol={symbol} | error={e}")
+            raise e
 
     def set_leverage(self, symbol: str, leverage: int):
 
@@ -253,6 +281,20 @@ class BinanceExchange(BaseExchange):
             reduceOnly=True
         )
         
+    def cancel_order(self, symbol: str, order_id):
+        try:
+            print(f"[EXCHANGE] Cancel order | symbol={symbol} | order_id={order_id}")
+
+            return self._safe_request(
+                self.client.futures_cancel_order,
+                symbol=symbol,
+                orderId=order_id
+            )
+
+        except Exception as e:
+            print(f"⚠️ Cancel order error | symbol={symbol} | order_id={order_id} | error={e}")
+            return None        
+        
     def cancel_all_orders(self, symbol):
 
         try:
@@ -290,8 +332,20 @@ class BinanceExchange(BaseExchange):
         }
         
     def get_price(self, symbol: str) -> float:
-        data = self.client.futures_symbol_ticker(symbol=symbol)
-        return float(data["price"])
+        data = self._safe_request(
+            self.client.futures_symbol_ticker,
+            symbol=symbol
+        )
+
+        if isinstance(data, dict):
+            if "price" in data:
+                return float(data["price"])
+
+            print(f"❌ get_price response without price | symbol={symbol} | data={data}")
+            raise KeyError("price")
+
+        print(f"❌ get_price unexpected response | symbol={symbol} | data={data}")
+        raise ValueError(f"Unexpected price response for {symbol}")
     
     def get_recent_fills(self, symbol: str, limit: int = 10):
         try:
@@ -302,7 +356,7 @@ class BinanceExchange(BaseExchange):
             )
             return trades or []
         except Exception as e:
-            print(f"❌ Error obteniendo fills: {e}")
+            print(f"❌ Error obteniendo fills | symbol={symbol} | error={e}")
             return []
 
     def adjust_price_to_tick(self, price: float, tick_size: float, side: str = "DOWN") -> Decimal:

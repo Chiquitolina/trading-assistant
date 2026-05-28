@@ -69,6 +69,8 @@ class Position:
     direction_5m_changed: bool = False
     direction_5m_after_entry: Optional[str] = None
     
+    be_moved: bool = False
+    
     strategy_mode: Optional[str] = None
     router_reason: Optional[str] = None
     

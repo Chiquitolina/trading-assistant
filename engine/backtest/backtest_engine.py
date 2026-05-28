@@ -11,6 +11,7 @@ from signals.strategy.risk import compute_levels
 from ui.banners import print_backtest_banner
 from signals.strategy.entries import long_setup, short_setup
 from config.strategies.v1 import LONG, SHORT, FEES, BACKTEST
+from config.timeframes import MODE_CONFIG
 from ui.trade_formatter import format_trade_timestamps
 
 from signals.state.regime_detector import RegimeDetector
@@ -19,7 +20,44 @@ from signals.state.market_state import MarketStateBuilder
 from ta.trend import EMAIndicator
 
 ARG_TZ = "America/Argentina/Cordoba"
-MIN_ATR = 250
+MODE = "default"
+MODE_CFG = MODE_CONFIG[MODE]
+
+MIN_ATR = MODE_CFG.get("min_atr")
+MIN_ATR_PCT = MODE_CFG.get("min_atr_pct")
+
+SYMBOLS = [
+    "SUI/USDT",
+]
+
+def atr_pct(atr: float, price: float) -> float:
+    if not price:
+        return 0.0
+    return (atr / price) * 100
+
+
+def atr_filter_ok(atr: float, price: float) -> bool:
+    current_atr_pct = atr_pct(atr, price)
+
+    if MIN_ATR_PCT is not None:
+        return current_atr_pct >= MIN_ATR_PCT
+
+    if MIN_ATR is not None:
+        return atr >= MIN_ATR
+
+    return True
+
+
+def get_atr_pct_bucket(value: float) -> str:
+    if value < 0.10:
+        return "<0.10%"
+    elif value < 0.15:
+        return "0.10-0.15%"
+    elif value < 0.20:
+        return "0.15-0.20%"
+    elif value < 0.30:
+        return "0.20-0.30%"
+    return "0.30%+"
 
 
 def align(df, ts):
@@ -289,7 +327,9 @@ def backtest(symbol: str):
                 i += 1
                 continue
 
-            if atr < MIN_ATR:
+            current_atr_pct = atr_pct(atr, entry_price)
+
+            if not atr_filter_ok(atr, entry_price):
                 i += 1
                 continue
 
@@ -324,7 +364,8 @@ def backtest(symbol: str):
                     "regime_tf": "1h",
                     "regime_ts": last_regime_ts,
                     "atr": round(atr, 3),
-                    "atr_bucket": get_atr_bucket(float(atr)),
+                    "atr_pct": round(current_atr_pct, 4),
+                    "atr_pct_bucket": get_atr_pct_bucket(current_atr_pct),
                 })
 
                 exit_idx = df_15m.index[df_15m["timestamp"] == result["exit_ts"]][0]
@@ -350,7 +391,9 @@ def backtest(symbol: str):
                 i += 1
                 continue
 
-            if atr < MIN_ATR:
+            current_atr_pct = atr_pct(atr, entry_price)
+
+            if not atr_filter_ok(atr, entry_price):
                 i += 1
                 continue
 
@@ -385,7 +428,8 @@ def backtest(symbol: str):
                     "regime_tf": "1h",
                     "regime_ts": last_regime_ts,
                     "atr": round(atr, 3),
-                    "atr_bucket": get_atr_bucket(float(atr)),
+                    "atr_pct": round(current_atr_pct, 4),
+                    "atr_pct_bucket": get_atr_pct_bucket(current_atr_pct),
                 })
 
                 exit_idx = df_15m.index[df_15m["timestamp"] == result["exit_ts"]][0]
@@ -449,6 +493,11 @@ def backtest(symbol: str):
 
         file_name = f"market_states_{symbol.replace('/', '')}.csv"
         df_states.to_csv(file_name, index=False)
+        
+        print(
+            f"✅ {symbol} | trades={len(trades)} "
+            f"| states={len(df_states)}"
+        )
 
         print(f"\033[95m[BACKTEST]\033[0m 💾 Saved market states CSV to {file_name}")
 
@@ -473,144 +522,72 @@ def backtest(symbol: str):
 
 
 if __name__ == "__main__":
-    symbol = "BTC/USDT"
-    trades = backtest(symbol)
 
-    long_trades = [t for t in trades if t["side"] == "LONG"]
-    short_trades = [t for t in trades if t["side"] == "SHORT"]
+    all_results = []
 
-    metrics_all = calculate_metrics(trades)
-    metrics_long = calculate_metrics(long_trades)
-    metrics_short = calculate_metrics(short_trades)
+    for symbol in SYMBOLS:
+        print("\n" + "=" * 80)
+        print(f"🚀 RUNNING BACKTEST / MARKET STATES FOR {symbol}")
+        print("=" * 80)
 
-    print("\n----------------------------------------------------------------------------------------------------------\n")
-    print_backtest_banner()
-    print("\n----------------------------------------------------------------------------------------------------------\n")
+        try:
+            trades = backtest(symbol)
 
-    print(
-        pretty_metrics(
-            metrics_all,
-            metrics_long,
-            metrics_short
-        )
-    )
+            df_trades = pd.DataFrame(trades)
 
-    df_trades = pd.DataFrame(trades)
+            if not df_trades.empty:
+                df_trades["symbol"] = symbol.replace("/", "")
 
-    if not df_trades.empty:
-        df_trades["entry_ts"] = (
-            pd.to_datetime(df_trades["entry_ts"], utc=True)
-            .dt.tz_convert(ARG_TZ)
-            .dt.tz_localize(None)
-        )
-        df_trades["exit_ts"] = (
-            pd.to_datetime(df_trades["exit_ts"], utc=True)
-            .dt.tz_convert(ARG_TZ)
-            .dt.tz_localize(None)
-        )
+                metrics_all = calculate_metrics(trades)
+                metrics_long = calculate_metrics(
+                    [t for t in trades if t["side"] == "LONG"]
+                )
+                metrics_short = calculate_metrics(
+                    [t for t in trades if t["side"] == "SHORT"]
+                )
 
-        df_trades = format_trade_timestamps(df_trades)
+                all_results.append({
+                    "symbol": symbol.replace("/", ""),
+                    "trades": metrics_all.get("trades"),
+                    "winrate": metrics_all.get("winrate"),
+                    "net_pnl": metrics_all.get("net_pnl"),
+                    "profit_factor": metrics_all.get("profit_factor"),
+                    "long_trades": metrics_long.get("trades"),
+                    "long_winrate": metrics_long.get("winrate"),
+                    "long_net_pnl": metrics_long.get("net_pnl"),
+                    "short_trades": metrics_short.get("trades"),
+                    "short_winrate": metrics_short.get("winrate"),
+                    "short_net_pnl": metrics_short.get("net_pnl"),
+                })
 
-        print("\n\n📌 TRADES DETAILS:\n\n")
-        text = df_trades.to_string(col_space=7, justify="center", index=False)
-        text = text.replace("\n", "\n\n")
-        print(text)
-    else:
-        print("\n\n📌 TRADES DETAILS:\n\nNo trades found.")
+            else:
+                all_results.append({
+                    "symbol": symbol.replace("/", ""),
+                    "trades": 0,
+                    "winrate": 0,
+                    "net_pnl": 0,
+                    "profit_factor": 0,
+                    "long_trades": 0,
+                    "long_winrate": 0,
+                    "long_net_pnl": 0,
+                    "short_trades": 0,
+                    "short_winrate": 0,
+                    "short_net_pnl": 0,
+                })
 
-    print("\n")
+        except Exception as e:
+            print(f"❌ ERROR running {symbol}: {e}")
 
-# ================================
-# ATR ANALYSIS
-# ================================
-if not df_trades.empty:
+            all_results.append({
+                "symbol": symbol.replace("/", ""),
+                "error": str(e),
+            })
 
-    print("\n📊 ATR PERFORMANCE:\n")
+    df_results = pd.DataFrame(all_results)
+    df_results.to_csv("multi_symbol_backtest_summary.csv", index=False)
 
-    df_atr = df_trades.copy()
+    print("\n" + "=" * 80)
+    print("✅ MULTI SYMBOL BACKTEST FINISHED")
+    print("=" * 80)
+    print(df_results.to_string(index=False))
 
-    summary = (
-        df_atr.assign(win=lambda x: x["pnl"] > 0)
-        .groupby(["side", "atr_bucket"], observed=False)
-        .agg(
-            trades=("pnl", "count"),
-            winrate=("win", "mean"),
-            avg_pnl=("pnl", "mean")
-        )
-        .reset_index()
-    )
-
-    summary["winrate"] = (summary["winrate"] * 100).round(2)
-    summary["avg_pnl"] = summary["avg_pnl"].round(6)
-
-    print(summary.to_string(index=False))
-    summary.to_csv("atr_performance.csv", index=False)
-
-# ================================
-# COMBINATION PERFORMANCE
-# ================================
-if not df_trades.empty:
-
-    print("\n📊 COMBINATION PERFORMANCE:\n")
-
-    df_combo = df_trades.copy()
-
-    summary_combo = (
-        df_combo.assign(win=lambda x: x["pnl"] > 0)
-        .groupby(["side", "trend", "direction", "momentum"], dropna=False)
-        .agg(
-            trades=("pnl", "count"),
-            winrate=("win", "mean"),
-            avg_pnl=("pnl", "mean")
-        )
-        .reset_index()
-    )
-
-    summary_combo["winrate"] = (summary_combo["winrate"] * 100).round(2)
-    summary_combo["avg_pnl"] = summary_combo["avg_pnl"].round(6)
-
-    summary_combo = summary_combo[summary_combo["trades"] >= 5]
-    summary_combo = summary_combo.sort_values(
-        ["side", "avg_pnl", "winrate"],
-        ascending=[True, False, False]
-    )
-
-    print(summary_combo.to_string(index=False))
-    summary_combo.to_csv("combo_performance.csv", index=False)
-
-# ================================
-# COMBINATION + ATR PERFORMANCE
-# ================================
-if not df_trades.empty:
-
-    print("\n📊 COMBINATION + ATR PERFORMANCE:\n")
-
-    df_combo_atr = df_trades.copy()
-
-    summary_combo_atr = (
-        df_combo_atr.assign(win=lambda x: x["pnl"] > 0)
-        .groupby(
-            ["side", "trend", "direction", "momentum", "atr_bucket"],
-            observed=False,
-            dropna=False
-        )
-        .agg(
-            trades=("pnl", "count"),
-            winrate=("win", "mean"),
-            avg_pnl=("pnl", "mean")
-        )
-        .reset_index()
-    )
-
-    summary_combo_atr["winrate"] = (summary_combo_atr["winrate"] * 100).round(2)
-    summary_combo_atr["avg_pnl"] = summary_combo_atr["avg_pnl"].round(6)
-
-    summary_combo_atr = summary_combo_atr[summary_combo_atr["trades"] >= 3]
-    summary_combo_atr = summary_combo_atr.sort_values(
-        ["side", "avg_pnl", "winrate"],
-        ascending=[True, False, False]
-    )
-
-    print(summary_combo_atr.to_string(index=False))
-    summary_combo_atr.to_csv("combo_atr_performance.csv", index=False)
-    

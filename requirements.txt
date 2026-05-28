@@ -7,3 +7,4 @@ python-binance
 streamlit>=1.30.0
 python-dotenv
 streamlit-lightweight-charts
+requests

@@ -112,39 +112,29 @@ class ExecutionEngine:
         diff_ms = current_candle_ts - self.position.entry_candle_ts
 
         return int(diff_ms // tf_ms) + 1
-            
-    def _infer_close_reason(self, pos, exit_price):
-        tolerance = abs(pos.real_entry) * 0.001
 
+    def _infer_close_reason(self, pos, exit_price):
         pnl_pct = (
             (exit_price - pos.real_entry) / pos.real_entry * 100
             if pos.side == "LONG"
             else (pos.real_entry - exit_price) / pos.real_entry * 100
         )
 
-        if pos.side == "LONG":
-            if exit_price >= pos.tp - tolerance:
-                return "TP"
+        tp_distance = abs(exit_price - float(pos.tp))
+        sl_distance = abs(exit_price - float(pos.sl))
 
-            if exit_price <= pos.sl + tolerance:
-                if pnl_pct > 0:
-                    return "TRAILING_SL"
-                elif pnl_pct >= -0.05:
-                    return "BE_SL"
-                return "SL"
+        # Si el cierre quedó más cerca del TP que del SL, clasificamos TP
+        if tp_distance < sl_distance:
+            return "TP"
 
-        else:
-            if exit_price <= pos.tp + tolerance:
-                return "TP"
+        # Si quedó más cerca del SL, clasificamos según PnL
+        if pnl_pct > 0.05:
+            return "TRAILING_SL"
 
-            if exit_price >= pos.sl - tolerance:
-                if pnl_pct > 0:
-                    return "TRAILING_SL"
-                elif pnl_pct >= -0.05:
-                    return "BE_SL"
-                return "SL"
+        if pnl_pct >= -0.10:
+            return "BE_SL"
 
-        return "MANUAL_PROFIT" if pnl_pct > 0 else "MANUAL_LOSS"
+        return "SL"
 
 
     def _handle_external_close(self, price, timestamp):
@@ -224,29 +214,33 @@ class ExecutionEngine:
         exit_iso = _to_iso(exit_ts)
 
         self.journal.log_trade(
+            # ==========================
+            # TRADE ID / TIME
+            # ==========================
             symbol=pos.symbol,
+            side=pos.side,
             signal_ts=signal_iso,
-            signal_price=pos.signal_price,
-
             entry_ts=entry_iso,
             exit_ts=exit_iso,
 
-            side=pos.side,
-
+            # ==========================
+            # PRICES / LEVELS
+            # ==========================
+            signal_price=pos.signal_price,
             entry=pos.entry_price,
             real_entry=pos.real_entry,
-
             exit_price=price,
             real_exit=real_exit,
-
             tp=pos.tp,
             sl=pos.sl,
 
+            # ==========================
+            # RESULT
+            # ==========================
             pnl=pnl_net,
             pnl_gross=pnl_pct,
             pnl_usd=pnl_usd,
             fees=fees,
-
             exit_reason=reason,
 
             # ==========================
@@ -255,15 +249,98 @@ class ExecutionEngine:
             signal_trend=ctx.get("trend"),
             signal_direction=ctx.get("direction"),
             signal_momentum=ctx.get("momentum"),
-
             signal_momentum_prev1=ctx.get("momentum_prev1"),
             signal_momentum_prev2=ctx.get("momentum_prev2"),
             signal_momentum_sequence=ctx.get("momentum_sequence"),
-
             signal_atr=ctx.get("signal_atr"),
 
             # ==========================
-            # LIVE POSITION CONTEXT
+            # BTC CONTEXT
+            # ==========================
+            btc_velocity_15m=ctx.get("btc_velocity_15m"),
+            btc_velocity_1h=ctx.get("btc_velocity_1h"),
+            btc_direction_15m=ctx.get("btc_direction_15m"),
+            btc_direction_1h=ctx.get("btc_direction_1h"),
+            btc_context_state=ctx.get("btc_context_state"),
+            btc_context_reason=ctx.get("btc_context_reason"),
+            
+            # ==========================
+            # BTC SWING CONTEXT
+            # ==========================
+            btc_dist_swing_low_1h_pct=ctx.get("btc_dist_swing_low_1h_pct"),
+            btc_dist_swing_high_1h_pct=ctx.get("btc_dist_swing_high_1h_pct"),
+            btc_near_swing_low_1h=ctx.get("btc_near_swing_low_1h"),
+            btc_near_swing_high_1h=ctx.get("btc_near_swing_high_1h"),
+
+            btc_dist_swing_low_4h_pct=ctx.get("btc_dist_swing_low_4h_pct"),
+            btc_dist_swing_high_4h_pct=ctx.get("btc_dist_swing_high_4h_pct"),
+            btc_near_swing_low_4h=ctx.get("btc_near_swing_low_4h"),
+            btc_near_swing_high_4h=ctx.get("btc_near_swing_high_4h"),
+
+            btc_dist_swing_low_1d_pct=ctx.get("btc_dist_swing_low_1d_pct"),
+            btc_dist_swing_high_1d_pct=ctx.get("btc_dist_swing_high_1d_pct"),
+            btc_near_swing_low_1d=ctx.get("btc_near_swing_low_1d"),
+            btc_near_swing_high_1d=ctx.get("btc_near_swing_high_1d"),
+
+            # ==========================
+            # EMA CONTEXT
+            # ==========================
+            dist_ema20_1m_pct=pos.dist_ema20_1m_pct,
+            dist_ema34_1m_pct=pos.dist_ema34_1m_pct,
+            dist_ema50_1m_pct=pos.dist_ema50_1m_pct,
+
+            dist_ema50_15m_pct=ctx.get("dist_ema50_15m_pct"),
+            dist_ema99_15m_pct=ctx.get("dist_ema99_15m_pct"),
+            dist_ema20_15m_pct=ctx.get("dist_ema20_15m_pct"),
+            dist_ema50_1h_pct=ctx.get("dist_ema50_1h_pct"),
+            dist_ema99_1h_pct=ctx.get("dist_ema99_1h_pct"),
+            dist_ema20_1h_pct=ctx.get("dist_ema20_1h_pct"),
+            dist_ema50_4h_pct=ctx.get("dist_ema50_4h_pct"),
+            dist_ema99_4h_pct=ctx.get("dist_ema99_4h_pct"),
+            dist_ema20_4h_pct=ctx.get("dist_ema20_4h_pct"),
+
+            reclaimed_ema20_1m=pos.reclaimed_ema20_1m,
+            reclaimed_ema34_1m=pos.reclaimed_ema34_1m,
+            reclaimed_ema50_1m=pos.reclaimed_ema50_1m,
+            lost_ema20_1m=pos.lost_ema20_1m,
+            lost_ema34_1m=pos.lost_ema34_1m,
+            lost_ema50_1m=pos.lost_ema50_1m,
+
+            # ==========================
+            # SWING CONTEXT
+            # ==========================
+            swing_low_15m=ctx.get("swing_low_15m"),
+            swing_high_15m=ctx.get("swing_high_15m"),
+            dist_swing_low_15m_pct=ctx.get("dist_swing_low_15m_pct"),
+            dist_swing_high_15m_pct=ctx.get("dist_swing_high_15m_pct"),
+            near_swing_low_15m=ctx.get("near_swing_low_15m"),
+            near_swing_high_15m=ctx.get("near_swing_high_15m"),
+
+            swing_low_1h=ctx.get("swing_low_1h"),
+            swing_high_1h=ctx.get("swing_high_1h"),
+            dist_swing_low_1h_pct=ctx.get("dist_swing_low_1h_pct"),
+            dist_swing_high_1h_pct=ctx.get("dist_swing_high_1h_pct"),
+            near_swing_low_1h=ctx.get("near_swing_low_1h"),
+            near_swing_high_1h=ctx.get("near_swing_high_1h"),
+
+            swing_low_4h=ctx.get("swing_low_4h"),
+            swing_high_4h=ctx.get("swing_high_4h"),
+            dist_swing_low_4h_pct=ctx.get("dist_swing_low_4h_pct"),
+            dist_swing_high_4h_pct=ctx.get("dist_swing_high_4h_pct"),
+            near_swing_low_4h=ctx.get("near_swing_low_4h"),
+            near_swing_high_4h=ctx.get("near_swing_high_4h"),
+
+            # ==========================
+            # RECENT MOVE CONTEXT
+            # ==========================
+            move_5_bars_pct=ctx.get("move_5_bars_pct"),
+            move_10_bars_pct=ctx.get("move_10_bars_pct"),
+
+            green_candles_last_10=ctx.get("green_candles_last_10"),
+            red_candles_last_10=ctx.get("red_candles_last_10"),
+
+            # ==========================
+            # LIVE / POST ENTRY CONTEXT
             # ==========================
             current_trend=pos.current_trend,
             current_direction=pos.current_direction,
@@ -272,42 +349,40 @@ class ExecutionEngine:
             direction_t1=pos.direction_t1,
             momentum_t1=pos.momentum_t1,
             pnl_t1=pos.pnl_t1,
-
             micro_t1=pos.micro_t1,
             direction_5m_t1=pos.direction_5m_t1,
-
-            reclaimed_ema20_1m=pos.reclaimed_ema20_1m,
-            reclaimed_ema34_1m=pos.reclaimed_ema34_1m,
-            reclaimed_ema50_1m=pos.reclaimed_ema50_1m,
-
-            lost_ema20_1m=pos.lost_ema20_1m,
-            lost_ema34_1m=pos.lost_ema34_1m,
-            lost_ema50_1m=pos.lost_ema50_1m,
-
-            dist_ema20_1m_pct=pos.dist_ema20_1m_pct,
-            dist_ema34_1m_pct=pos.dist_ema34_1m_pct,
-            dist_ema50_1m_pct=pos.dist_ema50_1m_pct,
-
-            dist_ema50_15m_pct=ctx.get("dist_ema50_15m_pct"),
-            dist_ema99_15m_pct=ctx.get("dist_ema99_15m_pct"),
-
-            dist_ema50_1h_pct=ctx.get("dist_ema50_1h_pct"),
-            dist_ema99_1h_pct=ctx.get("dist_ema99_1h_pct"),
-
-            dist_ema50_4h_pct=ctx.get("dist_ema50_4h_pct"),
-            dist_ema99_4h_pct=ctx.get("dist_ema99_4h_pct"),
-
-            max_favorable_pct=pos.max_favorable_pct,
-            max_adverse_pct=pos.max_adverse_pct,
 
             direction_5m_changed=pos.direction_5m_changed,
             direction_5m_after_entry=pos.direction_5m_after_entry,
 
+            # ==========================
+            # TRADE EXCURSION
+            # ==========================
+            max_favorable_pct=pos.max_favorable_pct,
+            max_adverse_pct=pos.max_adverse_pct,
             mae=pos.mae,
             mfe=pos.mfe,
+            
+            # ==========================
+            # LIQUIDITY CONTEXT
+            # ==========================
+            quote_volume_24h=ctx.get("quote_volume_24h"),
+            avg_quote_volume_15m=ctx.get("avg_quote_volume_15m"),
+            avg_quote_volume_1h=ctx.get("avg_quote_volume_1h"),
+            avg_quote_volume_4h=ctx.get("avg_quote_volume_4h"),
+            relative_volume_15m=ctx.get("relative_volume_15m"),
+            relative_volume_1h=ctx.get("relative_volume_1h"),
+            relative_volume_4h=ctx.get("relative_volume_4h"),
+            volume_tier=ctx.get("volume_tier"),
+            rvol_tier_15m=ctx.get("rvol_tier_15m"),
+            rvol_tier_1h=ctx.get("rvol_tier_1h"),
+            rvol_tier_4h=ctx.get("rvol_tier_4h"),
 
+            # ==========================
+            # STRATEGY / ROUTER
+            # ==========================
             strategy_mode=ctx.get("strategy_name"),
-            router_reason=ctx.get("router_reason")
+            router_reason=ctx.get("router_reason"),
         )
 
         try:
@@ -355,18 +430,20 @@ class ExecutionEngine:
                 f"raw_sl={raw_sl} -> sl={sl_price}"
             )
 
-            self.exchange.place_take_profit_limit(
-                symbol=symbol,
-                side=tp_side,
-                quantity=quantity,
-                price=tp_price
-            )
-
+            # 1) Primero SL. La posición nunca debe quedar desnuda.
             self.exchange.place_stop_loss(
                 symbol=symbol,
                 side=sl_side,
                 quantity=quantity,
                 stop_price=sl_price
+            )
+
+            # 2) Después TP.
+            self.exchange.place_take_profit_limit(
+                symbol=symbol,
+                side=tp_side,
+                quantity=quantity,
+                price=tp_price
             )
 
             print("✅ TP/SL colocados correctamente")
@@ -375,6 +452,81 @@ class ExecutionEngine:
         except Exception as e:
             print(f"❌ Error colocando TP/SL: {e}")
             return False
+            
+    def replace_stop_loss_only(self, pos, new_sl_price):
+        symbol = pos.symbol
+        side = "SELL" if pos.side == "LONG" else "BUY"
+
+        try:
+            print(
+                f"[SL] Replacing SL only | "
+                f"symbol={symbol} | old_sl={pos.sl} | new_sl={new_sl_price}"
+            )
+
+            self.order_executor.cancel_stop_orders(symbol)
+
+            self.exchange.place_stop_loss(
+                symbol=symbol,
+                side=side,
+                quantity=pos.quantity,
+                stop_price=new_sl_price
+            )
+
+            print(f"[SL] ✅ SL replaced | symbol={symbol} | stop={new_sl_price}")
+            return True
+
+        except Exception as e:
+            print(f"[SL] ❌ Failed replacing SL | symbol={symbol} | error={e}")
+            return False
+            
+    def move_sl_to_be(self, pos):
+        be_price = self.exchange.normalize_price(
+            pos.symbol,
+            pos.real_entry
+        )
+
+        current_sl = self.exchange.normalize_price(
+            pos.symbol,
+            pos.sl
+        )
+
+        if float(current_sl) == float(be_price):
+            print(f"[BE] Already at BE | {pos.symbol} | sl={current_sl}")
+            return True
+
+        print(
+            f"[BE] Moving SL to BE | "
+            f"symbol={pos.symbol} | "
+            f"old_sl={pos.sl} | "
+            f"new_sl={be_price}"
+        )
+
+        try:
+            ok = self.replace_stop_loss_only(pos, be_price)
+
+            if not ok:
+                print("[BE] Failed moving SL to BE")
+                return False
+
+            pos.sl = float(be_price)
+            pos.be_moved = True
+
+            self.snapshot_manager.update(
+                pos.symbol,
+                "position",
+                {
+                    "sl": float(be_price),
+                    "tp": float(pos.tp),
+                    "be_moved": True,
+                }
+            )
+
+            print(f"[BE] SL moved to BE successfully | {pos.symbol} | sl={be_price}")
+            return True
+
+        except Exception as e:
+            print(f"[BE] Error moving SL to BE: {e}")
+            return False
         
     def exchange_open_positions_count(self, symbols):
         count = 0
@@ -382,7 +534,10 @@ class ExecutionEngine:
         for symbol in symbols:
             pos = self.position_manager.sync(symbol)
 
-            if pos:
+            if pos == "INVALID_SYMBOL":
+                continue
+
+            if pos is not None:
                 count += 1
 
         return count
@@ -443,17 +598,16 @@ class ExecutionEngine:
                     "⚠️ Max global exchange positions reached. Plan ignored.\n"
                 )
                 return False
-
+            
             exchange_pos = self.position_manager.sync(plan.symbol)
 
-            if exchange_pos:
-                print("\033[94m[EXECUTION ENGINE]\033[0m ⚠️ Position already open (exchange). Plan ignored.\n")
+            if exchange_pos == "INVALID_SYMBOL":
+                print(f"⚠️ Invalid symbol skipped | {plan.symbol}")
                 return False
 
-            try:
-                self.order_executor.cancel_all(plan.symbol)
-            except Exception as e:
-                print(f"⚠️ Failed to clean orders: {e}")
+            if exchange_pos is not None:
+                print("\033[94m[EXECUTION ENGINE]\033[0m ⚠️ Position already open (exchange). Plan ignored.\n")
+                return False
 
             if plan.side not in ("LONG", "SHORT"):
                 return False
@@ -472,7 +626,11 @@ class ExecutionEngine:
 
             print(f"✅ Leverage set to {leverage}x")
 
-            price = float(self.exchange.get_price(plan.symbol))
+            try:
+                price = float(self.exchange.get_price(plan.symbol))
+            except Exception as e:
+                print(f"❌ Error getting price | symbol={plan.symbol} | error={e}")
+                return False
 
             size_data = self.position_sizer.calculate(
                 balance=balance,
@@ -540,7 +698,12 @@ class ExecutionEngine:
                     time.sleep(2)
 
                     exchange_pos = self.position_manager.sync(plan.symbol)
-                    if exchange_pos:
+
+                    if exchange_pos == "INVALID_SYMBOL":
+                        print(f"⚠️ Invalid symbol after timeout sync | {plan.symbol}")
+                        return False
+
+                    if exchange_pos is not None:
                         print("✅ Position detected after timeout sync")
                         order = {"status": "FILLED_AFTER_SYNC"}
                     else:
@@ -565,10 +728,13 @@ class ExecutionEngine:
                 print("❌ Order failed")
                 return False
 
-            # 🔥 SIEMPRE sync después del order
             exchange_pos = self.position_manager.sync(plan.symbol)
 
-            if not exchange_pos:
+            if exchange_pos == "INVALID_SYMBOL":
+                print(f"⚠️ Invalid symbol skipped after order | {plan.symbol}")
+                return False
+
+            if exchange_pos is None:
                 print("❌ No hay posición después del order, abortando")
                 return False
 
@@ -630,8 +796,8 @@ class ExecutionEngine:
                 symbol=plan.symbol,
                 side=plan.side,
                 quantity=quantity,
-                entry_price=self._apply_slippage(plan.entry, plan.side, True),
-                real_entry=real_entry,
+                entry_price=float(plan.entry),
+                real_entry=float(real_entry),
                 tp=tp_price,
                 sl=sl_price,
                 entry_ts=int(time.time() * 1000),
@@ -673,7 +839,8 @@ class ExecutionEngine:
                     "real_entry": real_entry,
 
                     "tp": tp_price,
-                    "sl": sl_price
+                    "sl": sl_price,
+                    "be_moved": False
                 },
 
                 "context": {
@@ -688,14 +855,82 @@ class ExecutionEngine:
                     "signal_atr": plan.signal_context.get("signal_atr"),
                     "signal_atr_pct": plan.signal_context.get("signal_atr_pct"),
                     
+                    "quote_volume_24h": plan.signal_context.get("quote_volume_24h"),
+                    "avg_quote_volume_15m": plan.signal_context.get("avg_quote_volume_15m"),
+                    "avg_quote_volume_1h": plan.signal_context.get("avg_quote_volume_1h"),
+                    "avg_quote_volume_4h": plan.signal_context.get("avg_quote_volume_4h"),
+
+                    "relative_volume_15m": plan.signal_context.get("relative_volume_15m"),
+                    "relative_volume_1h": plan.signal_context.get("relative_volume_1h"),
+                    "relative_volume_4h": plan.signal_context.get("relative_volume_4h"),
+
+                    "volume_tier": plan.signal_context.get("volume_tier"),
+                    "rvol_tier_15m": plan.signal_context.get("rvol_tier_15m"),
+                    "rvol_tier_1h": plan.signal_context.get("rvol_tier_1h"),
+                    "rvol_tier_4h": plan.signal_context.get("rvol_tier_4h"),
+                    
+                    "btc_velocity_15m": plan.signal_context.get("btc_velocity_15m"),
+                    "btc_velocity_1h": plan.signal_context.get("btc_velocity_1h"),
+
+                    "btc_direction_15m": plan.signal_context.get("btc_direction_15m"),
+                    "btc_direction_1h": plan.signal_context.get("btc_direction_1h"),
+
+                    "btc_context_state": plan.signal_context.get("btc_context_state"),
+                    "btc_context_reason": plan.signal_context.get("btc_context_reason"),
+                    
+                    "btc_dist_swing_low_1h_pct": plan.signal_context.get("btc_dist_swing_low_1h_pct"),
+                    "btc_dist_swing_high_1h_pct": plan.signal_context.get("btc_dist_swing_high_1h_pct"),
+                    "btc_near_swing_low_1h": plan.signal_context.get("btc_near_swing_low_1h"),
+                    "btc_near_swing_high_1h": plan.signal_context.get("btc_near_swing_high_1h"),
+
+                    "btc_dist_swing_low_4h_pct": plan.signal_context.get("btc_dist_swing_low_4h_pct"),
+                    "btc_dist_swing_high_4h_pct": plan.signal_context.get("btc_dist_swing_high_4h_pct"),
+                    "btc_near_swing_low_4h": plan.signal_context.get("btc_near_swing_low_4h"),
+                    "btc_near_swing_high_4h": plan.signal_context.get("btc_near_swing_high_4h"),
+
+                    "btc_dist_swing_low_1d_pct": plan.signal_context.get("btc_dist_swing_low_1d_pct"),
+                    "btc_dist_swing_high_1d_pct": plan.signal_context.get("btc_dist_swing_high_1d_pct"),
+                    "btc_near_swing_low_1d": plan.signal_context.get("btc_near_swing_low_1d"),
+                    "btc_near_swing_high_1d": plan.signal_context.get("btc_near_swing_high_1d"),
+                    
                     "dist_ema50_15m_pct": plan.signal_context.get("dist_ema50_15m_pct"),
                     "dist_ema99_15m_pct": plan.signal_context.get("dist_ema99_15m_pct"),
+                    "dist_ema20_15m_pct": plan.signal_context.get("dist_ema20_15m_pct"),
 
                     "dist_ema50_1h_pct": plan.signal_context.get("dist_ema50_1h_pct"),
                     "dist_ema99_1h_pct": plan.signal_context.get("dist_ema99_1h_pct"),
+                    "dist_ema20_1h_pct": plan.signal_context.get("dist_ema20_1h_pct"),
 
                     "dist_ema50_4h_pct": plan.signal_context.get("dist_ema50_4h_pct"),
                     "dist_ema99_4h_pct": plan.signal_context.get("dist_ema99_4h_pct"),
+                    "dist_ema20_4h_pct": plan.signal_context.get("dist_ema20_4h_pct"),
+                    
+                    "swing_low_15m": plan.signal_context.get("swing_low_15m"),
+                    "swing_high_15m": plan.signal_context.get("swing_high_15m"),
+                    "dist_swing_low_15m_pct": plan.signal_context.get("dist_swing_low_15m_pct"),
+                    "dist_swing_high_15m_pct": plan.signal_context.get("dist_swing_high_15m_pct"),
+                    "near_swing_low_15m": plan.signal_context.get("near_swing_low_15m"),
+                    "near_swing_high_15m": plan.signal_context.get("near_swing_high_15m"),
+
+                    "swing_low_1h": plan.signal_context.get("swing_low_1h"),
+                    "swing_high_1h": plan.signal_context.get("swing_high_1h"),
+                    "dist_swing_low_1h_pct": plan.signal_context.get("dist_swing_low_1h_pct"),
+                    "dist_swing_high_1h_pct": plan.signal_context.get("dist_swing_high_1h_pct"),
+                    "near_swing_low_1h": plan.signal_context.get("near_swing_low_1h"),
+                    "near_swing_high_1h": plan.signal_context.get("near_swing_high_1h"),
+
+                    "swing_low_4h": plan.signal_context.get("swing_low_4h"),
+                    "swing_high_4h": plan.signal_context.get("swing_high_4h"),
+                    "dist_swing_low_4h_pct": plan.signal_context.get("dist_swing_low_4h_pct"),
+                    "dist_swing_high_4h_pct": plan.signal_context.get("dist_swing_high_4h_pct"),
+                    "near_swing_low_4h": plan.signal_context.get("near_swing_low_4h"),
+                    "near_swing_high_4h": plan.signal_context.get("near_swing_high_4h"),
+                    
+                    "move_5_bars_pct": plan.signal_context.get("move_5_bars_pct"),
+                    "move_10_bars_pct": plan.signal_context.get("move_10_bars_pct"),
+
+                    "green_candles_last_10": plan.signal_context.get("green_candles_last_10"),
+                    "red_candles_last_10": plan.signal_context.get("red_candles_last_10"),
 
                     "strategy_mode": plan.signal_context.get("strategy_name"),
                     "router_reason": plan.signal_context.get("router_reason")
@@ -716,11 +951,11 @@ class ExecutionEngine:
     Symbol       : {plan.symbol}
     Side         : {plan.side}
     Quantity     : {quantity}
-    Signal Price : {plan.signal_price:.2f}
-    Entry (bot)  : {self.position.entry_price:.2f}
-    Entry (real) : {real_entry:.2f}
-    TP           : {tp_price:.2f}
-    SL           : {sl_price:.2f}
+    Signal Price : {plan.signal_price:.8f}
+    Entry (bot)  : {self.position.entry_price:.8f}
+    Entry (real) : {real_entry:.8f}
+    TP           : {tp_price:.8f}
+    SL           : {sl_price:.8f}
     """)
 
             return True
@@ -735,68 +970,71 @@ class ExecutionEngine:
     # ==========================
     # 🔄 PRICE UPDATE
     # ==========================
-    
     def update_position_context(
         self,
+        symbol,
         trend,
         direction,
         momentum,
-        micro_momentum,
-        price,
+        micro_momentum=None,
+        current_price=None,
         ema20_1m=None,
         ema34_1m=None,
         ema50_1m=None
     ):
         self.strategy.update_position_context(
-            self,
-            trend,
-            direction,
-            momentum,
-            micro_momentum,
-            price,
-            ema20_1m,
-            ema34_1m,
-            ema50_1m
+            execution_engine=self,
+            symbol=symbol,
+            trend=trend,
+            direction=direction,
+            momentum=momentum,
+            micro_momentum=micro_momentum,
+            current_price=current_price,
+            ema20_1m=ema20_1m,
+            ema34_1m=ema34_1m,
+            ema50_1m=ema50_1m
         )
 
-        if not self.position:
+        pos = self.get_position(symbol)
+
+        if not pos:
             return
 
         self.snapshot_manager.update(
-            self.position.symbol,
+            symbol,
             "post_entry_analysis",
             {
-                "current_trend": self.position.current_trend,
-                "current_direction": self.position.current_direction,
-                "current_momentum": self.position.current_momentum,
+                "current_trend": pos.current_trend,
+                "current_direction": pos.current_direction,
+                "current_momentum": pos.current_momentum,
 
-                "mae": self.position.mae,
-                "mfe": self.position.mfe,
+                "mae": pos.mae,
+                "mfe": pos.mfe,
 
-                "direction_t1": self.position.direction_t1,
-                "momentum_t1": self.position.momentum_t1,
-                "pnl_t1": self.position.pnl_t1,
+                "direction_t1": pos.direction_t1,
+                "momentum_t1": pos.momentum_t1,
+                "pnl_t1": pos.pnl_t1,
 
-                "micro_t1": self.position.micro_t1,
-                "direction_5m_t1": self.position.direction_5m_t1,
+                "micro_t1": pos.micro_t1,
+                "direction_5m_t1": pos.direction_5m_t1,
 
-                "reclaimed_ema20_1m": self.position.reclaimed_ema20_1m,
-                "reclaimed_ema34_1m": self.position.reclaimed_ema34_1m,
-                "reclaimed_ema50_1m": self.position.reclaimed_ema50_1m,
+                "reclaimed_ema20_1m": pos.reclaimed_ema20_1m,
+                "reclaimed_ema34_1m": pos.reclaimed_ema34_1m,
+                "reclaimed_ema50_1m": pos.reclaimed_ema50_1m,
 
-                "lost_ema20_1m": self.position.lost_ema20_1m,
-                "lost_ema34_1m": self.position.lost_ema34_1m,
-                "lost_ema50_1m": self.position.lost_ema50_1m,
+                "lost_ema20_1m": pos.lost_ema20_1m,
+                "lost_ema34_1m": pos.lost_ema34_1m,
+                "lost_ema50_1m": pos.lost_ema50_1m,
 
-                "dist_ema20_1m_pct": self.position.dist_ema20_1m_pct,
-                "dist_ema34_1m_pct": self.position.dist_ema34_1m_pct,
-                "dist_ema50_1m_pct": self.position.dist_ema50_1m_pct,
+                "dist_ema20_1m_pct": pos.dist_ema20_1m_pct,
+                "dist_ema34_1m_pct": pos.dist_ema34_1m_pct,
+                "dist_ema50_1m_pct": pos.dist_ema50_1m_pct,
 
-                "max_favorable_pct": self.position.max_favorable_pct,
-                "max_adverse_pct": self.position.max_adverse_pct,
+                "max_favorable_pct": pos.max_favorable_pct,
+                "max_adverse_pct": pos.max_adverse_pct,
 
-                "direction_5m_changed": self.position.direction_5m_changed,
-                "direction_5m_after_entry": self.position.direction_5m_after_entry,
+                "direction_5m_changed": pos.direction_5m_changed,
+                "direction_5m_after_entry": pos.direction_5m_after_entry,
             }
         )
     
@@ -815,7 +1053,10 @@ class ExecutionEngine:
 
         exchange_pos = self.position_manager.sync(symbol)
 
-        if not exchange_pos:
+        if exchange_pos == "INVALID_SYMBOL":
+            return
+
+        if exchange_pos is None:
             self.position = position
             self._handle_external_close(price, timestamp)
             return
@@ -823,8 +1064,13 @@ class ExecutionEngine:
         # compat temporal
         self.position = position
 
-        self.strategy.on_price_update(self, price, timestamp)
-        
+        self.strategy.on_price_update(
+            self,
+            symbol,
+            price,
+            timestamp
+        )
+                
         self.snapshot_manager.update(
             symbol,
             "engine",
@@ -894,29 +1140,33 @@ class ExecutionEngine:
         exit_iso = datetime.utcfromtimestamp(timestamp / 1000).isoformat()
 
         self.journal.log_trade(
+            # ==========================
+            # TRADE ID / TIME
+            # ==========================
             symbol=pos.symbol,
+            side=pos.side,
             signal_ts=signal_iso,
-            signal_price=pos.signal_price,
-
             entry_ts=entry_iso,
             exit_ts=exit_iso,
 
-            side=pos.side,
-
+            # ==========================
+            # PRICES / LEVELS
+            # ==========================
+            signal_price=pos.signal_price,
             entry=pos.entry_price,
             real_entry=pos.real_entry,
-
             exit_price=price,
             real_exit=real_exit,
-
             tp=pos.tp,
             sl=pos.sl,
 
+            # ==========================
+            # RESULT
+            # ==========================
             pnl=pnl_net,
             pnl_gross=pnl_pct,
             pnl_usd=pnl_usd,
             fees=fees,
-
             exit_reason=reason,
 
             # ==========================
@@ -925,70 +1175,140 @@ class ExecutionEngine:
             signal_trend=ctx.get("trend"),
             signal_direction=ctx.get("direction"),
             signal_momentum=ctx.get("momentum"),
-
-            # 🔥 NUEVO CONTEXTO
             signal_momentum_prev1=ctx.get("momentum_prev1"),
             signal_momentum_prev2=ctx.get("momentum_prev2"),
             signal_momentum_sequence=ctx.get("momentum_sequence"),
-
             signal_atr=ctx.get("signal_atr"),
 
             # ==========================
-            # LIVE POSITION CONTEXT
+            # BTC CONTEXT
             # ==========================
-            current_trend=pos.current_trend,
-            current_direction=pos.current_direction,
-            current_momentum=pos.current_momentum,
-
-            # ==========================
-            # FIRST POST-ENTRY STATE
-            # ==========================
-            direction_t1=pos.direction_t1,
-            momentum_t1=pos.momentum_t1,
-
-            pnl_t1=pos.pnl_t1,
+            btc_velocity_15m=ctx.get("btc_velocity_15m"),
+            btc_velocity_1h=ctx.get("btc_velocity_1h"),
+            btc_direction_15m=ctx.get("btc_direction_15m"),
+            btc_direction_1h=ctx.get("btc_direction_1h"),
+            btc_context_state=ctx.get("btc_context_state"),
+            btc_context_reason=ctx.get("btc_context_reason"),
             
             # ==========================
-            # AGGRESSIVE POST ANALYSIS
+            # BTC SWING CONTEXT
             # ==========================
-            micro_t1=pos.micro_t1,
-            direction_5m_t1=pos.direction_5m_t1,
+            btc_dist_swing_low_1h_pct=ctx.get("btc_dist_swing_low_1h_pct"),
+            btc_dist_swing_high_1h_pct=ctx.get("btc_dist_swing_high_1h_pct"),
+            btc_near_swing_low_1h=ctx.get("btc_near_swing_low_1h"),
+            btc_near_swing_high_1h=ctx.get("btc_near_swing_high_1h"),
 
-            reclaimed_ema20_1m=pos.reclaimed_ema20_1m,
-            reclaimed_ema34_1m=pos.reclaimed_ema34_1m,
-            reclaimed_ema50_1m=pos.reclaimed_ema50_1m,
+            btc_dist_swing_low_4h_pct=ctx.get("btc_dist_swing_low_4h_pct"),
+            btc_dist_swing_high_4h_pct=ctx.get("btc_dist_swing_high_4h_pct"),
+            btc_near_swing_low_4h=ctx.get("btc_near_swing_low_4h"),
+            btc_near_swing_high_4h=ctx.get("btc_near_swing_high_4h"),
 
-            lost_ema20_1m=pos.lost_ema20_1m,
-            lost_ema34_1m=pos.lost_ema34_1m,
-            lost_ema50_1m=pos.lost_ema50_1m,
+            btc_dist_swing_low_1d_pct=ctx.get("btc_dist_swing_low_1d_pct"),
+            btc_dist_swing_high_1d_pct=ctx.get("btc_dist_swing_high_1d_pct"),
+            btc_near_swing_low_1d=ctx.get("btc_near_swing_low_1d"),
+            btc_near_swing_high_1d=ctx.get("btc_near_swing_high_1d"),
 
+            # ==========================
+            # EMA CONTEXT
+            # ==========================
             dist_ema20_1m_pct=pos.dist_ema20_1m_pct,
             dist_ema34_1m_pct=pos.dist_ema34_1m_pct,
             dist_ema50_1m_pct=pos.dist_ema50_1m_pct,
 
             dist_ema50_15m_pct=ctx.get("dist_ema50_15m_pct"),
             dist_ema99_15m_pct=ctx.get("dist_ema99_15m_pct"),
-
+            dist_ema20_15m_pct=ctx.get("dist_ema20_15m_pct"),
             dist_ema50_1h_pct=ctx.get("dist_ema50_1h_pct"),
             dist_ema99_1h_pct=ctx.get("dist_ema99_1h_pct"),
-
+            dist_ema20_1h_pct=ctx.get("dist_ema20_1h_pct"),
             dist_ema50_4h_pct=ctx.get("dist_ema50_4h_pct"),
             dist_ema99_4h_pct=ctx.get("dist_ema99_4h_pct"),
+            dist_ema20_4h_pct=ctx.get("dist_ema20_4h_pct"),
 
-            max_favorable_pct=pos.max_favorable_pct,
-            max_adverse_pct=pos.max_adverse_pct,
+            reclaimed_ema20_1m=pos.reclaimed_ema20_1m,
+            reclaimed_ema34_1m=pos.reclaimed_ema34_1m,
+            reclaimed_ema50_1m=pos.reclaimed_ema50_1m,
+            lost_ema20_1m=pos.lost_ema20_1m,
+            lost_ema34_1m=pos.lost_ema34_1m,
+            lost_ema50_1m=pos.lost_ema50_1m,
+
+            # ==========================
+            # SWING CONTEXT
+            # ==========================
+            swing_low_15m=ctx.get("swing_low_15m"),
+            swing_high_15m=ctx.get("swing_high_15m"),
+            dist_swing_low_15m_pct=ctx.get("dist_swing_low_15m_pct"),
+            dist_swing_high_15m_pct=ctx.get("dist_swing_high_15m_pct"),
+            near_swing_low_15m=ctx.get("near_swing_low_15m"),
+            near_swing_high_15m=ctx.get("near_swing_high_15m"),
+
+            swing_low_1h=ctx.get("swing_low_1h"),
+            swing_high_1h=ctx.get("swing_high_1h"),
+            dist_swing_low_1h_pct=ctx.get("dist_swing_low_1h_pct"),
+            dist_swing_high_1h_pct=ctx.get("dist_swing_high_1h_pct"),
+            near_swing_low_1h=ctx.get("near_swing_low_1h"),
+            near_swing_high_1h=ctx.get("near_swing_high_1h"),
+
+            swing_low_4h=ctx.get("swing_low_4h"),
+            swing_high_4h=ctx.get("swing_high_4h"),
+            dist_swing_low_4h_pct=ctx.get("dist_swing_low_4h_pct"),
+            dist_swing_high_4h_pct=ctx.get("dist_swing_high_4h_pct"),
+            near_swing_low_4h=ctx.get("near_swing_low_4h"),
+            near_swing_high_4h=ctx.get("near_swing_high_4h"),
+
+            # ==========================
+            # RECENT MOVE CONTEXT
+            # ==========================
+            move_5_bars_pct=ctx.get("move_5_bars_pct"),
+            move_10_bars_pct=ctx.get("move_10_bars_pct"),
+
+            green_candles_last_10=ctx.get("green_candles_last_10"),
+            red_candles_last_10=ctx.get("red_candles_last_10"),
+
+            # ==========================
+            # LIVE / POST ENTRY CONTEXT
+            # ==========================
+            current_trend=pos.current_trend,
+            current_direction=pos.current_direction,
+            current_momentum=pos.current_momentum,
+
+            direction_t1=pos.direction_t1,
+            momentum_t1=pos.momentum_t1,
+            pnl_t1=pos.pnl_t1,
+            micro_t1=pos.micro_t1,
+            direction_5m_t1=pos.direction_5m_t1,
 
             direction_5m_changed=pos.direction_5m_changed,
             direction_5m_after_entry=pos.direction_5m_after_entry,
 
             # ==========================
-            # TRADE EVOLUTION
+            # TRADE EXCURSION
             # ==========================
+            max_favorable_pct=pos.max_favorable_pct,
+            max_adverse_pct=pos.max_adverse_pct,
             mae=pos.mae,
             mfe=pos.mfe,
             
+            # ==========================
+            # LIQUIDITY CONTEXT
+            # ==========================
+            quote_volume_24h=ctx.get("quote_volume_24h"),
+            avg_quote_volume_15m=ctx.get("avg_quote_volume_15m"),
+            avg_quote_volume_1h=ctx.get("avg_quote_volume_1h"),
+            avg_quote_volume_4h=ctx.get("avg_quote_volume_4h"),
+            relative_volume_15m=ctx.get("relative_volume_15m"),
+            relative_volume_1h=ctx.get("relative_volume_1h"),
+            relative_volume_4h=ctx.get("relative_volume_4h"),
+            volume_tier=ctx.get("volume_tier"),
+            rvol_tier_15m=ctx.get("rvol_tier_15m"),
+            rvol_tier_1h=ctx.get("rvol_tier_1h"),
+            rvol_tier_4h=ctx.get("rvol_tier_4h"),
+
+            # ==========================
+            # STRATEGY / ROUTER
+            # ==========================
             strategy_mode=ctx.get("strategy_name"),
-            router_reason=ctx.get("router_reason")
+            router_reason=ctx.get("router_reason"),
         )
         
         try:
@@ -1047,18 +1367,88 @@ class ExecutionEngine:
 
             "signal_atr": context.get("signal_atr") or context.get("atr"),
             "signal_atr_pct": context.get("signal_atr_pct") or context.get("atr_pct"),
+            
+            "quote_volume_24h": context.get("quote_volume_24h"),
+
+            "avg_quote_volume_15m": context.get("avg_quote_volume_15m"),
+            "avg_quote_volume_1h": context.get("avg_quote_volume_1h"),
+            "avg_quote_volume_4h": context.get("avg_quote_volume_4h"),
+
+            "relative_volume_15m": context.get("relative_volume_15m"),
+            "relative_volume_1h": context.get("relative_volume_1h"),
+            "relative_volume_4h": context.get("relative_volume_4h"),
+
+            "volume_tier": context.get("volume_tier"),
+
+            "rvol_tier_15m": context.get("rvol_tier_15m"),
+            "rvol_tier_1h": context.get("rvol_tier_1h"),
+            "rvol_tier_4h": context.get("rvol_tier_4h"),
+            
+            "btc_velocity_15m": context.get("btc_velocity_15m"),
+            "btc_velocity_1h": context.get("btc_velocity_1h"),
+
+            "btc_direction_15m": context.get("btc_direction_15m"),
+            "btc_direction_1h": context.get("btc_direction_1h"),
+
+            "btc_context_state": context.get("btc_context_state"),
+            "btc_context_reason": context.get("btc_context_reason"),
+            
+            "btc_dist_swing_low_1h_pct": context.get("btc_dist_swing_low_1h_pct"),
+            "btc_dist_swing_high_1h_pct": context.get("btc_dist_swing_high_1h_pct"),
+            "btc_near_swing_low_1h": context.get("btc_near_swing_low_1h"),
+            "btc_near_swing_high_1h": context.get("btc_near_swing_high_1h"),
+
+            "btc_dist_swing_low_4h_pct": context.get("btc_dist_swing_low_4h_pct"),
+            "btc_dist_swing_high_4h_pct": context.get("btc_dist_swing_high_4h_pct"),
+            "btc_near_swing_low_4h": context.get("btc_near_swing_low_4h"),
+            "btc_near_swing_high_4h": context.get("btc_near_swing_high_4h"),
+
+            "btc_dist_swing_low_1d_pct": context.get("btc_dist_swing_low_1d_pct"),
+            "btc_dist_swing_high_1d_pct": context.get("btc_dist_swing_high_1d_pct"),
+            "btc_near_swing_low_1d": context.get("btc_near_swing_low_1d"),
+            "btc_near_swing_high_1d": context.get("btc_near_swing_high_1d"),
 
             "strategy_name": context.get("strategy_name") or context.get("strategy_mode"),
             "router_reason": context.get("router_reason"),
 
             "dist_ema50_15m_pct": context.get("dist_ema50_15m_pct"),
             "dist_ema99_15m_pct": context.get("dist_ema99_15m_pct"),
+            "dist_ema20_15m_pct": context.get("dist_ema20_15m_pct"),
 
             "dist_ema50_1h_pct": context.get("dist_ema50_1h_pct"),
             "dist_ema99_1h_pct": context.get("dist_ema99_1h_pct"),
+            "dist_ema20_1h_pct": context.get("dist_ema20_1h_pct"),
 
             "dist_ema50_4h_pct": context.get("dist_ema50_4h_pct"),
             "dist_ema99_4h_pct": context.get("dist_ema99_4h_pct"),
+            "dist_ema20_4h_pct": context.get("dist_ema20_4h_pct"),
+            
+            "swing_low_15m": context.get("swing_low_15m"),
+            "swing_high_15m": context.get("swing_high_15m"),
+            "dist_swing_low_15m_pct": context.get("dist_swing_low_15m_pct"),
+            "dist_swing_high_15m_pct": context.get("dist_swing_high_15m_pct"),
+            "near_swing_low_15m": context.get("near_swing_low_15m"),
+            "near_swing_high_15m": context.get("near_swing_high_15m"),
+
+            "swing_low_1h": context.get("swing_low_1h"),
+            "swing_high_1h": context.get("swing_high_1h"),
+            "dist_swing_low_1h_pct": context.get("dist_swing_low_1h_pct"),
+            "dist_swing_high_1h_pct": context.get("dist_swing_high_1h_pct"),
+            "near_swing_low_1h": context.get("near_swing_low_1h"),
+            "near_swing_high_1h": context.get("near_swing_high_1h"),
+
+            "swing_low_4h": context.get("swing_low_4h"),
+            "swing_high_4h": context.get("swing_high_4h"),
+            "dist_swing_low_4h_pct": context.get("dist_swing_low_4h_pct"),
+            "dist_swing_high_4h_pct": context.get("dist_swing_high_4h_pct"),
+            "near_swing_low_4h": context.get("near_swing_low_4h"),
+            "near_swing_high_4h": context.get("near_swing_high_4h"),
+            
+            "move_5_bars_pct": context.get("move_5_bars_pct"),
+            "move_10_bars_pct": context.get("move_10_bars_pct"),
+
+            "green_candles_last_10": context.get("green_candles_last_10"),
+            "red_candles_last_10": context.get("red_candles_last_10"),
         }
         post_analysis = snapshot.get("post_entry_analysis", {})
 
@@ -1084,13 +1474,25 @@ class ExecutionEngine:
         # ==========================
         # EXCHANGE VALIDATION
         # ==========================
-        exchange_qty = float(exchange_state["quantity"])
+        exchange_qty = abs(float(exchange_state["quantity"]))
 
         if abs(exchange_qty - quantity) > 0.0001:
+
             print(
                 f"\033[93m[SYNC]\033[0m ⚠️ Quantity mismatch | "
-                f"snapshot={quantity} exchange={exchange_qty}"
+                f"snapshot={quantity} exchange={exchange_qty} -> using exchange"
             )
+
+            print(
+                f"[SYNC DEBUG] "
+                f"symbol={symbol} "
+                f"snapshot_qty={quantity} "
+                f"exchange_qty={exchange_qty}"
+            )
+
+            print(exchange_state)
+
+            quantity = exchange_qty
 
         # ==========================
         # TP / SL
@@ -1127,11 +1529,12 @@ class ExecutionEngine:
                 sl_price=sl,
                 real_entry=entry_price,
             )
-
+            
             if tp_sl_ok:
                 print("\033[94m[SYNC]\033[0m ✅ TP/SL rebuilt")
             else:
-                print("\033[94m[SYNC]\033[0m ❌ Failed rebuilding TP/SL")
+                print("\033[94m[SYNC]\033[0m ❌ Failed rebuilding TP/SL. Position NOT restored.")
+                return
 
         else:
             tp = float(tp)
@@ -1210,6 +1613,8 @@ class ExecutionEngine:
 
             mae=post_analysis.get("mae"),
             mfe=post_analysis.get("mfe"),
+            
+            be_moved=bool(position_data.get("be_moved", False)),
         )
         
         self.positions[symbol] = position
@@ -1233,11 +1638,18 @@ class ExecutionEngine:
     """)
 
     def check_exchange_close(self, symbol):
-
         pos = self.exchange.get_position(symbol)
 
+        if pos == "INVALID_SYMBOL":
+            return
+
         if not pos or float(pos["amount"]) == 0:
-            if self.position:
-                print("🔄 Exchange cerró posición")
-                self.position = None
+            if symbol in self.positions:
+                print(f"🔄 Exchange cerró posición | symbol={symbol}")
+
+                self.positions.pop(symbol, None)
+
+                if self.position and self.position.symbol == symbol:
+                    self.position = None
+
                 self.snapshot_manager.clear(symbol)

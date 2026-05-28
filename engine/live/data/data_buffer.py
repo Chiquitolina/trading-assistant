@@ -90,6 +90,7 @@ class DataBuffer:
             "low": float(k["l"]),
             "close": float(k["c"]),
             "volume": float(k["v"]),
+            "quoteVolume": float(k.get("q", 0)),
             "closed_at": datetime.utcfromtimestamp(close_time / 1000),
         }
 
@@ -188,6 +189,12 @@ class DataBuffer:
             "low": float(candle["low"]),
             "close": float(candle["close"]),
             "volume": float(candle.get("volume", 0)),
+            "quoteVolume": float(
+                candle.get("quoteVolume")
+                or candle.get("quote_volume")
+                or candle.get("quote_asset_volume")
+                or candle.get("volume", 0) * candle.get("close", 0)
+            ),
             "closed_at": datetime.utcfromtimestamp(close_time / 1000),
         }
 
@@ -228,6 +235,15 @@ class DataBuffer:
                 "low": float(row["low"]),
                 "close": float(row["close"]),
                 "volume": float(row["volume"]),
+                "quoteVolume": float(
+                    row.get("quoteVolume")
+                    if "quoteVolume" in row
+                    else row.get("quote_volume")
+                    if "quote_volume" in row
+                    else row.get("quote_asset_volume")
+                    if "quote_asset_volume" in row
+                    else row["volume"] * row["close"]
+                ),
                 "closed_at": datetime.utcfromtimestamp(close_time / 1000),
             }
 

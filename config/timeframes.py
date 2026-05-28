@@ -8,17 +8,19 @@ MODE_CONFIG = {
         "trigger_tf": "15m",
         "min_atr_pct": 0.26,
         "min_atr": 200,
-        "entry_tf": "1m",
+        "entry_tf": "15m",
         "atr_tf": "15m",
+        "entry_rules": "old"
     },
 
     "direction": {
-        "timeframes": ["1h", "15m", "5m"],
+        "timeframes": ["1d", "4h", "1h", "15m", "5m", "1m"],
         "trigger_tf": "15m",
         "min_atr_pct": 0.26,
         "min_atr": 200,
-        "entry_tf": "1m",
+        "entry_tf": "15m",
         "atr_tf": "15m",
+        "entry_rules": "standard"
     },
 
     "aggressive": {
@@ -28,6 +30,7 @@ MODE_CONFIG = {
         "entry_tf": "1m",
         "atr_tf": "5m",
         "min_atr": 120,
+        "entry_rules": "standard"
     },
 }
 
