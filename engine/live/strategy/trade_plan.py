@@ -1,6 +1,21 @@
 from dataclasses import dataclass, field
 from typing import Dict, Any
 
+
+def fmt_price(price):
+    if price is None:
+        return "N/A"
+
+    price = float(price)
+
+    if price >= 100:
+        return f"{price:.2f}"
+    elif price >= 1:
+        return f"{price:.4f}"
+    else:
+        return f"{price:.8f}"
+
+
 @dataclass
 class TradePlan:
     symbol: str
@@ -16,13 +31,13 @@ class TradePlan:
     atr_pct: float
     timestamp: int
     reason: str
-    
+
     signal_price: float
     signal_ts: int
-    
-    # 🆕 contexto de señal (seguro y escalable)
+
+    # contexto de señal
     signal_context: Dict[str, Any] = field(default_factory=dict)
-    
+
     max_hold_candles: int = 10
 
     def pretty(self):
@@ -36,17 +51,17 @@ Side   : {self.side}
 
 🧠 SIGNAL
 TS     : {self.signal_ts}
-Price  : {self.signal_price}
+Price  : {fmt_price(self.signal_price)}
 Dir    : {ctx.get("direction")}
 Trend  : {ctx.get("trend")}
 Mom    : {ctx.get("momentum")}
-ATR    : {ctx.get("atr")}
+ATR    : {fmt_price(ctx.get("atr"))}
 ATR%   : {ctx.get("atr_pct")}
 
 📦 EXECUTION
-Entry  : {self.entry:.2f}
-TP     : {self.tp:.2f}
-SL     : {self.sl:.2f}
+Entry  : {fmt_price(self.entry)}
+TP     : {fmt_price(self.tp)}
+SL     : {fmt_price(self.sl)}
 
 📊 RISK
 TP%    : {self.tp_pct:.3f}

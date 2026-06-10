@@ -69,11 +69,16 @@ class DefaultExecutionStrategy(BaseExecutionStrategy):
         # ==========================
         # TRAILING STOP
         # ==========================
-        TRAIL_TRIGGER = 0.40
+        TRAIL_TRIGGER = 0.60
 
         if pnl >= TRAIL_TRIGGER:
 
-            offset = 0.15
+            if pnl < 1.00:
+                offset = 0.25
+            elif pnl < 1.60:
+                offset = 0.35
+            else:
+                offset = 0.50
 
             if pos.side == "LONG":
                 new_sl = pos.real_entry * (1 + (pnl - offset) / 100)

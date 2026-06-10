@@ -1,0 +1,145 @@
+import pandas as pd
+
+
+def detect_compression(
+    df: pd.DataFrame,
+    lookback: int = 10,
+    base_lookback: int = 40,
+    max_range_ratio: float = 0.75,
+    max_atr_ratio: float = 0.85,
+    max_volume_ratio: float = 1.10,
+    max_body_pct: float = 0.55,
+    min_score: int = 3,
+):
+    if df is None or len(df) < base_lookback + lookback:
+        return {
+            "is_compression": False,
+            "score": 0,
+            "reason": "not_enough_data",
+        }
+
+    d = df.copy()
+
+    required_cols = ["open", "high", "low", "close", "volume"]
+    missing = [c for c in required_cols if c not in d.columns]
+
+    if missing:
+        return {
+            "is_compression": False,
+            "score": 0,
+            "reason": f"missing_cols:{missing}",
+        }
+
+    for col in required_cols:
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+
+    d = d.dropna(subset=required_cols).reset_index(drop=True)
+
+    if len(d) < base_lookback + lookback:
+        return {
+            "is_compression": False,
+            "score": 0,
+            "reason": "not_enough_clean_data",
+        }
+
+    d["range"] = d["high"] - d["low"]
+    d["body"] = (d["close"] - d["open"]).abs()
+    d["body_pct"] = d["body"] / d["range"].replace(0, 1e-12)
+
+    d["prev_close"] = d["close"].shift(1)
+
+    tr1 = d["high"] - d["low"]
+    tr2 = (d["high"] - d["prev_close"]).abs()
+    tr3 = (d["low"] - d["prev_close"]).abs()
+
+    d["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    d["atr"] = d["tr"].rolling(14).mean()
+
+    recent = d.tail(lookback)
+    base = d.tail(base_lookback)
+
+    recent_range_avg = recent["range"].mean()
+    base_range_avg = base["range"].mean()
+
+    recent_atr = recent["atr"].mean()
+    base_atr = base["atr"].mean()
+
+    recent_volume_avg = recent["volume"].mean()
+    base_volume_avg = base["volume"].mean()
+
+    recent_body_pct = recent["body_pct"].mean()
+
+    range_ratio = (
+        recent_range_avg / base_range_avg
+        if base_range_avg and base_range_avg > 0
+        else 999
+    )
+
+    atr_ratio = (
+        recent_atr / base_atr
+        if base_atr and base_atr > 0
+        else 999
+    )
+
+    volume_ratio = (
+        recent_volume_avg / base_volume_avg
+        if base_volume_avg and base_volume_avg > 0
+        else 999
+    )
+
+    compression_high = recent["high"].max()
+    compression_low = recent["low"].min()
+    close = float(d["close"].iloc[-1])
+
+    compression_range_pct = (
+        (compression_high - compression_low) / close * 100
+        if close > 0
+        else 999
+    )
+
+    score = 0
+    reasons = []
+
+    if range_ratio <= max_range_ratio:
+        score += 1
+        reasons.append("range_contracting")
+
+    if atr_ratio <= max_atr_ratio:
+        score += 1
+        reasons.append("atr_contracting")
+
+    if volume_ratio <= max_volume_ratio:
+        score += 1
+        reasons.append("volume_not_expanding")
+
+    if recent_body_pct <= max_body_pct:
+        score += 1
+        reasons.append("small_bodies")
+
+    is_compression = score >= min_score
+
+    return {
+        "is_compression": is_compression,
+        "score": score,
+        "reason": "compression" if is_compression else "no_compression",
+        "reasons": reasons,
+
+        "lookback": lookback,
+        "base_lookback": base_lookback,
+
+        "range_ratio": round(float(range_ratio), 4),
+        "atr_ratio": round(float(atr_ratio), 4),
+        "volume_ratio": round(float(volume_ratio), 4),
+        "avg_body_pct": round(float(recent_body_pct), 4),
+
+        "compression_high": float(compression_high),
+        "compression_low": float(compression_low),
+        "compression_range_pct": round(float(compression_range_pct), 4),
+
+        "recent_range_avg": float(recent_range_avg),
+        "base_range_avg": float(base_range_avg),
+        "recent_atr": float(recent_atr),
+        "base_atr": float(base_atr),
+        "recent_volume_avg": float(recent_volume_avg),
+        "base_volume_avg": float(base_volume_avg),
+    }

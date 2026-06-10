@@ -4,7 +4,7 @@ from binance import ThreadedWebsocketManager
 
 
 class WSClient:
-    def __init__(self, on_message, timeframes, symbols, stale_after=20, chunk_size=40):
+    def __init__(self, on_message, timeframes, symbols, stale_after=60, chunk_size=25):
         self.on_message = on_message
         self.timeframes = timeframes
         self.symbols = symbols
@@ -22,7 +22,7 @@ class WSClient:
         self._reconnect_lock = threading.Lock()
 
         self._last_reconnect = 0
-        self.min_reconnect_interval = 10
+        self.min_reconnect_interval = 60
 
         self.handshake_failures = 0
         
@@ -79,11 +79,15 @@ class WSClient:
     def _connect(self):
         print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...")
 
-        self._stop_ws()
+        if self.twm is not None:
+            print("\033[94m[WS CLIENT]\033[0m ⚠️ Existing TWM found, stopping before reconnect")
+            self._stop_ws()
 
         try:
-            twm = ThreadedWebsocketManager()
-            twm.start()
+            self.twm = ThreadedWebsocketManager()
+            self.twm.start()
+
+            time.sleep(3)
 
             total_streams = 0
 
@@ -97,7 +101,7 @@ class WSClient:
                     for tf in self.timeframes
                 ]
 
-                twm.start_multiplex_socket(
+                self.twm.start_multiplex_socket(
                     streams=streams,
                     callback=self._handle_message
                 )
@@ -111,12 +115,9 @@ class WSClient:
 
                 time.sleep(1)
 
-            self.twm = twm
-
             self.retries = 0
             self._is_reconnecting = False
             self.handshake_failures = 0
-
             self.is_connected = False
             self.last_message_at = 0.0
 
@@ -179,8 +180,8 @@ class WSClient:
 
             self.retries += 1
 
-            delay = min(2 ** min(self.retries, 6), 60)
-            delay = max(delay, 8)
+            delay = min(2 ** min(self.retries, 6), 120)
+            delay = max(delay, 30)
 
             print(
                 f"\033[94m[WS CLIENT]\033[0m 🔄 Reconnecting in {delay}s..."

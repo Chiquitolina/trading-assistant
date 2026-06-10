@@ -65,6 +65,37 @@ class BinanceExchange(BaseExchange):
                     return float(asset["availableBalance"])
 
         return 0.0
+
+    def get_wallet_balance(self):
+        account = self._safe_request(self.client.futures_account)
+
+        if account:
+            for asset in account["assets"]:
+                if asset["asset"] == "USDT":
+                    return float(asset["walletBalance"])
+
+        return 0.0
+
+    def get_lot_size_filter(self, symbol: str):
+        info = self.client.futures_exchange_info()
+
+        for s in info["symbols"]:
+            if s["symbol"] == symbol:
+                for f in s["filters"]:
+                    if f["filterType"] == "LOT_SIZE":
+                        return f
+
+        raise ValueError(f"No se encontró LOT_SIZE para {symbol}")
+
+
+    def get_min_quantity(self, symbol: str) -> float:
+        lot_size = self.get_lot_size_filter(symbol)
+        return float(lot_size["minQty"])
+
+
+    def get_max_quantity(self, symbol: str) -> float:
+        lot_size = self.get_lot_size_filter(symbol)
+        return float(lot_size["maxQty"])
     
     def get_position_size(self, symbol):
 
@@ -159,7 +190,7 @@ class BinanceExchange(BaseExchange):
 
             amt = float(pos.get("positionAmt", 0))
 
-            if abs(amt) == 0:
+            if abs(amt) < 1e-9:
                 return None
 
             return {
@@ -195,11 +226,10 @@ class BinanceExchange(BaseExchange):
             quantity=quantity
         )
         
-    def place_take_profit_limit(self, symbol, side, quantity, price):
-        print(
-            f"[EXCHANGE] TP LIMIT send | side={side} "
-            f"price={price} qty={quantity}"
-        )
+    def place_take_profit_limit(self, symbol, side, quantity, price, price_rounding="DOWN"):
+        price = self.normalize_price(symbol, price, price_rounding)
+
+        print(f"[EXCHANGE] TP LIMIT send | side={side} price={price} qty={quantity}")
 
         response = self._safe_request(
             self.client.futures_create_order,
@@ -212,11 +242,7 @@ class BinanceExchange(BaseExchange):
             reduceOnly=True
         )
 
-        print(
-            f"[EXCHANGE] TP LIMIT created | side={side} "
-            f"price={price} response={response}"
-        )
-
+        print(f"[EXCHANGE] TP LIMIT created | side={side} price={price} response={response}")
         return response
         
         
@@ -245,11 +271,10 @@ class BinanceExchange(BaseExchange):
 
         return response
 
-    def place_stop_loss(self, symbol, side, quantity, stop_price):
-        print(
-            f"[EXCHANGE] SL MARKET send | side={side} "
-            f"trigger={stop_price} qty={quantity}"
-        )
+    def place_stop_loss(self, symbol, side, quantity, stop_price, price_rounding="DOWN"):
+        stop_price = self.normalize_price(symbol, stop_price, price_rounding)
+
+        print(f"[EXCHANGE] SL MARKET send | side={side} trigger={stop_price} qty={quantity}")
 
         response = self._safe_request(
             self.client.futures_create_order,
@@ -263,11 +288,7 @@ class BinanceExchange(BaseExchange):
             priceProtect=True
         )
 
-        print(
-            f"[EXCHANGE] SL MARKET created | side={side} "
-            f"trigger={stop_price} response={response}"
-        )
-
+        print(f"[EXCHANGE] SL MARKET created | side={side} trigger={stop_price} response={response}")
         return response
 
     def close_position(self, symbol, side, quantity):
@@ -294,31 +315,63 @@ class BinanceExchange(BaseExchange):
         except Exception as e:
             print(f"⚠️ Cancel order error | symbol={symbol} | order_id={order_id} | error={e}")
             return None        
-        
+            
     def cancel_all_orders(self, symbol):
-
+        # ==========================
+        # CANCEL NORMAL OPEN ORDERS
+        # ==========================
         try:
+            normal_orders = self._safe_request(
+                self.client.futures_get_open_orders,
+                symbol=symbol
+            ) or []
 
-            orders = self.client.futures_get_open_algo_orders(symbol=symbol)
+            print(f"🔎 Found {len(normal_orders)} normal orders")
 
-            print(f"\n🔎 Found {len(orders)} conditional orders")
-
-            for o in orders:
-
+            for o in normal_orders:
                 print(
-                    f"\033[94m[EXCHANGE]\033[0m Cancel {o['orderType']} | trigger:{o['triggerPrice']} | id:{o['algoId']}"
+                    f"\033[94m[EXCHANGE]\033[0m "
+                    f"Cancel NORMAL {o.get('type')} | "
+                    f"price:{o.get('price')} | id:{o.get('orderId')}"
                 )
-                
 
-                self.client.futures_cancel_algo_order(
+                self._safe_request(
+                    self.client.futures_cancel_order,
+                    symbol=symbol,
+                    orderId=o["orderId"]
+                )
+
+        except Exception as e:
+            print(f"⚠️ Normal cancel error | symbol={symbol} | error={e}")
+
+        # ==========================
+        # CANCEL ALGO / CONDITIONAL ORDERS
+        # ==========================
+        try:
+            algo_orders = self._safe_request(
+                self.client.futures_get_open_algo_orders,
+                symbol=symbol
+            ) or []
+
+            print(f"🔎 Found {len(algo_orders)} conditional orders")
+
+            for o in algo_orders:
+                print(
+                    f"\033[94m[EXCHANGE]\033[0m "
+                    f"Cancel ALGO {o.get('orderType')} | "
+                    f"trigger:{o.get('triggerPrice')} | id:{o.get('algoId')}"
+                )
+
+                self._safe_request(
+                    self.client.futures_cancel_algo_order,
                     symbol=symbol,
                     algoId=o["algoId"]
                 )
 
-            print("🧹 Cancel requests sent")
-
         except Exception as e:
-            print(f"⚠️ Cancel error: {e}")
+            print(f"⚠️ Algo cancel error | symbol={symbol} | error={e}")
+
+        print(f"🧹 Cancel requests sent | symbol={symbol}")
             
     def get_futures_fees(self, symbol="BTCUSDT"):
         data = self.client.futures_commission_rate(symbol=symbol)
@@ -394,13 +447,31 @@ class BinanceExchange(BaseExchange):
 
     def normalize_quantity(self, symbol: str, quantity: float) -> str:
         step = Decimal(str(self.get_quantity_step_size(symbol)))
+        min_qty = Decimal(str(self.get_min_quantity(symbol)))
+        max_qty = Decimal(str(self.get_max_quantity(symbol)))
+
         quantity_dec = Decimal(str(quantity))
+
+        # cap maxQty
+        if quantity_dec > max_qty:
+            print(
+                f"⚠️ Quantity capped by maxQty | "
+                f"symbol={symbol} raw={quantity_dec} max={max_qty}"
+            )
+            quantity_dec = max_qty
 
         adjusted = (
             (quantity_dec / step)
             .quantize(Decimal("1"), rounding=ROUND_DOWN)
             * step
         )
+
+        if adjusted < min_qty:
+            print(
+                f"❌ Quantity below minQty | "
+                f"symbol={symbol} qty={adjusted} min={min_qty}"
+            )
+            return "0"
 
         decimals = max(0, -step.as_tuple().exponent)
 

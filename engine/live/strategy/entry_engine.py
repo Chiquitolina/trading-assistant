@@ -1,4 +1,6 @@
 import pandas as pd
+import csv
+from pathlib import Path
 
 from signals.indicators.atr import add_atr
 from signals.strategy.filters import min_expected_tp_ok
@@ -39,6 +41,62 @@ class EntryEngine:
             None
         )
         
+            
+    def _log_blocked_signal(self, trade_action: TradeAction, reason: str):
+        signal = trade_action.signal
+
+        self.status_writer.write_plan(
+            status="BLOCKED",
+            reason=reason,
+            side=trade_action.action.value,
+            entry=getattr(signal, "signal_price", None),
+        )
+
+        self._append_paper_signal_csv(trade_action, reason)
+
+        print(
+            f"[PAPER SIGNAL] {reason} | "
+            f"{getattr(signal, 'symbol', self.symbol)} | "
+            f"{trade_action.action.value} | "
+            f"strategy={trade_action.strategy_name} | "
+            f"router_reason={trade_action.reason}"
+        )
+        
+    def _append_paper_signal_csv(self, trade_action: TradeAction, reason: str):
+        signal = trade_action.signal
+
+        path = Path("paper_signals.csv")
+        exists = path.exists()
+
+        row = {
+            "ts": getattr(signal, "signal_ts", None),
+            "symbol": getattr(signal, "symbol", self.symbol),
+            "side": trade_action.action.value,
+            "reason": reason,
+            "strategy_name": trade_action.strategy_name,
+            "router_reason": trade_action.reason,
+            "signal_price": getattr(signal, "signal_price", None),
+
+            "signal_trend": getattr(getattr(signal, "trend", None), "value", None),
+            "signal_direction": getattr(getattr(signal, "direction", None), "value", None),
+            "signal_momentum": getattr(getattr(signal, "momentum", None), "value", None),
+
+            "btc_velocity_15m": getattr(signal, "btc_velocity_15m", None),
+            "btc_velocity_1h": getattr(signal, "btc_velocity_1h", None),
+            "btc_direction_15m": getattr(signal, "btc_direction_15m", None),
+            "btc_direction_1h": getattr(signal, "btc_direction_1h", None),
+            "btc_context_state": getattr(signal, "btc_context_state", None),
+            "btc_context_reason": getattr(signal, "btc_context_reason", None),
+        }
+
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+
+            if not exists:
+                writer.writeheader()
+
+            writer.writerow(row)
+        
     def _calculate_atr_pct(
         self,
         atr: float,
@@ -69,6 +127,20 @@ class EntryEngine:
                 reason="invalid_side",
                 side=side,
             )
+            return None
+        
+        allow_longs = self.config.get("allow_longs", True)
+        allow_shorts = self.config.get("allow_shorts", True)
+        log_blocked = self.config.get("log_blocked_signals", True)
+
+        if side == "LONG" and not allow_longs:
+            if log_blocked:
+                self._log_blocked_signal(trade_action, reason="LONG_DISABLED")
+            return None
+
+        if side == "SHORT" and not allow_shorts:
+            if log_blocked:
+                self._log_blocked_signal(trade_action, reason="SHORT_DISABLED_PAPER_ONLY")
             return None
 
         # ==========================
@@ -133,18 +205,18 @@ class EntryEngine:
             entry
         )
         
-        print(
-            f"[ENTRY FILTER DEBUG] "
-            f"symbol={plan_symbol} "
-            f"side={side} "
-            f"entry_tf={self.entry_tf} "
-            f"atr_tf={self.atr_tf} "
-            f"entry={entry:.6f} "
-            f"atr={atr:.6f} "
-            f"atr_pct={atr_pct:.4f}% "
-            f"min_atr={self.min_atr} "
-            f"min_atr_pct={self.min_atr_pct}"
-        )
+        #print(
+        #    f"[ENTRY FILTER DEBUG] "
+        #    f"symbol={plan_symbol} "
+        #    f"side={side} "
+        #    f"entry_tf={self.entry_tf} "
+        #    f"atr_tf={self.atr_tf} "
+        #    f"entry={entry:.6f} "
+        #    f"atr={atr:.6f} "
+        #    f"atr_pct={atr_pct:.4f}% "
+        #    f"min_atr={self.min_atr} "
+        #    f"min_atr_pct={self.min_atr_pct}"
+        #)
 
         strategy_name = (trade_action.strategy_name or "").lower()
 
@@ -164,6 +236,25 @@ class EntryEngine:
             atr=atr,
             cfg=cfg
         )
+        
+        # ==========================
+        # FIXED TP / SL EXPERIMENT
+        # ==========================
+        use_fixed_levels = self.config.get("use_fixed_levels", False)
+
+        if use_fixed_levels:
+            fixed_tp_pct = float(self.config.get("fixed_tp_pct", 0.40))
+            fixed_sl_pct = float(self.config.get("fixed_sl_pct", 0.30))
+
+            if side == "LONG":
+                tp = entry * (1 + fixed_tp_pct / 100)
+                sl = entry * (1 - fixed_sl_pct / 100)
+            else:
+                tp = entry * (1 - fixed_tp_pct / 100)
+                sl = entry * (1 + fixed_sl_pct / 100)
+
+            tp_pct = fixed_tp_pct
+            sl_pct = fixed_sl_pct
 
         # ==========================
         # 🔴 VOLATILITY FILTER
@@ -220,29 +311,32 @@ class EntryEngine:
         # ==========================
         # TP ESPERADO
         # ==========================
-        ok, expected_tp_pct = min_expected_tp_ok(
-            entry,
-            atr,
-            cfg["tp_mult"],
-            cfg["min_tp"]
-        )
-
-        if not ok:
-            if self.debug:
-                print(f"⛔ Entry descartado: TP esperado insuficiente ({expected_tp_pct:.2f}% < {cfg['min_tp']}%)")
-
-            self.status_writer.write_plan(
-                status="DISCARDED",
-                reason="min_tp_not_met",
-                side=side,
-                entry=round(entry, 2),
-                tp=round(tp, 2),
-                sl=round(sl, 2),
-                atr=round(atr, 2),
-                atr_pct=round(atr_pct, 4)
+        if not use_fixed_levels:
+            ok, expected_tp_pct = min_expected_tp_ok(
+                entry,
+                atr,
+                cfg["tp_mult"],
+                cfg["min_tp"]
             )
-            return None
 
+            if not ok:
+                if self.debug:
+                    print(
+                        f"⛔ Entry descartado: TP esperado insuficiente "
+                        f"({expected_tp_pct:.2f}% < {cfg['min_tp']}%)"
+                    )
+
+                self.status_writer.write_plan(
+                    status="DISCARDED",
+                    reason="min_tp_not_met",
+                    side=side,
+                    entry=round(entry, 2),
+                    tp=round(tp, 2),
+                    sl=round(sl, 2),
+                    atr=round(atr, 2),
+                    atr_pct=round(atr_pct, 4)
+                )
+                return None
 
         # ==========================
         # CONTEXT
@@ -376,9 +470,9 @@ class EntryEngine:
 
         quote_volume_24h = getattr(signal, "quote_volume_24h", None)
         
-        print(
-            f"\n[LIQUIDITY DEBUG] {plan_symbol}"
-        )
+        #print(
+        #    f"\n[LIQUIDITY DEBUG] {plan_symbol}"
+        #)
 
         print(
             "15m columns:",

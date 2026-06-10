@@ -1,5 +1,6 @@
 from collections import defaultdict, deque
 from datetime import datetime
+import threading
 
 
 class DataBuffer:
@@ -8,6 +9,7 @@ class DataBuffer:
         self.symbols = set(symbols or [])
 
         self.closed_events = set()
+        self.closed_events_lock = threading.Lock()
 
         self._last_price = {}
         self._last_timestamp = {}
@@ -104,12 +106,13 @@ class DataBuffer:
 
         self.last_close_time[symbol][tf] = open_time
         self.last_ws_close_time[symbol][tf] = close_time
-        self.closed_events.add((symbol, tf))
+        with self.closed_events_lock:
+            self.closed_events.add((symbol, tf))
 
-        print(
-            f"\033[94m[DATA LAYER]\033[0m "
-            f"🕯️ STORED [{symbol}][{tf}] {candle['close']}"
-        )
+        #print(
+        #    f"\033[94m[DATA LAYER]\033[0m "
+        #    f"🕯️ STORED [{symbol}][{tf}] {candle['close']}"
+        #)
 
     # ==========================================
     # EVENT CONSUMER
@@ -118,28 +121,37 @@ class DataBuffer:
         symbol = self._normalize_symbol(symbol)
         event = (symbol, tf)
 
-        if event in self.closed_events:
-            self.closed_events.remove(event)
-            return True
+        with self.closed_events_lock:
+            if event in self.closed_events:
+                self.closed_events.remove(event)
+                return True
 
         return False
 
+
     def consume_any_closed_tf(self, tf: str):
-        for symbol, closed_tf in list(self.closed_events):
-            if closed_tf == tf:
-                self.closed_events.remove((symbol, closed_tf))
-                return symbol
+        with self.closed_events_lock:
+            for symbol, closed_tf in tuple(self.closed_events):
+                if closed_tf == tf:
+                    self.closed_events.remove((symbol, closed_tf))
+                    return symbol
 
         return None
 
+
     def consume_closed_event(self):
-        if not self.closed_events:
-            return None
+        with self.closed_events_lock:
+            if not self.closed_events:
+                return None
 
-        event = next(iter(self.closed_events))
-        self.closed_events.remove(event)
+            event = next(iter(self.closed_events))
+            self.closed_events.remove(event)
 
-        return event
+            return event
+        
+    def closed_events_snapshot(self):
+        with self.closed_events_lock:
+            return tuple(self.closed_events)
 
     # ==========================================
     # GETTERS
@@ -200,7 +212,8 @@ class DataBuffer:
 
         self.buffers[symbol][tf].append(formatted)
         self.last_close_time[symbol][tf] = close_time
-        self.closed_events.add((symbol, tf))
+        with self.closed_events_lock:
+            self.closed_events.add((symbol, tf))
 
         print(
             f"\033[95m[REPLAY DATA]\033[0m "
@@ -250,7 +263,7 @@ class DataBuffer:
             self.buffers[symbol][tf].append(candle)
             self.last_close_time[symbol][tf] = close_time
 
-        print(
-            f"\033[94m[DATA LAYER]\033[0m "
-            f"📦 Loaded {len(df)} historical candles for [{symbol}][{tf}]"
-        )
+        #print(
+        #    f"\033[94m[DATA LAYER]\033[0m "
+        #    f"📦 Loaded {len(df)} historical candles for [{symbol}][{tf}]"
+        #)

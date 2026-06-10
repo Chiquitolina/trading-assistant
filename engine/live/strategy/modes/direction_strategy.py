@@ -11,14 +11,22 @@ class DirectionStrategy:
         previous_direction=None,
         current_position=None
     ):
+        
+        if signal is None:
+            return TradeAction(
+                action=Action.HOLD,
+                signal=None,
+                strategy_name="direction_strategy",
+                reason="no_signal"
+            )
 
         current_direction = signal.direction
 
-        print(
-            "[DIRECTION BREAKOUT STRATEGY]",
-            f"prev={previous_direction}",
-            f"current={current_direction}",
-        )
+        #print(
+        #    "[DIRECTION BREAKOUT STRATEGY]",
+        #    f"prev={previous_direction}",
+        #    f"current={current_direction}",
+        #)
 
         # =========================================
         # FIRST BOOT / NO PREVIOUS SIGNAL

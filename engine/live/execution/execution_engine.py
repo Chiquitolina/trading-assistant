@@ -18,13 +18,19 @@ class ExecutionEngine:
 
     def __init__(self, exchange, position_manager, strategy, symbol):
         self.exchange = exchange
+        self.is_testnet = getattr(exchange, "testnet", False)
         self.position_manager = position_manager
         self.symbol = symbol
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
         self.journal = TradeJournal()
         self.fees = self.exchange.get_futures_fees()
-        self.position_sizer = PositionSizer()
+        self.position_sizer = PositionSizer(
+            total_usage_pct=0.65,
+            max_positions=10,
+            buffer=0.90,
+            min_notional=105,
+        )
         self.risk_manager = RiskManager()
         self.snapshot_manager = SnapshotManager()
         self.order_executor = OrderExecutor(exchange)
@@ -35,7 +41,7 @@ class ExecutionEngine:
         self.last_global_entry_ts = 0
         self.last_symbol_entry_ts = {}
 
-        self.global_entry_cooldown = 180   # 3 min
+        self.global_entry_cooldown = 0   # 0 min
         self.symbol_entry_cooldown = 900   # 15 min
 
     def _apply_slippage(self, price: float, side: str, is_entry: bool = True):
@@ -48,13 +54,29 @@ class ExecutionEngine:
         if side == "SHORT":
             return price - slippage if is_entry else price + slippage
         
-    def _get_last_close_fill(self, symbol, side, quantity, entry_ts, limit=50):
+    def _resolve_leverage(self, plan, default_leverage: int = 2) -> int:
+        side = plan.side
+        direction = plan.signal_context.get("direction")
+        momentum = plan.signal_context.get("momentum")
+
+        if (
+            side == "LONG"
+            and direction == "up"
+            and momentum == "inside_bar"
+        ):
+            print("[LEVERAGE ROUTER] LONG up inside_bar -> 3x")
+            return 3
+
+        return default_leverage
+            
+    def _get_last_close_fill(self, symbol, side, quantity, entry_ts, limit=1000):
         fills = self.exchange.get_recent_fills(symbol, limit=limit)
 
         if not fills:
             return None
 
         exit_side = "SELL" if side == "LONG" else "BUY"
+        expected_qty = abs(float(quantity))
 
         candidates = [
             f for f in fills
@@ -73,12 +95,21 @@ class ExecutionEngine:
         valid_orders = []
 
         for oid, group in grouped.items():
-            total_qty = sum(float(f["qty"]) for f in group)
+            total_qty = sum(abs(float(f["qty"])) for f in group)
 
-            if abs(total_qty - float(quantity)) <= 0.000001:
+            qty_diff = abs(total_qty - expected_qty)
+            qty_diff_pct = qty_diff / expected_qty if expected_qty > 0 else 999
+
+            # tolerancia flexible: 0.2% o 1e-6, lo que sea mayor
+            if qty_diff_pct <= 0.002 or qty_diff <= 0.000001:
                 valid_orders.append((oid, group))
 
         if not valid_orders:
+            print(
+                f"⚠️ Close fill candidates found but qty mismatch | "
+                f"symbol={symbol} expected_qty={expected_qty} "
+                f"candidates={[(oid, sum(abs(float(x['qty'])) for x in g)) for oid, g in grouped.items()]}"
+            )
             return None
 
         latest_order_id, selected = max(
@@ -86,10 +117,10 @@ class ExecutionEngine:
             key=lambda item: max(int(x["time"]) for x in item[1])
         )
 
-        total_qty = sum(float(f["qty"]) for f in selected)
-        total_quote = sum(float(f["qty"]) * float(f["price"]) for f in selected)
-        total_commission = sum(float(f["commission"]) for f in selected)
-        total_realized = sum(float(f["realizedPnl"]) for f in selected)
+        total_qty = sum(abs(float(f["qty"])) for f in selected)
+        total_quote = sum(abs(float(f["qty"])) * float(f["price"]) for f in selected)
+        total_commission = sum(float(f.get("commission", 0) or 0) for f in selected)
+        total_realized = sum(float(f.get("realizedPnl", 0) or 0) for f in selected)
         last_time = max(int(f["time"]) for f in selected)
 
         avg_price = total_quote / total_qty if total_qty > 0 else None
@@ -103,7 +134,7 @@ class ExecutionEngine:
             "time": last_time,
             "fills": selected,
         }
-        
+            
     def _calc_candles_in_trade(self, current_candle_ts: int, tf_minutes: int = 1) -> int:
         if not self.position or self.position.entry_candle_ts is None:
             return 0
@@ -151,8 +182,8 @@ class ExecutionEngine:
             symbol=pos.symbol,
             side=pos.side,
             quantity=pos.quantity,
-            entry_ts=int(pos.entry_ts) - 60_000,
-            limit=100
+            entry_ts=int(pos.entry_ts) - 5 * 60_000,
+            limit=500
         )
 
         pnl_usd = 0.0
@@ -161,11 +192,19 @@ class ExecutionEngine:
         if close_fill:
             real_exit = float(close_fill["price"])
             exit_order_id = int(close_fill["orderId"])
-            pnl_usd = float(close_fill.get("realizedPnl", 0) or 0)
+
+            realized_pnl = float(close_fill.get("realizedPnl", 0) or 0)
+            close_commission = float(close_fill.get("commission", 0) or 0)
+
+            pnl_usd = realized_pnl - close_commission
 
             print(
                 f"✅ Close fill encontrado | "
-                f"orderId={exit_order_id} | real_exit={real_exit}"
+                f"orderId={exit_order_id} | "
+                f"real_exit={real_exit} | "
+                f"realized_pnl={realized_pnl:.6f} | "
+                f"close_commission={close_commission:.6f} | "
+                f"net_pnl_usd={pnl_usd:.6f}"
             )
 
         else:
@@ -219,6 +258,8 @@ class ExecutionEngine:
             # ==========================
             symbol=pos.symbol,
             side=pos.side,
+            leverage=getattr(pos, "leverage", 1),
+            is_testnet=getattr(pos, "is_testnet", self.is_testnet),
             signal_ts=signal_iso,
             entry_ts=entry_iso,
             exit_ts=exit_iso,
@@ -383,6 +424,31 @@ class ExecutionEngine:
             # ==========================
             strategy_mode=ctx.get("strategy_name"),
             router_reason=ctx.get("router_reason"),
+            
+            compression_state=ctx.get("compression_state"),
+            compression_reason=ctx.get("compression_reason"),
+
+            compression_high=ctx.get("compression_high"),
+            compression_low=ctx.get("compression_low"),
+
+            compression_score=ctx.get("compression_score"),
+            trend_score=ctx.get("trend_score"),
+
+            breakout_ts=ctx.get("breakout_ts"),
+            breakout_price=ctx.get("breakout_price"),
+            breakout_high=ctx.get("breakout_high"),
+            breakout_volume_ratio=ctx.get("breakout_volume_ratio"),
+
+            entry_ready_price=ctx.get("entry_ready_price"),
+            
+            breakout_extension_pct=ctx.get("breakout_extension_pct"),
+            breakout_extension_atr=ctx.get("breakout_extension_atr"),
+
+            compression_range_pct=ctx.get("compression_range_pct"),
+            range_ratio=ctx.get("range_ratio"),
+            atr_ratio=ctx.get("atr_ratio"),
+            volume_ratio=ctx.get("volume_ratio"),
+            avg_body_pct=ctx.get("avg_body_pct"),
         )
 
         try:
@@ -412,22 +478,30 @@ class ExecutionEngine:
             sl_float = float(sl_price)
 
             if side == "LONG":
+                tp_rounding = "UP"
+                sl_rounding = "DOWN"
+
                 tp_float = max(tp_float, mark_price + min_distance)
                 sl_float = min(sl_float, mark_price - min_distance)
 
             elif side == "SHORT":
+                tp_rounding = "DOWN"
+                sl_rounding = "UP"
+
                 tp_float = min(tp_float, mark_price - min_distance)
                 sl_float = max(sl_float, mark_price + min_distance)
 
-            tp_price = self.exchange.normalize_price(symbol, tp_float)
-            sl_price = self.exchange.normalize_price(symbol, sl_float)
+            else:
+                print(f"❌ Invalid side for TP/SL | side={side}")
+                return False
 
             print(
                 f"📌 TP/SL debug | "
                 f"symbol={symbol} | qty={quantity} | side={side} | "
                 f"mark={mark_price} | tick={tick_size} | "
-                f"raw_tp={raw_tp} -> tp={tp_price} | "
-                f"raw_sl={raw_sl} -> sl={sl_price}"
+                f"raw_tp={raw_tp} -> send_tp_raw={tp_float} | "
+                f"raw_sl={raw_sl} -> send_sl_raw={sl_float} | "
+                f"tp_rounding={tp_rounding} | sl_rounding={sl_rounding}"
             )
 
             # 1) Primero SL. La posición nunca debe quedar desnuda.
@@ -435,7 +509,8 @@ class ExecutionEngine:
                 symbol=symbol,
                 side=sl_side,
                 quantity=quantity,
-                stop_price=sl_price
+                stop_price=sl_float,
+                price_rounding=sl_rounding,
             )
 
             # 2) Después TP.
@@ -443,7 +518,8 @@ class ExecutionEngine:
                 symbol=symbol,
                 side=tp_side,
                 quantity=quantity,
-                price=tp_price
+                price=tp_float,
+                price_rounding=tp_rounding,
             )
 
             print("✅ TP/SL colocados correctamente")
@@ -581,8 +657,19 @@ class ExecutionEngine:
             return False
 
         return True
+    
+    def _timer(self, label, t):
+        elapsed = time.perf_counter() - t
+        print(
+            f"\033[91m[OPEN_POSITION TIMER]\033[0m "
+            f"{label} elapsed={elapsed:.2f}s"
+        )
+        return time.perf_counter()
 
     def open_position(self, plan, leverage: int = 1):
+        
+        started = time.perf_counter()
+        t = started
         
         if self.opening_position:
             print("⛔ Opening already in progress. Plan ignored.")
@@ -592,14 +679,16 @@ class ExecutionEngine:
         
         try:
             
-            if self.exchange_open_positions_count(SYMBOLS) >= self.max_global_positions:
+            if len(self.positions) >= self.max_global_positions:
                 print(
                     "\033[94m[EXECUTION ENGINE]\033[0m "
-                    "⚠️ Max global exchange positions reached. Plan ignored.\n"
+                    "⚠️ Max global local positions reached. Plan ignored.\n"
                 )
                 return False
+            t = self._timer("local_positions_count", t)
             
             exchange_pos = self.position_manager.sync(plan.symbol)
+            t = self._timer("position_manager.sync before order", t)
 
             if exchange_pos == "INVALID_SYMBOL":
                 print(f"⚠️ Invalid symbol skipped | {plan.symbol}")
@@ -614,40 +703,46 @@ class ExecutionEngine:
 
             side = "BUY" if plan.side == "LONG" else "SELL"
 
-            balance = float(self.exchange.get_balance())
-
+            balance = float(self.exchange.get_wallet_balance())
+            t = self._timer("get_balance", t)
+            
             if balance <= 0:
                 print("❌ No balance")
                 return False
+            
+            leverage = self._resolve_leverage(plan, default_leverage=leverage)
 
             if self.order_executor.set_leverage(plan.symbol, leverage) is None:
                 print("❌ Error setting leverage")
                 return False
-
+            t = self._timer("set_leverage", t)
+            
             print(f"✅ Leverage set to {leverage}x")
 
             try:
                 price = float(self.exchange.get_price(plan.symbol))
+                t = self._timer("get_price", t)
             except Exception as e:
                 print(f"❌ Error getting price | symbol={plan.symbol} | error={e}")
                 return False
 
             size_data = self.position_sizer.calculate(
-                balance=balance,
+                total_balance=balance,
                 price=price,
-                leverage=leverage
+                leverage=leverage,
+                open_positions_count=len(self.positions)
             )
 
-            print(f"""
-    [POSITION SIZER]
-    Balance         : {balance}
-    Price           : {price}
-    Leverage        : {leverage}
-    Quantity        : {size_data['quantity']}
-    Notional        : {size_data['notional']:.2f}
-    Required margin : {size_data['required_margin']:.2f}
-    Usable balance  : {size_data['usable_balance']:.2f}
-    """)
+    #        print(f"""
+    #[POSITION SIZER]
+    #Balance         : {balance}
+    #Price           : {price}
+    #Leverage        : {leverage}
+    #Quantity        : {size_data['quantity']}
+    #Notional        : {size_data['notional']:.2f}
+    #Required margin : {size_data['required_margin']:.2f}
+    #Usable balance  : {size_data['usable_balance']:.2f}
+    #""")
 
             is_valid, msg = self.position_sizer.validate(size_data)
 
@@ -661,12 +756,16 @@ class ExecutionEngine:
                 plan.symbol,
                 raw_quantity
             )
+            
+            if float(quantity) <= 0:
+                print(f"❌ Invalid quantity after normalization | symbol={plan.symbol} qty={quantity}")
+                return False
 
-            print(
-                f"📏 Quantity normalized | "
-                f"symbol={plan.symbol} | "
-                f"raw={raw_quantity} -> qty={quantity}"
-            )
+            #print(
+            #    f"📏 Quantity normalized | "
+            #    f"symbol={plan.symbol} | "
+            #    f"raw={raw_quantity} -> qty={quantity}"
+            #)
 
             # colchón extra para evitar órdenes demasiado al límite
             required_margin = float(size_data["required_margin"])
@@ -716,6 +815,7 @@ class ExecutionEngine:
             except Exception as e:
                 print(f"❌ Unexpected error placing market order: {e}")
                 return False
+            t = self._timer("market_order", t)
 
             # 💣 CASO CRÍTICO: timeout Binance
             if order and order.get("status") == "UNKNOWN":
@@ -729,6 +829,7 @@ class ExecutionEngine:
                 return False
 
             exchange_pos = self.position_manager.sync(plan.symbol)
+            t = self._timer("position_manager.sync after order", t)
 
             if exchange_pos == "INVALID_SYMBOL":
                 print(f"⚠️ Invalid symbol skipped after order | {plan.symbol}")
@@ -739,15 +840,58 @@ class ExecutionEngine:
                 return False
 
             time.sleep(1.0)
+            t = self._timer("sleep_1s", t)
 
             pos = self.exchange.get_position(plan.symbol)
+            t = self._timer("get_position", t)
             real_entry = float(pos["entry_price"]) if pos else plan.entry
+            entry_ts = int(time.time() * 1000)
+
+            opening_snapshot = {
+                "position": {
+                    "status": "OPENING",
+                    "side": plan.side,
+                    "entry_price": real_entry,
+                    "qty": quantity,
+                    "leverage": leverage,
+                    "opened_ts": entry_ts,
+
+                    "signal_ts": plan.signal_ts,
+                    "signal_price": plan.signal_price,
+
+                    "entry_ts": entry_ts,
+                    "entry": plan.entry,
+                    "real_entry": real_entry,
+
+                    "tp": None,
+                    "sl": None,
+                    "be_moved": False
+                },
+
+                "context": {
+                    **plan.signal_context,
+                    "strategy_mode": plan.signal_context.get("strategy_name"),
+                    "router_reason": plan.signal_context.get("router_reason"),
+                },
+
+                "post_entry_analysis": {},
+
+                "engine": {
+                    "last_update_ts": None,
+                    "last_candle_ts": None
+                }
+            }
+
+            self.snapshot_manager.save(plan.symbol, opening_snapshot)
+
+            print(f"📝 OPENING snapshot saved | symbol={plan.symbol}")
 
             # ==========================
             # 🎯 TP / SL
             # ==========================
             mark_price = float(self.exchange.get_mark_price(plan.symbol))
-
+            t = self._timer("get_mark_price", t)
+            
             tp_price, sl_price = self.risk_manager.calculate_tp_sl(
                 plan=plan,
                 real_entry=real_entry,
@@ -766,7 +910,8 @@ class ExecutionEngine:
                 sl_price=sl_price,
                 real_entry=real_entry
             )
-            
+            t = self._timer("_place_tp_sl", t)
+                        
             if not tp_sl_ok:
                 print("🚨 TP/SL placement failed. Closing position for safety.")
 
@@ -779,15 +924,31 @@ class ExecutionEngine:
                         quantity=quantity
                     )
 
+                    self.order_executor.cancel_all(plan.symbol)
+                    self.snapshot_manager.clear(plan.symbol)
+
                     print("✅ Position closed because TP/SL failed")
 
                 except Exception as e:
                     print(f"❌ Failed to close unprotected position: {e}")
 
                 return False
+            
                 
             TF_MS = 1 * 60 * 1000
             entry_candle_ts = int(plan.signal_ts + TF_MS)
+            entry_ts = int(time.time() * 1000)
+
+            delay_sec = (entry_ts - int(plan.signal_ts)) / 1000
+
+            print(
+                f"\033[91m[ENTRY DELAY]\033[0m "
+                f"symbol={plan.symbol} "
+                f"side={plan.side} "
+                f"delay={delay_sec:.2f}s "
+                f"signal_ts={plan.signal_ts} "
+                f"entry_ts={entry_ts}"
+            )
 
             # ==========================
             # 📈 SAVE POSITION
@@ -795,12 +956,14 @@ class ExecutionEngine:
             position = Position(
                 symbol=plan.symbol,
                 side=plan.side,
+                leverage=leverage,
+                is_testnet=self.is_testnet,
                 quantity=quantity,
                 entry_price=float(plan.entry),
                 real_entry=float(real_entry),
                 tp=tp_price,
                 sl=sl_price,
-                entry_ts=int(time.time() * 1000),
+                entry_ts=entry_ts,
                 signal_price=float(plan.signal_price),
                 signal_ts=int(plan.signal_ts),
                 signal_context=plan.signal_context,
@@ -828,12 +991,13 @@ class ExecutionEngine:
                     "side": plan.side,
                     "entry_price": real_entry,
                     "qty": quantity,
-                    "opened_ts": int(time.time() * 1000),
+                    "leverage": leverage,
+                    "opened_ts": entry_ts,
 
                     "signal_ts": plan.signal_ts,
                     "signal_price": plan.signal_price,
 
-                    "entry_ts": int(time.time() * 1000),
+                    "entry_ts": entry_ts,
 
                     "entry": plan.entry,
                     "real_entry": real_entry,
@@ -942,8 +1106,10 @@ class ExecutionEngine:
                     "last_candle_ts": None
                 }
             }
-
+            
             self.snapshot_manager.save(plan.symbol, snapshot)
+            t = self._timer("snapshot_manager.save FULL OPEN", t)
+
             
             print(f"""
     \033[94m[EXECUTION ENGINE]\033[0m
@@ -957,6 +1123,12 @@ class ExecutionEngine:
     TP           : {tp_price:.8f}
     SL           : {sl_price:.8f}
     """)
+            
+            print(
+            f"\033[91m[OPEN_POSITION TOTAL]\033[0m "
+            f"symbol={plan.symbol} "
+            f"elapsed={time.perf_counter() - started:.2f}s"
+            )
 
             return True
 
@@ -1145,6 +1317,8 @@ class ExecutionEngine:
             # ==========================
             symbol=pos.symbol,
             side=pos.side,
+            leverage=getattr(pos, "leverage", 1),
+            is_testnet=getattr(pos, "is_testnet", self.is_testnet),
             signal_ts=signal_iso,
             entry_ts=entry_iso,
             exit_ts=exit_iso,
@@ -1309,6 +1483,31 @@ class ExecutionEngine:
             # ==========================
             strategy_mode=ctx.get("strategy_name"),
             router_reason=ctx.get("router_reason"),
+            
+            compression_state=ctx.get("compression_state"),
+            compression_reason=ctx.get("compression_reason"),
+
+            compression_high=ctx.get("compression_high"),
+            compression_low=ctx.get("compression_low"),
+
+            compression_score=ctx.get("compression_score"),
+            trend_score=ctx.get("trend_score"),
+
+            breakout_ts=ctx.get("breakout_ts"),
+            breakout_price=ctx.get("breakout_price"),
+            breakout_high=ctx.get("breakout_high"),
+            breakout_volume_ratio=ctx.get("breakout_volume_ratio"),
+
+            entry_ready_price=ctx.get("entry_ready_price"),
+            
+            breakout_extension_pct=ctx.get("breakout_extension_pct"),
+            breakout_extension_atr=ctx.get("breakout_extension_atr"),
+
+            compression_range_pct=ctx.get("compression_range_pct"),
+            range_ratio=ctx.get("range_ratio"),
+            atr_ratio=ctx.get("atr_ratio"),
+            volume_ratio=ctx.get("volume_ratio"),
+            avg_body_pct=ctx.get("avg_body_pct"),
         )
         
         try:
@@ -1348,7 +1547,33 @@ class ExecutionEngine:
         snapshot = self.snapshot_manager.load(symbol)
 
         if not snapshot:
-            print("\033[94m[SYNC]\033[0m ⚠️ Snapshot not found.")
+            print(f"\033[91m[SYNC]\033[0m 🚨 ORPHAN POSITION WITHOUT SNAPSHOT | {symbol}")
+
+            side = exchange_state.get("side")
+            quantity = abs(float(exchange_state.get("quantity")))
+
+            close_side = "SELL" if side == "LONG" else "BUY"
+
+            try:
+                print(
+                    f"\033[91m[SYNC]\033[0m "
+                    f"Closing orphan position | symbol={symbol} side={side} qty={quantity}"
+                )
+
+                self.exchange.close_position(
+                    symbol=symbol,
+                    side=close_side,
+                    quantity=quantity
+                )
+
+                self.order_executor.cancel_all(symbol)
+                self.snapshot_manager.clear(symbol)
+
+                print(f"\033[91m[SYNC]\033[0m ✅ Orphan closed | {symbol}")
+
+            except Exception as e:
+                print(f"\033[91m[SYNC]\033[0m ❌ Failed closing orphan | {symbol} | error={e}")
+
             return
 
         position_data = snapshot.get("position", {})
@@ -1547,6 +1772,8 @@ class ExecutionEngine:
         position = Position(
             symbol=symbol,
             side=side,
+            leverage=int(position_data.get("leverage", 1)),
+            is_testnet=self.is_testnet,
             quantity=quantity,
 
             entry_price=float(position_data.get("entry", entry_price)),
