@@ -35,7 +35,7 @@ class ExecutionEngine:
         self.last_global_entry_ts = 0
         self.last_symbol_entry_ts = {}
 
-        self.global_entry_cooldown = 180   # 3 min
+        self.global_entry_cooldown = 0   # 0 min
         self.symbol_entry_cooldown = 900   # 15 min
 
     def _apply_slippage(self, price: float, side: str, is_entry: bool = True):
