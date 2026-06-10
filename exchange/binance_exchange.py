@@ -65,26 +65,26 @@ class BinanceExchange(BaseExchange):
                     return float(asset["availableBalance"])
 
         return 0.0
-    
+
+    def get_lot_size_filter(self, symbol: str):
+        info = self.client.futures_exchange_info()
+
+        for s in info["symbols"]:
+            if s["symbol"] == symbol:
+                for f in s["filters"]:
+                    if f["filterType"] == "LOT_SIZE":
+                        return f
+
+        raise ValueError(f"No se encontró LOT_SIZE para {symbol}")
+
+
     def get_min_quantity(self, symbol: str) -> float:
-        info = self.get_symbol_info(symbol)
-
-        lot_size = next(
-            f for f in info["filters"]
-            if f["filterType"] == "LOT_SIZE"
-        )
-
+        lot_size = self.get_lot_size_filter(symbol)
         return float(lot_size["minQty"])
 
 
     def get_max_quantity(self, symbol: str) -> float:
-        info = self.get_symbol_info(symbol)
-
-        lot_size = next(
-            f for f in info["filters"]
-            if f["filterType"] == "LOT_SIZE"
-        )
-
+        lot_size = self.get_lot_size_filter(symbol)
         return float(lot_size["maxQty"])
     
     def get_position_size(self, symbol):
