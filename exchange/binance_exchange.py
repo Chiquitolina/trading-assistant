@@ -66,6 +66,27 @@ class BinanceExchange(BaseExchange):
 
         return 0.0
     
+    def get_min_quantity(self, symbol: str) -> float:
+        info = self.get_symbol_info(symbol)
+
+        lot_size = next(
+            f for f in info["filters"]
+            if f["filterType"] == "LOT_SIZE"
+        )
+
+        return float(lot_size["minQty"])
+
+
+    def get_max_quantity(self, symbol: str) -> float:
+        info = self.get_symbol_info(symbol)
+
+        lot_size = next(
+            f for f in info["filters"]
+            if f["filterType"] == "LOT_SIZE"
+        )
+
+        return float(lot_size["maxQty"])
+    
     def get_position_size(self, symbol):
 
         positions = self.client.futures_position_information(symbol=symbol)
@@ -394,13 +415,31 @@ class BinanceExchange(BaseExchange):
 
     def normalize_quantity(self, symbol: str, quantity: float) -> str:
         step = Decimal(str(self.get_quantity_step_size(symbol)))
+        min_qty = Decimal(str(self.get_min_quantity(symbol)))
+        max_qty = Decimal(str(self.get_max_quantity(symbol)))
+
         quantity_dec = Decimal(str(quantity))
+
+        # cap maxQty
+        if quantity_dec > max_qty:
+            print(
+                f"⚠️ Quantity capped by maxQty | "
+                f"symbol={symbol} raw={quantity_dec} max={max_qty}"
+            )
+            quantity_dec = max_qty
 
         adjusted = (
             (quantity_dec / step)
             .quantize(Decimal("1"), rounding=ROUND_DOWN)
             * step
         )
+
+        if adjusted < min_qty:
+            print(
+                f"❌ Quantity below minQty | "
+                f"symbol={symbol} qty={adjusted} min={min_qty}"
+            )
+            return "0"
 
         decimals = max(0, -step.as_tuple().exponent)
 

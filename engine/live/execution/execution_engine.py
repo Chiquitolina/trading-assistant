@@ -422,13 +422,13 @@ class ExecutionEngine:
             tp_price = self.exchange.normalize_price(symbol, tp_float)
             sl_price = self.exchange.normalize_price(symbol, sl_float)
 
-            print(
-                f"📌 TP/SL debug | "
-                f"symbol={symbol} | qty={quantity} | side={side} | "
-                f"mark={mark_price} | tick={tick_size} | "
-                f"raw_tp={raw_tp} -> tp={tp_price} | "
-                f"raw_sl={raw_sl} -> sl={sl_price}"
-            )
+            #print(
+            #    f"📌 TP/SL debug | "
+            #    f"symbol={symbol} | qty={quantity} | side={side} | "
+            #   f"mark={mark_price} | tick={tick_size} | "
+            #    f"raw_tp={raw_tp} -> tp={tp_price} | "
+            #    f"raw_sl={raw_sl} -> sl={sl_price}"
+            #)
 
             # 1) Primero SL. La posición nunca debe quedar desnuda.
             self.exchange.place_stop_loss(
@@ -654,16 +654,16 @@ class ExecutionEngine:
                 leverage=leverage
             )
 
-            print(f"""
-    [POSITION SIZER]
-    Balance         : {balance}
-    Price           : {price}
-    Leverage        : {leverage}
-    Quantity        : {size_data['quantity']}
-    Notional        : {size_data['notional']:.2f}
-    Required margin : {size_data['required_margin']:.2f}
-    Usable balance  : {size_data['usable_balance']:.2f}
-    """)
+    #        print(f"""
+    #[POSITION SIZER]
+    #Balance         : {balance}
+    #Price           : {price}
+    #Leverage        : {leverage}
+    #Quantity        : {size_data['quantity']}
+    #Notional        : {size_data['notional']:.2f}
+    #Required margin : {size_data['required_margin']:.2f}
+    #Usable balance  : {size_data['usable_balance']:.2f}
+    #""")
 
             is_valid, msg = self.position_sizer.validate(size_data)
 
@@ -677,12 +677,16 @@ class ExecutionEngine:
                 plan.symbol,
                 raw_quantity
             )
+            
+            if float(quantity) <= 0:
+                print(f"❌ Invalid quantity after normalization | symbol={plan.symbol} qty={quantity}")
+                return False
 
-            print(
-                f"📏 Quantity normalized | "
-                f"symbol={plan.symbol} | "
-                f"raw={raw_quantity} -> qty={quantity}"
-            )
+            #print(
+            #    f"📏 Quantity normalized | "
+            #    f"symbol={plan.symbol} | "
+            #    f"raw={raw_quantity} -> qty={quantity}"
+            #)
 
             # colchón extra para evitar órdenes demasiado al límite
             required_margin = float(size_data["required_margin"])

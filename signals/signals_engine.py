@@ -891,13 +891,13 @@ class SignalEngine:
         dist_ema20_1h_pct = ema_distance_pct(signal_price, ema20_1h)
         dist_ema20_4h_pct = ema_distance_pct(signal_price, ema20_4h)
         
-        if self.debug:
-            print(
-                f"\033[95m[HTF EXT]\033[0m {symbol} | "
-                f"15m EMA50={dist_ema50_15m_pct}% EMA99={dist_ema99_15m_pct}% | "
-                f"1h EMA50={dist_ema50_1h_pct}% EMA99={dist_ema99_1h_pct}% | "
-                f"4h EMA50={dist_ema50_4h_pct}% EMA99={dist_ema99_4h_pct}%"
-            )
+        #if self.debug:
+        #    print(
+        #        f"\033[95m[HTF EXT]\033[0m {symbol} | "
+        #        f"15m EMA50={dist_ema50_15m_pct}% EMA99={dist_ema99_15m_pct}% | "
+        #        f"1h EMA50={dist_ema50_1h_pct}% EMA99={dist_ema99_1h_pct}% | "
+        #        f"4h EMA50={dist_ema50_4h_pct}% EMA99={dist_ema99_4h_pct}%"
+        #    )
 
         ema20_slope = ema20_now - ema20_prev
 
