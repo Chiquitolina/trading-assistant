@@ -157,12 +157,12 @@ class DirectionExecutionStrategy(BaseExecutionStrategy):
         pos.max_favorable_pct = pos.mfe
         pos.max_adverse_pct = pos.mae
         
-        print(
-            f"[POST ENTRY] "
-            f"{symbol} | "
-            f"pnl={pos.current_pnl} | "
-            f"mfe={pos.mfe} | "
-            f"mae={pos.mae} | "
-            f"dir={pos.current_direction} | "
-            f"mom={pos.current_momentum}"
-        )
+        #print(
+        #    f"[POST ENTRY] "
+        #    f"{symbol} | "
+        #    f"pnl={pos.current_pnl} | "
+        #    f"mfe={pos.mfe} | "
+        #    f"mae={pos.mae} | "
+        #    f"dir={pos.current_direction} | "
+        #    f"mom={pos.current_momentum}"
+        #)

@@ -581,8 +581,19 @@ class ExecutionEngine:
             return False
 
         return True
+    
+    def _timer(self, label, t):
+        elapsed = time.perf_counter() - t
+        print(
+            f"\033[91m[OPEN_POSITION TIMER]\033[0m "
+            f"{label} elapsed={elapsed:.2f}s"
+        )
+        return time.perf_counter()
 
     def open_position(self, plan, leverage: int = 1):
+        
+        started = time.perf_counter()
+        t = started
         
         if self.opening_position:
             print("⛔ Opening already in progress. Plan ignored.")
@@ -592,14 +603,16 @@ class ExecutionEngine:
         
         try:
             
-            if self.exchange_open_positions_count(SYMBOLS) >= self.max_global_positions:
+            if len(self.positions) >= self.max_global_positions:
                 print(
                     "\033[94m[EXECUTION ENGINE]\033[0m "
-                    "⚠️ Max global exchange positions reached. Plan ignored.\n"
+                    "⚠️ Max global local positions reached. Plan ignored.\n"
                 )
                 return False
+            t = self._timer("local_positions_count", t)
             
             exchange_pos = self.position_manager.sync(plan.symbol)
+            t = self._timer("position_manager.sync before order", t)
 
             if exchange_pos == "INVALID_SYMBOL":
                 print(f"⚠️ Invalid symbol skipped | {plan.symbol}")
@@ -615,7 +628,8 @@ class ExecutionEngine:
             side = "BUY" if plan.side == "LONG" else "SELL"
 
             balance = float(self.exchange.get_balance())
-
+            t = self._timer("get_balance", t)
+            
             if balance <= 0:
                 print("❌ No balance")
                 return False
@@ -623,11 +637,13 @@ class ExecutionEngine:
             if self.order_executor.set_leverage(plan.symbol, leverage) is None:
                 print("❌ Error setting leverage")
                 return False
-
+            t = self._timer("set_leverage", t)
+            
             print(f"✅ Leverage set to {leverage}x")
 
             try:
                 price = float(self.exchange.get_price(plan.symbol))
+                t = self._timer("get_price", t)
             except Exception as e:
                 print(f"❌ Error getting price | symbol={plan.symbol} | error={e}")
                 return False
@@ -716,6 +732,7 @@ class ExecutionEngine:
             except Exception as e:
                 print(f"❌ Unexpected error placing market order: {e}")
                 return False
+            t = self._timer("market_order", t)
 
             # 💣 CASO CRÍTICO: timeout Binance
             if order and order.get("status") == "UNKNOWN":
@@ -729,6 +746,7 @@ class ExecutionEngine:
                 return False
 
             exchange_pos = self.position_manager.sync(plan.symbol)
+            t = self._timer("position_manager.sync after order", t)
 
             if exchange_pos == "INVALID_SYMBOL":
                 print(f"⚠️ Invalid symbol skipped after order | {plan.symbol}")
@@ -739,15 +757,18 @@ class ExecutionEngine:
                 return False
 
             time.sleep(1.0)
+            t = self._timer("sleep_1s", t)
 
             pos = self.exchange.get_position(plan.symbol)
+            t = self._timer("get_position", t)
             real_entry = float(pos["entry_price"]) if pos else plan.entry
 
             # ==========================
             # 🎯 TP / SL
             # ==========================
             mark_price = float(self.exchange.get_mark_price(plan.symbol))
-
+            t = self._timer("get_mark_price", t)
+            
             tp_price, sl_price = self.risk_manager.calculate_tp_sl(
                 plan=plan,
                 real_entry=real_entry,
@@ -766,6 +787,7 @@ class ExecutionEngine:
                 sl_price=sl_price,
                 real_entry=real_entry
             )
+            t = self._timer("_place_tp_sl", t)
             
             if not tp_sl_ok:
                 print("🚨 TP/SL placement failed. Closing position for safety.")
@@ -788,6 +810,18 @@ class ExecutionEngine:
                 
             TF_MS = 1 * 60 * 1000
             entry_candle_ts = int(plan.signal_ts + TF_MS)
+            entry_ts = int(time.time() * 1000)
+
+            delay_sec = (entry_ts - int(plan.signal_ts)) / 1000
+
+            print(
+                f"\033[91m[ENTRY DELAY]\033[0m "
+                f"symbol={plan.symbol} "
+                f"side={plan.side} "
+                f"delay={delay_sec:.2f}s "
+                f"signal_ts={plan.signal_ts} "
+                f"entry_ts={entry_ts}"
+            )
 
             # ==========================
             # 📈 SAVE POSITION
@@ -800,7 +834,7 @@ class ExecutionEngine:
                 real_entry=float(real_entry),
                 tp=tp_price,
                 sl=sl_price,
-                entry_ts=int(time.time() * 1000),
+                entry_ts=entry_ts,
                 signal_price=float(plan.signal_price),
                 signal_ts=int(plan.signal_ts),
                 signal_context=plan.signal_context,
@@ -828,12 +862,12 @@ class ExecutionEngine:
                     "side": plan.side,
                     "entry_price": real_entry,
                     "qty": quantity,
-                    "opened_ts": int(time.time() * 1000),
+                    "opened_ts": entry_ts,
 
                     "signal_ts": plan.signal_ts,
                     "signal_price": plan.signal_price,
 
-                    "entry_ts": int(time.time() * 1000),
+                    "entry_ts": entry_ts,
 
                     "entry": plan.entry,
                     "real_entry": real_entry,
@@ -944,6 +978,7 @@ class ExecutionEngine:
             }
 
             self.snapshot_manager.save(plan.symbol, snapshot)
+            t = self._timer("snapshot_manager.save", t)
             
             print(f"""
     \033[94m[EXECUTION ENGINE]\033[0m
@@ -957,6 +992,12 @@ class ExecutionEngine:
     TP           : {tp_price:.8f}
     SL           : {sl_price:.8f}
     """)
+            
+            print(
+            f"\033[91m[OPEN_POSITION TOTAL]\033[0m "
+            f"symbol={plan.symbol} "
+            f"elapsed={time.perf_counter() - started:.2f}s"
+            )
 
             return True
 

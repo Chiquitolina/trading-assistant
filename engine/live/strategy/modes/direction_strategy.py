@@ -14,11 +14,11 @@ class DirectionStrategy:
 
         current_direction = signal.direction
 
-        print(
-            "[DIRECTION BREAKOUT STRATEGY]",
-            f"prev={previous_direction}",
-            f"current={current_direction}",
-        )
+        #print(
+        #    "[DIRECTION BREAKOUT STRATEGY]",
+        #    f"prev={previous_direction}",
+        #    f"current={current_direction}",
+        #)
 
         # =========================================
         # FIRST BOOT / NO PREVIOUS SIGNAL

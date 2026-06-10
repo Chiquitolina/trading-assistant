@@ -555,13 +555,13 @@ class SignalEngine:
         dist_ema50_4h_pct = ema_distance_pct(signal_price, ema50_4h)
         dist_ema99_4h_pct = ema_distance_pct(signal_price, ema99_4h)
         
-        if self.debug:
-            print(
-                f"\033[95m[HTF EXT]\033[0m {symbol} | "
-                f"15m EMA50={dist_ema50_15m_pct}% EMA99={dist_ema99_15m_pct}% | "
-                f"1h EMA50={dist_ema50_1h_pct}% EMA99={dist_ema99_1h_pct}% | "
-                f"4h EMA50={dist_ema50_4h_pct}% EMA99={dist_ema99_4h_pct}%"
-            )
+        #if self.debug:
+            #print(
+            #    f"\033[95m[HTF EXT]\033[0m {symbol} | "
+            #    f"15m EMA50={dist_ema50_15m_pct}% EMA99={dist_ema99_15m_pct}% | "
+            #    f"1h EMA50={dist_ema50_1h_pct}% EMA99={dist_ema99_1h_pct}% | "
+            #    f"4h EMA50={dist_ema50_4h_pct}% EMA99={dist_ema99_4h_pct}%"
+            #)
 
         ema20_slope = ema20_now - ema20_prev
 
@@ -937,12 +937,12 @@ class SignalEngine:
             atr=atr_5m
         )
         
-        print(
-            f"\033[96m[DIRECTION DEBUG]\033[0m "
-            f"{symbol} | "
-            f"5m={momentum_5m_value.value} | "
-            f"1m={micro.value}"
-        )
+        #print(
+         #   f"\033[96m[DIRECTION DEBUG]\033[0m "
+         #   f"{symbol} | "
+         #   f"5m={momentum_5m_value.value} | "
+         #   f"1m={micro.value}"
+        #)
 
         if update_last_ts:
             history = self.momentum_history.setdefault(symbol, [])

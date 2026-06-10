@@ -7,6 +7,8 @@ import argparse
 import pandas as pd
 from signals.indicators.direction import trade_direction
 
+from signals.utils.logger import BotLogger
+
 from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
@@ -36,6 +38,8 @@ from engine.live.status_writer import StatusWriter
 from enums.actions import Action
 
 from engine.live.status_helper import update_status
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.market_context.btc_velocity_context import BTCVelocityContextService
 
@@ -74,6 +78,9 @@ args = parser.parse_args()
 STRATEGY_MODE = args.strategy
 
 mode_config = MODE_CONFIG[STRATEGY_MODE]
+
+DEBUG_LOGS = False
+logger = BotLogger(debug=DEBUG_LOGS)
 
 TIMEFRAMES = mode_config["timeframes"]
 TRIGGER_TF = mode_config["trigger_tf"]
@@ -137,9 +144,10 @@ print(
 # =========================================================
 
 for symbol in SYMBOLS:
+    print(symbol)
     for tf in TIMEFRAMES:
 
-        print(f"[HISTORY] loading symbol={symbol} tf={tf}")
+        #print(f"[HISTORY] loading symbol={symbol} tf={tf}")
 
         days = DAYS_BY_TF.get(tf, 3)
 
@@ -149,7 +157,7 @@ for symbol in SYMBOLS:
             days
         )
 
-        print(f"[HISTORY] {symbol} {tf} fetched rows={len(df_hist)}")
+        #print(f"[HISTORY] {symbol} {tf} fetched rows={len(df_hist)}")
 
         buffer.load_historical(
             symbol,
@@ -157,7 +165,7 @@ for symbol in SYMBOLS:
             df_hist
         )
 
-        print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
+        #print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
         
 # =========================================================
 # INIT PREVIOUS DIRECTION FROM HISTORY
@@ -361,7 +369,7 @@ ws = WSClient(
     buffer.on_ws_message,
     timeframes=TIMEFRAMES,
     symbols=SYMBOLS,
-    chunk_size=25,
+    chunk_size=15,
     stale_after=90
 )
 
@@ -519,9 +527,11 @@ try:
         # 15m CLOSED
         # =================================================
         
+        closed_events_snapshot = buffer.closed_events_snapshot()
+
         pending_15m = sum(
             1
-            for _, tf in buffer.closed_events
+            for _, tf in closed_events_snapshot
             if tf == TRIGGER_TF
         )
 
@@ -533,228 +543,273 @@ try:
                 f"pending={pending_15m} max={max_15m_queue}"
             )
 
-        symbol = buffer.consume_any_closed_tf(TRIGGER_TF)
+        symbols_to_process = []
 
-        if symbol:
+        while True:
+            symbol = buffer.consume_any_closed_tf(TRIGGER_TF)
 
-            print(
-                f"\033[93m[LIVE MAIN]\033[0m "
-                f"✅ {TRIGGER_TF} close event consumed"
-            )
+            if not symbol:
+                break
 
-            # =================================================
-            # 1. SNAPSHOT + SIGNAL GENERATION (PRIMERO SIEMPRE)
-            # =================================================
-            close_price = buffer.last_price(symbol)
-            closed_candle_ts = buffer.last_ws_close_time[symbol][TRIGGER_TF]
+            symbols_to_process.append(symbol)
 
-            if not closed_candle_ts:
-                continue
-
-            closed_ts = closed_candle_ts
-
-            if closed_ts > 10_000_000_000:
-                closed_ts = closed_ts / 1000
-
-            event_delay_sec = time.time() - closed_ts
+        if symbols_to_process:
 
             print(
-                f"\033[91m[EVENT DELAY]\033[0m "
-                f"{symbol} tf={TRIGGER_TF} "
-                f"delay={event_delay_sec:.2f}s"
+                f"\033[93m[15M BATCH]\033[0m "
+                f"symbols={len(symbols_to_process)}"
             )
 
-            signal_started = time.perf_counter()
+            batch_started = time.perf_counter()
+            max_delay_seen = 0
 
-            signal = signals.generate_signal(symbol)
+            for symbol in symbols_to_process:
 
-            elapsed_ms = (time.perf_counter() - signal_started) * 1000
-
-            print(
-                f"\033[96m[ANALYZE TIME]\033[0m "
-                f"{symbol} {elapsed_ms:.2f}ms"
-            )
-
-            if not signal:
-                continue
-
-            signal_delay_sec = (
-                int(time.time() * 1000) - int(signal.signal_ts)
-            ) / 1000
-
-            print(
-                f"\033[91m[SIGNAL DELAY]\033[0m "
-                f"{symbol} delay={signal_delay_sec:.2f}s"
-            )
-            
-            btc_context = btc_context_service.evaluate(buffer)
-
-            print(
-                f"[BTC CONTEXT] "
-                f"state={btc_context.state} | "
-                f"reason={btc_context.reason} | "
-                f"v15={btc_context.velocity_15m} | "
-                f"v1h={btc_context.velocity_1h} | "
-                f"d15={btc_context.direction_15m} | "
-                f"d1h={btc_context.direction_1h}"
-            )
-            
-            # ================================
-            # DEBUG ROUTER INPUT
-            # ================================
-
-            previous_direction = last_direction_by_symbol.get(symbol)
-
-            print("\n[ROUTER DEBUG]")
-            print(f"prev_direction (from memory) : {previous_direction}")
-            print(f"signal direction           : {signal.direction.value}")
-            print(f"signal trend              : {signal.trend.value}")
-            print(f"signal momentum           : {signal.momentum.value}")
-            
-            print(
-                f"[DIRECTION TRANSITION] "
-                f"{symbol} "
-                f"{previous_direction} -> {signal.direction}"
-            )
-            print("===========================\n")
-
-            trade_action = strategy_router.evaluate(
-                signal,
-                previous_direction=previous_direction,    
-                current_position=execution.get_position(symbol)
-            )
-            
-            last_direction_by_symbol[symbol] = signal.direction
-
-            update_status(
-                status_writer,
-                last_router_action=trade_action.action.value,
-                last_router_reason=trade_action.reason
-            )
-            
-            print(
-                f"\033[93m[STRATEGY ROUTER]\033[0m "
-                f"action={trade_action.action.value} "
-                f"reason={trade_action.reason}"
-            )
-
-            print(
-                f"\033[93m[LIVE MAIN]\033[0m "
-                f"signal returned: {signal}"
-            )
-
-            # =================================================
-            # 2. UPDATE CONTEXT (SI YA HAY POSICIÓN)
-            # =================================================
-
-            if execution.get_position(symbol):
-
-                execution.update_position_context(
-                    symbol=symbol,
-                    trend=signal.trend.value,
-                    direction=signal.direction.value,
-                    momentum=signal.momentum.value,
-                    micro_momentum=signal.momentum.value if signal.momentum else None,
-                    current_price=close_price,                    
-                    ema20_1m=getattr(signal, "ema20_1m", None),
-                    ema34_1m=getattr(signal, "ema34_1m", None),
-                    ema50_1m=getattr(signal, "ema50_1m", None),
-                )
-
-            # =================================================
-            # 3. STATUS UPDATE
-            # =================================================
-
-            last_signal_side = trade_action.action.value
-            last_signal_trend = signal.trend.value
-            last_signal_direction = signal.direction.value
-            last_signal_momentum = signal.momentum.value
-
-            # =================================================
-            # 4. SIGNAL JOURNAL
-            # =================================================
-
-            signal_journal.log_signal(
-                timestamp=signal.signal_ts,
-                tf=TRIGGER_TF,
-                side=trade_action.action.value,
-                signal_price=signal.signal_price,
-                direction=signal.direction.value,
-                trend=signal.trend.value,
-                momentum=signal.momentum.value,
-            )
-
-            # =================================================
-            # 5. HOLD CHECK
-            # =================================================
-
-            if trade_action.action == Action.HOLD:
-                continue
-            
-            # =================================================
-            # GLOBAL POSITION LOCK
-            # =================================================
-
-            if not execution.can_open_position(symbol) or opening_position:
-                print(
+                logger.debug(
                     f"\033[93m[LIVE MAIN]\033[0m "
-                    f"⛔ global lock active"
+                    f"✅ {TRIGGER_TF} close event consumed"
                 )
-                continue
 
-            # =================================================
-            # 6. ENTRY PLAN
-            # =================================================
+                # =================================================
+                # 1. SNAPSHOT + SIGNAL GENERATION (PRIMERO SIEMPRE)
+                # =================================================
+                close_price = buffer.last_price(symbol)
+                closed_candle_ts = buffer.last_ws_close_time[symbol][TRIGGER_TF]
 
-            plan = entry_engine.generate_entry(trade_action)
+                if not closed_candle_ts:
+                    continue
 
-            if not plan:
-                print("\033[94m[ENTRY PLANNER]\033[0m ❌ PLAN DESCARTADO\n")
-                continue
-            
-            plan.signal_context = {
-                **(plan.signal_context or {}),
+                closed_ts = closed_candle_ts
 
-                "btc_velocity_15m": btc_context.velocity_15m,
-                "btc_velocity_1h": btc_context.velocity_1h,
-                "btc_direction_15m": btc_context.direction_15m,
-                "btc_direction_1h": btc_context.direction_1h,
-                "btc_context_state": btc_context.state,
-                "btc_context_reason": btc_context.reason,
-            }
+                if closed_ts > 10_000_000_000:
+                    closed_ts = closed_ts / 1000
 
-            print(
-                f"[DEBUG PLAN] "
-                f"signal_price={signal.signal_price} "
-                f"plan_symbol={plan.symbol} "
-                f"entry={plan.entry}"
-            )
+                event_delay_sec = time.time() - closed_ts
 
-            # =================================================
-            # 7. EXECUTION STRATEGY (ULTIMO PASO)
-            # =================================================
-
-            try:
-                opening_position = True
-
-                executed = execution_strategy.on_signal(
-                    execution_engine=execution,
-                    trade_action=trade_action,
-                    plan=plan
+                logger.debug(
+                    f"\033[91m[EVENT DELAY]\033[0m "
+                    f"{symbol} tf={TRIGGER_TF} "
+                    f"delay={event_delay_sec:.2f}s"
                 )
+                
+                max_delay_seen = max(
+                    max_delay_seen,
+                    event_delay_sec
+                )
+
+                signal_started = time.perf_counter()
+
+                signal = signals.generate_signal(symbol)
+
+                elapsed_ms = (time.perf_counter() - signal_started) * 1000
+
+                logger.debug(
+                    f"\033[96m[ANALYZE TIME]\033[0m "
+                    f"{symbol} {elapsed_ms:.2f}ms"
+                )
+
+                if not signal:
+                    continue
+                
+
+                signal_delay_sec = (
+                    int(time.time() * 1000) - int(signal.signal_ts)
+                ) / 1000
+
+                logger.debug(
+                    f"\033[91m[SIGNAL DELAY]\033[0m "
+                    f"{symbol} delay={signal_delay_sec:.2f}s"
+                )
+                
+                btc_context = btc_context_service.evaluate(buffer)
+
+                logger.debug(
+                    f"[BTC CONTEXT] "
+                    f"state={btc_context.state} | "
+                    f"reason={btc_context.reason} | "
+                    f"v15={btc_context.velocity_15m} | "
+                    f"v1h={btc_context.velocity_1h} | "
+                    f"d15={btc_context.direction_15m} | "
+                    f"d1h={btc_context.direction_1h}"
+                )
+                
+                # ================================
+                # DEBUG ROUTER INPUT
+                # ================================
+
+                previous_direction = last_direction_by_symbol.get(symbol)
+
+                logger.debug("\n[ROUTER DEBUG]")
+                logger.debug(f"prev_direction (from memory) : {previous_direction}")
+                logger.debug(f"signal direction           : {signal.direction.value}")
+                logger.debug(f"signal trend              : {signal.trend.value}")
+                logger.debug(f"signal momentum           : {signal.momentum.value}")
+
+                logger.debug(
+                    f"[DIRECTION TRANSITION] "
+                    f"{symbol} "
+                    f"{previous_direction} -> {signal.direction}"
+                )
+
+                logger.debug("===========================\n")
+
+                trade_action = strategy_router.evaluate(
+                    signal,
+                    previous_direction=previous_direction,    
+                    current_position=execution.get_position(symbol)
+                )
+                
+                last_direction_by_symbol[symbol] = signal.direction
 
                 update_status(
                     status_writer,
-                    last_executed_strategy=execution_strategy.__class__.__name__
+                    last_router_action=trade_action.action.value,
+                    last_router_reason=trade_action.reason
+                )
+                
+                if trade_action.action != Action.HOLD:
+                    print(
+                        f"\033[93m[STRATEGY ROUTER]\033[0m "
+                        f"symbol={symbol} "
+                        f"action={trade_action.action.value} "
+                        f"reason={trade_action.reason}"
+                    )
+
+                logger.debug(
+                    f"\033[93m[LIVE MAIN]\033[0m "
+                    f"signal returned: {signal}"
                 )
 
-                print(f"[LIVE MAIN] execution result: {executed}")
+                # =================================================
+                # 2. UPDATE CONTEXT (SI YA HAY POSICIÓN)
+                # =================================================
 
-            except Exception as e:
-                print(f"[LIVE MAIN] ❌ execution error but loop continues: {e}")
+                if execution.get_position(symbol):
 
-            finally:
-                opening_position = False
+                    execution.update_position_context(
+                        symbol=symbol,
+                        trend=signal.trend.value,
+                        direction=signal.direction.value,
+                        momentum=signal.momentum.value,
+                        micro_momentum=signal.momentum.value if signal.momentum else None,
+                        current_price=close_price,                    
+                        ema20_1m=getattr(signal, "ema20_1m", None),
+                        ema34_1m=getattr(signal, "ema34_1m", None),
+                        ema50_1m=getattr(signal, "ema50_1m", None),
+                    )
+
+                # =================================================
+                # 3. STATUS UPDATE
+                # =================================================
+
+                last_signal_side = trade_action.action.value
+                last_signal_trend = signal.trend.value
+                last_signal_direction = signal.direction.value
+                last_signal_momentum = signal.momentum.value
+
+                # =================================================
+                # 4. SIGNAL JOURNAL
+                # =================================================
+
+                signal_journal.log_signal(
+                    timestamp=signal.signal_ts,
+                    tf=TRIGGER_TF,
+                    side=trade_action.action.value,
+                    signal_price=signal.signal_price,
+                    direction=signal.direction.value,
+                    trend=signal.trend.value,
+                    momentum=signal.momentum.value,
+                )
+
+                # =================================================
+                # 5. HOLD CHECK
+                # =================================================
+
+                if trade_action.action == Action.HOLD:
+                    continue
+                
+                # =================================================
+                # GLOBAL POSITION LOCK
+                # =================================================
+
+                if not execution.can_open_position(symbol) or opening_position:
+                    print(
+                        f"\033[93m[LIVE MAIN]\033[0m "
+                        f"⛔ global lock active"
+                    )
+                    continue
+
+                # =================================================
+                # 6. ENTRY PLAN
+                # =================================================
+
+                plan = entry_engine.generate_entry(trade_action)
+
+                if not plan:
+                    print("\033[94m[ENTRY PLANNER]\033[0m ❌ PLAN DESCARTADO\n")
+                    continue
+                
+                plan.signal_context = {
+                    **(plan.signal_context or {}),
+
+                    "btc_velocity_15m": btc_context.velocity_15m,
+                    "btc_velocity_1h": btc_context.velocity_1h,
+                    "btc_direction_15m": btc_context.direction_15m,
+                    "btc_direction_1h": btc_context.direction_1h,
+                    "btc_context_state": btc_context.state,
+                    "btc_context_reason": btc_context.reason,
+                }
+
+                logger.debug(
+                    f"[DEBUG PLAN] "
+                    f"signal_price={signal.signal_price} "
+                    f"plan_symbol={plan.symbol} "
+                    f"entry={plan.entry}"
+                )
+
+                # =================================================
+                # 7. EXECUTION STRATEGY (ULTIMO PASO)
+                # =================================================
+
+                try:
+                    opening_position = True
+
+                    exec_started = time.perf_counter()
+
+                    executed = execution_strategy.on_signal(
+                        execution_engine=execution,
+                        trade_action=trade_action,
+                        plan=plan
+                    )
+
+                    exec_elapsed = time.perf_counter() - exec_started
+
+                    print(
+                        f"\033[91m[EXECUTION TIME]\033[0m "
+                        f"symbol={symbol} elapsed={exec_elapsed:.2f}s"
+                    )
+
+                    update_status(
+                        status_writer,
+                        last_executed_strategy=execution_strategy.__class__.__name__
+                    )
+
+                    logger.debug(f"[LIVE MAIN] execution result: {executed}")
+
+                except Exception as e:
+                    print(f"[LIVE MAIN] ❌ execution error but loop continues: {e}")
+
+                finally:
+                    opening_position = False
+                    
+            batch_elapsed = time.perf_counter() - batch_started
+
+            print(
+                f"\033[95m[15M BATCH SUMMARY]\033[0m "
+                f"symbols={len(symbols_to_process)} "
+                f"elapsed={batch_elapsed:.2f}s "
+                f"max_delay={max_delay_seen:.2f}s"
+            )
 
 # =========================================================
 # STOP

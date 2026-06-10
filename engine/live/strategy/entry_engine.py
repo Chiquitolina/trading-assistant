@@ -133,18 +133,18 @@ class EntryEngine:
             entry
         )
         
-        print(
-            f"[ENTRY FILTER DEBUG] "
-            f"symbol={plan_symbol} "
-            f"side={side} "
-            f"entry_tf={self.entry_tf} "
-            f"atr_tf={self.atr_tf} "
-            f"entry={entry:.6f} "
-            f"atr={atr:.6f} "
-            f"atr_pct={atr_pct:.4f}% "
-            f"min_atr={self.min_atr} "
-            f"min_atr_pct={self.min_atr_pct}"
-        )
+        #print(
+        #    f"[ENTRY FILTER DEBUG] "
+        #    f"symbol={plan_symbol} "
+        #    f"side={side} "
+        #    f"entry_tf={self.entry_tf} "
+        #    f"atr_tf={self.atr_tf} "
+        #    f"entry={entry:.6f} "
+        #    f"atr={atr:.6f} "
+        #    f"atr_pct={atr_pct:.4f}% "
+        #    f"min_atr={self.min_atr} "
+        #    f"min_atr_pct={self.min_atr_pct}"
+        #)
 
         strategy_name = (trade_action.strategy_name or "").lower()
 
@@ -376,9 +376,9 @@ class EntryEngine:
 
         quote_volume_24h = getattr(signal, "quote_volume_24h", None)
         
-        print(
-            f"\n[LIQUIDITY DEBUG] {plan_symbol}"
-        )
+        #print(
+        #    f"\n[LIQUIDITY DEBUG] {plan_symbol}"
+        #)
 
         print(
             "15m columns:",
