@@ -47,14 +47,15 @@ class ExecutionEngine:
 
         if side == "SHORT":
             return price - slippage if is_entry else price + slippage
-        
-    def _get_last_close_fill(self, symbol, side, quantity, entry_ts, limit=50):
+            
+    def _get_last_close_fill(self, symbol, side, quantity, entry_ts, limit=1000):
         fills = self.exchange.get_recent_fills(symbol, limit=limit)
 
         if not fills:
             return None
 
         exit_side = "SELL" if side == "LONG" else "BUY"
+        expected_qty = abs(float(quantity))
 
         candidates = [
             f for f in fills
@@ -73,12 +74,21 @@ class ExecutionEngine:
         valid_orders = []
 
         for oid, group in grouped.items():
-            total_qty = sum(float(f["qty"]) for f in group)
+            total_qty = sum(abs(float(f["qty"])) for f in group)
 
-            if abs(total_qty - float(quantity)) <= 0.000001:
+            qty_diff = abs(total_qty - expected_qty)
+            qty_diff_pct = qty_diff / expected_qty if expected_qty > 0 else 999
+
+            # tolerancia flexible: 0.2% o 1e-6, lo que sea mayor
+            if qty_diff_pct <= 0.002 or qty_diff <= 0.000001:
                 valid_orders.append((oid, group))
 
         if not valid_orders:
+            print(
+                f"⚠️ Close fill candidates found but qty mismatch | "
+                f"symbol={symbol} expected_qty={expected_qty} "
+                f"candidates={[(oid, sum(abs(float(x['qty'])) for x in g)) for oid, g in grouped.items()]}"
+            )
             return None
 
         latest_order_id, selected = max(
@@ -86,10 +96,10 @@ class ExecutionEngine:
             key=lambda item: max(int(x["time"]) for x in item[1])
         )
 
-        total_qty = sum(float(f["qty"]) for f in selected)
-        total_quote = sum(float(f["qty"]) * float(f["price"]) for f in selected)
-        total_commission = sum(float(f["commission"]) for f in selected)
-        total_realized = sum(float(f["realizedPnl"]) for f in selected)
+        total_qty = sum(abs(float(f["qty"])) for f in selected)
+        total_quote = sum(abs(float(f["qty"])) * float(f["price"]) for f in selected)
+        total_commission = sum(float(f.get("commission", 0) or 0) for f in selected)
+        total_realized = sum(float(f.get("realizedPnl", 0) or 0) for f in selected)
         last_time = max(int(f["time"]) for f in selected)
 
         avg_price = total_quote / total_qty if total_qty > 0 else None
@@ -103,7 +113,7 @@ class ExecutionEngine:
             "time": last_time,
             "fills": selected,
         }
-        
+            
     def _calc_candles_in_trade(self, current_candle_ts: int, tf_minutes: int = 1) -> int:
         if not self.position or self.position.entry_candle_ts is None:
             return 0
@@ -151,8 +161,8 @@ class ExecutionEngine:
             symbol=pos.symbol,
             side=pos.side,
             quantity=pos.quantity,
-            entry_ts=int(pos.entry_ts) - 60_000,
-            limit=100
+            entry_ts=int(pos.entry_ts) - 5 * 60_000,
+            limit=500
         )
 
         pnl_usd = 0.0
