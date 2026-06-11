@@ -82,8 +82,10 @@ class WSClient:
         self._stop_ws()
 
         try:
-            twm = ThreadedWebsocketManager()
-            twm.start()
+            self.twm = ThreadedWebsocketManager()
+            self.twm.start()
+
+            time.sleep(3)
 
             total_streams = 0
 
@@ -97,7 +99,7 @@ class WSClient:
                     for tf in self.timeframes
                 ]
 
-                twm.start_multiplex_socket(
+                self.twm.start_multiplex_socket(
                     streams=streams,
                     callback=self._handle_message
                 )
@@ -111,12 +113,9 @@ class WSClient:
 
                 time.sleep(1)
 
-            self.twm = twm
-
             self.retries = 0
             self._is_reconnecting = False
             self.handshake_failures = 0
-
             self.is_connected = False
             self.last_message_at = 0.0
 
