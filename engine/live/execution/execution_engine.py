@@ -171,11 +171,19 @@ class ExecutionEngine:
         if close_fill:
             real_exit = float(close_fill["price"])
             exit_order_id = int(close_fill["orderId"])
-            pnl_usd = float(close_fill.get("realizedPnl", 0) or 0)
+
+            realized_pnl = float(close_fill.get("realizedPnl", 0) or 0)
+            close_commission = float(close_fill.get("commission", 0) or 0)
+
+            pnl_usd = realized_pnl - close_commission
 
             print(
                 f"✅ Close fill encontrado | "
-                f"orderId={exit_order_id} | real_exit={real_exit}"
+                f"orderId={exit_order_id} | "
+                f"real_exit={real_exit} | "
+                f"realized_pnl={realized_pnl:.6f} | "
+                f"close_commission={close_commission:.6f} | "
+                f"net_pnl_usd={pnl_usd:.6f}"
             )
 
         else:
@@ -776,6 +784,45 @@ class ExecutionEngine:
             pos = self.exchange.get_position(plan.symbol)
             t = self._timer("get_position", t)
             real_entry = float(pos["entry_price"]) if pos else plan.entry
+            entry_ts = int(time.time() * 1000)
+
+            opening_snapshot = {
+                "position": {
+                    "status": "OPENING",
+                    "side": plan.side,
+                    "entry_price": real_entry,
+                    "qty": quantity,
+                    "opened_ts": entry_ts,
+
+                    "signal_ts": plan.signal_ts,
+                    "signal_price": plan.signal_price,
+
+                    "entry_ts": entry_ts,
+                    "entry": plan.entry,
+                    "real_entry": real_entry,
+
+                    "tp": None,
+                    "sl": None,
+                    "be_moved": False
+                },
+
+                "context": {
+                    **plan.signal_context,
+                    "strategy_mode": plan.signal_context.get("strategy_name"),
+                    "router_reason": plan.signal_context.get("router_reason"),
+                },
+
+                "post_entry_analysis": {},
+
+                "engine": {
+                    "last_update_ts": None,
+                    "last_candle_ts": None
+                }
+            }
+
+            self.snapshot_manager.save(plan.symbol, opening_snapshot)
+
+            print(f"📝 OPENING snapshot saved | symbol={plan.symbol}")
 
             # ==========================
             # 🎯 TP / SL
@@ -802,7 +849,7 @@ class ExecutionEngine:
                 real_entry=real_entry
             )
             t = self._timer("_place_tp_sl", t)
-            
+                        
             if not tp_sl_ok:
                 print("🚨 TP/SL placement failed. Closing position for safety.")
 
@@ -815,12 +862,16 @@ class ExecutionEngine:
                         quantity=quantity
                     )
 
+                    self.order_executor.cancel_all(plan.symbol)
+                    self.snapshot_manager.clear(plan.symbol)
+
                     print("✅ Position closed because TP/SL failed")
 
                 except Exception as e:
                     print(f"❌ Failed to close unprotected position: {e}")
 
                 return False
+            
                 
             TF_MS = 1 * 60 * 1000
             entry_candle_ts = int(plan.signal_ts + TF_MS)
@@ -990,9 +1041,10 @@ class ExecutionEngine:
                     "last_candle_ts": None
                 }
             }
-
+            
             self.snapshot_manager.save(plan.symbol, snapshot)
-            t = self._timer("snapshot_manager.save", t)
+            t = self._timer("snapshot_manager.save FULL OPEN", t)
+
             
             print(f"""
     \033[94m[EXECUTION ENGINE]\033[0m
@@ -1403,7 +1455,33 @@ class ExecutionEngine:
         snapshot = self.snapshot_manager.load(symbol)
 
         if not snapshot:
-            print("\033[94m[SYNC]\033[0m ⚠️ Snapshot not found.")
+            print(f"\033[91m[SYNC]\033[0m 🚨 ORPHAN POSITION WITHOUT SNAPSHOT | {symbol}")
+
+            side = exchange_state.get("side")
+            quantity = abs(float(exchange_state.get("quantity")))
+
+            close_side = "SELL" if side == "LONG" else "BUY"
+
+            try:
+                print(
+                    f"\033[91m[SYNC]\033[0m "
+                    f"Closing orphan position | symbol={symbol} side={side} qty={quantity}"
+                )
+
+                self.exchange.close_position(
+                    symbol=symbol,
+                    side=close_side,
+                    quantity=quantity
+                )
+
+                self.order_executor.cancel_all(symbol)
+                self.snapshot_manager.clear(symbol)
+
+                print(f"\033[91m[SYNC]\033[0m ✅ Orphan closed | {symbol}")
+
+            except Exception as e:
+                print(f"\033[91m[SYNC]\033[0m ❌ Failed closing orphan | {symbol} | error={e}")
+
             return
 
         position_data = snapshot.get("position", {})

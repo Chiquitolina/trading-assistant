@@ -180,7 +180,7 @@ class BinanceExchange(BaseExchange):
 
             amt = float(pos.get("positionAmt", 0))
 
-            if abs(amt) == 0:
+            if abs(amt) < 1e-9:
                 return None
 
             return {
@@ -315,31 +315,63 @@ class BinanceExchange(BaseExchange):
         except Exception as e:
             print(f"⚠️ Cancel order error | symbol={symbol} | order_id={order_id} | error={e}")
             return None        
-        
+            
     def cancel_all_orders(self, symbol):
-
+        # ==========================
+        # CANCEL NORMAL OPEN ORDERS
+        # ==========================
         try:
+            normal_orders = self._safe_request(
+                self.client.futures_get_open_orders,
+                symbol=symbol
+            ) or []
 
-            orders = self.client.futures_get_open_algo_orders(symbol=symbol)
+            print(f"🔎 Found {len(normal_orders)} normal orders")
 
-            print(f"\n🔎 Found {len(orders)} conditional orders")
-
-            for o in orders:
-
+            for o in normal_orders:
                 print(
-                    f"\033[94m[EXCHANGE]\033[0m Cancel {o['orderType']} | trigger:{o['triggerPrice']} | id:{o['algoId']}"
+                    f"\033[94m[EXCHANGE]\033[0m "
+                    f"Cancel NORMAL {o.get('type')} | "
+                    f"price:{o.get('price')} | id:{o.get('orderId')}"
                 )
-                
 
-                self.client.futures_cancel_algo_order(
+                self._safe_request(
+                    self.client.futures_cancel_order,
+                    symbol=symbol,
+                    orderId=o["orderId"]
+                )
+
+        except Exception as e:
+            print(f"⚠️ Normal cancel error | symbol={symbol} | error={e}")
+
+        # ==========================
+        # CANCEL ALGO / CONDITIONAL ORDERS
+        # ==========================
+        try:
+            algo_orders = self._safe_request(
+                self.client.futures_get_open_algo_orders,
+                symbol=symbol
+            ) or []
+
+            print(f"🔎 Found {len(algo_orders)} conditional orders")
+
+            for o in algo_orders:
+                print(
+                    f"\033[94m[EXCHANGE]\033[0m "
+                    f"Cancel ALGO {o.get('orderType')} | "
+                    f"trigger:{o.get('triggerPrice')} | id:{o.get('algoId')}"
+                )
+
+                self._safe_request(
+                    self.client.futures_cancel_algo_order,
                     symbol=symbol,
                     algoId=o["algoId"]
                 )
 
-            print("🧹 Cancel requests sent")
-
         except Exception as e:
-            print(f"⚠️ Cancel error: {e}")
+            print(f"⚠️ Algo cancel error | symbol={symbol} | error={e}")
+
+        print(f"🧹 Cancel requests sent | symbol={symbol}")
             
     def get_futures_fees(self, symbol="BTCUSDT"):
         data = self.client.futures_commission_rate(symbol=symbol)

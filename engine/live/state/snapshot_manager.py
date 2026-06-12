@@ -13,9 +13,13 @@ class SnapshotManager:
 
     def save(self, symbol: str, data: dict[str, Any]):
         path = self._path(symbol)
+        tmp_path = path.with_suffix(".json.tmp")
 
-        with open(path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, default=str)
+            f.flush()
+
+        tmp_path.replace(path)
 
     def load(self, symbol: str) -> dict[str, Any] | None:
         path = self._path(symbol)

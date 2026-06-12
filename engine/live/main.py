@@ -327,21 +327,14 @@ restored_count = 0
 
 for symbol in SYMBOLS:
     try:
-        pos = exchange.get_position(symbol)
+        before = len(execution.positions)
 
-    except Exception as e:
-        print(
-            f"\033[94m[SYNC]\033[0m "
-            f"⚠️ Error checking position | symbol={symbol} | error={e}"
-        )
-        continue
-
-    if not pos:
-        continue
-
-    try:
         execution.restore_state(symbol)
-        restored_count += 1
+
+        after = len(execution.positions)
+
+        if after > before:
+            restored_count += 1
 
     except Exception as e:
         print(
@@ -350,11 +343,8 @@ for symbol in SYMBOLS:
         )
         continue
 
-    if len(execution.positions) >= execution.max_global_positions:
-        break
-
 if restored_count == 0:
-    print("\033[94m[SYNC]\033[0m ℹ️ No position to restore.")
+    print("\033[94m[SYNC]\033[0m ℹ️ No position restored.")
 else:
     print(
         f"\033[94m[SYNC]\033[0m "
