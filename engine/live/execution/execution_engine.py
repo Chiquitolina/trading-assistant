@@ -47,6 +47,21 @@ class ExecutionEngine:
 
         if side == "SHORT":
             return price - slippage if is_entry else price + slippage
+        
+    def _resolve_leverage(self, plan, default_leverage: int = 1) -> int:
+        side = plan.side
+        direction = plan.signal_context.get("direction")
+        momentum = plan.signal_context.get("momentum")
+
+        if (
+            side == "LONG"
+            and direction == "up"
+            and momentum == "inside_bar"
+        ):
+            print("[LEVERAGE ROUTER] LONG up inside_bar -> 3x")
+            return 3
+
+        return default_leverage
             
     def _get_last_close_fill(self, symbol, side, quantity, entry_ts, limit=1000):
         fills = self.exchange.get_recent_fills(symbol, limit=limit)
@@ -651,6 +666,8 @@ class ExecutionEngine:
             if balance <= 0:
                 print("❌ No balance")
                 return False
+            
+            leverage = self._resolve_leverage(plan, default_leverage=leverage)
 
             if self.order_executor.set_leverage(plan.symbol, leverage) is None:
                 print("❌ Error setting leverage")
@@ -792,6 +809,7 @@ class ExecutionEngine:
                     "side": plan.side,
                     "entry_price": real_entry,
                     "qty": quantity,
+                    "leverage": leverage,
                     "opened_ts": entry_ts,
 
                     "signal_ts": plan.signal_ts,
@@ -927,6 +945,7 @@ class ExecutionEngine:
                     "side": plan.side,
                     "entry_price": real_entry,
                     "qty": quantity,
+                    "leverage": leverage,
                     "opened_ts": entry_ts,
 
                     "signal_ts": plan.signal_ts,
