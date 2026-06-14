@@ -18,6 +18,7 @@ class ExecutionEngine:
 
     def __init__(self, exchange, position_manager, strategy, symbol):
         self.exchange = exchange
+        self.is_testnet = getattr(exchange, "testnet", False)
         self.position_manager = position_manager
         self.symbol = symbol
         self.position: Optional[Position] = None
@@ -48,7 +49,7 @@ class ExecutionEngine:
         if side == "SHORT":
             return price - slippage if is_entry else price + slippage
         
-    def _resolve_leverage(self, plan, default_leverage: int = 1) -> int:
+    def _resolve_leverage(self, plan, default_leverage: int = 2) -> int:
         side = plan.side
         direction = plan.signal_context.get("direction")
         momentum = plan.signal_context.get("momentum")
@@ -252,6 +253,8 @@ class ExecutionEngine:
             # ==========================
             symbol=pos.symbol,
             side=pos.side,
+            leverage=getattr(pos, "leverage", 1),
+            is_testnet=getattr(pos, "is_testnet", self.is_testnet),
             signal_ts=signal_iso,
             entry_ts=entry_iso,
             exit_ts=exit_iso,
@@ -912,6 +915,8 @@ class ExecutionEngine:
             position = Position(
                 symbol=plan.symbol,
                 side=plan.side,
+                leverage=leverage,
+                is_testnet=self.is_testnet,
                 quantity=quantity,
                 entry_price=float(plan.entry),
                 real_entry=float(real_entry),
@@ -1271,6 +1276,8 @@ class ExecutionEngine:
             # ==========================
             symbol=pos.symbol,
             side=pos.side,
+            leverage=getattr(pos, "leverage", 1),
+            is_testnet=getattr(pos, "is_testnet", self.is_testnet),
             signal_ts=signal_iso,
             entry_ts=entry_iso,
             exit_ts=exit_iso,
@@ -1699,6 +1706,8 @@ class ExecutionEngine:
         position = Position(
             symbol=symbol,
             side=side,
+            leverage=int(position_data.get("leverage", 1)),
+            is_testnet=self.is_testnet,
             quantity=quantity,
 
             entry_price=float(position_data.get("entry", entry_price)),

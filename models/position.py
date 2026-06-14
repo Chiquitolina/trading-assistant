@@ -6,6 +6,9 @@ from typing import Optional
 class Position:
     symbol: str
     side: str
+    
+    leverage: int = 1
+    is_testnet: bool = False
 
     quantity: float
 
