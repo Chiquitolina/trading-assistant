@@ -197,7 +197,7 @@ for symbol in SYMBOLS:
 exchange = BinanceExchange(
     api_key=api_key,
     api_secret=secret,
-    testnet=True
+    testnet=False
 )
 
 # =========================================================
