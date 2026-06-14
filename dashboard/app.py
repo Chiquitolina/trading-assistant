@@ -922,77 +922,6 @@ with tab_overview:
     col4.metric("Winrate", f"{winrate}%")
     col5.metric("Avg PnL %", safe_mean(df_raw, "pnl"))
     col6.metric("Best Trade %", safe_max(df_raw, "pnl"))
-    
-    #    # =========================
-    # WEEKDAY VS WEEKEND
-    # =========================
-    #st.markdown("---")
-    #st.subheader("📅 Weekday vs Weekend Performance")
-
-    #if "entry_ts_dt" in df_raw.columns and "pnl" in df_raw.columns:
-     #   day_df = df_raw.dropna(subset=["entry_ts_dt"]).copy()
-
-      #  day_df["weekday_num"] = day_df["entry_ts_dt"].dt.dayofweek
-       # day_df["day_name"] = day_df["entry_ts_dt"].dt.day_name()
-        #day_df["period"] = day_df["weekday_num"].apply(
-        #    lambda x: "Weekend" if x >= 5 else "Weekday"
-        #)
-
-        #period_summary = (
-#            day_df
- #           .groupby("period")
-    #       .agg(
-     #           trades=("pnl", "count"),
-     #           wins=("pnl", lambda x: int((x > 0).sum())),
-      #          losses=("pnl", lambda x: int((x <= 0).sum())),
-       #         winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
-        #        avg_pnl=("pnl", "mean"),
-         #       net_pnl=("pnl", "sum"),
-          #      avg_win=("pnl", lambda x: round(x[x > 0].mean(), 3) if (x > 0).any() else 0),
-           #     avg_loss=("pnl", lambda x: round(x[x <= 0].mean(), 3) if (x <= 0).any() else 0),
-           # )
-           # .reset_index()
-       # )
-
-        #for col in ["avg_pnl", "net_pnl"]:
-         #   period_summary[col] = period_summary[col].round(3)
-
-    #    st.dataframe(period_summary, use_container_width=True)
-
-     #   st.markdown("### 📆 Performance by Day")
-
-      #  day_order = [
-       #     "Monday",
-        #    "Tuesday",
-         #   "Wednesday",
-          #  "Thursday",
-           # "Friday",
-           # "Saturday",
-           # "Sunday",
-        #]
-
-        #daily_summary = (
-         #   day_df
-          #  .groupby("day_name")
-           # .agg(
-            #    trades=("pnl", "count"),
-             #   wins=("pnl", lambda x: int((x > 0).sum())),
-              #  losses=("pnl", lambda x: int((x <= 0).sum())),
-               # winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
-               # avg_pnl=("pnl", "mean"),
-               # net_pnl=("pnl", "sum"),
-            #)
-            #.reindex(day_order)
-            #.dropna(subset=["trades"])
-            #.reset_index()
-       # )
-
-       # daily_summary["trades"] = daily_summary["trades"].astype(int)
-
-        #for col in ["avg_pnl", "net_pnl"]:
-         #   daily_summary[col] = daily_summary[col].round(3)
-
-        #st.dataframe(daily_summary, use_container_width=True)
         
         #st.markdown("### 📊 Performance by Volume Tier")
 
@@ -1176,25 +1105,80 @@ with tab_overview:
         l7, l8 = st.columns(2)
         l7.metric("Expectancy", safe_metric(metrics_long, "expectancy"))
         l8.metric("Max Drawdown", safe_metric(metrics_long, "max_drawdown"))
+    
 
-    with col_short:
-        st.markdown("## 🔴 SHORT")
+    # =========================
+    # WEEKDAY VS WEEKEND
+    # =========================
+    st.markdown("---")
+    st.subheader("📅 Weekday vs Weekend Performance")
 
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Trades", safe_metric(metrics_short, "trades"))
-        s2.metric("Winrate", safe_metric(metrics_short, "winrate", True))
-        s3.metric("Net PnL %", safe_metric(metrics_short, "net_pnl"))
-        s4.metric("Net PnL USD", f"{safe_sum(short_df, 'pnl_usd')} USDT")
+    if "entry_ts_dt" in df_raw.columns and "pnl" in df_raw.columns:
+        day_df = df_raw.dropna(subset=["entry_ts_dt"]).copy()
 
-        s5, s6 = st.columns(2)
-        s5.metric("Avg Win", safe_metric(metrics_short, "avg_win"))
-        s6.metric("Avg Loss", safe_metric(metrics_short, "avg_loss"))
+        day_df["weekday_num"] = day_df["entry_ts_dt"].dt.dayofweek
+        day_df["day_name"] = day_df["entry_ts_dt"].dt.day_name()
+        day_df["period"] = day_df["weekday_num"].apply(
+            lambda x: "Weekend" if x >= 5 else "Weekday"
+        )
 
-        s7, s8 = st.columns(2)
-        s7.metric("Expectancy", safe_metric(metrics_short, "expectancy"))
-        s8.metric("Max Drawdown", safe_metric(metrics_short, "max_drawdown"))
-        
-        
+        period_summary = (
+            day_df
+            .groupby("period")
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                net_pnl=("pnl", "sum"),
+                avg_win=("pnl", lambda x: round(x[x > 0].mean(), 3) if (x > 0).any() else 0),
+                avg_loss=("pnl", lambda x: round(x[x <= 0].mean(), 3) if (x <= 0).any() else 0),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "net_pnl"]:
+            period_summary[col] = period_summary[col].round(3)
+
+        st.dataframe(period_summary, use_container_width=True)
+
+        st.markdown("### 📆 Performance by Day")
+
+        day_order = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ]
+
+        daily_summary = (
+            day_df
+            .groupby("day_name")
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                net_pnl=("pnl", "sum"),
+            )
+            .reindex(day_order)
+            .dropna(subset=["trades"])
+            .reset_index()
+        )
+
+        daily_summary["trades"] = daily_summary["trades"].astype(int)
+
+        for col in ["avg_pnl", "net_pnl"]:
+            daily_summary[col] = daily_summary[col].round(3)
+
+        st.dataframe(daily_summary, use_container_width=True)
+            
+            
     # =========================
     # BTC DIRECTION MATRIX
     # =========================
