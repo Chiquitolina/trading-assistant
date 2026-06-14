@@ -333,6 +333,10 @@ def build_today_4h_strategy_performance(df):
         right=False,
         include_lowest=True,
     )
+    
+    current_hour = pd.Timestamp.now(tz=TZ).hour
+    current_block_start = (current_hour // 4) * 4
+    current_block = f"{current_block_start:02d}-{current_block_start + 4:02d}"
 
     rows = []
 
@@ -370,6 +374,7 @@ def build_today_4h_strategy_performance(df):
 
         rows.append({
             "block_4h": str(block),
+            "status": "🟡 CURRENT / PARTIAL" if str(block) == current_block else "✅ CLOSED",
             "trades": len(block_df),
 
             "long_trades": safe_metric(metrics_long, "trades"),
