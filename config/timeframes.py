@@ -22,7 +22,7 @@ MODE_CONFIG = {
         "atr_tf": "15m",
         "entry_rules": "standard",
         "allow_longs": True,
-        "allow_shorts": True,
+        "allow_shorts": False,
         "log_blocked_signals": True,
     },
 
