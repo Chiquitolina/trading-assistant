@@ -394,6 +394,44 @@ def build_today_4h_strategy_performance(df):
 
     return pd.DataFrame(rows)
 
+def build_historical_4h_blocks(df):
+    if df.empty or "entry_ts_dt" not in df.columns:
+        return pd.DataFrame()
+
+    data = df.copy()
+
+    data["hour"] = data["entry_ts_dt"].dt.hour
+
+    data["block_4h"] = pd.cut(
+        data["hour"],
+        bins=[0, 4, 8, 12, 16, 20, 24],
+        labels=["00-04", "04-08", "08-12", "12-16", "16-20", "20-24"],
+        right=False,
+        include_lowest=True,
+    )
+
+    summary = (
+        data
+        .groupby("block_4h", observed=False)
+        .agg(
+            trades=("pnl", "count"),
+            wins=("pnl", lambda x: int((x > 0).sum())),
+            losses=("pnl", lambda x: int((x <= 0).sum())),
+            winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+            avg_pnl=("pnl", "mean"),
+            net_pnl=("pnl", "sum"),
+            avg_win=("pnl", lambda x: round(x[x > 0].mean(), 3) if (x > 0).any() else 0),
+            avg_loss=("pnl", lambda x: round(x[x <= 0].mean(), 3) if (x <= 0).any() else 0),
+            pf=("pnl", profit_factor),
+        )
+        .reset_index()
+    )
+
+    for col in ["avg_pnl", "net_pnl"]:
+        summary[col] = summary[col].round(3)
+
+    return summary
+
 
 def get_today_pnl(df, tz_name):
     if df.empty or "exit_ts" not in df.columns or "pnl" not in df.columns:
@@ -1087,26 +1125,17 @@ with tab_overview:
             use_container_width=True,
         )
 
-    col_long, col_short = st.columns(2)
+    st.markdown("### 📊 Historical 4H Blocks")
 
-    with col_long:
-        st.markdown("## 🟢 LONG")
+    historical_4h_df = build_historical_4h_blocks(df_raw)
 
-        l1, l2, l3, l4 = st.columns(4)
-        l1.metric("Trades", safe_metric(metrics_long, "trades"))
-        l2.metric("Winrate", safe_metric(metrics_long, "winrate", True))
-        l3.metric("Net PnL %", safe_metric(metrics_long, "net_pnl"))
-        l4.metric("Net PnL USD", f"{safe_sum(long_df, 'pnl_usd')} USDT")
-
-        l5, l6 = st.columns(2)
-        l5.metric("Avg Win", safe_metric(metrics_long, "avg_win"))
-        l6.metric("Avg Loss", safe_metric(metrics_long, "avg_loss"))
-
-        l7, l8 = st.columns(2)
-        l7.metric("Expectancy", safe_metric(metrics_long, "expectancy"))
-        l8.metric("Max Drawdown", safe_metric(metrics_long, "max_drawdown"))
-    
-
+    if historical_4h_df.empty:
+        st.info("No historical 4H block data.")
+    else:
+        st.dataframe(
+            historical_4h_df,
+            use_container_width=True,
+        )
     # =========================
     # WEEKDAY VS WEEKEND
     # =========================
