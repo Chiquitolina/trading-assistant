@@ -20,6 +20,7 @@ from engine.backtest.metrics import calculate_metrics  # noqa
 from dashboard.analytics.mfe_mae import build_mfe_mae_report
 
 TRADES_FILE = BASE_DIR / "trades.csv"
+PAPER_SIGNALS_FILE = BASE_DIR / "paper_signals.csv"
 STATUS_FILE = BASE_DIR / "status.json"
 TZ = "America/Argentina/Buenos_Aires"
 SYMBOL = "BTCUSDT"
@@ -60,6 +61,32 @@ def safe_metric(metrics_dict, key, is_percent=False):
 
     return round(value, 2)
 
+def filter_by_window(df, days=None, yesterday=False):
+    if df.empty or "entry_ts_dt" not in df.columns:
+        return pd.DataFrame()
+
+    now = pd.Timestamp.now(tz=TZ)
+
+    if yesterday:
+        target = (now - pd.Timedelta(days=1)).date()
+
+        return df[
+            df["entry_ts_dt"].dt.date == target
+        ]
+
+    if days == 0:
+        return df[
+            df["entry_ts_dt"].dt.date == now.date()
+        ]
+
+    if days is None:
+        return df
+
+    start = (now - pd.Timedelta(days=days)).date()
+
+    return df[
+        df["entry_ts_dt"].dt.date >= start
+    ]
 
 def safe_sum(df, col):
     if col not in df.columns or df.empty:
@@ -284,6 +311,84 @@ def get_last_signal(df):
 
     return valid.iloc[-1]["side"]
 
+def build_today_4h_strategy_performance(df):
+    if df.empty or "entry_ts_dt" not in df.columns or "side" not in df.columns:
+        return pd.DataFrame()
+
+    today = pd.Timestamp.now(tz=TZ).date()
+
+    data = df[
+        df["entry_ts_dt"].dt.date == today
+    ].copy()
+
+    if data.empty:
+        return pd.DataFrame()
+
+    data["hour"] = data["entry_ts_dt"].dt.hour
+
+    data["block_4h"] = pd.cut(
+        data["hour"],
+        bins=[0, 4, 8, 12, 16, 20, 24],
+        labels=["00-04", "04-08", "08-12", "12-16", "16-20", "20-24"],
+        right=False,
+        include_lowest=True,
+    )
+
+    rows = []
+
+    for block, block_df in data.groupby("block_4h", observed=False):
+        if block_df.empty:
+            continue
+
+        long_df = block_df[block_df["side"] == "LONG"]
+        short_df = block_df[block_df["side"] == "SHORT"]
+
+        metrics_long = calculate_metrics(long_df.to_dict("records"))
+        metrics_short = calculate_metrics(short_df.to_dict("records"))
+
+        long_exp = safe_metric(metrics_long, "expectancy")
+        short_exp = safe_metric(metrics_short, "expectancy")
+        edge_difference = round(long_exp - short_exp, 2)
+
+        if long_exp > 0 and short_exp < 0:
+            side_bias = "🟢 LONG EDGE"
+        elif long_exp < 0 and short_exp > 0:
+            side_bias = "🔴 SHORT EDGE"
+        elif long_exp <= 0 and short_exp <= 0:
+            side_bias = "⚪ NO EDGE"
+        else:
+            side_bias = "🟡 BOTH SIDES"
+
+        if long_exp <= 0 and short_exp <= 0:
+            recommendation = "⚪ NO TRADE"
+        elif edge_difference > 0.10:
+            recommendation = "🟢 LONG ONLY"
+        elif edge_difference < -0.10:
+            recommendation = "🔴 SHORT ONLY"
+        else:
+            recommendation = "🟡 BOTH"
+
+        rows.append({
+            "block_4h": str(block),
+            "trades": len(block_df),
+
+            "long_trades": safe_metric(metrics_long, "trades"),
+            "long_winrate": safe_metric(metrics_long, "winrate", True),
+            "long_net_pnl": safe_metric(metrics_long, "net_pnl"),
+            "long_expectancy": long_exp,
+
+            "short_trades": safe_metric(metrics_short, "trades"),
+            "short_winrate": safe_metric(metrics_short, "winrate", True),
+            "short_net_pnl": safe_metric(metrics_short, "net_pnl"),
+            "short_expectancy": short_exp,
+
+            "edge_difference": edge_difference,
+            "side_bias": side_bias,
+            "recommendation": recommendation,
+        })
+
+    return pd.DataFrame(rows)
+
 
 def get_today_pnl(df, tz_name):
     if df.empty or "exit_ts" not in df.columns or "pnl" not in df.columns:
@@ -296,6 +401,113 @@ def get_today_pnl(df, tz_name):
     mask = exit_dt.dt.date == today
 
     return round(df.loc[mask, "pnl"].fillna(0).sum(), 2)
+
+def build_btc_regime_by_signals(trades_df, paper_df, tz_name):
+    frames = []
+
+    if not trades_df.empty:
+        real = trades_df.copy()
+        real["source"] = "real_trade"
+        real["event_ts"] = real.get("entry_ts", real.get("signal_ts"))
+        frames.append(real)
+
+    if not paper_df.empty:
+        paper = paper_df.copy()
+        paper["source"] = "paper_signal"
+        paper["event_ts"] = paper.get("ts")
+        frames.append(paper)
+
+    if not frames:
+        return pd.DataFrame()
+
+    data = pd.concat(frames, ignore_index=True)
+
+    required = ["event_ts", "btc_direction_15m", "btc_direction_1h"]
+    missing = [c for c in required if c not in data.columns]
+
+    if missing:
+        return pd.DataFrame()
+
+    data["event_dt"] = pd.to_datetime(data["event_ts"], utc=True, errors="coerce")
+
+    try:
+        data["event_dt"] = data["event_dt"].dt.tz_convert(tz_name)
+    except Exception:
+        pass
+
+    data = data.dropna(subset=["event_dt"])
+
+    for col in ["btc_direction_15m", "btc_direction_1h"]:
+        data[col] = data[col].astype(str).str.lower().str.strip()
+
+    now = pd.Timestamp.now(tz=tz_name)
+
+    windows = {
+        "Today": (
+            now.date(),
+            now.date(),
+        ),
+
+        "Yesterday": (
+            (now - pd.Timedelta(days=1)).date(),
+            (now - pd.Timedelta(days=1)).date(),
+        ),
+
+        "Last 3D": (
+            (now - pd.Timedelta(days=3)).date(),
+            now.date(),
+        ),
+
+        "Last 7D": (
+            (now - pd.Timedelta(days=7)).date(),
+            now.date(),
+        ),
+
+        "Last 30D": (
+            (now - pd.Timedelta(days=30)).date(),
+            now.date(),
+        ),
+    }
+
+    rows = []
+
+    for label, (start_date, end_date) in windows.items():
+        subset = data[
+            (data["event_dt"].dt.date >= start_date)
+            & (data["event_dt"].dt.date <= end_date)
+        ]
+
+        total = len(subset)
+
+        if total == 0:
+            rows.append({
+                "window": label,
+                "signals": 0,
+                "btc_15m_up_pct": 0,
+                "btc_15m_down_pct": 0,
+                "btc_1h_up_pct": 0,
+                "btc_1h_down_pct": 0,
+                "long_signals": 0,
+                "short_signals": 0,
+                "paper_signals": 0,
+            })
+            continue
+
+        side = subset["side"].astype(str).str.upper().str.strip() if "side" in subset.columns else pd.Series([], dtype=str)
+
+        rows.append({
+            "window": label,
+            "signals": total,
+            "btc_15m_up_pct": round((subset["btc_direction_15m"].eq("up").mean()) * 100, 2),
+            "btc_15m_down_pct": round((subset["btc_direction_15m"].eq("down").mean()) * 100, 2),
+            "btc_1h_up_pct": round((subset["btc_direction_1h"].eq("up").mean()) * 100, 2),
+            "btc_1h_down_pct": round((subset["btc_direction_1h"].eq("down").mean()) * 100, 2),
+            "long_signals": int((side == "LONG").sum()),
+            "short_signals": int((side == "SHORT").sum()),
+            "paper_signals": int((subset["source"] == "paper_signal").sum()),
+        })
+
+    return pd.DataFrame(rows)
 
 
 def get_today_pnl_usd(df, tz_name):
@@ -412,6 +624,11 @@ if TRADES_FILE.exists():
     df = pd.read_csv(TRADES_FILE)
 else:
     df = pd.DataFrame()
+
+if PAPER_SIGNALS_FILE.exists():
+    paper_df = pd.read_csv(PAPER_SIGNALS_FILE)
+else:
+    paper_df = pd.DataFrame()
 
 # =========================
 # CLEAN NUMERIC COLUMNS
@@ -631,10 +848,11 @@ if df_raw.empty:
     st.info("📭 No trades yet")
     st.stop()
     
-tab_overview, tab_mfe_mae, tab_setups, tab_bad_decisions, tab_execution = st.tabs([
+tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution = st.tabs([
     "📊 Overview",
     "📐 MFE / MAE",
     "🧠 Setups",
+    "🎯 Swings",
     "❌ Bad Decisions",
     "⏱️ Execution Analysis",
 ])
@@ -644,6 +862,47 @@ with tab_overview:
 # QUICK METRICS
 # =========================
     st.markdown("## Overview")
+    
+    # =========================
+    # BTC REGIME BY SIGNALS
+    # =========================
+    st.markdown("---")
+    st.subheader("₿ BTC Regime by Signals")
+
+    btc_regime_signals = build_btc_regime_by_signals(
+        trades_df=df_raw,
+        paper_df=paper_df,
+        tz_name=TZ,
+    )
+
+    if btc_regime_signals.empty:
+        st.info("No BTC regime signal data available yet.")
+    else:
+        today = btc_regime_signals[
+            btc_regime_signals["window"] == "Today"
+        ]
+
+        if not today.empty:
+            row = today.iloc[0]
+
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+            c1.metric("Signals Today", int(row["signals"]))
+            c2.metric("BTC 15m UP", f"{row['btc_15m_up_pct']}%")
+            c3.metric("BTC 15m DOWN", f"{row['btc_15m_down_pct']}%")
+            c4.metric("BTC 1h UP", f"{row['btc_1h_up_pct']}%")
+            c5.metric("BTC 1h DOWN", f"{row['btc_1h_down_pct']}%")
+            c6.metric("Paper Signals", int(row["paper_signals"]))
+
+        st.dataframe(
+            btc_regime_signals,
+            use_container_width=True,
+        )
+
+        st.caption(
+            "Incluye trades reales + señales paper bloqueadas. "
+            "Sirve para detectar si el sistema está recibiendo más señales en contexto BTC bullish o bearish."
+        )
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
@@ -659,133 +918,133 @@ with tab_overview:
     col5.metric("Avg PnL %", safe_mean(df_raw, "pnl"))
     col6.metric("Best Trade %", safe_max(df_raw, "pnl"))
     
-        # =========================
+    #    # =========================
     # WEEKDAY VS WEEKEND
     # =========================
-    st.markdown("---")
-    st.subheader("📅 Weekday vs Weekend Performance")
+    #st.markdown("---")
+    #st.subheader("📅 Weekday vs Weekend Performance")
 
-    if "entry_ts_dt" in df_raw.columns and "pnl" in df_raw.columns:
-        day_df = df_raw.dropna(subset=["entry_ts_dt"]).copy()
+    #if "entry_ts_dt" in df_raw.columns and "pnl" in df_raw.columns:
+     #   day_df = df_raw.dropna(subset=["entry_ts_dt"]).copy()
 
-        day_df["weekday_num"] = day_df["entry_ts_dt"].dt.dayofweek
-        day_df["day_name"] = day_df["entry_ts_dt"].dt.day_name()
-        day_df["period"] = day_df["weekday_num"].apply(
-            lambda x: "Weekend" if x >= 5 else "Weekday"
-        )
+      #  day_df["weekday_num"] = day_df["entry_ts_dt"].dt.dayofweek
+       # day_df["day_name"] = day_df["entry_ts_dt"].dt.day_name()
+        #day_df["period"] = day_df["weekday_num"].apply(
+        #    lambda x: "Weekend" if x >= 5 else "Weekday"
+        #)
 
-        period_summary = (
-            day_df
-            .groupby("period")
-            .agg(
-                trades=("pnl", "count"),
-                wins=("pnl", lambda x: int((x > 0).sum())),
-                losses=("pnl", lambda x: int((x <= 0).sum())),
-                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
-                avg_pnl=("pnl", "mean"),
-                net_pnl=("pnl", "sum"),
-                avg_win=("pnl", lambda x: round(x[x > 0].mean(), 3) if (x > 0).any() else 0),
-                avg_loss=("pnl", lambda x: round(x[x <= 0].mean(), 3) if (x <= 0).any() else 0),
-            )
-            .reset_index()
-        )
+        #period_summary = (
+#            day_df
+ #           .groupby("period")
+    #       .agg(
+     #           trades=("pnl", "count"),
+     #           wins=("pnl", lambda x: int((x > 0).sum())),
+      #          losses=("pnl", lambda x: int((x <= 0).sum())),
+       #         winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+        #        avg_pnl=("pnl", "mean"),
+         #       net_pnl=("pnl", "sum"),
+          #      avg_win=("pnl", lambda x: round(x[x > 0].mean(), 3) if (x > 0).any() else 0),
+           #     avg_loss=("pnl", lambda x: round(x[x <= 0].mean(), 3) if (x <= 0).any() else 0),
+           # )
+           # .reset_index()
+       # )
 
-        for col in ["avg_pnl", "net_pnl"]:
-            period_summary[col] = period_summary[col].round(3)
+        #for col in ["avg_pnl", "net_pnl"]:
+         #   period_summary[col] = period_summary[col].round(3)
 
-        st.dataframe(period_summary, use_container_width=True)
+    #    st.dataframe(period_summary, use_container_width=True)
 
-        st.markdown("### 📆 Performance by Day")
+     #   st.markdown("### 📆 Performance by Day")
 
-        day_order = [
-            "Monday",
-            "Tuesday",
-            "Wednesday",
-            "Thursday",
-            "Friday",
-            "Saturday",
-            "Sunday",
-        ]
+      #  day_order = [
+       #     "Monday",
+        #    "Tuesday",
+         #   "Wednesday",
+          #  "Thursday",
+           # "Friday",
+           # "Saturday",
+           # "Sunday",
+        #]
 
-        daily_summary = (
-            day_df
-            .groupby("day_name")
-            .agg(
-                trades=("pnl", "count"),
-                wins=("pnl", lambda x: int((x > 0).sum())),
-                losses=("pnl", lambda x: int((x <= 0).sum())),
-                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
-                avg_pnl=("pnl", "mean"),
-                net_pnl=("pnl", "sum"),
-            )
-            .reindex(day_order)
-            .dropna(subset=["trades"])
-            .reset_index()
-        )
+        #daily_summary = (
+         #   day_df
+          #  .groupby("day_name")
+           # .agg(
+            #    trades=("pnl", "count"),
+             #   wins=("pnl", lambda x: int((x > 0).sum())),
+              #  losses=("pnl", lambda x: int((x <= 0).sum())),
+               # winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+               # avg_pnl=("pnl", "mean"),
+               # net_pnl=("pnl", "sum"),
+            #)
+            #.reindex(day_order)
+            #.dropna(subset=["trades"])
+            #.reset_index()
+       # )
 
-        daily_summary["trades"] = daily_summary["trades"].astype(int)
+       # daily_summary["trades"] = daily_summary["trades"].astype(int)
 
-        for col in ["avg_pnl", "net_pnl"]:
-            daily_summary[col] = daily_summary[col].round(3)
+        #for col in ["avg_pnl", "net_pnl"]:
+         #   daily_summary[col] = daily_summary[col].round(3)
 
-        st.dataframe(daily_summary, use_container_width=True)
+        #st.dataframe(daily_summary, use_container_width=True)
         
-        st.markdown("### 📊 Performance by Volume Tier")
+        #st.markdown("### 📊 Performance by Volume Tier")
 
-        if "volume_tier" in df_raw.columns:
+        #if "volume_tier" in df_raw.columns:
 
-            tier_summary = (
-                df_raw
-                .dropna(subset=["volume_tier"])
-                .groupby("volume_tier")
-                .agg(
-                    trades=("pnl", "count"),
-                    wins=("pnl", lambda x: int((x > 0).sum())),
-                    losses=("pnl", lambda x: int((x <= 0).sum())),
-                    winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
-                    avg_pnl=("pnl", "mean"),
-                    net_pnl=("pnl", "sum"),
-                )
-                .reset_index()
-            )
+          #  tier_summary = (
+          #      df_raw
+          #      .dropna(subset=["volume_tier"])
+           #     .groupby("volume_tier")
+            #    .agg(
+             #       trades=("pnl", "count"),
+              #      wins=("pnl", lambda x: int((x > 0).sum())),
+                #    losses=("pnl", lambda x: int((x <= 0).sum())),
+               #     winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                 #   avg_pnl=("pnl", "mean"),
+                  #  net_pnl=("pnl", "sum"),
+                #)
+                #.reset_index()
+            #)
 
-            tier_summary["avg_pnl"] = tier_summary["avg_pnl"].round(3)
-            tier_summary["net_pnl"] = tier_summary["net_pnl"].round(3)
+            #tier_summary["avg_pnl"] = tier_summary["avg_pnl"].round(3)
+            #tier_summary["net_pnl"] = tier_summary["net_pnl"].round(3)
 
-            st.dataframe(
-                tier_summary,
-                use_container_width=True
-            )
+#            st.dataframe(
+ #               tier_summary,
+  #              use_container_width=True
+   #         )
             
-            st.markdown("### 🚀 Performance by RVOL Tier (15m)")
+    #        st.markdown("### 🚀 Performance by RVOL Tier (15m)")
 
-        if "rvol_tier_15m" in df_raw.columns:
+     #   if "rvol_tier_15m" in df_raw.columns:
+#
+   #         rvol_summary = (
+    #            df_raw
+     #           .dropna(subset=["rvol_tier_15m"])
+      #          .groupby("rvol_tier_15m")
+       #         .agg(
+        #            trades=("pnl", "count"),
+         ##           wins=("pnl", lambda x: int((x > 0).sum())),
+           #         losses=("pnl", lambda x: int((x <= 0).sum())),
+            #        winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+             ##       avg_pnl=("pnl", "mean"),
+              #      net_pnl=("pnl", "sum"),
+              #  )
+           #     .reset_index()
+            #)
 
-            rvol_summary = (
-                df_raw
-                .dropna(subset=["rvol_tier_15m"])
-                .groupby("rvol_tier_15m")
-                .agg(
-                    trades=("pnl", "count"),
-                    wins=("pnl", lambda x: int((x > 0).sum())),
-                    losses=("pnl", lambda x: int((x <= 0).sum())),
-                    winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
-                    avg_pnl=("pnl", "mean"),
-                    net_pnl=("pnl", "sum"),
-                )
-                .reset_index()
-            )
+         #   rvol_summary["avg_pnl"] = rvol_summary["avg_pnl"].round(3)
+          #  rvol_summary["net_pnl"] = rvol_summary["net_pnl"].round(3)
 
-            rvol_summary["avg_pnl"] = rvol_summary["avg_pnl"].round(3)
-            rvol_summary["net_pnl"] = rvol_summary["net_pnl"].round(3)
+           # st.dataframe(
+            #    rvol_summary,
+             #   use_container_width=True
+          #  )
 
-            st.dataframe(
-                rvol_summary,
-                use_container_width=True
-            )
-
-    else:
-        st.info("entry_ts_dt or pnl column not found.")
+    #else:
+     #   st.info("entry_ts_dt or pnl column not found.")
 
     # =========================
     # METRICS CALCULATION
@@ -805,7 +1064,94 @@ with tab_overview:
     # STRATEGY PERFORMANCE
     # =========================
     st.markdown("---")
-    st.subheader("📊 Strategy Performance")
+    st.subheader("📊 Strategy Performance by Window")
+    
+    windows = [
+        ("Today", filter_by_window(df_raw, days=0)),
+        ("Yesterday", filter_by_window(df_raw, yesterday=True)),
+        ("Last 3D", filter_by_window(df_raw, days=3)),
+        ("Last 7D", filter_by_window(df_raw, days=7)),
+        ("Last 30D", filter_by_window(df_raw, days=30)),
+        ("Historical", df_raw),
+    ]
+    
+    rows = []
+
+    for label, window_df in windows:
+
+        long_df = window_df[window_df["side"] == "LONG"]
+        short_df = window_df[window_df["side"] == "SHORT"]
+
+        metrics_long = calculate_metrics(long_df.to_dict("records"))
+        metrics_short = calculate_metrics(short_df.to_dict("records"))
+        
+        long_exp = safe_metric(metrics_long, "expectancy")
+        short_exp = safe_metric(metrics_short, "expectancy")
+
+        edge_difference = round(long_exp - short_exp, 2)
+
+        # Which side has edge?
+        if long_exp > 0 and short_exp < 0:
+            side_bias = "🟢 LONG EDGE"
+
+        elif long_exp < 0 and short_exp > 0:
+            side_bias = "🔴 SHORT EDGE"
+
+        elif long_exp < 0 and short_exp < 0:
+            side_bias = "⚪ NO EDGE"
+
+        else:
+            side_bias = "🟡 BOTH SIDES"
+
+        # Recommendation
+        if long_exp <= 0 and short_exp <= 0:
+            recommendation = "⚪ NO TRADE"
+
+        elif edge_difference > 0.10:
+            recommendation = "🟢 LONG ONLY"
+
+        elif edge_difference < -0.10:
+            recommendation = "🔴 SHORT ONLY"
+
+        else:
+            recommendation = "🟡 BOTH"
+
+        rows.append({
+            "window": label,
+
+            "long_trades": safe_metric(metrics_long, "trades"),
+            "long_winrate": safe_metric(metrics_long, "winrate", True),
+            "long_net_pnl": safe_metric(metrics_long, "net_pnl"),
+            "long_expectancy": long_exp,
+
+            "short_trades": safe_metric(metrics_short, "trades"),
+            "short_winrate": safe_metric(metrics_short, "winrate", True),
+            "short_net_pnl": safe_metric(metrics_short, "net_pnl"),
+            "short_expectancy": short_exp,
+
+            "edge_difference": edge_difference,
+            "side_bias": side_bias,
+            "recommendation": recommendation,
+        })
+        
+    strategy_window_df = pd.DataFrame(rows)
+
+    st.dataframe(
+        strategy_window_df,
+        use_container_width=True
+    )
+    
+    st.markdown("### Today 4H Blocks")
+
+    today_4h_df = build_today_4h_strategy_performance(df_raw)
+
+    if today_4h_df.empty:
+        st.info("No trades today for 4H block analysis.")
+    else:
+        st.dataframe(
+            today_4h_df,
+            use_container_width=True,
+        )
 
     col_long, col_short = st.columns(2)
 
@@ -843,40 +1189,41 @@ with tab_overview:
         s7.metric("Expectancy", safe_metric(metrics_short, "expectancy"))
         s8.metric("Max Drawdown", safe_metric(metrics_short, "max_drawdown"))
         
-        # =========================
+        
+    # =========================
     # BTC DIRECTION MATRIX
     # =========================
-    st.markdown("---")
-    st.subheader("₿ BTC Direction Matrix")
+    #st.markdown("---")
+    #st.subheader("₿ BTC Direction Matrix")
 
-    btc_matrix = build_btc_direction_matrix(df_raw)
+    #btc_matrix = build_btc_direction_matrix(df_raw)
 
-    if btc_matrix.empty:
-        st.info("Missing BTC direction columns or not enough data.")
-    else:
-        btc_pivot = build_btc_direction_pivot(btc_matrix)
+    #if btc_matrix.empty:
+     #   st.info("Missing BTC direction columns or not enough data.")
+    ##else:
+      #  btc_pivot = build_btc_direction_pivot(btc_matrix)
 
-        st.markdown("### BTC 1H + BTC 15M: LONG vs SHORT")
+       # st.markdown("### BTC 1H + BTC 15M: LONG vs SHORT")
 
-        st.dataframe(
-            btc_pivot.sort_values(["btc_direction_1h", "btc_direction_15m"]),
-            use_container_width=True,
-        )
+        #st.dataframe(
+           # btc_pivot.sort_values(["btc_direction_1h", "btc_direction_15m"]),
+       #     use_container_width=True,
+       # )
 
-        st.markdown("### Detailed Matrix")
+        #st.markdown("### Detailed Matrix")
 
-        st.dataframe(
-            btc_matrix.sort_values(
-                ["btc_direction_1h", "btc_direction_15m", "side"]
-            ),
-            use_container_width=True,
-        )
+       # st.dataframe(
+        #    btc_matrix.sort_values(
+         #       ["btc_direction_1h", "btc_direction_15m", "side"]
+          #  ),
+           # use_container_width=True,
+        #)
 
-        st.caption(
-            "Lectura rápida: BTC 1H UP + BTC 15M UP debería favorecer LONG. "
-            "BTC 1H DOWN + BTC 15M DOWN debería favorecer SHORT. "
-            "Los regímenes mixtos suelen ser zonas de cuidado."
-        )
+        #st.caption(
+         #   "Lectura rápida: BTC 1H UP + BTC 15M UP debería favorecer LONG. "
+          #  "BTC 1H DOWN + BTC 15M DOWN debería favorecer SHORT. "
+           # "Los regímenes mixtos suelen ser zonas de cuidado."
+        #)
 
     # =========================
     # FORMAT DATES FOR DISPLAY ONLY
@@ -1009,6 +1356,295 @@ with tab_setups:
         )
 
         st.dataframe(setup_df, use_container_width=True)
+        
+with tab_swings:
+
+    st.markdown("---")
+    st.subheader("🎯 Swing Context Analytics")
+
+    required_cols = [
+        "side",
+        "pnl",
+        "max_favorable_pct",
+        "max_adverse_pct",
+        "router_reason",
+    ]
+
+    missing_cols = [c for c in required_cols if c not in df_raw.columns]
+
+    if missing_cols:
+        st.info(f"Missing columns: {missing_cols}")
+
+    else:
+        swing_df = df_raw.copy()
+
+        swing_df["pnl"] = pd.to_numeric(swing_df["pnl"], errors="coerce")
+        swing_df["max_favorable_pct"] = pd.to_numeric(
+            swing_df["max_favorable_pct"],
+            errors="coerce"
+        )
+        swing_df["max_adverse_pct"] = pd.to_numeric(
+            swing_df["max_adverse_pct"],
+            errors="coerce"
+        )
+
+        swing_df = swing_df.dropna(subset=["pnl"])
+
+        def to_bool(series):
+            return (
+                series.astype(str)
+                .str.lower()
+                .isin(["true", "1", "yes"])
+            )
+
+        def swing_profit_factor(x):
+            wins = x[x > 0].sum()
+            losses = abs(x[x < 0].sum())
+            return round(wins / losses, 2) if losses > 0 else None
+
+        def swing_stats(name, data):
+            if len(data) == 0:
+                return None
+
+            return {
+                "setup": name,
+                "trades": len(data),
+                "wins": int((data["pnl"] > 0).sum()),
+                "losses": int((data["pnl"] <= 0).sum()),
+                "winrate": round((data["pnl"] > 0).mean() * 100, 2),
+                "avg_return": round(data["pnl"].mean(), 4),
+                "total_return": round(data["pnl"].sum(), 4),
+                "avg_mfe": round(data["max_favorable_pct"].mean(), 4),
+                "avg_mae": round(data["max_adverse_pct"].mean(), 4),
+                "profit_factor": swing_profit_factor(data["pnl"]),
+            }
+
+        min_trades_swings = st.slider(
+            "Minimum trades per swing setup",
+            min_value=1,
+            max_value=50,
+            value=10,
+            step=1,
+            key="swings_min_trades",
+        )
+
+        # =========================
+        # NEAR SWING STATS
+        # =========================
+
+        st.markdown("### Near Swing Stats")
+
+        near_results = []
+
+        for tf in ["15m", "1h", "4h"]:
+            for side in ["LONG", "SHORT"]:
+                for ref in ["low", "high"]:
+                    col = f"near_swing_{ref}_{tf}"
+
+                    if col not in swing_df.columns:
+                        continue
+
+                    subset = swing_df[
+                        (swing_df["side"] == side)
+                        & to_bool(swing_df[col])
+                    ]
+
+                    row = swing_stats(
+                        f"{side} near swing {ref} {tf}",
+                        subset
+                    )
+
+                    if row:
+                        near_results.append(row)
+
+        near_df = pd.DataFrame(near_results)
+
+        if near_df.empty:
+            st.info("No near swing data available.")
+        else:
+            near_df = near_df[near_df["trades"] >= min_trades_swings]
+
+            near_df = near_df.sort_values(
+                ["profit_factor", "trades"],
+                ascending=[False, False],
+                na_position="last",
+            )
+
+            st.dataframe(near_df, use_container_width=True)
+
+        # =========================
+        # DISTANCE BUCKETS
+        # =========================
+
+        st.markdown("### Distance Bucket Stats")
+
+        BUCKETS = [-999, -4, -2, -1, 0, 1, 2, 4, 8, 999]
+
+        LABELS = [
+            "< -4%",
+            "-4% to -2%",
+            "-2% to -1%",
+            "-1% to 0%",
+            "0% to 1%",
+            "1% to 2%",
+            "2% to 4%",
+            "4% to 8%",
+            "> 8%",
+        ]
+
+        distance_results = []
+
+        for tf in ["15m", "1h", "4h"]:
+            for side in ["LONG", "SHORT"]:
+                for ref in ["low", "high"]:
+                    col = f"dist_swing_{ref}_{tf}_pct"
+
+                    if col not in swing_df.columns:
+                        continue
+
+                    temp = swing_df[swing_df["side"] == side].copy()
+                    temp[col] = pd.to_numeric(temp[col], errors="coerce")
+                    temp = temp.dropna(subset=[col, "pnl"])
+
+                    if temp.empty:
+                        continue
+
+                    temp["bucket"] = pd.cut(
+                        temp[col],
+                        bins=BUCKETS,
+                        labels=LABELS,
+                        include_lowest=True,
+                    )
+
+                    for bucket, group in temp.groupby("bucket", observed=False):
+                        if len(group) == 0:
+                            continue
+
+                        row = swing_stats(
+                            f"{side} dist swing {ref} {tf} {bucket}",
+                            group
+                        )
+
+                        if row:
+                            row["side"] = side
+                            row["tf"] = tf
+                            row["reference"] = ref
+                            row["bucket"] = str(bucket)
+                            distance_results.append(row)
+
+        distance_df = pd.DataFrame(distance_results)
+
+        if distance_df.empty:
+            st.info("No distance bucket data available.")
+        else:
+            distance_filtered = distance_df[
+                distance_df["trades"] >= min_trades_swings
+            ]
+
+            best_distance = distance_filtered.sort_values(
+                ["profit_factor", "trades"],
+                ascending=[False, False],
+                na_position="last",
+            )
+
+            worst_distance = distance_filtered.sort_values(
+                ["profit_factor", "avg_return"],
+                ascending=[True, True],
+                na_position="last",
+            )
+
+            col_a, col_b = st.columns(2)
+
+            with col_a:
+                st.markdown("#### Best Swing Buckets")
+                st.dataframe(best_distance, use_container_width=True)
+
+            with col_b:
+                st.markdown("#### Worst Swing Buckets")
+                st.dataframe(worst_distance, use_container_width=True)
+
+        # =========================
+        # ROUTER x SWING
+        # =========================
+
+        st.markdown("### Router Reason × Swing Distance")
+
+        router_results = []
+
+        if "router_reason" not in swing_df.columns:
+            st.info("router_reason column not found.")
+
+        else:
+            for reason in swing_df["router_reason"].dropna().unique():
+                for side in ["LONG", "SHORT"]:
+                    for tf in ["15m", "1h", "4h"]:
+                        for ref in ["low", "high"]:
+                            col = f"dist_swing_{ref}_{tf}_pct"
+
+                            if col not in swing_df.columns:
+                                continue
+
+                            temp = swing_df[
+                                (swing_df["router_reason"] == reason)
+                                & (swing_df["side"] == side)
+                            ].copy()
+
+                            temp[col] = pd.to_numeric(temp[col], errors="coerce")
+                            temp = temp.dropna(subset=[col, "pnl"])
+
+                            if temp.empty:
+                                continue
+
+                            temp["bucket"] = pd.cut(
+                                temp[col],
+                                bins=BUCKETS,
+                                labels=LABELS,
+                                include_lowest=True,
+                            )
+
+                            for bucket, group in temp.groupby("bucket", observed=False):
+                                if len(group) < min_trades_swings:
+                                    continue
+
+                                row = swing_stats(
+                                    f"{reason} | {side} | {ref} {tf} | {bucket}",
+                                    group
+                                )
+
+                                if row:
+                                    row["reason"] = reason
+                                    row["side"] = side
+                                    row["tf"] = tf
+                                    row["reference"] = ref
+                                    row["bucket"] = str(bucket)
+                                    router_results.append(row)
+
+            router_df = pd.DataFrame(router_results)
+
+            if router_df.empty:
+                st.info("No router × swing groups with enough trades.")
+            else:
+                router_best = router_df.sort_values(
+                    ["profit_factor", "trades"],
+                    ascending=[False, False],
+                    na_position="last",
+                )
+
+                router_worst = router_df.sort_values(
+                    ["profit_factor", "avg_return"],
+                    ascending=[True, True],
+                    na_position="last",
+                )
+
+                col_c, col_d = st.columns(2)
+
+                with col_c:
+                    st.markdown("#### Best Router × Swing")
+                    st.dataframe(router_best, use_container_width=True)
+
+                with col_d:
+                    st.markdown("#### Worst Router × Swing")
+                    st.dataframe(router_worst, use_container_width=True)
         
 with tab_bad_decisions:
 

@@ -1,4 +1,6 @@
 import pandas as pd
+import csv
+from pathlib import Path
 
 from signals.indicators.atr import add_atr
 from signals.strategy.filters import min_expected_tp_ok
@@ -39,6 +41,62 @@ class EntryEngine:
             None
         )
         
+            
+    def _log_blocked_signal(self, trade_action: TradeAction, reason: str):
+        signal = trade_action.signal
+
+        self.status_writer.write_plan(
+            status="BLOCKED",
+            reason=reason,
+            side=trade_action.action.value,
+            entry=getattr(signal, "signal_price", None),
+        )
+
+        self._append_paper_signal_csv(trade_action, reason)
+
+        print(
+            f"[PAPER SIGNAL] {reason} | "
+            f"{getattr(signal, 'symbol', self.symbol)} | "
+            f"{trade_action.action.value} | "
+            f"strategy={trade_action.strategy_name} | "
+            f"router_reason={trade_action.reason}"
+        )
+        
+    def _append_paper_signal_csv(self, trade_action: TradeAction, reason: str):
+        signal = trade_action.signal
+
+        path = Path("paper_signals.csv")
+        exists = path.exists()
+
+        row = {
+            "ts": getattr(signal, "signal_ts", None),
+            "symbol": getattr(signal, "symbol", self.symbol),
+            "side": trade_action.action.value,
+            "reason": reason,
+            "strategy_name": trade_action.strategy_name,
+            "router_reason": trade_action.reason,
+            "signal_price": getattr(signal, "signal_price", None),
+
+            "signal_trend": getattr(getattr(signal, "trend", None), "value", None),
+            "signal_direction": getattr(getattr(signal, "direction", None), "value", None),
+            "signal_momentum": getattr(getattr(signal, "momentum", None), "value", None),
+
+            "btc_velocity_15m": getattr(signal, "btc_velocity_15m", None),
+            "btc_velocity_1h": getattr(signal, "btc_velocity_1h", None),
+            "btc_direction_15m": getattr(signal, "btc_direction_15m", None),
+            "btc_direction_1h": getattr(signal, "btc_direction_1h", None),
+            "btc_context_state": getattr(signal, "btc_context_state", None),
+            "btc_context_reason": getattr(signal, "btc_context_reason", None),
+        }
+
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+
+            if not exists:
+                writer.writeheader()
+
+            writer.writerow(row)
+        
     def _calculate_atr_pct(
         self,
         atr: float,
@@ -69,6 +127,20 @@ class EntryEngine:
                 reason="invalid_side",
                 side=side,
             )
+            return None
+        
+        allow_longs = self.config.get("allow_longs", True)
+        allow_shorts = self.config.get("allow_shorts", True)
+        log_blocked = self.config.get("log_blocked_signals", True)
+
+        if side == "LONG" and not allow_longs:
+            if log_blocked:
+                self._log_blocked_signal(trade_action, reason="LONG_DISABLED")
+            return None
+
+        if side == "SHORT" and not allow_shorts:
+            if log_blocked:
+                self._log_blocked_signal(trade_action, reason="SHORT_DISABLED_PAPER_ONLY")
             return None
 
         # ==========================
