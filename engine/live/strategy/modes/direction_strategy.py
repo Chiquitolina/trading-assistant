@@ -41,95 +41,30 @@ class DirectionStrategy:
 
         # =========================================
         # RANGE -> UP = LONG
-        # High conviction LONG setups
         # =========================================
         if (
             previous_direction_value == Direction.RANGE.value
             and current_direction == Direction.UP
         ):
-            ctx = signal.context or {}
-
-            def to_float(value):
-                try:
-                    return float(value)
-                except (TypeError, ValueError):
-                    return None
-
-            dist_low_15m = to_float(ctx.get("dist_swing_low_15m_pct"))
-            dist_high_15m = to_float(ctx.get("dist_swing_high_15m_pct"))
-            dist_high_4h = to_float(ctx.get("dist_swing_high_4h_pct"))
-
-            # =========================================
-            # HARD BLOCK:
-            # LONG near swing high 4h 0%-1%
-            # históricamente PF ~0.22
-            # =========================================
-            if dist_high_4h is not None and 0 <= dist_high_4h < 1:
-                return TradeAction(
-                    action=Action.HOLD,
-                    signal=signal,
-                    strategy_name="direction_strategy",
-                    reason="long_blocked_high_4h_0_1"
-                )
-
-            # LONG dist swing high 15m 1%-2%
-            if dist_high_15m is not None and 1 <= dist_high_15m < 2:
-                return TradeAction(
-                    action=Action.LONG,
-                    signal=signal,
-                    strategy_name="direction_strategy",
-                    reason="long_high_15m_1_2"
-                )
-
-            # LONG dist swing low 15m 4%-8%
-            if dist_low_15m is not None and 4 <= dist_low_15m < 8:
-                return TradeAction(
-                    action=Action.LONG,
-                    signal=signal,
-                    strategy_name="direction_strategy",
-                    reason="long_low_15m_4_8"
-                )
-
-            # LONG dist swing high 4h >8%
-            if dist_high_4h is not None and dist_high_4h >= 8:
-                return TradeAction(
-                    action=Action.LONG,
-                    signal=signal,
-                    strategy_name="direction_strategy",
-                    reason="long_high_4h_gt_8"
-                )
-
             return TradeAction(
-                action=Action.HOLD,
+                action=Action.LONG,
                 signal=signal,
                 strategy_name="direction_strategy",
-                reason="long_blocked_not_high_conviction_swing_setup"
+                reason="range_breakout_up"
             )
 
         # =========================================
         # RANGE -> DOWN = SHORT
-        # Only allow:
-        # range_breakout_down + SHORT + near_swing_high_4h
         # =========================================
         if (
             previous_direction_value == Direction.RANGE.value
             and current_direction == Direction.DOWN
         ):
-            ctx = signal.context or {}
-
-            if not bool(ctx.get("near_swing_high_4h")):
-                return TradeAction(
-                    action=Action.HOLD,
-                    signal=signal,
-                    strategy_name="direction_strategy",
-                    reason="short_blocked_not_near_swing_high_4h"
-                )
-
             return TradeAction(
                 action=Action.SHORT,
                 signal=signal,
                 strategy_name="direction_strategy",
-                reason="short_near_swing_high_4h"
+                reason="range_breakout_down"
             )
 
         # =========================================
