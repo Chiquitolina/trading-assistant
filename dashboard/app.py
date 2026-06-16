@@ -2705,6 +2705,97 @@ with tab_swings:
                     use_container_width=True
                 )
                 
+                
+        # =========================
+        # MOVE10 × GREEN CANDLES
+        # =========================
+
+        st.markdown("#### Move10 × Green Candles")
+
+        if (
+            "move_10_bars_pct" in setup_diag.columns
+            and "green_candles_last_10" in setup_diag.columns
+        ):
+
+            temp = setup_diag.copy()
+
+            temp["move_10_bars_pct"] = pd.to_numeric(
+                temp["move_10_bars_pct"],
+                errors="coerce"
+            )
+
+            temp["green_candles_last_10"] = pd.to_numeric(
+                temp["green_candles_last_10"],
+                errors="coerce"
+            )
+
+            # =========================
+            # Move10 buckets
+            # =========================
+            MOVE_BINS = [-999, 0, 2, 5, 10, 20, 999]
+
+            MOVE_LABELS = [
+                "<0",
+                "0-2",
+                "2-5",
+                "5-10",
+                "10-20",
+                ">20"
+            ]
+
+            temp["move10_bucket"] = pd.cut(
+                temp["move_10_bars_pct"],
+                bins=MOVE_BINS,
+                labels=MOVE_LABELS,
+                include_lowest=True,
+            )
+
+            rows = []
+
+            for move_bucket, move_group in temp.groupby(
+                "move10_bucket",
+                observed=False
+            ):
+
+                if len(move_group) == 0:
+                    continue
+
+                for greens, group in move_group.groupby(
+                    "green_candles_last_10",
+                    observed=False
+                ):
+
+                    if len(group) == 0:
+                        continue
+
+                    row = swing_stats(
+                        f"{move_bucket} | {int(greens)} greens",
+                        group
+                    )
+
+                    if row:
+                        row["move10_bucket"] = str(move_bucket)
+                        row["greens"] = int(greens)
+
+                        rows.append(row)
+
+            combo_df = pd.DataFrame(rows)
+
+            if combo_df.empty:
+                st.info("No Move10 × Green data.")
+            else:
+
+                combo_df = combo_df.sort_values(
+                    ["profit_factor", "trades"],
+                    ascending=[False, False],
+                    na_position="last"
+                )
+
+                st.dataframe(
+                    combo_df,
+                    use_container_width=True
+                )
+                
 with tab_bad_decisions:
 
     st.markdown("---")
