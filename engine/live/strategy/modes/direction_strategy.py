@@ -59,19 +59,6 @@ class DirectionStrategy:
             dist_high_15m = to_float(ctx.get("dist_swing_high_15m_pct"))
             dist_high_4h = to_float(ctx.get("dist_swing_high_4h_pct"))
 
-            # =========================================
-            # HARD BLOCK:
-            # LONG near swing high 4h 0%-1%
-            # históricamente PF ~0.22
-            # =========================================
-            if dist_high_4h is not None and 0 <= dist_high_4h < 1:
-                return TradeAction(
-                    action=Action.HOLD,
-                    signal=signal,
-                    strategy_name="direction_strategy",
-                    reason="long_blocked_high_4h_0_1"
-                )
-
             # LONG dist swing high 15m 1%-2%
             if dist_high_15m is not None and 1 <= dist_high_15m < 2:
                 return TradeAction(
