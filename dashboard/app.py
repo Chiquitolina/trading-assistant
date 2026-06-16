@@ -1663,6 +1663,500 @@ with tab_swings:
                 with col_d:
                     st.markdown("#### Worst Router × Swing")
                     st.dataframe(router_worst, use_container_width=True)
+                    
+        # =========================
+        # SWING × SWING CROSS
+        # =========================
+
+        st.markdown("### Swing × Swing Cross")
+
+        st.caption(
+            "Cruza distancia a soporte vs distancia a resistencia. "
+            "Ej: LONG low 15m 4%-8% + high 4h >8%."
+        )
+
+        cross_results = []
+
+        swing_cross_pairs = [
+            # LONG: soporte cercano/medio vs espacio a resistencia
+            ("LONG", "low", "15m", "high", "4h"),
+            ("LONG", "low", "1h", "high", "4h"),
+            ("LONG", "low", "15m", "high", "1h"),
+
+            # SHORT: resistencia vs espacio a soporte
+            ("SHORT", "high", "15m", "low", "4h"),
+            ("SHORT", "high", "1h", "low", "4h"),
+            ("SHORT", "high", "15m", "low", "1h"),
+        ]
+
+        for side, ref_a, tf_a, ref_b, tf_b in swing_cross_pairs:
+            col_a = f"dist_swing_{ref_a}_{tf_a}_pct"
+            col_b = f"dist_swing_{ref_b}_{tf_b}_pct"
+
+            if col_a not in swing_df.columns or col_b not in swing_df.columns:
+                continue
+
+            temp = swing_df[swing_df["side"] == side].copy()
+
+            temp[col_a] = pd.to_numeric(temp[col_a], errors="coerce")
+            temp[col_b] = pd.to_numeric(temp[col_b], errors="coerce")
+
+            temp = temp.dropna(subset=[col_a, col_b, "pnl"])
+
+            if temp.empty:
+                continue
+
+            temp["bucket_a"] = pd.cut(
+                temp[col_a],
+                bins=BUCKETS,
+                labels=LABELS,
+                include_lowest=True,
+            )
+
+            temp["bucket_b"] = pd.cut(
+                temp[col_b],
+                bins=BUCKETS,
+                labels=LABELS,
+                include_lowest=True,
+            )
+
+            for (bucket_a, bucket_b), group in temp.groupby(
+                ["bucket_a", "bucket_b"],
+                observed=False
+            ):
+                if len(group) < min_trades_swings:
+                    continue
+
+                setup_name = (
+                    f"{side} | "
+                    f"{ref_a} {tf_a} {bucket_a} | "
+                    f"{ref_b} {tf_b} {bucket_b}"
+                )
+
+                row = swing_stats(setup_name, group)
+
+                if row:
+                    row["side"] = side
+                    row["ref_a"] = ref_a
+                    row["tf_a"] = tf_a
+                    row["bucket_a"] = str(bucket_a)
+                    row["ref_b"] = ref_b
+                    row["tf_b"] = tf_b
+                    row["bucket_b"] = str(bucket_b)
+                    cross_results.append(row)
+
+        cross_df = pd.DataFrame(cross_results)
+
+        if cross_df.empty:
+            st.info("No swing × swing cross groups with enough trades.")
+        else:
+            cross_best = cross_df.sort_values(
+                ["profit_factor", "trades"],
+                ascending=[False, False],
+                na_position="last",
+            )
+
+            cross_worst = cross_df.sort_values(
+                ["profit_factor", "avg_return"],
+                ascending=[True, True],
+                na_position="last",
+            )
+
+            col_e, col_f = st.columns(2)
+
+            with col_e:
+                st.markdown("#### Best Swing × Swing")
+                st.dataframe(cross_best, use_container_width=True)
+
+            with col_f:
+                st.markdown("#### Worst Swing × Swing")
+                st.dataframe(cross_worst, use_container_width=True)
+                
+        # =========================
+        # ROUTER × SWING × SWING CROSS
+        # =========================
+
+        st.markdown("### Router Reason × Swing × Swing Cross")
+
+        router_cross_results = []
+
+        if "router_reason" not in swing_df.columns:
+            st.info("router_reason column not found.")
+        else:
+            for reason in swing_df["router_reason"].dropna().unique():
+
+                for side, ref_a, tf_a, ref_b, tf_b in swing_cross_pairs:
+                    col_a = f"dist_swing_{ref_a}_{tf_a}_pct"
+                    col_b = f"dist_swing_{ref_b}_{tf_b}_pct"
+
+                    if col_a not in swing_df.columns or col_b not in swing_df.columns:
+                        continue
+
+                    temp = swing_df[
+                        (swing_df["side"] == side)
+                        & (swing_df["router_reason"] == reason)
+                    ].copy()
+
+                    temp[col_a] = pd.to_numeric(temp[col_a], errors="coerce")
+                    temp[col_b] = pd.to_numeric(temp[col_b], errors="coerce")
+
+                    temp = temp.dropna(subset=[col_a, col_b, "pnl"])
+
+                    if temp.empty:
+                        continue
+
+                    temp["bucket_a"] = pd.cut(
+                        temp[col_a],
+                        bins=BUCKETS,
+                        labels=LABELS,
+                        include_lowest=True,
+                    )
+
+                    temp["bucket_b"] = pd.cut(
+                        temp[col_b],
+                        bins=BUCKETS,
+                        labels=LABELS,
+                        include_lowest=True,
+                    )
+
+                    for (bucket_a, bucket_b), group in temp.groupby(
+                        ["bucket_a", "bucket_b"],
+                        observed=False,
+                    ):
+                        if len(group) < min_trades_swings:
+                            continue
+
+                        setup_name = (
+                            f"{reason} | {side} | "
+                            f"{ref_a} {tf_a} {bucket_a} | "
+                            f"{ref_b} {tf_b} {bucket_b}"
+                        )
+
+                        row = swing_stats(setup_name, group)
+
+                        if row:
+                            row["reason"] = reason
+                            row["side"] = side
+                            row["ref_a"] = ref_a
+                            row["tf_a"] = tf_a
+                            row["bucket_a"] = str(bucket_a)
+                            row["ref_b"] = ref_b
+                            row["tf_b"] = tf_b
+                            row["bucket_b"] = str(bucket_b)
+                            router_cross_results.append(row)
+
+            router_cross_df = pd.DataFrame(router_cross_results)
+
+            if router_cross_df.empty:
+                st.info("No router × swing × swing groups with enough trades.")
+            else:
+                router_cross_best = router_cross_df.sort_values(
+                    ["profit_factor", "trades"],
+                    ascending=[False, False],
+                    na_position="last",
+                )
+
+                router_cross_worst = router_cross_df.sort_values(
+                    ["profit_factor", "avg_return"],
+                    ascending=[True, True],
+                    na_position="last",
+                )
+
+                col_g, col_h = st.columns(2)
+
+                with col_g:
+                    st.markdown("#### Best Router × Swing × Swing")
+                    st.dataframe(router_cross_best, use_container_width=True)
+
+                with col_h:
+                    st.markdown("#### Worst Router × Swing × Swing")
+                    st.dataframe(router_cross_worst, use_container_width=True)
+
+        # =========================
+        # MOMENTUM × SWING × SWING CROSS
+        # =========================
+
+        st.markdown("### Momentum × Swing × Swing Cross")
+
+        momentum_col = next(
+            (
+                c for c in [
+                    "signal_momentum",
+                    "momentum",
+                    "current_momentum",
+                    "entry_momentum",
+                ]
+                if c in swing_df.columns
+            ),
+            None,
+        )
+
+        min_trades_momentum_cross = st.slider(
+            "Minimum trades per momentum swing cross",
+            min_value=2,
+            max_value=30,
+            value=5,
+            step=1,
+            key="momentum_swing_cross_min_trades",
+        )
+
+        if momentum_col is None:
+            st.info("No momentum column found.")
+        else:
+            mom_df = swing_df.copy()
+
+            mom_df["_momentum"] = (
+                mom_df[momentum_col]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+
+            mom_rows = []
+
+            for side, ref_a, tf_a, ref_b, tf_b in swing_cross_pairs:
+                col_a = f"dist_swing_{ref_a}_{tf_a}_pct"
+                col_b = f"dist_swing_{ref_b}_{tf_b}_pct"
+
+                if col_a not in mom_df.columns or col_b not in mom_df.columns:
+                    continue
+
+                temp = mom_df[mom_df["side"] == side].copy()
+
+                temp[col_a] = pd.to_numeric(temp[col_a], errors="coerce")
+                temp[col_b] = pd.to_numeric(temp[col_b], errors="coerce")
+
+                temp = temp.dropna(subset=[col_a, col_b, "pnl", "_momentum"])
+
+                if temp.empty:
+                    continue
+
+                temp["bucket_a"] = pd.cut(
+                    temp[col_a],
+                    bins=BUCKETS,
+                    labels=LABELS,
+                    include_lowest=True,
+                )
+
+                temp["bucket_b"] = pd.cut(
+                    temp[col_b],
+                    bins=BUCKETS,
+                    labels=LABELS,
+                    include_lowest=True,
+                )
+
+                group_cols = [
+                    "_momentum",
+                    "side",
+                    "bucket_a",
+                    "bucket_b",
+                ]
+
+                if "router_reason" in temp.columns:
+                    group_cols = ["router_reason"] + group_cols
+
+                grouped = temp.groupby(group_cols, observed=False)
+
+                for keys, group in grouped:
+                    if len(group) < min_trades_momentum_cross:
+                        continue
+
+                    if "router_reason" in temp.columns:
+                        reason, momentum, side_key, bucket_a, bucket_b = keys
+                    else:
+                        reason = "NO_REASON"
+                        momentum, side_key, bucket_a, bucket_b = keys
+
+                    setup_name = (
+                        f"{reason} | {momentum} | {side_key} | "
+                        f"{ref_a} {tf_a} {bucket_a} | "
+                        f"{ref_b} {tf_b} {bucket_b}"
+                    )
+
+                    row = swing_stats(setup_name, group)
+
+                    if row:
+                        row["reason"] = reason
+                        row["momentum"] = momentum
+                        row["side"] = side_key
+                        row["ref_a"] = ref_a
+                        row["tf_a"] = tf_a
+                        row["bucket_a"] = str(bucket_a)
+                        row["ref_b"] = ref_b
+                        row["tf_b"] = tf_b
+                        row["bucket_b"] = str(bucket_b)
+                        mom_rows.append(row)
+
+            mom_cross_df = pd.DataFrame(mom_rows)
+
+            if mom_cross_df.empty:
+                st.info("No momentum × swing × swing groups with enough trades.")
+            else:
+                mom_best = mom_cross_df.sort_values(
+                    ["profit_factor", "trades"],
+                    ascending=[False, False],
+                    na_position="last",
+                )
+
+                mom_worst = mom_cross_df.sort_values(
+                    ["profit_factor", "avg_return"],
+                    ascending=[True, True],
+                    na_position="last",
+                )
+
+                col_i, col_j = st.columns(2)
+
+                with col_i:
+                    st.markdown("#### Best Momentum × Swing × Swing")
+                    st.dataframe(mom_best, use_container_width=True)
+
+                with col_j:
+                    st.markdown("#### Worst Momentum × Swing × Swing")
+                    st.dataframe(mom_worst, use_container_width=True)
+
+
+        # =========================
+        # SPACE ANALYSIS
+        # =========================
+
+        st.markdown("### Swing Space Analysis")
+
+        st.caption(
+            "Mide el espacio entre swing low y swing high del mismo timeframe. "
+            "Para LONG interesa espacio hacia arriba; para SHORT espacio hacia abajo."
+        )
+
+        SPACE_BUCKETS = [-999, 0, 1, 2, 4, 8, 999]
+
+        SPACE_LABELS = [
+            "< 0%",
+            "0% to 1%",
+            "1% to 2%",
+            "2% to 4%",
+            "4% to 8%",
+            "> 8%",
+        ]
+
+        space_df = swing_df.copy()
+
+        space_results = []
+        router_space_results = []
+
+        for tf in ["15m", "1h", "4h"]:
+            low_col = f"dist_swing_low_{tf}_pct"
+            high_col = f"dist_swing_high_{tf}_pct"
+
+            if low_col not in space_df.columns or high_col not in space_df.columns:
+                continue
+
+            space_df[low_col] = pd.to_numeric(space_df[low_col], errors="coerce")
+            space_df[high_col] = pd.to_numeric(space_df[high_col], errors="coerce")
+
+            space_col = f"swing_space_{tf}_pct"
+
+            space_df[space_col] = space_df[high_col] + space_df[low_col]
+
+            temp = space_df.dropna(subset=[space_col, "pnl"]).copy()
+
+            temp["space_bucket"] = pd.cut(
+                temp[space_col],
+                bins=SPACE_BUCKETS,
+                labels=SPACE_LABELS,
+                include_lowest=True,
+            )
+
+            for side in ["LONG", "SHORT"]:
+                side_temp = temp[temp["side"] == side]
+
+                for bucket, group in side_temp.groupby("space_bucket", observed=False):
+                    if len(group) < min_trades_swings:
+                        continue
+
+                    row = swing_stats(
+                        f"{side} space {tf} {bucket}",
+                        group
+                    )
+
+                    if row:
+                        row["side"] = side
+                        row["tf"] = tf
+                        row["space_bucket"] = str(bucket)
+                        row["avg_space"] = round(group[space_col].mean(), 4)
+                        space_results.append(row)
+
+                if "router_reason" in temp.columns:
+                    for reason in temp["router_reason"].dropna().unique():
+                        reason_temp = side_temp[
+                            side_temp["router_reason"] == reason
+                        ]
+
+                        for bucket, group in reason_temp.groupby("space_bucket", observed=False):
+                            if len(group) < min_trades_swings:
+                                continue
+
+                            row = swing_stats(
+                                f"{reason} | {side} | space {tf} {bucket}",
+                                group
+                            )
+
+                            if row:
+                                row["reason"] = reason
+                                row["side"] = side
+                                row["tf"] = tf
+                                row["space_bucket"] = str(bucket)
+                                row["avg_space"] = round(group[space_col].mean(), 4)
+                                router_space_results.append(row)
+
+        space_stats_df = pd.DataFrame(space_results)
+        router_space_df = pd.DataFrame(router_space_results)
+
+        if space_stats_df.empty:
+            st.info("No swing space data available.")
+        else:
+            space_best = space_stats_df.sort_values(
+                ["profit_factor", "trades"],
+                ascending=[False, False],
+                na_position="last",
+            )
+
+            space_worst = space_stats_df.sort_values(
+                ["profit_factor", "avg_return"],
+                ascending=[True, True],
+                na_position="last",
+            )
+
+            col_k, col_l = st.columns(2)
+
+            with col_k:
+                st.markdown("#### Best Space Buckets")
+                st.dataframe(space_best, use_container_width=True)
+
+            with col_l:
+                st.markdown("#### Worst Space Buckets")
+                st.dataframe(space_worst, use_container_width=True)
+
+        if not router_space_df.empty:
+            router_space_best = router_space_df.sort_values(
+                ["profit_factor", "trades"],
+                ascending=[False, False],
+                na_position="last",
+            )
+
+            router_space_worst = router_space_df.sort_values(
+                ["profit_factor", "avg_return"],
+                ascending=[True, True],
+                na_position="last",
+            )
+
+            col_m, col_n = st.columns(2)
+
+            with col_m:
+                st.markdown("#### Best Router × Space")
+                st.dataframe(router_space_best, use_container_width=True)
+
+            with col_n:
+                st.markdown("#### Worst Router × Space")
+                st.dataframe(router_space_worst, use_container_width=True)
         
 with tab_bad_decisions:
 
