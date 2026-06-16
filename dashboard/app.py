@@ -2158,6 +2158,192 @@ with tab_swings:
                 st.markdown("#### Worst Router × Space")
                 st.dataframe(router_space_worst, use_container_width=True)
         
+        # =========================
+        # LONG WHITELIST IMPACT
+        # =========================
+
+        st.markdown("### Long Whitelist Impact + Poison Block")
+
+        required_long_cols = [
+            "dist_swing_low_15m_pct",
+            "dist_swing_high_15m_pct",
+            "dist_swing_high_4h_pct",
+            "pnl",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        missing_long_cols = [c for c in required_long_cols if c not in swing_df.columns]
+
+        if missing_long_cols:
+            st.info(f"Missing long whitelist columns: {missing_long_cols}")
+        else:
+            long_df = swing_df[swing_df["side"] == "LONG"].copy()
+
+            long_df["dist_swing_low_15m_pct"] = pd.to_numeric(
+                long_df["dist_swing_low_15m_pct"], errors="coerce"
+            )
+            long_df["dist_swing_high_15m_pct"] = pd.to_numeric(
+                long_df["dist_swing_high_15m_pct"], errors="coerce"
+            )
+            long_df["dist_swing_high_4h_pct"] = pd.to_numeric(
+                long_df["dist_swing_high_4h_pct"], errors="coerce"
+            )
+
+            # Poison block:
+            # LONG dist swing high 4h 0%-1%
+            long_df["_poison_high_4h_0_1"] = (
+                long_df["dist_swing_high_4h_pct"].notna()
+                & (long_df["dist_swing_high_4h_pct"] >= 0)
+                & (long_df["dist_swing_high_4h_pct"] < 1)
+            )
+
+            long_rules = [
+                {
+                    "setup": "long_high_15m_1_2",
+                    "mask": (
+                        long_df["dist_swing_high_15m_pct"].notna()
+                        & (long_df["dist_swing_high_15m_pct"] >= 1)
+                        & (long_df["dist_swing_high_15m_pct"] < 2)
+                    ),
+                },
+                {
+                    "setup": "long_low_15m_4_8",
+                    "mask": (
+                        long_df["dist_swing_low_15m_pct"].notna()
+                        & (long_df["dist_swing_low_15m_pct"] >= 4)
+                        & (long_df["dist_swing_low_15m_pct"] < 8)
+                    ),
+                },
+                {
+                    "setup": "long_high_4h_gt_8",
+                    "mask": (
+                        long_df["dist_swing_high_4h_pct"].notna()
+                        & (long_df["dist_swing_high_4h_pct"] >= 8)
+                    ),
+                },
+            ]
+
+            impact_rows = []
+
+            for rule in long_rules:
+                setup_name = rule["setup"]
+                base_mask = rule["mask"]
+
+                original = long_df[base_mask].copy()
+                blocked = long_df[base_mask & long_df["_poison_high_4h_0_1"]].copy()
+                after_block = long_df[base_mask & ~long_df["_poison_high_4h_0_1"]].copy()
+
+                original_stats = swing_stats(f"{setup_name} BEFORE block", original)
+                after_stats = swing_stats(f"{setup_name} AFTER block", after_block)
+
+                if original_stats:
+                    impact_rows.append({
+                        "setup": setup_name,
+                        "status": "before_block",
+                        "blocked_trades": len(blocked),
+                        "remaining_trades": len(after_block),
+                        **original_stats,
+                    })
+
+                if after_stats:
+                    impact_rows.append({
+                        "setup": setup_name,
+                        "status": "after_block",
+                        "blocked_trades": len(blocked),
+                        "remaining_trades": len(after_block),
+                        **after_stats,
+                    })
+
+            impact_df = pd.DataFrame(impact_rows)
+
+            if impact_df.empty:
+                st.info("No long whitelist impact data available.")
+            else:
+                cols_order = [
+                    "setup",
+                    "status",
+                    "trades",
+                    "blocked_trades",
+                    "remaining_trades",
+                    "wins",
+                    "losses",
+                    "winrate",
+                    "avg_return",
+                    "total_return",
+                    "avg_mfe",
+                    "avg_mae",
+                    "profit_factor",
+                ]
+
+                impact_df = impact_df[[c for c in cols_order if c in impact_df.columns]]
+
+                st.dataframe(
+                    impact_df.sort_values(
+                        ["setup", "status"],
+                        ascending=[True, True],
+                    ),
+                    use_container_width=True,
+                )
+
+            # =========================
+            # Combined whitelist impact
+            # =========================
+
+            combined_allowed = False
+
+            for rule in long_rules:
+                combined_allowed = combined_allowed | rule["mask"]
+
+            combined_original = long_df[combined_allowed].copy()
+            combined_blocked = long_df[
+                combined_allowed & long_df["_poison_high_4h_0_1"]
+            ].copy()
+            combined_after = long_df[
+                combined_allowed & ~long_df["_poison_high_4h_0_1"]
+            ].copy()
+
+            combined_rows = []
+
+            original_stats = swing_stats(
+                "ALL_LONG_WHITELIST BEFORE block",
+                combined_original,
+            )
+
+            after_stats = swing_stats(
+                "ALL_LONG_WHITELIST AFTER block",
+                combined_after,
+            )
+
+            if original_stats:
+                combined_rows.append({
+                    "setup": "ALL_LONG_WHITELIST",
+                    "status": "before_block",
+                    "blocked_trades": len(combined_blocked),
+                    "remaining_trades": len(combined_after),
+                    **original_stats,
+                })
+
+            if after_stats:
+                combined_rows.append({
+                    "setup": "ALL_LONG_WHITELIST",
+                    "status": "after_block",
+                    "blocked_trades": len(combined_blocked),
+                    "remaining_trades": len(combined_after),
+                    **after_stats,
+                })
+
+            combined_df = pd.DataFrame(combined_rows)
+
+            if not combined_df.empty:
+                st.markdown("#### Combined LONG Whitelist Impact")
+
+                combined_df = combined_df[
+                    [c for c in cols_order if c in combined_df.columns]
+                ]
+
+                st.dataframe(combined_df, use_container_width=True)
+                
 with tab_bad_decisions:
 
     st.markdown("---")
