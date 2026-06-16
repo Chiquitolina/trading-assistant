@@ -2587,6 +2587,7 @@ with tab_swings:
             .sort_values("pnl", ascending=False),
             use_container_width=True
         )
+        
                     
         # =========================
         # LOSERS ONLY
@@ -2642,6 +2643,67 @@ with tab_swings:
             .sort_values("pnl"),
             use_container_width=True
         )
+        
+        # =========================
+        # MOVE_10_BARS BUCKETS
+        # =========================
+
+        st.markdown("#### Move 10 Bars Buckets")
+
+        if "move_10_bars_pct" in setup_diag.columns:
+
+            temp = setup_diag.copy()
+
+            temp["move_10_bars_pct"] = pd.to_numeric(
+                temp["move_10_bars_pct"],
+                errors="coerce"
+            )
+
+            MOVE_BINS = [-999, 0, 2, 5, 10, 20, 999]
+
+            MOVE_LABELS = [
+                "<0",
+                "0-2",
+                "2-5",
+                "5-10",
+                "10-20",
+                ">20"
+            ]
+
+            temp["move10_bucket"] = pd.cut(
+                temp["move_10_bars_pct"],
+                bins=MOVE_BINS,
+                labels=MOVE_LABELS,
+                include_lowest=True,
+            )
+
+            rows = []
+
+            for bucket, group in temp.groupby("move10_bucket", observed=False):
+
+                if len(group) == 0:
+                    continue
+
+                rows.append(
+                    swing_stats(
+                        str(bucket),
+                        group
+                    )
+                )
+
+            move10_df = pd.DataFrame(rows)
+
+            if not move10_df.empty:
+                move10_df = move10_df.sort_values(
+                    "profit_factor",
+                    ascending=False,
+                    na_position="last"
+                )
+
+                st.dataframe(
+                    move10_df,
+                    use_container_width=True
+                )
                 
 with tab_bad_decisions:
 
