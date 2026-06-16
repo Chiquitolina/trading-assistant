@@ -2344,6 +2344,194 @@ with tab_swings:
 
                 st.dataframe(combined_df, use_container_width=True)
                 
+        # =========================
+        # SETUP LOSER DIAGNOSTICS
+        # =========================
+
+        st.markdown("### Setup Winner vs Loser Diagnostics")
+
+        diagnostic_setup = st.selectbox(
+            "Diagnostic setup",
+            [
+                "long_low_15m_4_8",
+                "long_high_15m_1_2",
+                "long_high_4h_gt_8",
+                "short_near_swing_high_4h",
+            ],
+            key="diagnostic_setup_select",
+        )
+
+        diag_df = swing_df.copy()
+
+        for c in [
+            "dist_swing_low_15m_pct",
+            "dist_swing_high_15m_pct",
+            "dist_swing_high_4h_pct",
+            "dist_swing_low_4h_pct",
+            "move_5_bars_pct",
+            "move_10_bars_pct",
+            "green_candles_last_10",
+            "red_candles_last_10",
+            "relative_volume_15m",
+            "relative_volume_1h",
+            "relative_volume_4h",
+            "btc_velocity_15m",
+            "btc_velocity_1h",
+        ]:
+            if c in diag_df.columns:
+                diag_df[c] = pd.to_numeric(diag_df[c], errors="coerce")
+
+        if diagnostic_setup == "long_low_15m_4_8":
+            setup_mask = (
+                (diag_df["side"] == "LONG")
+                & (diag_df["router_reason"].isin(["range_breakout_up", "long_low_15m_4_8"]))
+                & (diag_df["dist_swing_low_15m_pct"] >= 4)
+                & (diag_df["dist_swing_low_15m_pct"] < 8)
+            )
+
+        elif diagnostic_setup == "long_high_15m_1_2":
+            setup_mask = (
+                (diag_df["side"] == "LONG")
+                & (diag_df["dist_swing_high_15m_pct"] >= 1)
+                & (diag_df["dist_swing_high_15m_pct"] < 2)
+            )
+
+        elif diagnostic_setup == "long_high_4h_gt_8":
+            setup_mask = (
+                (diag_df["side"] == "LONG")
+                & (diag_df["dist_swing_high_4h_pct"] >= 8)
+            )
+
+        else:
+            setup_mask = (
+                (diag_df["side"] == "SHORT")
+                & (
+                    diag_df["near_swing_high_4h"]
+                    .astype(str)
+                    .str.lower()
+                    .isin(["true", "1", "yes"])
+                )
+            )
+
+        setup_diag = diag_df[setup_mask].copy()
+
+        if setup_diag.empty:
+            st.info("No trades found for selected diagnostic setup.")
+        else:
+            setup_diag["result"] = setup_diag["pnl"].apply(
+                lambda x: "WIN" if x > 0 else "LOSS"
+            )
+
+            numeric_cols = [
+                "pnl",
+                "max_favorable_pct",
+                "max_adverse_pct",
+                "dist_swing_low_15m_pct",
+                "dist_swing_high_15m_pct",
+                "dist_swing_low_1h_pct",
+                "dist_swing_high_1h_pct",
+                "dist_swing_low_4h_pct",
+                "dist_swing_high_4h_pct",
+                "move_5_bars_pct",
+                "move_10_bars_pct",
+                "green_candles_last_10",
+                "red_candles_last_10",
+                "relative_volume_15m",
+                "relative_volume_1h",
+                "relative_volume_4h",
+                "btc_velocity_15m",
+                "btc_velocity_1h",
+            ]
+
+            numeric_cols = [c for c in numeric_cols if c in setup_diag.columns]
+
+            comparison = (
+                setup_diag
+                .groupby("result")[numeric_cols]
+                .mean()
+                .round(4)
+                .reset_index()
+            )
+
+            st.markdown("#### Winners vs Losers — Numeric Averages")
+            st.dataframe(comparison, use_container_width=True)
+
+            categorical_cols = [
+                "signal_momentum",
+                "btc_direction_15m",
+                "btc_direction_1h",
+                "btc_context_state",
+                "volume_tier",
+                "rvol_tier_15m",
+                "rvol_tier_1h",
+                "rvol_tier_4h",
+            ]
+
+            categorical_cols = [c for c in categorical_cols if c in setup_diag.columns]
+
+            cat_rows = []
+
+            for col in categorical_cols:
+                pivot = (
+                    setup_diag
+                    .groupby([col, "result"])
+                    .size()
+                    .unstack(fill_value=0)
+                    .reset_index()
+                )
+
+                if "WIN" not in pivot.columns:
+                    pivot["WIN"] = 0
+                if "LOSS" not in pivot.columns:
+                    pivot["LOSS"] = 0
+
+                pivot["total"] = pivot["WIN"] + pivot["LOSS"]
+                pivot["winrate"] = (pivot["WIN"] / pivot["total"] * 100).round(2)
+                pivot["feature"] = col
+
+                pivot = pivot.rename(columns={col: "value"})
+
+                cat_rows.append(pivot[["feature", "value", "total", "WIN", "LOSS", "winrate"]])
+
+            if cat_rows:
+                categorical_diag = pd.concat(cat_rows, ignore_index=True)
+                categorical_diag = categorical_diag.sort_values(
+                    ["feature", "total"],
+                    ascending=[True, False],
+                )
+
+                st.markdown("#### Winners vs Losers — Categorical Breakdown")
+                st.dataframe(categorical_diag, use_container_width=True)
+
+            show_cols = [
+                "symbol",
+                "side",
+                "entry_ts",
+                "exit_ts",
+                "pnl",
+                "exit_reason",
+                "signal_momentum",
+                "btc_context_state",
+                "btc_direction_15m",
+                "btc_direction_1h",
+                "dist_swing_low_15m_pct",
+                "dist_swing_high_15m_pct",
+                "dist_swing_high_4h_pct",
+                "relative_volume_15m",
+                "move_5_bars_pct",
+                "move_10_bars_pct",
+                "green_candles_last_10",
+                "red_candles_last_10",
+            ]
+
+            show_cols = [c for c in show_cols if c in setup_diag.columns]
+
+            st.markdown("#### Raw Trades")
+            st.dataframe(
+                setup_diag[show_cols].sort_values("pnl"),
+                use_container_width=True,
+            )
+                
 with tab_bad_decisions:
 
     st.markdown("---")
@@ -2645,193 +2833,6 @@ with tab_bad_decisions:
                 use_container_width=True
             )
             
-        # =========================
-        # SETUP LOSER DIAGNOSTICS
-        # =========================
-
-        st.markdown("### Setup Winner vs Loser Diagnostics")
-
-        diagnostic_setup = st.selectbox(
-            "Diagnostic setup",
-            [
-                "long_low_15m_4_8",
-                "long_high_15m_1_2",
-                "long_high_4h_gt_8",
-                "short_near_swing_high_4h",
-            ],
-            key="diagnostic_setup_select",
-        )
-
-        diag_df = swing_df.copy()
-
-        for c in [
-            "dist_swing_low_15m_pct",
-            "dist_swing_high_15m_pct",
-            "dist_swing_high_4h_pct",
-            "dist_swing_low_4h_pct",
-            "move_5_bars_pct",
-            "move_10_bars_pct",
-            "green_candles_last_10",
-            "red_candles_last_10",
-            "relative_volume_15m",
-            "relative_volume_1h",
-            "relative_volume_4h",
-            "btc_velocity_15m",
-            "btc_velocity_1h",
-        ]:
-            if c in diag_df.columns:
-                diag_df[c] = pd.to_numeric(diag_df[c], errors="coerce")
-
-        if diagnostic_setup == "long_low_15m_4_8":
-            setup_mask = (
-                (diag_df["side"] == "LONG")
-                & (diag_df["router_reason"].isin(["range_breakout_up", "long_low_15m_4_8"]))
-                & (diag_df["dist_swing_low_15m_pct"] >= 4)
-                & (diag_df["dist_swing_low_15m_pct"] < 8)
-            )
-
-        elif diagnostic_setup == "long_high_15m_1_2":
-            setup_mask = (
-                (diag_df["side"] == "LONG")
-                & (diag_df["dist_swing_high_15m_pct"] >= 1)
-                & (diag_df["dist_swing_high_15m_pct"] < 2)
-            )
-
-        elif diagnostic_setup == "long_high_4h_gt_8":
-            setup_mask = (
-                (diag_df["side"] == "LONG")
-                & (diag_df["dist_swing_high_4h_pct"] >= 8)
-            )
-
-        else:
-            setup_mask = (
-                (diag_df["side"] == "SHORT")
-                & (
-                    diag_df["near_swing_high_4h"]
-                    .astype(str)
-                    .str.lower()
-                    .isin(["true", "1", "yes"])
-                )
-            )
-
-        setup_diag = diag_df[setup_mask].copy()
-
-        if setup_diag.empty:
-            st.info("No trades found for selected diagnostic setup.")
-        else:
-            setup_diag["result"] = setup_diag["pnl"].apply(
-                lambda x: "WIN" if x > 0 else "LOSS"
-            )
-
-            numeric_cols = [
-                "pnl",
-                "max_favorable_pct",
-                "max_adverse_pct",
-                "dist_swing_low_15m_pct",
-                "dist_swing_high_15m_pct",
-                "dist_swing_low_1h_pct",
-                "dist_swing_high_1h_pct",
-                "dist_swing_low_4h_pct",
-                "dist_swing_high_4h_pct",
-                "move_5_bars_pct",
-                "move_10_bars_pct",
-                "green_candles_last_10",
-                "red_candles_last_10",
-                "relative_volume_15m",
-                "relative_volume_1h",
-                "relative_volume_4h",
-                "btc_velocity_15m",
-                "btc_velocity_1h",
-            ]
-
-            numeric_cols = [c for c in numeric_cols if c in setup_diag.columns]
-
-            comparison = (
-                setup_diag
-                .groupby("result")[numeric_cols]
-                .mean()
-                .round(4)
-                .reset_index()
-            )
-
-            st.markdown("#### Winners vs Losers — Numeric Averages")
-            st.dataframe(comparison, use_container_width=True)
-
-            categorical_cols = [
-                "signal_momentum",
-                "btc_direction_15m",
-                "btc_direction_1h",
-                "btc_context_state",
-                "volume_tier",
-                "rvol_tier_15m",
-                "rvol_tier_1h",
-                "rvol_tier_4h",
-            ]
-
-            categorical_cols = [c for c in categorical_cols if c in setup_diag.columns]
-
-            cat_rows = []
-
-            for col in categorical_cols:
-                pivot = (
-                    setup_diag
-                    .groupby([col, "result"])
-                    .size()
-                    .unstack(fill_value=0)
-                    .reset_index()
-                )
-
-                if "WIN" not in pivot.columns:
-                    pivot["WIN"] = 0
-                if "LOSS" not in pivot.columns:
-                    pivot["LOSS"] = 0
-
-                pivot["total"] = pivot["WIN"] + pivot["LOSS"]
-                pivot["winrate"] = (pivot["WIN"] / pivot["total"] * 100).round(2)
-                pivot["feature"] = col
-
-                pivot = pivot.rename(columns={col: "value"})
-
-                cat_rows.append(pivot[["feature", "value", "total", "WIN", "LOSS", "winrate"]])
-
-            if cat_rows:
-                categorical_diag = pd.concat(cat_rows, ignore_index=True)
-                categorical_diag = categorical_diag.sort_values(
-                    ["feature", "total"],
-                    ascending=[True, False],
-                )
-
-                st.markdown("#### Winners vs Losers — Categorical Breakdown")
-                st.dataframe(categorical_diag, use_container_width=True)
-
-            show_cols = [
-                "symbol",
-                "side",
-                "entry_ts",
-                "exit_ts",
-                "pnl",
-                "exit_reason",
-                "signal_momentum",
-                "btc_context_state",
-                "btc_direction_15m",
-                "btc_direction_1h",
-                "dist_swing_low_15m_pct",
-                "dist_swing_high_15m_pct",
-                "dist_swing_high_4h_pct",
-                "relative_volume_15m",
-                "move_5_bars_pct",
-                "move_10_bars_pct",
-                "green_candles_last_10",
-                "red_candles_last_10",
-            ]
-
-            show_cols = [c for c in show_cols if c in setup_diag.columns]
-
-            st.markdown("#### Raw Trades")
-            st.dataframe(
-                setup_diag[show_cols].sort_values("pnl"),
-                use_container_width=True,
-            )
             
 with tab_execution:
 
