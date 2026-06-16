@@ -2796,6 +2796,99 @@ with tab_swings:
                     use_container_width=True
                 )
                 
+                
+        # =========================
+        # MOVE10 × MOMENTUM × BTC 1H
+        # =========================
+
+        st.markdown("#### Move10 × Momentum × BTC 1H")
+
+        if (
+            "move_10_bars_pct" in setup_diag.columns
+            and "signal_momentum" in setup_diag.columns
+            and "btc_direction_1h" in setup_diag.columns
+        ):
+
+            temp = setup_diag.copy()
+
+            temp["move_10_bars_pct"] = pd.to_numeric(
+                temp["move_10_bars_pct"],
+                errors="coerce"
+            )
+
+            MOVE_BINS = [-999, 0, 2, 5, 10, 20, 999]
+
+            MOVE_LABELS = [
+                "<0",
+                "0-2",
+                "2-5",
+                "5-10",
+                "10-20",
+                ">20"
+            ]
+
+            temp["move10_bucket"] = pd.cut(
+                temp["move_10_bars_pct"],
+                bins=MOVE_BINS,
+                labels=MOVE_LABELS,
+                include_lowest=True,
+            )
+
+            rows = []
+
+            for move_bucket, move_group in temp.groupby(
+                "move10_bucket",
+                observed=False
+            ):
+
+                if len(move_group) == 0:
+                    continue
+
+                for momentum, mom_group in move_group.groupby(
+                    "signal_momentum",
+                    observed=False
+                ):
+
+                    if len(mom_group) == 0:
+                        continue
+
+                    for btc1h, group in mom_group.groupby(
+                        "btc_direction_1h",
+                        observed=False
+                    ):
+
+                        if len(group) < 2:
+                            continue
+
+                        row = swing_stats(
+                            f"{move_bucket} | {momentum} | BTC1h {btc1h}",
+                            group
+                        )
+
+                        if row:
+                            row["move10_bucket"] = str(move_bucket)
+                            row["momentum"] = momentum
+                            row["btc_1h"] = btc1h
+
+                            rows.append(row)
+
+            combo_df = pd.DataFrame(rows)
+
+            if combo_df.empty:
+                st.info("No Move10 × Momentum × BTC1H groups.")
+            else:
+
+                combo_df = combo_df.sort_values(
+                    ["profit_factor", "trades"],
+                    ascending=[False, False],
+                    na_position="last",
+                )
+
+                st.dataframe(
+                    combo_df,
+                    use_container_width=True
+                )
+                
 with tab_bad_decisions:
 
     st.markdown("---")
