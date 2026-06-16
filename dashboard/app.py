@@ -2344,6 +2344,7 @@ with tab_swings:
 
                 st.dataframe(combined_df, use_container_width=True)
                 
+                
         # =========================
         # SETUP LOSER DIAGNOSTICS
         # =========================
@@ -2531,6 +2532,61 @@ with tab_swings:
                 setup_diag[show_cols].sort_values("pnl"),
                 use_container_width=True,
             )
+                    
+        # =========================
+        # LOSERS ONLY
+        # =========================
+
+        st.markdown("#### Losers Only")
+
+        losers = setup_diag[setup_diag["pnl"] <= 0].copy()
+
+        losers_cols = [
+            "symbol",
+            "pnl",
+            "exit_reason",
+
+            "signal_momentum",
+            "signal_momentum_prev1",
+            "signal_momentum_prev2",
+            "signal_momentum_sequence",
+
+            "btc_context_state",
+            "btc_direction_15m",
+            "btc_direction_1h",
+            "btc_velocity_15m",
+            "btc_velocity_1h",
+
+            "volume_tier",
+            "rvol_tier_15m",
+            "rvol_tier_1h",
+            "rvol_tier_4h",
+
+            "move_5_bars_pct",
+            "move_10_bars_pct",
+            "green_candles_last_10",
+            "red_candles_last_10",
+
+            "dist_swing_low_15m_pct",
+            "dist_swing_high_15m_pct",
+
+            "dist_swing_low_1h_pct",
+            "dist_swing_high_1h_pct",
+
+            "dist_swing_low_4h_pct",
+            "dist_swing_high_4h_pct",
+
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        losers_cols = [c for c in losers_cols if c in losers.columns]
+
+        st.dataframe(
+            losers[losers_cols]
+            .sort_values("pnl"),
+            use_container_width=True
+        )
                 
 with tab_bad_decisions:
 
