@@ -25,7 +25,12 @@ class ExecutionEngine:
         self.trades: list[Trade] = []
         self.journal = TradeJournal()
         self.fees = self.exchange.get_futures_fees()
-        self.position_sizer = PositionSizer()
+        self.position_sizer = PositionSizer(
+            total_usage_pct=0.65,
+            max_positions=3,
+            buffer=0.90,
+            min_notional=105,
+        )
         self.risk_manager = RiskManager()
         self.snapshot_manager = SnapshotManager()
         self.order_executor = OrderExecutor(exchange)
@@ -663,7 +668,7 @@ class ExecutionEngine:
 
             side = "BUY" if plan.side == "LONG" else "SELL"
 
-            balance = float(self.exchange.get_balance())
+            balance = float(self.exchange.get_wallet_balance())
             t = self._timer("get_balance", t)
             
             if balance <= 0:
@@ -687,9 +692,10 @@ class ExecutionEngine:
                 return False
 
             size_data = self.position_sizer.calculate(
-                balance=balance,
+                total_balance=balance,
                 price=price,
-                leverage=leverage
+                leverage=leverage,
+                open_positions_count=len(self.positions)
             )
 
     #        print(f"""

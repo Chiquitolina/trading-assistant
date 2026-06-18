@@ -66,6 +66,16 @@ class BinanceExchange(BaseExchange):
 
         return 0.0
 
+    def get_wallet_balance(self):
+        account = self._safe_request(self.client.futures_account)
+
+        if account:
+            for asset in account["assets"]:
+                if asset["asset"] == "USDT":
+                    return float(asset["walletBalance"])
+
+        return 0.0
+
     def get_lot_size_filter(self, symbol: str):
         info = self.client.futures_exchange_info()
 
