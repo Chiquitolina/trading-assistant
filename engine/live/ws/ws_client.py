@@ -4,7 +4,7 @@ from binance import ThreadedWebsocketManager
 
 
 class WSClient:
-    def __init__(self, on_message, timeframes, symbols, stale_after=20, chunk_size=40):
+    def __init__(self, on_message, timeframes, symbols, stale_after=60, chunk_size=25):
         self.on_message = on_message
         self.timeframes = timeframes
         self.symbols = symbols
@@ -22,7 +22,7 @@ class WSClient:
         self._reconnect_lock = threading.Lock()
 
         self._last_reconnect = 0
-        self.min_reconnect_interval = 10
+        self.min_reconnect_interval = 60
 
         self.handshake_failures = 0
         
@@ -79,7 +79,6 @@ class WSClient:
     def _connect(self):
         print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...")
 
-        self._stop_ws()
 
         try:
             self.twm = ThreadedWebsocketManager()
