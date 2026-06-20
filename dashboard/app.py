@@ -1253,6 +1253,151 @@ with tab_overview:
 
         if dt_col in df_display.columns:
             df_display[col] = df_display[dt_col].dt.strftime("%d-%m %H:%M")
+            
+    # =========================
+    # TRADES TABLE
+    # =========================
+    st.markdown("---")
+    st.subheader("📋 Trades")
+
+    table_df = df_display.copy()
+
+    # =========================
+    # DATE FILTER
+    # =========================
+
+    if "entry_ts_dt" in df_raw.columns:
+
+        filter_col1, filter_col2 = st.columns(2)
+
+        with filter_col1:
+            start_date = st.date_input(
+                "Start Date",
+                value=df_raw["entry_ts_dt"].min().date(),
+                key="trades_start_date"
+            )
+
+        with filter_col2:
+            end_date = st.date_input(
+                "End Date",
+                value=df_raw["entry_ts_dt"].max().date(),
+                key="trades_end_date"
+            )
+
+    if "entry_ts_dt" in table_df.columns:
+        table_df = table_df.sort_values("entry_ts_dt")
+        
+    if "entry_ts_dt" in table_df.columns:
+
+        table_df = table_df[
+            (
+                table_df["entry_ts_dt"].dt.date >= start_date
+            )
+            &
+            (
+                table_df["entry_ts_dt"].dt.date <= end_date
+            )
+        ]
+
+    if "entry_distance_pct" in table_df.columns:
+        table_df["entry_distance_pct"] = table_df["entry_distance_pct"].map(
+            lambda x: f"{x:.4f}%" if pd.notnull(x) else "0.0000%"
+        )
+
+    if "pnl" in table_df.columns:
+        table_df["pnl"] = table_df["pnl"].map(
+            lambda x: f"{x:.4f}%" if pd.notnull(x) else "-"
+        )
+
+    if "trade_duration_min" in table_df.columns:
+        table_df["trade_duration_min"] = table_df["trade_duration_min"].map(
+            lambda x: f"{x:.2f}" if pd.notnull(x) else "-"
+        )
+
+    drop_cols = [c for c in ["signal_ts_dt", "entry_ts_dt", "exit_ts_dt"] if c in table_df.columns]
+    table_df = table_df.drop(columns=drop_cols)
+
+    # =========================
+    # FORMAT BOOLEAN COLUMNS
+    # =========================
+
+    bool_cols = [
+        "reclaimed_ema20_1m",
+        "reclaimed_ema34_1m",
+        "reclaimed_ema50_1m",
+        "lost_ema20_1m",
+        "lost_ema34_1m",
+        "lost_ema50_1m",
+        "direction_5m_changed",
+    ]
+
+    for col in bool_cols:
+        if col in table_df.columns:
+            table_df[col] = table_df[col].map({
+                True: "TRUE",
+                False: "FALSE"
+            })
+            
+    price_cols = [
+        "signal_price",
+        "entry",
+        "real_entry",
+        "exit",
+        "real_exit",
+        "tp",
+        "sl",
+        "tp1",
+        "tp2",
+        "tp3",
+        "entry_price",
+        "mark_price",
+    ]
+
+    for col in price_cols:
+        if col in table_df.columns:
+            table_df[col] = table_df[col].map(fmt_price_for_display)
+            
+    st.caption(
+        f"Showing {len(table_df)} trades "
+        f"from {start_date} to {end_date}"
+    )
+
+    st.dataframe(
+        table_df,
+        use_container_width=True
+    )
+
+    # =========================
+    # EQUITY CURVE
+    # =========================
+    st.markdown("---")
+    st.subheader("📈 Equity Curve")
+
+    df_equity = df_raw.copy()
+
+    if "entry_ts_dt" in df_equity.columns and "pnl" in df_equity.columns:
+        df_equity = df_equity.sort_values("entry_ts_dt")
+        df_equity["equity"] = df_equity["pnl"].fillna(0).cumsum()
+
+        st.line_chart(
+            df_equity.set_index("entry_ts_dt")["equity"],
+            use_container_width=True
+        )
+
+    # =========================
+    # EQUITY CURVE USD
+    # =========================
+    if "entry_ts_dt" in df_raw.columns and "pnl_usd" in df_raw.columns:
+        st.markdown("---")
+        st.subheader("💵 Equity Curve USD")
+
+        df_equity_usd = df_raw.copy().sort_values("entry_ts_dt")
+        df_equity_usd["equity_usd"] = df_equity_usd["pnl_usd"].fillna(0).cumsum()
+
+        st.line_chart(
+            df_equity_usd.set_index("entry_ts_dt")["equity_usd"],
+            use_container_width=True
+        )
         
 with tab_mfe_mae:
     st.markdown("---")
@@ -3331,147 +3476,3 @@ with tab_execution:
         st.error(f"Execution Analysis Error: {e}")
         st.exception(e)
         
-# =========================
-# TRADES TABLE
-# =========================
-st.markdown("---")
-st.subheader("📋 Trades")
-
-table_df = df_display.copy()
-
-# =========================
-# DATE FILTER
-# =========================
-
-if "entry_ts_dt" in df_raw.columns:
-
-    filter_col1, filter_col2 = st.columns(2)
-
-    with filter_col1:
-        start_date = st.date_input(
-            "Start Date",
-            value=df_raw["entry_ts_dt"].min().date(),
-            key="trades_start_date"
-        )
-
-    with filter_col2:
-        end_date = st.date_input(
-            "End Date",
-            value=df_raw["entry_ts_dt"].max().date(),
-            key="trades_end_date"
-        )
-
-if "entry_ts_dt" in table_df.columns:
-    table_df = table_df.sort_values("entry_ts_dt")
-    
-if "entry_ts_dt" in table_df.columns:
-
-    table_df = table_df[
-        (
-            table_df["entry_ts_dt"].dt.date >= start_date
-        )
-        &
-        (
-            table_df["entry_ts_dt"].dt.date <= end_date
-        )
-    ]
-
-if "entry_distance_pct" in table_df.columns:
-    table_df["entry_distance_pct"] = table_df["entry_distance_pct"].map(
-        lambda x: f"{x:.4f}%" if pd.notnull(x) else "0.0000%"
-    )
-
-if "pnl" in table_df.columns:
-    table_df["pnl"] = table_df["pnl"].map(
-        lambda x: f"{x:.4f}%" if pd.notnull(x) else "-"
-    )
-
-if "trade_duration_min" in table_df.columns:
-    table_df["trade_duration_min"] = table_df["trade_duration_min"].map(
-        lambda x: f"{x:.2f}" if pd.notnull(x) else "-"
-    )
-
-drop_cols = [c for c in ["signal_ts_dt", "entry_ts_dt", "exit_ts_dt"] if c in table_df.columns]
-table_df = table_df.drop(columns=drop_cols)
-
-# =========================
-# FORMAT BOOLEAN COLUMNS
-# =========================
-
-bool_cols = [
-    "reclaimed_ema20_1m",
-    "reclaimed_ema34_1m",
-    "reclaimed_ema50_1m",
-    "lost_ema20_1m",
-    "lost_ema34_1m",
-    "lost_ema50_1m",
-    "direction_5m_changed",
-]
-
-for col in bool_cols:
-    if col in table_df.columns:
-        table_df[col] = table_df[col].map({
-            True: "TRUE",
-            False: "FALSE"
-        })
-        
-price_cols = [
-    "signal_price",
-    "entry",
-    "real_entry",
-    "exit",
-    "real_exit",
-    "tp",
-    "sl",
-    "tp1",
-    "tp2",
-    "tp3",
-    "entry_price",
-    "mark_price",
-]
-
-for col in price_cols:
-    if col in table_df.columns:
-        table_df[col] = table_df[col].map(fmt_price_for_display)
-        
-st.caption(
-    f"Showing {len(table_df)} trades "
-    f"from {start_date} to {end_date}"
-)
-
-st.dataframe(
-    table_df,
-    use_container_width=True
-)
-
-# =========================
-# EQUITY CURVE
-# =========================
-st.markdown("---")
-st.subheader("📈 Equity Curve")
-
-df_equity = df_raw.copy()
-
-if "entry_ts_dt" in df_equity.columns and "pnl" in df_equity.columns:
-    df_equity = df_equity.sort_values("entry_ts_dt")
-    df_equity["equity"] = df_equity["pnl"].fillna(0).cumsum()
-
-    st.line_chart(
-        df_equity.set_index("entry_ts_dt")["equity"],
-        use_container_width=True
-    )
-
-# =========================
-# EQUITY CURVE USD
-# =========================
-if "entry_ts_dt" in df_raw.columns and "pnl_usd" in df_raw.columns:
-    st.markdown("---")
-    st.subheader("💵 Equity Curve USD")
-
-    df_equity_usd = df_raw.copy().sort_values("entry_ts_dt")
-    df_equity_usd["equity_usd"] = df_equity_usd["pnl_usd"].fillna(0).cumsum()
-
-    st.line_chart(
-        df_equity_usd.set_index("entry_ts_dt")["equity_usd"],
-        use_container_width=True
-    )
