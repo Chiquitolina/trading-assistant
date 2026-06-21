@@ -1504,6 +1504,65 @@ with tab_mfe_mae:
 
         st.dataframe(sim_tp_df, use_container_width=True)
         
+        st.markdown("### Simulated Fixed TP / SL Matrix")
+
+        tp_levels = [0.20, 0.25, 0.30, 0.40, 0.50]
+        sl_levels = [0.30, 0.40, 0.50, 0.60, 0.80]
+
+        matrix_rows = []
+
+        matrix_df = df_view.copy()
+
+        matrix_df["pnl"] = pd.to_numeric(matrix_df["pnl"], errors="coerce")
+        matrix_df["max_favorable_pct"] = pd.to_numeric(matrix_df["max_favorable_pct"], errors="coerce")
+        matrix_df["max_adverse_pct"] = pd.to_numeric(matrix_df["max_adverse_pct"], errors="coerce")
+
+        matrix_df = matrix_df.dropna(subset=["pnl", "max_favorable_pct", "max_adverse_pct"])
+
+        for tp_level in tp_levels:
+            for sl_level in sl_levels:
+
+                simulated = []
+
+                for _, row in matrix_df.iterrows():
+
+                    if row["max_favorable_pct"] >= tp_level:
+                        simulated.append(tp_level)
+
+                    elif abs(row["max_adverse_pct"]) >= sl_level:
+                        simulated.append(-sl_level)
+
+                    else:
+                        simulated.append(row["pnl"])
+
+                simulated_pnl = pd.Series(simulated)
+
+                gross_win = simulated_pnl[simulated_pnl > 0].sum()
+                gross_loss = abs(simulated_pnl[simulated_pnl < 0].sum())
+
+                matrix_rows.append({
+                    "tp": tp_level,
+                    "sl": sl_level,
+                    "trades": len(simulated_pnl),
+                    "wins": int((simulated_pnl > 0).sum()),
+                    "losses": int((simulated_pnl <= 0).sum()),
+                    "winrate": round((simulated_pnl > 0).mean() * 100, 2),
+                    "avg_pnl": round(simulated_pnl.mean(), 4),
+                    "net_pnl": round(simulated_pnl.sum(), 4),
+                    "pf": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
+                })
+
+            tp_sl_matrix_df = pd.DataFrame(matrix_rows)
+
+            st.dataframe(
+                tp_sl_matrix_df.sort_values(
+                    ["pf", "net_pnl"],
+                    ascending=False,
+                    na_position="last"
+                ),
+                use_container_width=True
+            )
+        
 with tab_setups:
 
     st.markdown("---")
