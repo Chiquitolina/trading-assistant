@@ -79,6 +79,9 @@ class WSClient:
     def _connect(self):
         print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...")
 
+        if self.twm is not None:
+            print("\033[94m[WS CLIENT]\033[0m ⚠️ Existing TWM found, stopping before reconnect")
+            self._stop_ws()
 
         try:
             self.twm = ThreadedWebsocketManager()
@@ -177,8 +180,8 @@ class WSClient:
 
             self.retries += 1
 
-            delay = min(2 ** min(self.retries, 6), 60)
-            delay = max(delay, 8)
+            delay = min(2 ** min(self.retries, 6), 120)
+            delay = max(delay, 30)
 
             print(
                 f"\033[94m[WS CLIENT]\033[0m 🔄 Reconnecting in {delay}s..."
