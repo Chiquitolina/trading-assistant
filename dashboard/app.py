@@ -717,8 +717,6 @@ for col in ["signal_ts", "entry_ts", "exit_ts"]:
         except Exception:
             pass
         
-mfe_report = build_mfe_mae_report(df_raw)
-
 # =========================
 # TRADE DURATION
 # =========================
@@ -783,13 +781,12 @@ if "entry_ts_dt" in df_view.columns and not df_view.empty:
         (df_view["entry_ts_dt"].dt.date <= end_date)
     ].copy()
     
-df_view = df_view[
-    (df_view["entry_ts_dt"].dt.date >= start_date)
-    &
-    (df_view["entry_ts_dt"].dt.date <= end_date)
-].copy()
-
 st.sidebar.caption(f"Filtered trades: {len(df_view)}")
+
+# =========================
+# MFE / MAE REPORT
+# =========================
+mfe_report = build_mfe_mae_report(df_view)
 
 # =========================
 # STATUS PANEL DATA
