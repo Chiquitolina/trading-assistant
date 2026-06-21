@@ -754,6 +754,44 @@ else:
     df_raw["signal_delay_min"] = None
 
 # =========================
+# GLOBAL VIEW (NO FILTER YET)
+# =========================
+df_view = df_raw.copy()
+
+# =========================
+# GLOBAL DATE FILTER
+# =========================
+if "entry_ts_dt" in df_view.columns and not df_view.empty:
+
+    st.sidebar.markdown("## 📅 Trade Filter")
+
+    start_date = st.sidebar.date_input(
+        "Start Date",
+        value=df_view["entry_ts_dt"].min().date(),
+        key="global_start_date"
+    )
+
+    end_date = st.sidebar.date_input(
+        "End Date",
+        value=df_view["entry_ts_dt"].max().date(),
+        key="global_end_date"
+    )
+
+    df_view = df_view[
+        (df_view["entry_ts_dt"].dt.date >= start_date)
+        &
+        (df_view["entry_ts_dt"].dt.date <= end_date)
+    ].copy()
+    
+df_view = df_view[
+    (df_view["entry_ts_dt"].dt.date >= start_date)
+    &
+    (df_view["entry_ts_dt"].dt.date <= end_date)
+].copy()
+
+st.sidebar.caption(f"Filtered trades: {len(df_view)}")
+
+# =========================
 # STATUS PANEL DATA
 # =========================
 status = load_status()
@@ -1246,7 +1284,7 @@ with tab_overview:
     # =========================
     # FORMAT DATES FOR DISPLAY ONLY
     # =========================
-    df_display = df_raw.copy()
+    df_display = df_view.copy()
 
     for col in ["signal_ts", "entry_ts", "exit_ts"]:
         dt_col = f"{col}_dt"
@@ -1262,42 +1300,8 @@ with tab_overview:
 
     table_df = df_display.copy()
 
-    # =========================
-    # DATE FILTER
-    # =========================
-
-    if "entry_ts_dt" in df_raw.columns:
-
-        filter_col1, filter_col2 = st.columns(2)
-
-        with filter_col1:
-            start_date = st.date_input(
-                "Start Date",
-                value=df_raw["entry_ts_dt"].min().date(),
-                key="trades_start_date"
-            )
-
-        with filter_col2:
-            end_date = st.date_input(
-                "End Date",
-                value=df_raw["entry_ts_dt"].max().date(),
-                key="trades_end_date"
-            )
-
     if "entry_ts_dt" in table_df.columns:
         table_df = table_df.sort_values("entry_ts_dt")
-        
-    if "entry_ts_dt" in table_df.columns:
-
-        table_df = table_df[
-            (
-                table_df["entry_ts_dt"].dt.date >= start_date
-            )
-            &
-            (
-                table_df["entry_ts_dt"].dt.date <= end_date
-            )
-        ]
 
     if "entry_distance_pct" in table_df.columns:
         table_df["entry_distance_pct"] = table_df["entry_distance_pct"].map(
@@ -1533,13 +1537,15 @@ with tab_swings:
         "router_reason",
     ]
 
-    missing_cols = [c for c in required_cols if c not in df_raw.columns]
+    missing_cols = [c for c in required_cols if c not in df_view.columns]
 
     if missing_cols:
         st.info(f"Missing columns: {missing_cols}")
 
     else:
-        swing_df = df_raw.copy()
+        swing_df = df_view.copy().reset_index(drop=True)
+
+        st.caption(f"Swings trades: {len(swing_df)}")
 
         swing_df["pnl"] = pd.to_numeric(swing_df["pnl"], errors="coerce")
         swing_df["max_favorable_pct"] = pd.to_numeric(
