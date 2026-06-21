@@ -338,23 +338,6 @@ class EntryEngine:
                 )
                 return None
 
-        if not ok:
-            if self.debug:
-                print(f"⛔ Entry descartado: TP esperado insuficiente ({expected_tp_pct:.2f}% < {cfg['min_tp']}%)")
-
-            self.status_writer.write_plan(
-                status="DISCARDED",
-                reason="min_tp_not_met",
-                side=side,
-                entry=round(entry, 2),
-                tp=round(tp, 2),
-                sl=round(sl, 2),
-                atr=round(atr, 2),
-                atr_pct=round(atr_pct, 4)
-            )
-            return None
-
-
         # ==========================
         # CONTEXT
         # ==========================
