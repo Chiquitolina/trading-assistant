@@ -1471,7 +1471,7 @@ with tab_setups:
         "max_adverse_pct",
     ]
 
-    missing_cols = [c for c in required_cols if c not in df_raw.columns]
+    missing_cols = [c for c in required_cols if c not in df_view.columns]
 
     if missing_cols:
         st.info(f"Missing columns: {missing_cols}")
@@ -1491,7 +1491,7 @@ with tab_setups:
         )
 
         setup_df = (
-            df_raw
+            df_view
             .dropna(subset=["signal_direction", "signal_momentum", "side"])
             .groupby(["side", "signal_direction", "signal_momentum"])
             .agg(
@@ -1520,6 +1520,53 @@ with tab_setups:
         )
 
         st.dataframe(setup_df, use_container_width=True)
+        
+        st.markdown("### 🧭 Direction + Trend by Side")
+
+        required_trend_cols = [
+            "side",
+            "signal_direction",
+            "signal_trend",
+            "pnl",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        missing_trend_cols = [c for c in required_trend_cols if c not in df_view.columns]
+
+        if missing_trend_cols:
+            st.info(f"Missing trend columns: {missing_trend_cols}")
+        else:
+            trend_df = (
+                df_view
+                .dropna(subset=["side", "signal_direction", "signal_trend"])
+                .groupby(["side", "signal_direction", "signal_trend"])
+                .agg(
+                    trades=("pnl", "count"),
+                    wins=("pnl", lambda x: int((x > 0).sum())),
+                    losses=("pnl", lambda x: int((x <= 0).sum())),
+                    winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                    avg_pnl=("pnl", "mean"),
+                    total_pnl=("pnl", "sum"),
+                    avg_mfe=("max_favorable_pct", "mean"),
+                    avg_mae=("max_adverse_pct", "mean"),
+                    pf=("pnl", profit_factor),
+                )
+                .reset_index()
+            )
+
+            trend_df = trend_df[trend_df["trades"] >= min_trades]
+
+            for col in ["avg_pnl", "total_pnl", "avg_mfe", "avg_mae"]:
+                trend_df[col] = trend_df[col].round(3)
+
+            trend_df = trend_df.sort_values(
+                by=["pf", "total_pnl", "winrate"],
+                ascending=False,
+                na_position="last",
+            )
+
+            st.dataframe(trend_df, use_container_width=True)
         
 with tab_swings:
 

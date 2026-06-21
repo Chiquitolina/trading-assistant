@@ -2,7 +2,7 @@ import pandas as pd
 
 
 MFE_LEVELS = [0.25, 0.50, 1.00, 1.50, 2.00, 3.00]
-SL_MFE_LEVELS = [0.40, 0.75, 1.00, 1.50]
+SL_MFE_LEVELS = [0.20, 0.30, 0.40, 0.75, 1.00, 1.50]
 
 
 def _safe_mean(df, col):
