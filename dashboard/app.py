@@ -1457,6 +1457,49 @@ with tab_mfe_mae:
                 pd.DataFrame(mfe_report["worst_symbols_by_mfe"]),
                 use_container_width=True
             )
+            
+        st.markdown("### Simulated Fixed TP")
+
+        tp_levels = [0.20, 0.25, 0.30, 0.40, 0.50]
+
+        sim_rows = []
+
+        sim_df = df_view.copy()
+
+        sim_df["pnl"] = pd.to_numeric(sim_df["pnl"], errors="coerce")
+        sim_df["max_favorable_pct"] = pd.to_numeric(
+            sim_df["max_favorable_pct"],
+            errors="coerce"
+        )
+
+        sim_df = sim_df.dropna(subset=["pnl", "max_favorable_pct"])
+
+        for tp_level in tp_levels:
+            simulated_pnl = sim_df.apply(
+                lambda row: tp_level
+                if row["max_favorable_pct"] >= tp_level
+                else row["pnl"],
+                axis=1,
+            )
+
+            wins = simulated_pnl[simulated_pnl > 0].sum()
+            losses = abs(simulated_pnl[simulated_pnl < 0].sum())
+
+            sim_rows.append({
+                "tp_level": f"{tp_level}%",
+                "trades": len(simulated_pnl),
+                "wins": int((simulated_pnl > 0).sum()),
+                "losses": int((simulated_pnl <= 0).sum()),
+                "winrate": round((simulated_pnl > 0).mean() * 100, 2),
+                "avg_pnl": round(simulated_pnl.mean(), 4),
+                "net_pnl": round(simulated_pnl.sum(), 4),
+                "profit_factor": round(wins / losses, 2) if losses > 0 else None,
+            })
+
+        sim_tp_df = pd.DataFrame(sim_rows)
+
+        st.dataframe(sim_tp_df, use_container_width=True)
+        
 with tab_setups:
 
     st.markdown("---")
