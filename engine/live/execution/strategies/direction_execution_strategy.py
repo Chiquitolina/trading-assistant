@@ -3,7 +3,7 @@ from engine.live.execution.strategies.base_execution_strategy import BaseExecuti
 
 class DirectionExecutionStrategy(BaseExecutionStrategy):
     
-    BE_TRIGGER = 0.40
+    BE_TRIGGER = None
 
     # ==========================================================
     # SIGNAL → FLIP LOGIC
@@ -42,7 +42,7 @@ class DirectionExecutionStrategy(BaseExecutionStrategy):
         pos.mae = pnl if pos.mae is None else min(pos.mae, pnl)
         pos.mfe = pnl if pos.mfe is None else max(pos.mfe, pnl)
 
-        if pnl >= self.BE_TRIGGER:
+        if self.BE_TRIGGER is not None and pnl >= self.BE_TRIGGER:
             
             if pos.be_moved:
                 return

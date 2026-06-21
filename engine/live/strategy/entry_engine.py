@@ -236,6 +236,25 @@ class EntryEngine:
             atr=atr,
             cfg=cfg
         )
+        
+        # ==========================
+        # FIXED TP / SL EXPERIMENT
+        # ==========================
+        use_fixed_levels = self.config.get("use_fixed_levels", False)
+
+        if use_fixed_levels:
+            fixed_tp_pct = float(self.config.get("fixed_tp_pct", 0.40))
+            fixed_sl_pct = float(self.config.get("fixed_sl_pct", 0.30))
+
+            if side == "LONG":
+                tp = entry * (1 + fixed_tp_pct / 100)
+                sl = entry * (1 - fixed_sl_pct / 100)
+            else:
+                tp = entry * (1 - fixed_tp_pct / 100)
+                sl = entry * (1 + fixed_sl_pct / 100)
+
+            tp_pct = fixed_tp_pct
+            sl_pct = fixed_sl_pct
 
         # ==========================
         # 🔴 VOLATILITY FILTER
@@ -292,12 +311,32 @@ class EntryEngine:
         # ==========================
         # TP ESPERADO
         # ==========================
-        ok, expected_tp_pct = min_expected_tp_ok(
-            entry,
-            atr,
-            cfg["tp_mult"],
-            cfg["min_tp"]
-        )
+        if not use_fixed_levels:
+            ok, expected_tp_pct = min_expected_tp_ok(
+                entry,
+                atr,
+                cfg["tp_mult"],
+                cfg["min_tp"]
+            )
+
+            if not ok:
+                if self.debug:
+                    print(
+                        f"⛔ Entry descartado: TP esperado insuficiente "
+                        f"({expected_tp_pct:.2f}% < {cfg['min_tp']}%)"
+                    )
+
+                self.status_writer.write_plan(
+                    status="DISCARDED",
+                    reason="min_tp_not_met",
+                    side=side,
+                    entry=round(entry, 2),
+                    tp=round(tp, 2),
+                    sl=round(sl, 2),
+                    atr=round(atr, 2),
+                    atr_pct=round(atr_pct, 4)
+                )
+                return None
 
         if not ok:
             if self.debug:

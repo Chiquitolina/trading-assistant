@@ -24,6 +24,9 @@ MODE_CONFIG = {
         "allow_longs": True,
         "allow_shorts": True,
         "log_blocked_signals": True,
+        "use_fixed_levels": True,
+        "fixed_tp_pct": 0.30,
+        "fixed_sl_pct": 0.40,
     },
 
     "aggressive": {
