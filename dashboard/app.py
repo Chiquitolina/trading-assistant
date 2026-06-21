@@ -1723,6 +1723,89 @@ with tab_setups:
             )
 
             st.dataframe(trend_df, use_container_width=True)
+            
+        st.markdown("### 🔁 Momentum Previous Context")
+
+        momentum_context_cols = [
+            "side",
+            "signal_momentum",
+            "signal_momentum_prev1",
+            "signal_momentum_prev2",
+            "signal_momentum_sequence",
+            "pnl",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        missing_mom_ctx_cols = [
+            c for c in momentum_context_cols
+            if c not in df_view.columns
+        ]
+
+        if missing_mom_ctx_cols:
+            st.info(f"Missing momentum context columns: {missing_mom_ctx_cols}")
+
+        else:
+
+            def build_setup_table(group_cols):
+                out = (
+                    df_view
+                    .dropna(subset=group_cols + ["side"])
+                    .groupby(group_cols)
+                    .agg(
+                        trades=("pnl", "count"),
+                        wins=("pnl", lambda x: int((x > 0).sum())),
+                        losses=("pnl", lambda x: int((x <= 0).sum())),
+                        winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                        avg_pnl=("pnl", "mean"),
+                        total_pnl=("pnl", "sum"),
+                        avg_mfe=("max_favorable_pct", "mean"),
+                        avg_mae=("max_adverse_pct", "mean"),
+                        pf=("pnl", profit_factor),
+                    )
+                    .reset_index()
+                )
+
+                out = out[out["trades"] >= min_trades]
+
+                for col in ["avg_pnl", "total_pnl", "avg_mfe", "avg_mae"]:
+                    out[col] = out[col].round(3)
+
+                return out.sort_values(
+                    by=["pf", "total_pnl", "winrate"],
+                    ascending=False,
+                    na_position="last",
+                )
+
+            st.markdown("#### Momentum + Prev1")
+
+            mom_prev1_df = build_setup_table([
+                "side",
+                "signal_momentum_prev1",
+                "signal_momentum",
+            ])
+
+            st.dataframe(mom_prev1_df, use_container_width=True)
+
+            st.markdown("#### Momentum + Prev2 + Prev1")
+
+            mom_prev2_df = build_setup_table([
+                "side",
+                "signal_momentum_prev2",
+                "signal_momentum_prev1",
+                "signal_momentum",
+            ])
+
+            st.dataframe(mom_prev2_df, use_container_width=True)
+
+            st.markdown("#### Momentum Sequence")
+
+            mom_seq_df = build_setup_table([
+                "side",
+                "signal_momentum_sequence",
+            ])
+
+            st.dataframe(mom_seq_df, use_container_width=True)
         
 with tab_swings:
 
