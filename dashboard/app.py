@@ -984,17 +984,17 @@ with tab_overview:
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
-    total_trades = len(df_raw)
-    net_pnl_pct = safe_sum(df_raw, "pnl")
-    net_pnl_usd = safe_sum(df_raw, "pnl_usd")
-    winrate = round((df_raw["pnl"] > 0).mean() * 100, 2) if len(df_raw) and "pnl" in df_raw.columns else 0
+    total_trades = len(df_view)
+    net_pnl_pct = safe_sum(df_view, "pnl")
+    net_pnl_usd = safe_sum(df_view, "pnl_usd")
+    winrate = round((df_view["pnl"] > 0).mean() * 100, 2) if len(df_raw) and "pnl" in df_view.columns else 0
 
     col1.metric("Trades", total_trades)
     col2.metric("Net PnL %", f"{net_pnl_pct}%")
     col3.metric("Net PnL USD", f"{net_pnl_usd} USDT")
     col4.metric("Winrate", f"{winrate}%")
-    col5.metric("Avg PnL %", safe_mean(df_raw, "pnl"))
-    col6.metric("Best Trade %", safe_max(df_raw, "pnl"))
+    col5.metric("Avg PnL %", safe_mean(df_view, "pnl"))
+    col6.metric("Best Trade %", safe_max(df_view, "pnl"))
         
         #st.markdown("### 📊 Performance by Volume Tier")
 
@@ -1056,9 +1056,9 @@ with tab_overview:
     # =========================
     # METRICS CALCULATION
     # =========================
-    all_trades = df_raw.to_dict(orient="records")
-    long_df = df_raw[df_raw["side"] == "LONG"] if "side" in df_raw.columns else pd.DataFrame()
-    short_df = df_raw[df_raw["side"] == "SHORT"] if "side" in df_raw.columns else pd.DataFrame()
+    all_trades = df_view.to_dict(orient="records")
+    long_df = df_view[df_view["side"] == "LONG"] if "side" in df_view.columns else pd.DataFrame()
+    short_df = df_view[df_view["side"] == "SHORT"] if "side" in df_view.columns else pd.DataFrame()
 
     long_trades = long_df.to_dict(orient="records")
     short_trades = short_df.to_dict(orient="records")
