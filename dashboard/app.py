@@ -1552,16 +1552,66 @@ with tab_mfe_mae:
                     "pf": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
                 })
 
-            tp_sl_matrix_df = pd.DataFrame(matrix_rows)
+        tp_sl_matrix_df = pd.DataFrame(matrix_rows)
 
-            st.dataframe(
-                tp_sl_matrix_df.sort_values(
-                    ["pf", "net_pnl"],
-                    ascending=False,
-                    na_position="last"
-                ),
-                use_container_width=True
-            )
+        st.dataframe(
+            tp_sl_matrix_df.sort_values(
+                ["pf", "net_pnl"],
+                ascending=False,
+                na_position="last"
+            ),
+            use_container_width=True
+        )
+        
+        st.markdown("### Pure TP / SL Matrix")
+
+        pure_rows = []
+
+        for tp_level in tp_levels:
+            for sl_level in sl_levels:
+
+                simulated = []
+
+                for _, row in matrix_df.iterrows():
+                    if row["max_favorable_pct"] >= tp_level:
+                        simulated.append(tp_level)
+                    else:
+                        simulated.append(-sl_level)
+
+                simulated_pnl = pd.Series(simulated)
+
+                gross_win = simulated_pnl[simulated_pnl > 0].sum()
+                gross_loss = abs(simulated_pnl[simulated_pnl < 0].sum())
+
+                winrate = (simulated_pnl > 0).mean()
+                avg_win = simulated_pnl[simulated_pnl > 0].mean()
+                avg_loss = abs(simulated_pnl[simulated_pnl < 0].mean())
+
+                expectancy = (winrate * avg_win) - ((1 - winrate) * avg_loss)
+
+                pure_rows.append({
+                    "tp": tp_level,
+                    "sl": sl_level,
+                    "trades": len(simulated_pnl),
+                    "wins": int((simulated_pnl > 0).sum()),
+                    "losses": int((simulated_pnl <= 0).sum()),
+                    "winrate": round(winrate * 100, 2),
+                    "avg_pnl": round(simulated_pnl.mean(), 4),
+                    "net_pnl": round(simulated_pnl.sum(), 4),
+                    "expectancy": round(expectancy, 4),
+                    "pf": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
+                })
+
+        pure_matrix_df = pd.DataFrame(pure_rows)
+
+        st.dataframe(
+            pure_matrix_df.sort_values(
+                ["expectancy", "pf", "net_pnl"],
+                ascending=False,
+                na_position="last"
+            ),
+            use_container_width=True
+        )
         
 with tab_setups:
 
