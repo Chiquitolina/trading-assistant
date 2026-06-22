@@ -27,7 +27,7 @@ class ExecutionEngine:
         self.fees = self.exchange.get_futures_fees()
         self.position_sizer = PositionSizer(
             total_usage_pct=0.65,
-            max_positions=3,
+            max_positions=10,
             buffer=0.90,
             min_notional=105,
         )
@@ -453,30 +453,39 @@ class ExecutionEngine:
             sl_float = float(sl_price)
 
             if side == "LONG":
+                tp_rounding = "UP"
+                sl_rounding = "DOWN"
+
                 tp_float = max(tp_float, mark_price + min_distance)
                 sl_float = min(sl_float, mark_price - min_distance)
 
             elif side == "SHORT":
+                tp_rounding = "DOWN"
+                sl_rounding = "UP"
+
                 tp_float = min(tp_float, mark_price - min_distance)
                 sl_float = max(sl_float, mark_price + min_distance)
 
-            tp_price = self.exchange.normalize_price(symbol, tp_float)
-            sl_price = self.exchange.normalize_price(symbol, sl_float)
+            else:
+                print(f"❌ Invalid side for TP/SL | side={side}")
+                return False
 
-            #print(
-            #    f"📌 TP/SL debug | "
-            #    f"symbol={symbol} | qty={quantity} | side={side} | "
-            #   f"mark={mark_price} | tick={tick_size} | "
-            #    f"raw_tp={raw_tp} -> tp={tp_price} | "
-            #    f"raw_sl={raw_sl} -> sl={sl_price}"
-            #)
+            print(
+                f"📌 TP/SL debug | "
+                f"symbol={symbol} | qty={quantity} | side={side} | "
+                f"mark={mark_price} | tick={tick_size} | "
+                f"raw_tp={raw_tp} -> send_tp_raw={tp_float} | "
+                f"raw_sl={raw_sl} -> send_sl_raw={sl_float} | "
+                f"tp_rounding={tp_rounding} | sl_rounding={sl_rounding}"
+            )
 
             # 1) Primero SL. La posición nunca debe quedar desnuda.
             self.exchange.place_stop_loss(
                 symbol=symbol,
                 side=sl_side,
                 quantity=quantity,
-                stop_price=sl_price
+                stop_price=sl_float,
+                price_rounding=sl_rounding,
             )
 
             # 2) Después TP.
@@ -484,7 +493,8 @@ class ExecutionEngine:
                 symbol=symbol,
                 side=tp_side,
                 quantity=quantity,
-                price=tp_price
+                price=tp_float,
+                price_rounding=tp_rounding,
             )
 
             print("✅ TP/SL colocados correctamente")

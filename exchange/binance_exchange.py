@@ -226,11 +226,10 @@ class BinanceExchange(BaseExchange):
             quantity=quantity
         )
         
-    def place_take_profit_limit(self, symbol, side, quantity, price):
-        print(
-            f"[EXCHANGE] TP LIMIT send | side={side} "
-            f"price={price} qty={quantity}"
-        )
+    def place_take_profit_limit(self, symbol, side, quantity, price, price_rounding="DOWN"):
+        price = self.normalize_price(symbol, price, price_rounding)
+
+        print(f"[EXCHANGE] TP LIMIT send | side={side} price={price} qty={quantity}")
 
         response = self._safe_request(
             self.client.futures_create_order,
@@ -243,11 +242,7 @@ class BinanceExchange(BaseExchange):
             reduceOnly=True
         )
 
-        print(
-            f"[EXCHANGE] TP LIMIT created | side={side} "
-            f"price={price} response={response}"
-        )
-
+        print(f"[EXCHANGE] TP LIMIT created | side={side} price={price} response={response}")
         return response
         
         
@@ -276,11 +271,10 @@ class BinanceExchange(BaseExchange):
 
         return response
 
-    def place_stop_loss(self, symbol, side, quantity, stop_price):
-        print(
-            f"[EXCHANGE] SL MARKET send | side={side} "
-            f"trigger={stop_price} qty={quantity}"
-        )
+    def place_stop_loss(self, symbol, side, quantity, stop_price, price_rounding="DOWN"):
+        stop_price = self.normalize_price(symbol, stop_price, price_rounding)
+
+        print(f"[EXCHANGE] SL MARKET send | side={side} trigger={stop_price} qty={quantity}")
 
         response = self._safe_request(
             self.client.futures_create_order,
@@ -294,11 +288,7 @@ class BinanceExchange(BaseExchange):
             priceProtect=True
         )
 
-        print(
-            f"[EXCHANGE] SL MARKET created | side={side} "
-            f"trigger={stop_price} response={response}"
-        )
-
+        print(f"[EXCHANGE] SL MARKET created | side={side} trigger={stop_price} response={response}")
         return response
 
     def close_position(self, symbol, side, quantity):
