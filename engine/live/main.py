@@ -9,6 +9,13 @@ from signals.indicators.direction import trade_direction
 
 from signals.utils.logger import BotLogger
 
+from models.trade_action import TradeAction
+
+from signals.indicators.trend_detector import detect_trend_up
+from signals.indicators.compression_detector import detect_compression
+from signals.indicators.compression_breakout_detector import detect_compression_breakout
+from signals.indicators.compression_state_machine import CompressionStateMachine
+
 from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
@@ -69,7 +76,8 @@ parser.add_argument(
     choices=[
         "default",
         "direction",
-        "aggressive"
+        "aggressive",
+        "compression"
     ],
 )
 
@@ -241,7 +249,7 @@ except Exception as e:
 signals = SignalEngine(
     buffer,
     config=mode_config,
-    mode=STRATEGY_MODE
+    mode="direction" if STRATEGY_MODE == "compression" else STRATEGY_MODE
 )
 
 entry_engine = EntryEngine(
@@ -277,7 +285,7 @@ status_data = status_writer._read_current()
 last_signal_direction = status_data.get("signal_direction")
 
 strategy_router = StrategyRouter(
-    mode=STRATEGY_MODE,
+    mode="direction" if STRATEGY_MODE == "compression" else STRATEGY_MODE,
     entry_rules=mode_config.get(
         "entry_rules",
         "standard"
@@ -285,6 +293,13 @@ strategy_router = StrategyRouter(
 )
 
 btc_context_service = BTCVelocityContextService()
+
+compression_machine = CompressionStateMachine(
+    max_watch_candles=8,
+    max_pullback_candles=5,
+    pullback_max_pct=1.2,
+    pullback_min_hold_high=True,
+)
 
 # =========================================================
 # STATUS DEFAULT
@@ -643,11 +658,74 @@ try:
 
                 logger.debug("===========================\n")
 
-                trade_action = strategy_router.evaluate(
-                    signal,
-                    previous_direction=previous_direction,    
-                    current_position=execution.get_position(symbol)
-                )
+                if STRATEGY_MODE == "compression":
+                    candles = buffer.get_candles(symbol, TRIGGER_TF)
+
+                    if len(candles) < 80:
+                        continue
+
+                    df_tf = pd.DataFrame(candles)
+
+                    prev_df = df_tf.iloc[:-1].copy()
+
+                    trend = detect_trend_up(
+                        prev_df,
+                        lookback=20,
+                        ema_fast=20,
+                        ema_slow=50,
+                        min_score=4,
+                    )
+
+                    compression = detect_compression(
+                        prev_df,
+                        lookback=10,
+                        base_lookback=40,
+                        max_range_ratio=0.65,
+                        max_atr_ratio=0.75,
+                        max_volume_ratio=0.95,
+                        max_body_pct=0.50,
+                        min_score=3,
+                    )
+
+                    breakout = detect_compression_breakout(df_tf)
+
+                    compression_state = compression_machine.update(
+                        symbol=symbol,
+                        candle=df_tf.iloc[-1].to_dict(),
+                        trend=trend,
+                        compression=compression,
+                        breakout=breakout,
+                    )
+
+                    if compression_state["state"] != "IDLE":
+                        print(
+                            f"\033[96m[COMPRESSION]\033[0m "
+                            f"symbol={symbol} "
+                            f"state={compression_state['state']} "
+                            f"reason={compression_state.get('reason')}"
+                        )
+
+                    if compression_state["state"] == "ENTRY_READY":
+                        trade_action = TradeAction(
+                            action=Action.LONG,
+                            signal=signal,
+                            reason="compression_breakout",
+                            strategy_name="compression"
+                        )
+                    else:
+                        trade_action = TradeAction(
+                            action=Action.HOLD,
+                            signal=signal,
+                            reason=compression_state.get("reason", "compression_waiting"),
+                            strategy_name="compression"
+                        )
+
+                else:
+                    trade_action = strategy_router.evaluate(
+                        signal,
+                        previous_direction=previous_direction,
+                        current_position=execution.get_position(symbol)
+                    )
                 
                 last_direction_by_symbol[symbol] = signal.direction
 

@@ -38,6 +38,26 @@ MODE_CONFIG = {
         "min_atr": 120,
         "entry_rules": "standard"
     },
+    
+    "compression": {
+        "timeframes": ["1m", "5m", "15m", "1h", "4h"],
+        "trigger_tf": "15m",
+        "min_atr_pct": 0.20,
+        "min_atr": 120,
+        "entry_tf": "15m",
+        "atr_tf": "15m",
+        "entry_rules": "standard",
+
+        "allow_longs": True,
+        "allow_shorts": False,
+
+        "use_fixed_levels": True,
+        "fixed_tp_pct": 0.30,
+        "fixed_sl_pct": 0.40,
+
+        "compression_enabled": True,
+        "compression_tf": "15m",
+    }
 }
 
 # =========================

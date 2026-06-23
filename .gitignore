@@ -99,3 +99,6 @@ trailing_sl_by_side.csv
 trailing_sl_by_side_router.csv
 trailing_sl_by_symbol.csv
 trailing_sl_thresholds.csv
+trend_detector_test.csv
+compression_breakout_test.csv
+compression_state_machine_test.csv
