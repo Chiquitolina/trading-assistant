@@ -817,6 +817,49 @@ try:
                     print("\033[94m[ENTRY PLANNER]\033[0m ❌ PLAN DESCARTADO\n")
                     continue
                 
+                if STRATEGY_MODE == "compression":
+                    plan.signal_context = {
+                        **(plan.signal_context or {}),
+
+                        "trend": signal.trend.value,
+                        "direction": signal.direction.value,
+                        "momentum": signal.momentum.value,
+
+                        "strategy_name": "compression",
+
+                        "compression_state": compression_state.get("state"),
+                        "compression_reason": compression_state.get("reason"),
+
+                        "compression_created_ts": compression_state.get("created_ts"),
+                        "compression_updated_ts": compression_state.get("updated_ts"),
+                        "compression_candles_waiting": compression_state.get("candles_waiting"),
+
+                        "trend_score": compression_state.get("trend_score") or trend.get("score"),
+                        "trend_reasons": trend.get("reasons"),
+                        "compression_trend_up": trend.get("trend_up"),
+
+                        "compression_score": compression_state.get("compression_score") or compression.get("score"),
+                        "compression_reasons": compression.get("reasons"),
+                        "compression_is_compression": compression.get("is_compression"),
+
+                        "compression_high": compression_state.get("compression_high"),
+                        "compression_low": compression_state.get("compression_low"),
+                        "compression_range_pct": compression.get("compression_range_pct"),
+
+                        "range_ratio": compression.get("range_ratio"),
+                        "atr_ratio": compression.get("atr_ratio"),
+                        "volume_ratio": compression.get("volume_ratio"),
+                        "avg_body_pct": compression.get("avg_body_pct"),
+
+                        "breakout_detected": breakout.get("breakout"),
+                        "breakout_ts": compression_state.get("breakout_ts"),
+                        "breakout_price": compression_state.get("breakout_price"),
+                        "breakout_high": compression_state.get("breakout_high"),
+                        "breakout_volume_ratio": compression_state.get("breakout_volume_ratio"),
+
+                        "entry_ready_price": compression_state.get("entry_price"),
+                    }
+                
                 plan.signal_context = {
                     **(plan.signal_context or {}),
 

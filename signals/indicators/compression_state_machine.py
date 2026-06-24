@@ -156,6 +156,7 @@ class CompressionStateMachine:
             return watch.to_dict()
 
         if watch.state == CompressionState.WAIT_PULLBACK:
+
             if watch.candles_waiting > self.max_pullback_candles:
                 watch.state = CompressionState.EXPIRED
                 watch.reason = "pullback_expired"
@@ -186,6 +187,20 @@ class CompressionStateMachine:
             )
 
             continuation = close > watch.breakout_price
+
+            print(
+                f"[PULLBACK DEBUG] "
+                f"{symbol} "
+                f"waiting={watch.candles_waiting}/{self.max_pullback_candles} "
+                f"pullback_pct={pullback_pct:.2f} "
+                f"valid_pullback={valid_pullback} "
+                f"hold_high={holds_compression_high} "
+                f"continuation={continuation} "
+                f"close={close:.8f} "  
+                f"low={low:.8f} "
+                f"breakout_price={watch.breakout_price:.8f} "
+                f"compression_high={watch.compression_high:.8f}"
+            )
 
             if valid_pullback and continuation:
                 watch.state = CompressionState.ENTRY_READY

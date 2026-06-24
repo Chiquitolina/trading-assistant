@@ -424,6 +424,28 @@ class ExecutionEngine:
             # ==========================
             strategy_mode=ctx.get("strategy_name"),
             router_reason=ctx.get("router_reason"),
+            
+            compression_state=ctx.get("compression_state"),
+            compression_reason=ctx.get("compression_reason"),
+
+            compression_high=ctx.get("compression_high"),
+            compression_low=ctx.get("compression_low"),
+
+            compression_score=ctx.get("compression_score"),
+            trend_score=ctx.get("trend_score"),
+
+            breakout_ts=ctx.get("breakout_ts"),
+            breakout_price=ctx.get("breakout_price"),
+            breakout_high=ctx.get("breakout_high"),
+            breakout_volume_ratio=ctx.get("breakout_volume_ratio"),
+
+            entry_ready_price=ctx.get("entry_ready_price"),
+
+            compression_range_pct=ctx.get("compression_range_pct"),
+            range_ratio=ctx.get("range_ratio"),
+            atr_ratio=ctx.get("atr_ratio"),
+            volume_ratio=ctx.get("volume_ratio"),
+            avg_body_pct=ctx.get("avg_body_pct"),
         )
 
         try:
@@ -1458,6 +1480,28 @@ class ExecutionEngine:
             # ==========================
             strategy_mode=ctx.get("strategy_name"),
             router_reason=ctx.get("router_reason"),
+            
+            compression_state=ctx.get("compression_state"),
+            compression_reason=ctx.get("compression_reason"),
+
+            compression_high=ctx.get("compression_high"),
+            compression_low=ctx.get("compression_low"),
+
+            compression_score=ctx.get("compression_score"),
+            trend_score=ctx.get("trend_score"),
+
+            breakout_ts=ctx.get("breakout_ts"),
+            breakout_price=ctx.get("breakout_price"),
+            breakout_high=ctx.get("breakout_high"),
+            breakout_volume_ratio=ctx.get("breakout_volume_ratio"),
+
+            entry_ready_price=ctx.get("entry_ready_price"),
+
+            compression_range_pct=ctx.get("compression_range_pct"),
+            range_ratio=ctx.get("range_ratio"),
+            atr_ratio=ctx.get("atr_ratio"),
+            volume_ratio=ctx.get("volume_ratio"),
+            avg_body_pct=ctx.get("avg_body_pct"),
         )
         
         try:
