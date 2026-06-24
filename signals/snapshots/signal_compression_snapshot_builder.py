@@ -1,5 +1,4 @@
 import time
-from dataclasses import field
 import pandas as pd
 
 from models.signal_compression_snapshot import SignalCompressionSnapshot
@@ -12,9 +11,9 @@ class SignalCompressionSnapshotBuilder:
 
     def build(self, symbol: str) -> SignalCompressionSnapshot | None:
 
-        df_15m = self.buffer.get(symbol, "15m")
-        df_1h = self.buffer.get(symbol, "1h")
-        df_4h = self.buffer.get(symbol, "4h")
+        df_15m = self._df(symbol, "15m")
+        df_1h = self._df(symbol, "1h")
+        df_4h = self._df(symbol, "4h")
 
         if df_15m is None or df_15m.empty:
             return None
@@ -81,6 +80,14 @@ class SignalCompressionSnapshotBuilder:
     # ==========================================================
     # HELPERS
     # ==========================================================
+    
+    def _df(self, symbol: str, tf: str) -> pd.DataFrame | None:
+        candles = self.buffer.get_candles(symbol, tf)
+
+        if not candles:
+            return None
+
+        return pd.DataFrame(candles)
 
     def _last(self, df: pd.DataFrame | None, col: str):
 
