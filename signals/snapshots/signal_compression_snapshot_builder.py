@@ -87,7 +87,13 @@ class SignalCompressionSnapshotBuilder:
         if not candles:
             return None
 
-        return pd.DataFrame(candles)
+        df = pd.DataFrame(candles)
+
+        if "close" in df.columns:
+            df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+            df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+
+        return df
 
     def _last(self, df: pd.DataFrame | None, col: str):
 
