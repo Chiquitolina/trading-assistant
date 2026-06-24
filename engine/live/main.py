@@ -11,6 +11,9 @@ from signals.utils.logger import BotLogger
 
 from models.trade_action import TradeAction
 
+from signals.snapshots.signal_compression_snapshot_builder import SignalCompressionSnapshotBuilder
+from engine.live.snapshots.compression_snapshot_manager import CompressionSnapshotManager
+
 from signals.indicators.trend_detector import detect_trend_up
 from signals.indicators.compression_detector import detect_compression
 from signals.indicators.compression_breakout_detector import detect_compression_breakout
@@ -293,6 +296,9 @@ strategy_router = StrategyRouter(
 )
 
 btc_context_service = BTCVelocityContextService()
+
+compression_snapshot_builder = SignalCompressionSnapshotBuilder(buffer)
+compression_snapshot_manager = CompressionSnapshotManager()
 
 compression_machine = CompressionStateMachine(
     max_watch_candles=8,
@@ -596,6 +602,15 @@ try:
                 # =================================================
                 close_price = buffer.last_price(symbol)
                 closed_candle_ts = buffer.last_ws_close_time[symbol][TRIGGER_TF]
+                
+                # =================================================
+                # COMPRESSION SNAPSHOT LIVE
+                # =================================================
+
+                compression_snapshot = compression_snapshot_builder.build(symbol)
+
+                if compression_snapshot:
+                    compression_snapshot_manager.save(compression_snapshot)
 
                 if not closed_candle_ts:
                     continue
