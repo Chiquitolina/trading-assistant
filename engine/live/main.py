@@ -576,6 +576,12 @@ try:
                 "ENTRY_READY": 0,
                 "EXPIRED": 0,
                 "SKIPPED_NOT_ENOUGH_CANDLES": 0,
+
+                "TREND_UP_TRUE": 0,
+                "TREND_UP_FALSE": 0,
+                "COMPRESSION_TRUE": 0,
+                "COMPRESSION_FALSE": 0,
+                "TREND_AND_COMPRESSION": 0,
             }
 
             for symbol in symbols_to_process:
@@ -697,6 +703,19 @@ try:
                         max_body_pct=0.50,
                         min_score=3,
                     )
+                    
+                    if trend.get("trend_up"):
+                        compression_counts["TREND_UP_TRUE"] += 1
+                    else:
+                        compression_counts["TREND_UP_FALSE"] += 1
+
+                    if compression.get("is_compression"):
+                        compression_counts["COMPRESSION_TRUE"] += 1
+                    else:
+                        compression_counts["COMPRESSION_FALSE"] += 1
+
+                    if trend.get("trend_up") and compression.get("is_compression"):
+                        compression_counts["TREND_AND_COMPRESSION"] += 1
 
                     breakout = detect_compression_breakout(df_tf)
 
