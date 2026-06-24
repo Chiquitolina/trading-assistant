@@ -588,6 +588,11 @@ try:
                 "COMPRESSION_TRUE": 0,
                 "COMPRESSION_FALSE": 0,
                 "TREND_AND_COMPRESSION": 0,
+                
+                "RAW_BREAKOUT_UP": 0,
+                "BREAKOUT_TRUE": 0,
+                "BREAKOUT_FALSE": 0,
+                "RAW_BREAKOUT_BUT_FALSE": 0,
             }
 
             for symbol in symbols_to_process:
@@ -733,6 +738,36 @@ try:
                         compression_counts["TREND_AND_COMPRESSION"] += 1
 
                     breakout = detect_compression_breakout(df_tf)
+                    
+                    last_close = float(df_tf["close"].iloc[-1])
+                    watch = compression_machine.get(symbol)
+
+                    raw_breakout_up = (
+                        watch is not None
+                        and last_close > float(watch.compression_high)
+                    )
+
+                    if raw_breakout_up:
+                        compression_counts["RAW_BREAKOUT_UP"] += 1
+
+                    if breakout.get("breakout"):
+                        compression_counts["BREAKOUT_TRUE"] += 1
+                    else:
+                        compression_counts["BREAKOUT_FALSE"] += 1
+
+                    if raw_breakout_up and not breakout.get("breakout"):
+                        compression_counts["RAW_BREAKOUT_BUT_FALSE"] += 1
+
+                        print(
+                            f"[BREAKOUT AUDIT] "
+                            f"{symbol} "
+                            f"close={last_close:.8f} "
+                            f"compression_high={float(watch.compression_high):.8f} "
+                            f"breakout={breakout.get('breakout')} "
+                            f"reason={breakout.get('reason')} "
+                            f"score={breakout.get('score')} "
+                            f"volume_ratio={breakout.get('volume_ratio')}"
+                        )
 
                     compression_state = compression_machine.update(
                         symbol=symbol,
