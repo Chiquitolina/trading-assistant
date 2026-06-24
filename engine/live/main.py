@@ -567,6 +567,16 @@ try:
 
             batch_started = time.perf_counter()
             max_delay_seen = 0
+            
+            compression_counts = {
+                "IDLE": 0,
+                "WATCHING_COMPRESSION": 0,
+                "BREAKOUT_DETECTED": 0,
+                "WAIT_PULLBACK": 0,
+                "ENTRY_READY": 0,
+                "EXPIRED": 0,
+                "SKIPPED_NOT_ENOUGH_CANDLES": 0,
+            }
 
             for symbol in symbols_to_process:
 
@@ -662,6 +672,7 @@ try:
                     candles = buffer.get_candles(symbol, TRIGGER_TF)
 
                     if len(candles) < 80:
+                        compression_counts["SKIPPED_NOT_ENOUGH_CANDLES"] += 1
                         continue
 
                     df_tf = pd.DataFrame(candles)
@@ -696,6 +707,8 @@ try:
                         compression=compression,
                         breakout=breakout,
                     )
+                    
+                    compression_counts[compression_state["state"]] += 1
 
                     if compression_state["state"] != "IDLE":
                         print(
@@ -914,6 +927,16 @@ try:
                     opening_position = False
                     
             batch_elapsed = time.perf_counter() - batch_started
+
+            if STRATEGY_MODE == "compression":
+
+                alive_watches = len(compression_machine.watches)
+
+                print(
+                    f"[COMPRESSION SUMMARY] "
+                    f"alive_watches={alive_watches} "
+                    f"{compression_counts}"
+                )
 
             print(
                 f"\033[95m[15M BATCH SUMMARY]\033[0m "
