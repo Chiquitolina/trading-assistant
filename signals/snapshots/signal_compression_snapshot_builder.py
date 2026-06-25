@@ -90,8 +90,78 @@ class SignalCompressionSnapshotBuilder:
         df = pd.DataFrame(candles)
 
         if "close" in df.columns:
+            # EMAs
             df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
             df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+
+            # RSI 14
+            delta = df["close"].diff()
+            gain = delta.clip(lower=0)
+            loss = -delta.clip(upper=0)
+
+            avg_gain = gain.ewm(alpha=1 / 14, adjust=False).mean()
+            avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean()
+
+            rs = avg_gain / avg_loss
+            df["rsi"] = 100 - (100 / (1 + rs))
+
+            # MACD 12/26/9
+            ema12 = df["close"].ewm(span=12, adjust=False).mean()
+            ema26 = df["close"].ewm(span=26, adjust=False).mean()
+
+            df["macd"] = ema12 - ema26
+            df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+            df["macd_hist"] = df["macd"] - df["macd_signal"]
+
+        if {"high", "low", "close"}.issubset(df.columns):
+            # ADX 14
+            high = df["high"]
+            low = df["low"]
+            close = df["close"]
+
+            prev_close = close.shift(1)
+
+            tr = pd.concat([
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ], axis=1).max(axis=1)
+
+            up_move = high.diff()
+            down_move = -low.diff()
+
+            plus_dm = up_move.where(
+                (up_move > down_move) & (up_move > 0),
+                0.0
+            )
+
+            minus_dm = down_move.where(
+                (down_move > up_move) & (down_move > 0),
+                0.0
+            )
+
+            atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
+
+            plus_di = (
+                100
+                * plus_dm.ewm(alpha=1 / 14, adjust=False).mean()
+                / atr
+            )
+
+            minus_di = (
+                100
+                * minus_dm.ewm(alpha=1 / 14, adjust=False).mean()
+                / atr
+            )
+
+            dx = (
+                (plus_di - minus_di).abs()
+                / (plus_di + minus_di)
+            ) * 100
+
+            df["adx"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
+            df["plus_di"] = plus_di
+            df["minus_di"] = minus_di
 
         return df
 
