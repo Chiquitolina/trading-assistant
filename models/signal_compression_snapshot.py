@@ -16,6 +16,9 @@ class SignalCompressionSnapshot:
 
     volume_ratio_15m: float | None = None
     volume_ratio_1h: float | None = None
+    
+    atr_ratio_15m: float | None = None
+    range_ratio_15m: float | None = None
 
     compression_score: int | None = None
     compression_high: float | None = None

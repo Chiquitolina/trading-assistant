@@ -169,6 +169,8 @@ class SignalCompressionSnapshotBuilder:
             snapshot.compression_score,
             snapshot.compression_high,
             snapshot.compression_low,
+            snapshot.range_ratio_15m,
+            snapshot.atr_ratio_15m,
         ) = self._compression(df_15m)
 
         # ==========================
@@ -338,6 +340,31 @@ class SignalCompressionSnapshotBuilder:
             return None
 
         return round(last_vol / avg_vol, 2)
+    
+    def _atr_ratio(
+        self,
+        df: pd.DataFrame | None,
+        lookback: int = 10,
+        base_lookback: int = 40,
+    ) -> float | None:
+
+        if df is None or len(df) < base_lookback + 1:
+            return None
+
+        if not {"high", "low", "close"}.issubset(df.columns):
+            return None
+
+        atr = (
+            df["high"] - df["low"]
+        ).rolling(14).mean()
+
+        recent_atr = atr.iloc[-lookback - 1:-1].mean()
+        base_atr = atr.iloc[-base_lookback - 1:-1].mean()
+
+        if pd.isna(recent_atr) or pd.isna(base_atr) or base_atr <= 0:
+            return None
+
+        return round(float(recent_atr / base_atr), 4)
 
     def _move_pct(
         self,
@@ -394,10 +421,10 @@ class SignalCompressionSnapshotBuilder:
     ):
 
         if df is None or len(df) < base_lookback + 1:
-            return None, None, None
+            return None, None, None, None, None
 
         if not {"high", "low", "volume"}.issubset(df.columns):
-            return None, None, None
+            return None, None, None, None, None
 
         # últimas 10 velas previas
         recent = df.iloc[-lookback - 1:-1]
@@ -414,7 +441,7 @@ class SignalCompressionSnapshotBuilder:
         )
 
         if base_range <= 0:
-            return None, None, None
+            return None, None, None, None, None
 
         range_ratio = recent_range / base_range
 
@@ -433,10 +460,14 @@ class SignalCompressionSnapshotBuilder:
         compression_high = float(recent["high"].max())
         compression_low = float(recent["low"].min())
 
+        atr_ratio = self._atr_ratio(df)
+
         return (
             score,
             compression_high,
             compression_low,
+            round(range_ratio, 4),
+            atr_ratio,
         )
 
     # ==========================================================
