@@ -3801,123 +3801,6 @@ with tab_execution:
 
         st.error(f"Execution Analysis Error: {e}")
         st.exception(e)
-        
-with tab_compressions:
-    st.subheader("Compression Monitor")
-
-    compression_df = load_compression_snapshots()
-
-    if compression_df.empty:
-        st.info("No compression snapshots found yet.")
-    else:
-        compression_df["timestamp_dt"] = pd.to_datetime(
-            compression_df["timestamp"],
-            unit="ms",
-            errors="coerce"
-        )
-
-        compression_df["tags_text"] = compression_df["tags"].apply(
-            lambda x: ", ".join(x) if isinstance(x, list) else ""
-        )
-
-        symbols = sorted(compression_df["symbol"].dropna().unique())
-
-        selected_symbol = st.selectbox(
-            "Select coin",
-            options=["ALL"] + symbols,
-            index=0,
-            key="compression_symbol_filter"
-        )
-
-        view_df = compression_df.copy()
-
-        if selected_symbol != "ALL":
-            view_df = view_df[
-                view_df["symbol"] == selected_symbol
-            ].copy()
-            
-        st.caption(f"Selected: {selected_symbol} | Rows: {len(view_df)}")
-
-        cols = [
-            "symbol",
-            "timestamp_dt",
-            "trend_15m",
-            "trend_1h",
-            "trend_4h",
-            "compression_score",
-            "compression_high",
-            "compression_low",
-            "breakout_side",
-            "breakout_score",
-            "volume_ratio_15m",
-            "volume_ratio_1h",
-            "range_ratio_15m",
-            "atr_ratio_15m",
-            "move_3bars_pct",
-            "dist_ema20_1h_pct",
-            "tags_text",
-        ]
-
-        existing_cols = [c for c in cols if c in view_df.columns]
-
-        if selected_symbol != "ALL" and not view_df.empty:
-            row = view_df.iloc[0]
-
-            st.markdown("## Signal Analysis")
-
-            c1, c2, c3, c4 = st.columns(4)
-
-            c1.metric("Bias", row.get("trend_1h", "N/A"))
-            c2.metric("Compression", row.get("compression_score", "N/A"))
-            c3.metric("Breakout", row.get("breakout_side") or "NONE")
-            c4.metric("Move 3 Bars", f"{row.get('move_3bars_pct', 0):.2f}%")
-
-            st.markdown("---")
-
-            c1, c2, c3 = st.columns(3)
-
-            with c1:
-                st.markdown("### Trend")
-                st.write(f"15m: **{row.get('trend_15m', 'N/A')}**")
-                st.write(f"1h: **{row.get('trend_1h', 'N/A')}**")
-                st.write(f"4h: **{row.get('trend_4h', 'N/A')}**")
-
-            with c2:
-                st.markdown("### Compression")
-                st.write(f"Score: **{row.get('compression_score', 'N/A')}**")
-                st.write(f"Range Ratio: **{row.get('range_ratio_15m', 'N/A')}**")
-                st.write(f"ATR Ratio: **{row.get('atr_ratio_15m', 'N/A')}**")
-
-                st.write(f"High: **{row.get('compression_high', 'N/A')}**")
-                st.write(f"Low: **{row.get('compression_low', 'N/A')}**")
-
-            with c3:
-                st.markdown("### Entry Quality")
-                st.write(f"Vol 15m: **{row.get('volume_ratio_15m', 'N/A')}x**")
-                st.write(f"Vol 1h: **{row.get('volume_ratio_1h', 'N/A')}x**")
-                st.write(f"Dist EMA20 1h: **{row.get('dist_ema20_1h_pct', 'N/A')}%**")
-
-            tags = row.get("tags", [])
-
-            st.markdown("### Tags")
-
-            if isinstance(tags, list) and tags:
-                st.markdown(
-                    " ".join([
-                        f"<span style='background:#1f2937;padding:6px 10px;border-radius:8px;margin-right:6px'>{tag}</span>"
-                        for tag in tags
-                    ]),
-                    unsafe_allow_html=True
-                )
-
-        else:
-            st.dataframe(
-                view_df[existing_cols].sort_values(
-                    ["compression_score", "breakout_score", "move_3bars_pct"],
-                    ascending=[False, False, False]
-                ),
-                use_container_width=True
-            )
             
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
@@ -3926,6 +3809,7 @@ with tab_compression_pipeline:
 
     if pipeline_df.empty:
         st.info("No active compression watches.")
+
     else:
         # =========================
         # PIPELINE SCORE
@@ -3938,6 +3822,115 @@ with tab_compression_pipeline:
             + (1 - pipeline_df["atr_ratio"].fillna(1)) * 2
             + (1 - pipeline_df["volume_ratio"].fillna(1))
         ).round(2)
+
+        # =========================
+        # HELPERS VISUALES
+        # =========================
+
+        def fmt(value, default="N/A"):
+            if value is None or pd.isna(value):
+                return default
+            if isinstance(value, float):
+                return f"{value:.4f}"
+            return value
+
+        def bool_icon(value):
+            return "✅" if str(value).lower() in ["true", "1", "yes"] else "❌"
+
+        def score_color(score):
+            try:
+                score = float(score)
+            except Exception:
+                return "#6b7280"
+
+            if score >= 4:
+                return "#22c55e"
+            if score >= 3:
+                return "#eab308"
+            return "#ef4444"
+
+        def state_color(state):
+            return {
+                "ENTRY_READY": "#22c55e",
+                "WAIT_PULLBACK": "#eab308",
+                "BREAKOUT_DETECTED": "#38bdf8",
+                "WATCHING_COMPRESSION": "#a78bfa",
+                "EXPIRED": "#ef4444",
+            }.get(state, "#6b7280")
+
+        def card_html(row):
+            state = row.get("state", "N/A")
+            color = state_color(state)
+            qcolor = score_color(row.get("compression_score", 0))
+
+            return f"""
+            <div style="
+                border: 1px solid #263244;
+                border-left: 5px solid {color};
+                border-radius: 14px;
+                padding: 16px;
+                margin-bottom: 14px;
+                background: #0f172a;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            ">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <div style="font-size:20px; font-weight:800; color:#ffffff;">
+                            {row.get("symbol", "N/A")}
+                        </div>
+                        <div style="
+                            display:inline-block;
+                            margin-top:6px;
+                            padding:4px 9px;
+                            border-radius:999px;
+                            background:{color};
+                            color:#020617;
+                            font-size:12px;
+                            font-weight:800;
+                        ">
+                            {state}
+                        </div>
+                    </div>
+
+                    <div style="text-align:right;">
+                        <div style="font-size:12px; color:#94a3b8;">Pipeline Score</div>
+                        <div style="font-size:28px; font-weight:900; color:{color};">
+                            {fmt(row.get("pipeline_score"))}
+                        </div>
+                    </div>
+                </div>
+
+                <hr style="border-color:#1e293b; margin:14px 0;" />
+
+                <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:14px;">
+                    <div>
+                        <div style="color:#94a3b8; font-size:12px;">Compression</div>
+                        <div style="font-size:18px; font-weight:800; color:{qcolor};">
+                            Score {fmt(row.get("compression_score"))}
+                        </div>
+                        <div style="color:#cbd5e1;">Range: <b>{fmt(row.get("range_ratio"))}</b></div>
+                        <div style="color:#cbd5e1;">ATR: <b>{fmt(row.get("atr_ratio"))}</b></div>
+                        <div style="color:#cbd5e1;">Vol: <b>{fmt(row.get("volume_ratio"))}</b></div>
+                    </div>
+
+                    <div>
+                        <div style="color:#94a3b8; font-size:12px;">Trend / Age</div>
+                        <div style="color:#cbd5e1;">Trend Score: <b>{fmt(row.get("trend_score"))}</b></div>
+                        <div style="color:#cbd5e1;">Watch Age: <b>{fmt(row.get("watch_age"))}</b></div>
+                        <div style="color:#cbd5e1;">Waiting: <b>{fmt(row.get("candles_waiting"))}</b></div>
+                        <div style="color:#cbd5e1;">Reason: <b>{row.get("reason", "N/A")}</b></div>
+                    </div>
+
+                    <div>
+                        <div style="color:#94a3b8; font-size:12px;">Breakout / Pullback</div>
+                        <div style="color:#cbd5e1;">Breakout Price: <b>{fmt(row.get("breakout_price"))}</b></div>
+                        <div style="color:#cbd5e1;">Pullback: <b>{fmt(row.get("pullback_pct"))}</b></div>
+                        <div style="color:#cbd5e1;">Hold High: <b>{bool_icon(row.get("holds_compression_high"))}</b></div>
+                        <div style="color:#cbd5e1;">Continuation: <b>{bool_icon(row.get("continuation"))}</b></div>
+                    </div>
+                </div>
+            </div>
+            """
 
         # =========================
         # SUMMARY METRICS
@@ -3965,7 +3958,7 @@ with tab_compression_pipeline:
             "Inspect symbol",
             options=["ALL"] + symbols,
             index=0,
-            key="pipeline_symbol_filter",
+            key="pipeline_symbol_filter_cards",
         )
 
         min_score = st.slider(
@@ -3974,117 +3967,83 @@ with tab_compression_pipeline:
             max_value=float(max(20, pipeline_df["pipeline_score"].max())),
             value=0.0,
             step=0.5,
+            key="pipeline_min_score_cards",
         )
 
         view_df = pipeline_df.copy()
 
         if selected_symbol != "ALL":
-            view_df = view_df[view_df["symbol"] == selected_symbol].copy()
+            view_df = view_df[
+                view_df["symbol"] == selected_symbol
+            ].copy()
 
         view_df = view_df[
             view_df["pipeline_score"] >= min_score
         ].copy()
 
-        # =========================
-        # SELECTED SYMBOL DETAIL
-        # =========================
-
-        if selected_symbol != "ALL" and not view_df.empty:
-            row = view_df.iloc[0]
-
-            st.markdown(f"## {row.get('symbol')}")
-
-            c1, c2, c3, c4 = st.columns(4)
-
-            c1.metric("State", row.get("state", "N/A"))
-            c2.metric("Pipeline Score", row.get("pipeline_score", "N/A"))
-            c3.metric("Compression", row.get("compression_score", "N/A"))
-            c4.metric("Trend", row.get("trend_score", "N/A"))
-
-            c1, c2, c3 = st.columns(3)
-
-            with c1:
-                st.markdown("### Compression")
-                st.write(f"Range Ratio: **{row.get('range_ratio', 'N/A')}**")
-                st.write(f"ATR Ratio: **{row.get('atr_ratio', 'N/A')}**")
-                st.write(f"Volume Ratio: **{row.get('volume_ratio', 'N/A')}**")
-                st.write(f"High: **{row.get('compression_high', 'N/A')}**")
-                st.write(f"Low: **{row.get('compression_low', 'N/A')}**")
-
-            with c2:
-                st.markdown("### Breakout")
-                st.write(f"Price: **{row.get('breakout_price', 'N/A')}**")
-                st.write(f"Volume Ratio: **{row.get('breakout_volume_ratio', 'N/A')}**")
-                st.write(f"Reason: **{row.get('reason', 'N/A')}**")
-                st.write(f"Age: **{row.get('watch_age', 'N/A')} candles**")
-                st.write(f"Waiting: **{row.get('candles_waiting', 'N/A')} candles**")
-
-            with c3:
-                st.markdown("### Pullback")
-                st.write(f"Pullback %: **{row.get('pullback_pct', 'N/A')}**")
-                st.write(f"Valid Pullback: **{row.get('valid_pullback', 'N/A')}**")
-                st.write(f"Holds High: **{row.get('holds_compression_high', 'N/A')}**")
-                st.write(f"Continuation: **{row.get('continuation', 'N/A')}**")
-                st.write(f"Entry Ready: **{row.get('entry_ready', 'N/A')}**")
-
-            st.markdown("---")
+        view_df = view_df.sort_values(
+            ["pipeline_score", "compression_score", "trend_score", "watch_age"],
+            ascending=[False, False, False, False],
+        )
 
         # =========================
-        # FLAGS
+        # CARDS BY STATE
         # =========================
 
-        def icon_bool(value):
-            return "✅" if str(value).lower() in ["true", "1", "yes"] else "❌"
-
-        for col in [
-            "valid_pullback",
-            "holds_compression_high",
-            "continuation",
-            "entry_ready",
-        ]:
-            if col in view_df.columns:
-                view_df[col] = view_df[col].apply(icon_bool)
-
-        # =========================
-        # DISPLAY TABLE
-        # =========================
-
-        cols = [
-            "symbol",
-            "state",
-            "pipeline_score",
-            "reason",
-            "watch_age",
-            "candles_waiting",
-            "compression_score",
-            "trend_score",
-            "range_ratio",
-            "atr_ratio",
-            "volume_ratio",
-            "compression_high",
-            "compression_low",
-            "breakout_price",
-            "breakout_volume_ratio",
-            "pullback_pct",
-            "valid_pullback",
-            "holds_compression_high",
-            "continuation",
-            "entry_ready",
+        states_order = [
+            "ENTRY_READY",
+            "WAIT_PULLBACK",
+            "BREAKOUT_DETECTED",
+            "WATCHING_COMPRESSION",
+            "EXPIRED",
         ]
 
-        existing_cols = [c for c in cols if c in view_df.columns]
+        for state in states_order:
+            state_df = view_df[view_df["state"] == state]
 
-        display_df = (
-            view_df
-            .sort_values(
-                ["pipeline_score", "compression_score", "trend_score", "watch_age"],
-                ascending=[False, False, False, False],
+            if state_df.empty:
+                continue
+
+            st.markdown(f"### {state} ({len(state_df)})")
+
+            for _, row in state_df.iterrows():
+                st.markdown(
+                    card_html(row),
+                    unsafe_allow_html=True,
+                )
+
+        # =========================
+        # OPTIONAL RAW TABLE
+        # =========================
+
+        with st.expander("Raw pipeline table"):
+            cols = [
+                "symbol",
+                "state",
+                "pipeline_score",
+                "reason",
+                "watch_age",
+                "candles_waiting",
+                "compression_score",
+                "trend_score",
+                "range_ratio",
+                "atr_ratio",
+                "volume_ratio",
+                "compression_high",
+                "compression_low",
+                "breakout_price",
+                "breakout_volume_ratio",
+                "pullback_pct",
+                "valid_pullback",
+                "holds_compression_high",
+                "continuation",
+                "entry_ready",
+            ]
+
+            existing_cols = [c for c in cols if c in view_df.columns]
+
+            st.dataframe(
+                view_df[existing_cols],
+                use_container_width=True,
+                hide_index=True,
             )
-            [existing_cols]
-        )
-
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-        )
