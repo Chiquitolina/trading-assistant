@@ -3,11 +3,123 @@ import pandas as pd
 
 from models.signal_compression_snapshot import SignalCompressionSnapshot
 
-
 class SignalCompressionSnapshotBuilder:
 
     def __init__(self, buffer):
         self.buffer = buffer
+
+
+    def _candle_progress_pct(self, df: pd.DataFrame | None) -> float | None:
+        if df is None or df.empty:
+            return None
+
+        if "timestamp" not in df.columns:
+            return None
+
+        last_ts = int(df.iloc[-1]["timestamp"])
+
+        # 15m en ms
+        tf_ms = 15 * 60 * 1000
+
+        now_ms = int(time.time() * 1000)
+
+        progress = ((now_ms - last_ts) / tf_ms) * 100
+
+        if progress < 0:
+            return 0.0
+
+        if progress > 100:
+            return 100.0
+
+        return round(progress, 2)
+
+    def _btc_metrics(
+        self,
+        symbol: str,
+        df_symbol: pd.DataFrame | None,
+        tf: str = "1h",
+        lookback: int = 168,  # 7 días de velas 1h
+    ):
+        if symbol == "BTCUSDT":
+            return None, None, None, None, None
+
+        df_btc = self._df("BTCUSDT", tf)
+
+        if df_symbol is None or df_btc is None:
+            return None, None, None, None, None
+
+        if len(df_symbol) < lookback or len(df_btc) < lookback:
+            return None, None, None, None, None
+
+        if "close" not in df_symbol.columns or "close" not in df_btc.columns:
+            return None, None, None, None, None
+
+        s = df_symbol[["timestamp", "close"]].tail(lookback).copy()
+        b = df_btc[["timestamp", "close"]].tail(lookback).copy()
+
+        s = s.rename(columns={"close": "symbol_close"})
+        b = b.rename(columns={"close": "btc_close"})
+
+        merged = pd.merge(
+            s,
+            b,
+            on="timestamp",
+            how="inner"
+        )
+
+        if len(merged) < 30:
+            return None, None, None, None, None
+
+        merged["symbol_ret"] = merged["symbol_close"].pct_change()
+        merged["btc_ret"] = merged["btc_close"].pct_change()
+
+        merged = merged.dropna(subset=["symbol_ret", "btc_ret"])
+
+        if len(merged) < 30:
+            return None, None, None, None, None
+
+        symbol_ret = merged["symbol_ret"]
+        btc_ret = merged["btc_ret"]
+
+        btc_var = btc_ret.var()
+
+        if btc_var == 0:
+            return None, None, None, None, None
+
+        corr = symbol_ret.corr(btc_ret)
+        beta = symbol_ret.cov(btc_ret) / btc_var
+        r2 = corr ** 2 if corr is not None else None
+
+        symbol_vol = symbol_ret.std()
+        btc_vol = btc_ret.std()
+
+        vol_ratio = (
+            symbol_vol / btc_vol
+            if btc_vol and btc_vol > 0
+            else None
+        )
+
+        symbol_return_7d = (
+            merged["symbol_close"].iloc[-1]
+            / merged["symbol_close"].iloc[0]
+            - 1
+        ) * 100
+
+        btc_return_7d = (
+            merged["btc_close"].iloc[-1]
+            / merged["btc_close"].iloc[0]
+            - 1
+        ) * 100
+
+        outperformance = symbol_return_7d - btc_return_7d
+
+        return (
+            round(float(corr), 4) if corr is not None else None,
+            round(float(beta), 4) if beta is not None else None,
+            round(float(r2), 4) if r2 is not None else None,
+            round(float(vol_ratio), 4) if vol_ratio is not None else None,
+            round(float(outperformance), 4),
+        )
 
     def build(self, symbol: str) -> SignalCompressionSnapshot | None:
 
@@ -48,6 +160,7 @@ class SignalCompressionSnapshotBuilder:
         # ==========================
         snapshot.move_3bars_pct = self._move_pct(df_15m, bars=3)
         snapshot.dist_ema20_1h_pct = self._dist_ema_pct(df_1h, "ema20")
+        snapshot.candle_progress_pct = self._candle_progress_pct(df_15m)
 
         # ==========================
         # COMPRESSION
@@ -69,6 +182,14 @@ class SignalCompressionSnapshotBuilder:
             snapshot.compression_high,
             snapshot.compression_low,
         )
+        
+        (
+            snapshot.btc_corr_7d,
+            snapshot.beta_vs_btc,
+            snapshot.r2_vs_btc,
+            snapshot.vol_ratio_vs_btc,
+            snapshot.outperformance_7d,
+        ) = self._btc_metrics(symbol, df_1h)
 
         # ==========================
         # TAGS
