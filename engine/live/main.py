@@ -768,6 +768,20 @@ try:
                             f"score={breakout.get('score')} "
                             f"volume_ratio={breakout.get('volume_ratio')}"
                         )
+                        
+                    # <<< AGREGAR ACÁ >>>
+                    if watch is not None:
+                        print(
+                            f"[WATCH AUDIT] "
+                            f"{symbol} "
+                            f"state={watch.state.value} "
+                            f"created={watch.created_ts} "
+                            f"compression_now={compression.get('is_compression')} "
+                            f"breakout={breakout.get('breakout')} "
+                            f"reason={breakout.get('reason')} "
+                            f"close={last_close:.8f} "
+                            f"watch_high={float(watch.compression_high):.8f}"
+                        )
 
                     compression_state = compression_machine.update(
                         symbol=symbol,
