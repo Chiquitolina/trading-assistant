@@ -2,6 +2,7 @@ import os
 import sys
 import json
 from pathlib import Path
+import streamlit.components.v1 as components
 
 import pandas as pd
 import streamlit as st
@@ -4007,7 +4008,11 @@ with tab_compression_pipeline:
             st.markdown(f"### {state} ({len(state_df)})")
     
         for _, row in state_df.iterrows():
-            st.html(card_html(row))
+            components.html(
+                card_html(row),
+                height=260,
+                scrolling=False,
+            )
 
         # =========================
         # OPTIONAL RAW TABLE
