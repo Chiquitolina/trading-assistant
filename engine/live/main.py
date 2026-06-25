@@ -4,6 +4,9 @@ import time
 import threading
 import argparse
 
+import json
+from pathlib import Path
+
 import pandas as pd
 from signals.indicators.direction import trade_direction
 
@@ -1020,6 +1023,19 @@ try:
                     f"alive_watches={alive_watches} "
                     f"{compression_counts}"
                 )
+                
+                pipeline_path = Path("compression_pipeline.json")
+                tmp_path = pipeline_path.with_suffix(".json.tmp")
+
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        compression_machine.active_watches(),
+                        f,
+                        indent=4,
+                        default=str
+                    )
+
+                tmp_path.replace(pipeline_path)
 
             print(
                 f"\033[95m[15M BATCH SUMMARY]\033[0m "

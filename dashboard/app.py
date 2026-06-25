@@ -81,6 +81,21 @@ def load_compression_snapshots(base_dir="compression_snapshots"):
 
     return pd.DataFrame(rows)
 
+def load_compression_pipeline(path="compression_pipeline.json"):
+    path = Path(path)
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        return pd.DataFrame(data)
+
+    except Exception:
+        return pd.DataFrame()
+
 def filter_by_window(df, days=None, yesterday=False):
     if df.empty or "entry_ts_dt" not in df.columns:
         return pd.DataFrame()
@@ -946,14 +961,15 @@ if df_raw.empty:
     st.info("📭 No trades yet")
     st.stop()
     
-tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution, tab_compressions = st.tabs([
+tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution, tab_compressions, tab_compression_pipeline = st.tabs([
     "📊 Overview",
     "📐 MFE / MAE",
     "🧠 Setups",
     "🎯 Swings",
     "❌ Bad Decisions x",
     "⏱️ Execution Analysis",
-    "Compressions"
+    "Compressions",
+    "Compression Pipeline"
 ])
 
 with tab_overview:
@@ -3902,4 +3918,44 @@ with tab_compressions:
                 ),
                 use_container_width=True
             )
+            
+with tab_compression_pipeline:
+    st.subheader("Compression Pipeline")
+
+    pipeline_df = load_compression_pipeline()
+
+    if pipeline_df.empty:
+        st.info("No active compression watches.")
+    else:
+        cols = [
+            "symbol",
+            "state",
+            "reason",
+            "watch_age",
+            "candles_waiting",
+            "compression_score",
+            "trend_score",
+            "range_ratio",
+            "atr_ratio",
+            "volume_ratio",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "breakout_volume_ratio",
+            "pullback_pct",
+            "valid_pullback",
+            "holds_compression_high",
+            "continuation",
+            "entry_ready",
+        ]
+
+        existing_cols = [c for c in cols if c in pipeline_df.columns]
+
+        st.dataframe(
+            pipeline_df[existing_cols].sort_values(
+                ["state", "compression_score", "watch_age"],
+                ascending=[True, False, False]
+            ),
+            use_container_width=True
+        )
         
