@@ -269,7 +269,7 @@ trade_manager = TradeManager(
 
 position_manager = PositionManager(exchange)
 
-if STRATEGY_MODE == "direction":
+if STRATEGY_MODE in ("direction", "compression"):
     execution_strategy = DirectionExecutionStrategy()
 else:
     execution_strategy = DefaultExecutionStrategy()
