@@ -3928,23 +3928,16 @@ with tab_compression_pipeline:
         st.info("No active compression watches.")
     else:
         # =========================
-        # STATE PRIORITY
+        # PIPELINE SCORE
         # =========================
 
-        state_priority = {
-            "ENTRY_READY": 1,
-            "WAIT_PULLBACK": 2,
-            "BREAKOUT_DETECTED": 3,
-            "WATCHING_COMPRESSION": 4,
-            "EXPIRED": 5,
-            "IDLE": 6,
-        }
-
-        pipeline_df["_state_priority"] = (
-            pipeline_df["state"]
-            .map(state_priority)
-            .fillna(99)
-        )
+        pipeline_df["pipeline_score"] = (
+            pipeline_df["compression_score"].fillna(0) * 2
+            + pipeline_df["trend_score"].fillna(0)
+            + (1 - pipeline_df["range_ratio"].fillna(1)) * 2
+            + (1 - pipeline_df["atr_ratio"].fillna(1)) * 2
+            + (1 - pipeline_df["volume_ratio"].fillna(1))
+        ).round(2)
 
         # =========================
         # SUMMARY METRICS
@@ -3963,6 +3956,80 @@ with tab_compression_pipeline:
         st.markdown("---")
 
         # =========================
+        # FILTERS
+        # =========================
+
+        symbols = sorted(pipeline_df["symbol"].dropna().unique())
+
+        selected_symbol = st.selectbox(
+            "Inspect symbol",
+            options=["ALL"] + symbols,
+            index=0,
+            key="pipeline_symbol_filter",
+        )
+
+        min_score = st.slider(
+            "Min Pipeline Score",
+            min_value=0.0,
+            max_value=float(max(20, pipeline_df["pipeline_score"].max())),
+            value=0.0,
+            step=0.5,
+        )
+
+        view_df = pipeline_df.copy()
+
+        if selected_symbol != "ALL":
+            view_df = view_df[view_df["symbol"] == selected_symbol].copy()
+
+        view_df = view_df[
+            view_df["pipeline_score"] >= min_score
+        ].copy()
+
+        # =========================
+        # SELECTED SYMBOL DETAIL
+        # =========================
+
+        if selected_symbol != "ALL" and not view_df.empty:
+            row = view_df.iloc[0]
+
+            st.markdown(f"## {row.get('symbol')}")
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric("State", row.get("state", "N/A"))
+            c2.metric("Pipeline Score", row.get("pipeline_score", "N/A"))
+            c3.metric("Compression", row.get("compression_score", "N/A"))
+            c4.metric("Trend", row.get("trend_score", "N/A"))
+
+            c1, c2, c3 = st.columns(3)
+
+            with c1:
+                st.markdown("### Compression")
+                st.write(f"Range Ratio: **{row.get('range_ratio', 'N/A')}**")
+                st.write(f"ATR Ratio: **{row.get('atr_ratio', 'N/A')}**")
+                st.write(f"Volume Ratio: **{row.get('volume_ratio', 'N/A')}**")
+                st.write(f"High: **{row.get('compression_high', 'N/A')}**")
+                st.write(f"Low: **{row.get('compression_low', 'N/A')}**")
+
+            with c2:
+                st.markdown("### Breakout")
+                st.write(f"Price: **{row.get('breakout_price', 'N/A')}**")
+                st.write(f"Volume Ratio: **{row.get('breakout_volume_ratio', 'N/A')}**")
+                st.write(f"Reason: **{row.get('reason', 'N/A')}**")
+                st.write(f"Age: **{row.get('watch_age', 'N/A')} candles**")
+                st.write(f"Waiting: **{row.get('candles_waiting', 'N/A')} candles**")
+
+            with c3:
+                st.markdown("### Pullback")
+                st.write(f"Pullback %: **{row.get('pullback_pct', 'N/A')}**")
+                st.write(f"Valid Pullback: **{row.get('valid_pullback', 'N/A')}**")
+                st.write(f"Holds High: **{row.get('holds_compression_high', 'N/A')}**")
+                st.write(f"Continuation: **{row.get('continuation', 'N/A')}**")
+                st.write(f"Entry Ready: **{row.get('entry_ready', 'N/A')}**")
+
+            st.markdown("---")
+
+        # =========================
         # FLAGS
         # =========================
 
@@ -3975,16 +4042,17 @@ with tab_compression_pipeline:
             "continuation",
             "entry_ready",
         ]:
-            if col in pipeline_df.columns:
-                pipeline_df[col] = pipeline_df[col].apply(icon_bool)
+            if col in view_df.columns:
+                view_df[col] = view_df[col].apply(icon_bool)
 
         # =========================
-        # DISPLAY COLUMNS
+        # DISPLAY TABLE
         # =========================
 
         cols = [
             "symbol",
             "state",
+            "pipeline_score",
             "reason",
             "watch_age",
             "candles_waiting",
@@ -4004,13 +4072,13 @@ with tab_compression_pipeline:
             "entry_ready",
         ]
 
-        existing_cols = [c for c in cols if c in pipeline_df.columns]
+        existing_cols = [c for c in cols if c in view_df.columns]
 
         display_df = (
-            pipeline_df
+            view_df
             .sort_values(
-                ["_state_priority", "compression_score", "trend_score", "watch_age"],
-                ascending=[True, False, False, False],
+                ["pipeline_score", "compression_score", "trend_score", "watch_age"],
+                ascending=[False, False, False, False],
             )
             [existing_cols]
         )
