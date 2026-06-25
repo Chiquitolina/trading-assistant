@@ -3927,6 +3927,61 @@ with tab_compression_pipeline:
     if pipeline_df.empty:
         st.info("No active compression watches.")
     else:
+        # =========================
+        # STATE PRIORITY
+        # =========================
+
+        state_priority = {
+            "ENTRY_READY": 1,
+            "WAIT_PULLBACK": 2,
+            "BREAKOUT_DETECTED": 3,
+            "WATCHING_COMPRESSION": 4,
+            "EXPIRED": 5,
+            "IDLE": 6,
+        }
+
+        pipeline_df["_state_priority"] = (
+            pipeline_df["state"]
+            .map(state_priority)
+            .fillna(99)
+        )
+
+        # =========================
+        # SUMMARY METRICS
+        # =========================
+
+        state_counts = pipeline_df["state"].value_counts()
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+
+        c1.metric("ENTRY_READY", int(state_counts.get("ENTRY_READY", 0)))
+        c2.metric("WAIT_PULLBACK", int(state_counts.get("WAIT_PULLBACK", 0)))
+        c3.metric("BREAKOUT", int(state_counts.get("BREAKOUT_DETECTED", 0)))
+        c4.metric("WATCHING", int(state_counts.get("WATCHING_COMPRESSION", 0)))
+        c5.metric("EXPIRED", int(state_counts.get("EXPIRED", 0)))
+
+        st.markdown("---")
+
+        # =========================
+        # FLAGS
+        # =========================
+
+        def icon_bool(value):
+            return "✅" if str(value).lower() in ["true", "1", "yes"] else "❌"
+
+        for col in [
+            "valid_pullback",
+            "holds_compression_high",
+            "continuation",
+            "entry_ready",
+        ]:
+            if col in pipeline_df.columns:
+                pipeline_df[col] = pipeline_df[col].apply(icon_bool)
+
+        # =========================
+        # DISPLAY COLUMNS
+        # =========================
+
         cols = [
             "symbol",
             "state",
@@ -3951,11 +4006,17 @@ with tab_compression_pipeline:
 
         existing_cols = [c for c in cols if c in pipeline_df.columns]
 
-        st.dataframe(
-            pipeline_df[existing_cols].sort_values(
-                ["state", "compression_score", "watch_age"],
-                ascending=[True, False, False]
-            ),
-            use_container_width=True
+        display_df = (
+            pipeline_df
+            .sort_values(
+                ["_state_priority", "compression_score", "trend_score", "watch_age"],
+                ascending=[True, False, False, False],
+            )
+            [existing_cols]
         )
-        
+
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+        )
