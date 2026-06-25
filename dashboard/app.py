@@ -61,6 +61,26 @@ def safe_metric(metrics_dict, key, is_percent=False):
 
     return round(value, 2)
 
+def load_compression_snapshots(base_dir="compression_snapshots"):
+    base_path = Path(base_dir)
+
+    rows = []
+
+    if not base_path.exists():
+        return pd.DataFrame()
+
+    for path in base_path.glob("*.json"):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            rows.append(data)
+
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
+
 def filter_by_window(df, days=None, yesterday=False):
     if df.empty or "entry_ts_dt" not in df.columns:
         return pd.DataFrame()
@@ -926,13 +946,14 @@ if df_raw.empty:
     st.info("📭 No trades yet")
     st.stop()
     
-tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution = st.tabs([
+tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution, tab_compressions = st.tabs([
     "📊 Overview",
     "📐 MFE / MAE",
     "🧠 Setups",
     "🎯 Swings",
-    "❌ Bad Decisions",
+    "❌ Bad Decisions x",
     "⏱️ Execution Analysis",
+    "Compressions"
 ])
 
 with tab_overview:
@@ -3764,4 +3785,68 @@ with tab_execution:
 
         st.error(f"Execution Analysis Error: {e}")
         st.exception(e)
+        
+with tab_compressions:
+    st.subheader("Compression Monitor")
+
+    compression_df = load_compression_snapshots()
+
+    if compression_df.empty:
+        st.info("No compression snapshots found yet.")
+    else:
+        compression_df["timestamp_dt"] = pd.to_datetime(
+            compression_df["timestamp"],
+            unit="ms",
+            errors="coerce"
+        )
+
+        compression_df["tags_text"] = compression_df["tags"].apply(
+            lambda x: ", ".join(x) if isinstance(x, list) else ""
+        )
+
+        symbols = sorted(compression_df["symbol"].dropna().unique())
+
+        selected_symbol = st.selectbox(
+            "Select coin",
+            options=["ALL"] + symbols,
+            index=0,
+            key="compression_symbol_filter"
+        )
+
+        view_df = compression_df.copy()
+
+        if selected_symbol != "ALL":
+            view_df = view_df[
+                view_df["symbol"] == selected_symbol
+            ].copy()
+            
+        st.caption(f"Selected: {selected_symbol} | Rows: {len(view_df)}")
+
+        cols = [
+            "symbol",
+            "timestamp_dt",
+            "trend_15m",
+            "trend_1h",
+            "trend_4h",
+            "compression_score",
+            "compression_high",
+            "compression_low",
+            "breakout_side",
+            "breakout_score",
+            "volume_ratio_15m",
+            "volume_ratio_1h",
+            "move_3bars_pct",
+            "dist_ema20_1h_pct",
+            "tags_text",
+        ]
+
+        existing_cols = [c for c in cols if c in view_df.columns]
+
+        st.dataframe(
+            view_df[existing_cols].sort_values(
+                ["compression_score", "breakout_score", "move_3bars_pct"],
+                ascending=[False, False, False]
+            ),
+            use_container_width=True
+        )
         

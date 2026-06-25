@@ -102,3 +102,5 @@ trailing_sl_thresholds.csv
 trend_detector_test.csv
 compression_breakout_test.csv
 compression_state_machine_test.csv
+compression_snapshots
+live_signals_multi_asset.csv
