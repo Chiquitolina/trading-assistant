@@ -426,10 +426,7 @@ class SignalCompressionSnapshotBuilder:
         if not {"high", "low", "volume"}.issubset(df.columns):
             return None, None, None, None, None
 
-        # últimas 10 velas previas
         recent = df.iloc[-lookback - 1:-1]
-
-        # últimas 40 velas previas
         base = df.iloc[-base_lookback - 1:-1]
 
         recent_range = float(
@@ -444,23 +441,30 @@ class SignalCompressionSnapshotBuilder:
             return None, None, None, None, None
 
         range_ratio = recent_range / base_range
+        volume_ratio = self._volume_ratio(df)
+        atr_ratio = self._atr_ratio(df)
 
         score = 0
 
+        # Range compression
         if range_ratio < 0.35:
             score += 2
         elif range_ratio < 0.50:
             score += 1
 
-        volume_ratio = self._volume_ratio(df)
+        # ATR compression
+        if atr_ratio is not None:
+            if atr_ratio < 0.70:
+                score += 2
+            elif atr_ratio < 0.85:
+                score += 1
 
+        # Volume compression
         if volume_ratio is not None and volume_ratio < 0.75:
             score += 1
 
         compression_high = float(recent["high"].max())
         compression_low = float(recent["low"].min())
-
-        atr_ratio = self._atr_ratio(df)
 
         return (
             score,
@@ -469,7 +473,7 @@ class SignalCompressionSnapshotBuilder:
             round(range_ratio, 4),
             atr_ratio,
         )
-
+        
     # ==========================================================
     # BREAKOUT
     # ==========================================================

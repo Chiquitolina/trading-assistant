@@ -3835,6 +3835,8 @@ with tab_compressions:
             "breakout_score",
             "volume_ratio_15m",
             "volume_ratio_1h",
+            "range_ratio_15m",
+            "atr_ratio_15m",
             "move_3bars_pct",
             "dist_ema20_1h_pct",
             "tags_text",
@@ -3867,6 +3869,9 @@ with tab_compressions:
             with c2:
                 st.markdown("### Compression")
                 st.write(f"Score: **{row.get('compression_score', 'N/A')}**")
+                st.write(f"Range Ratio: **{row.get('range_ratio_15m', 'N/A')}**")
+                st.write(f"ATR Ratio: **{row.get('atr_ratio_15m', 'N/A')}**")
+
                 st.write(f"High: **{row.get('compression_high', 'N/A')}**")
                 st.write(f"Low: **{row.get('compression_low', 'N/A')}**")
 
