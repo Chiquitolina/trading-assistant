@@ -3842,11 +3842,59 @@ with tab_compressions:
 
         existing_cols = [c for c in cols if c in view_df.columns]
 
-        st.dataframe(
-            view_df[existing_cols].sort_values(
-                ["compression_score", "breakout_score", "move_3bars_pct"],
-                ascending=[False, False, False]
-            ),
-            use_container_width=True
-        )
+        if selected_symbol != "ALL" and not view_df.empty:
+            row = view_df.iloc[0]
+
+            st.markdown("## Signal Analysis")
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric("Bias", row.get("trend_1h", "N/A"))
+            c2.metric("Compression", row.get("compression_score", "N/A"))
+            c3.metric("Breakout", row.get("breakout_side") or "NONE")
+            c4.metric("Move 3 Bars", f"{row.get('move_3bars_pct', 0):.2f}%")
+
+            st.markdown("---")
+
+            c1, c2, c3 = st.columns(3)
+
+            with c1:
+                st.markdown("### Trend")
+                st.write(f"15m: **{row.get('trend_15m', 'N/A')}**")
+                st.write(f"1h: **{row.get('trend_1h', 'N/A')}**")
+                st.write(f"4h: **{row.get('trend_4h', 'N/A')}**")
+
+            with c2:
+                st.markdown("### Compression")
+                st.write(f"Score: **{row.get('compression_score', 'N/A')}**")
+                st.write(f"High: **{row.get('compression_high', 'N/A')}**")
+                st.write(f"Low: **{row.get('compression_low', 'N/A')}**")
+
+            with c3:
+                st.markdown("### Entry Quality")
+                st.write(f"Vol 15m: **{row.get('volume_ratio_15m', 'N/A')}x**")
+                st.write(f"Vol 1h: **{row.get('volume_ratio_1h', 'N/A')}x**")
+                st.write(f"Dist EMA20 1h: **{row.get('dist_ema20_1h_pct', 'N/A')}%**")
+
+            tags = row.get("tags", [])
+
+            st.markdown("### Tags")
+
+            if isinstance(tags, list) and tags:
+                st.markdown(
+                    " ".join([
+                        f"<span style='background:#1f2937;padding:6px 10px;border-radius:8px;margin-right:6px'>{tag}</span>"
+                        for tag in tags
+                    ]),
+                    unsafe_allow_html=True
+                )
+
+        else:
+            st.dataframe(
+                view_df[existing_cols].sort_values(
+                    ["compression_score", "breakout_score", "move_3bars_pct"],
+                    ascending=[False, False, False]
+                ),
+                use_container_width=True
+            )
         
