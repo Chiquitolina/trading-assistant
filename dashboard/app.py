@@ -4005,12 +4005,9 @@ with tab_compression_pipeline:
                 continue
 
             st.markdown(f"### {state} ({len(state_df)})")
-
-            for _, row in state_df.iterrows():
-                st.markdown(
-                    card_html(row),
-                    unsafe_allow_html=True,
-                )
+    
+        for _, row in state_df.iterrows():
+            st.html(card_html(row))
 
         # =========================
         # OPTIONAL RAW TABLE
