@@ -1036,6 +1036,8 @@ try:
                     )
 
                 tmp_path.replace(pipeline_path)
+                
+                print(f"[PIPELINE] Saved -> {pipeline_path.resolve()}")
 
             print(
                 f"\033[95m[15M BATCH SUMMARY]\033[0m "
