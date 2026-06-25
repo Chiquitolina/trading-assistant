@@ -770,7 +770,7 @@ try:
                         )
                         
                     # <<< AGREGAR ACÁ >>>
-                    if watch is not None:
+                    if watch is not None and raw_breakout_up and not breakout.get("breakout"):
                         print(
                             f"[WATCH AUDIT] "
                             f"{symbol} "
