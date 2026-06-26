@@ -101,6 +101,7 @@ class CompressionStateMachine:
         symbol: str,
         close: float,
         low: float,
+        high: float
     ):
         if not watch.breakout_price:
             watch.state = CompressionState.EXPIRED
@@ -131,6 +132,41 @@ class CompressionStateMachine:
 
         watch.pullback_detected = valid_pullback
         watch.continuation_detected = continuation
+        
+        print(
+            "\n"
+            "========================================\n"
+            f"[COMPRESSION PIPELINE] {symbol}\n"
+            "========================================\n"
+            f"State               : {watch.state.value}\n"
+            f"Waiting             : {watch.candles_waiting}/{self.max_pullback_candles}\n"
+            "\n"
+            "----- BREAKOUT -----\n"
+            f"Breakout Price      : {watch.breakout_price:.8f}\n"
+            f"Breakout High       : {watch.breakout_high:.8f}\n"
+            f"Compression High    : {watch.compression_high:.8f}\n"
+            f"Compression Low     : {watch.compression_low:.8f}\n"
+            "\n"
+            "----- CURRENT CANDLE -----\n"
+            f"High                : {high:.8f}\n"
+            f"Low                 : {low:.8f}\n"
+            f"Close               : {close:.8f}\n"
+            "\n"
+            "----- EVALUATION -----\n"
+            f"Pullback %          : {pullback_pct:.3f}%\n"
+            f"Hold Compression    : {holds_compression_high}\n"
+            f"Continuation        : {continuation}\n"
+            f"Valid Pullback      : {valid_pullback}\n"
+            "\n"
+            "----- FLAGS -----\n"
+            f"breakout_detected   : {watch.breakout_detected}\n"
+            f"pullback_detected   : {watch.pullback_detected}\n"
+            f"continuation_detect : {watch.continuation_detected}\n"
+            f"entry_ready         : {watch.entry_ready}\n"
+            "\n"
+            f"Reason              : {watch.reason}\n"
+            "========================================\n"
+        )
 
         print(
             f"[PULLBACK DEBUG] "
@@ -147,6 +183,20 @@ class CompressionStateMachine:
         )
 
         if valid_pullback and continuation:
+            print(
+                "\n"
+                "########################################\n"
+                f"[ENTRY READY] {symbol}\n"
+                "########################################\n"
+                f"Entry Price      : {close:.8f}\n"
+                f"Current High     : {high:.8f}\n"
+                f"Current Low      : {low:.8f}\n"
+                f"Pullback %       : {pullback_pct:.3f}%\n"
+                f"Compression High : {watch.compression_high:.8f}\n"
+                f"Breakout Price   : {watch.breakout_price:.8f}\n"
+                "########################################\n"
+            )
+
             watch.state = CompressionState.ENTRY_READY
             watch.entry_ready = True
             watch.entry_price = close
@@ -155,6 +205,23 @@ class CompressionStateMachine:
             result = watch.to_dict()
             self.remove(symbol)
             return result
+
+        print(
+            "\n"
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+            f"[PULLBACK REJECTED] {symbol}\n"
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+            f"Pullback %     : {pullback_pct:.3f}%\n"
+            f"Hold High      : {holds_compression_high}\n"
+            f"Continuation   : {continuation}\n"
+            f"Valid Pullback : {valid_pullback}\n"
+            f"Close          : {close:.8f}\n"
+            f"High           : {high:.8f}\n"
+            f"Low            : {low:.8f}\n"
+            f"Breakout Price : {watch.breakout_price:.8f}\n"
+            f"Compression Hi : {watch.compression_high:.8f}\n"
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+        )
 
         watch.reason = "waiting_valid_pullback"
         return watch.to_dict()
@@ -253,6 +320,7 @@ class CompressionStateMachine:
                     symbol=symbol,
                     close=close,
                     low=low,
+                    high=high
                 )
 
             return watch.to_dict()
@@ -267,6 +335,7 @@ class CompressionStateMachine:
                 symbol=symbol,
                 close=close,
                 low=low,
+                high=high
             )
 
         if watch.state == CompressionState.WAIT_PULLBACK:
@@ -283,6 +352,7 @@ class CompressionStateMachine:
                 symbol=symbol,
                 close=close,
                 low=low,
+                high=high
             )
 
         return watch.to_dict()
