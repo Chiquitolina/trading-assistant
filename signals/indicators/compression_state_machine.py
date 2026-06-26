@@ -36,6 +36,8 @@ class CompressionWatch:
     breakout_price: Optional[float] = None
     breakout_high: Optional[float] = None
     breakout_volume_ratio: Optional[float] = None
+    breakout_extension_pct: Optional[float] = None
+    breakout_extension_atr: Optional[float] = None
 
     candles_waiting: int = 0
     max_wait_candles: int = 5
@@ -133,6 +135,18 @@ class CompressionStateMachine:
         watch.pullback_detected = valid_pullback
         watch.continuation_detected = continuation
         
+        breakout_ext_pct_text = (
+            f"{watch.breakout_extension_pct:.3f}%"
+            if watch.breakout_extension_pct is not None
+            else "None"
+        )
+
+        breakout_ext_atr_text = (
+            f"{watch.breakout_extension_atr:.3f}"
+            if watch.breakout_extension_atr is not None
+            else "None"
+        )
+        
         print(
             "\n"
             "========================================\n"
@@ -142,6 +156,8 @@ class CompressionStateMachine:
             f"Waiting             : {watch.candles_waiting}/{self.max_pullback_candles}\n"
             "\n"
             "----- BREAKOUT -----\n"
+            f"Breakout Ext %      : {breakout_ext_pct_text}\n"
+            f"Breakout Ext ATR    : {breakout_ext_atr_text}\n"
             f"Breakout Price      : {watch.breakout_price:.8f}\n"
             f"Breakout High       : {watch.breakout_high:.8f}\n"
             f"Compression High    : {watch.compression_high:.8f}\n"
@@ -194,6 +210,8 @@ class CompressionStateMachine:
                 f"Pullback %       : {pullback_pct:.3f}%\n"
                 f"Compression High : {watch.compression_high:.8f}\n"
                 f"Breakout Price   : {watch.breakout_price:.8f}\n"
+                f"Breakout Ext %  : {breakout_ext_pct_text}\n"
+                f"Breakout Ext ATR: {breakout_ext_atr_text}\n"
                 "########################################\n"
             )
 
@@ -233,12 +251,14 @@ class CompressionStateMachine:
         trend: dict,
         compression: dict,
         breakout: dict,
+        atr: float | None = None,
     ):
         ts = normalize_timestamp(candle["timestamp"])
 
         close = float(candle["close"])
         high = float(candle["high"])
         low = float(candle["low"])
+        atr = float(atr) if atr is not None else None
 
         watch = self.watches.get(symbol)
 
@@ -311,6 +331,14 @@ class CompressionStateMachine:
                 watch.breakout_price = close
                 watch.breakout_high = high
                 watch.breakout_volume_ratio = breakout.get("volume_ratio")
+                
+                watch.breakout_extension_pct = (
+                    (close - watch.compression_high) / watch.compression_high
+                ) * 100 if watch.compression_high else None
+
+                watch.breakout_extension_atr = (
+                    (close - watch.compression_high) / atr
+                ) if atr and atr > 0 else None
 
                 watch.candles_waiting = 0
                 watch.reason = "breakout_detected_waiting_pullback"

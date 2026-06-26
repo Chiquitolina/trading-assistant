@@ -3,6 +3,7 @@ import os
 import time
 import threading
 import argparse
+from signals.indicators.atr import add_atr
 
 import json
 from pathlib import Path
@@ -706,7 +707,11 @@ try:
 
                     df_tf = pd.DataFrame(candles)
 
+                    df_tf = add_atr(df_tf)
+
                     prev_df = df_tf.iloc[:-1].copy()
+
+                    atr = float(df_tf["atr"].iloc[-1])
 
                     trend = detect_trend_up(
                         prev_df,
@@ -792,6 +797,7 @@ try:
                         trend=trend,
                         compression=compression,
                         breakout=breakout,
+                        atr=atr
                     )
                     
                     compression_counts[compression_state["state"]] += 1
@@ -955,6 +961,9 @@ try:
                         "breakout_price": compression_state.get("breakout_price"),
                         "breakout_high": compression_state.get("breakout_high"),
                         "breakout_volume_ratio": compression_state.get("breakout_volume_ratio"),
+                        
+                        "breakout_extension_pct": compression_state.get("breakout_extension_pct"),
+                        "breakout_extension_atr": compression_state.get("breakout_extension_atr"),
 
                         "entry_ready_price": compression_state.get("entry_price"),
                     }
