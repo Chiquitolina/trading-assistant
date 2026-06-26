@@ -774,7 +774,8 @@ try:
                             f"breakout={breakout.get('breakout')} "
                             f"reason={breakout.get('reason')} "
                             f"score={breakout.get('score')} "
-                            f"volume_ratio={breakout.get('volume_ratio')}"
+                            f"volume_ratio={breakout.get('volume_ratio')}",
+                            f"failed={breakout.get('failed_reasons')}"
                         )
                         
                     # <<< AGREGAR ACÁ >>>

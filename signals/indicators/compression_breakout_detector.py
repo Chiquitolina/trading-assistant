@@ -96,25 +96,51 @@ def detect_compression_breakout(
         and volume_expansion
     )
 
-    reasons = []
+    passed_reasons = []
+    failed_reasons = []
 
     if close_breaks_high:
-        reasons.append("close_breaks_compression_high")
+        passed_reasons.append("close_breaks_compression_high")
+    else:
+        failed_reasons.append(
+            f"close_not_above_compression_high "
+            f"close={float(last['close']):.8f} "
+            f"compression_high={compression_high:.8f}"
+        )
 
     if high_breaks_high:
-        reasons.append("high_breaks_compression_high")
+        passed_reasons.append("high_breaks_compression_high")
+    else:
+        failed_reasons.append(
+            f"high_not_above_compression_high "
+            f"high={float(last['high']):.8f} "
+            f"compression_high={compression_high:.8f}"
+        )
 
     if bullish_candle:
-        reasons.append("bullish_candle")
+        passed_reasons.append("bullish_candle")
+    else:
+        failed_reasons.append(
+            f"not_bullish_candle "
+            f"open={float(last['open']):.8f} "
+            f"close={float(last['close']):.8f}"
+        )
 
     if volume_expansion:
-        reasons.append("volume_expansion")
+        passed_reasons.append("volume_expansion")
+    else:
+        failed_reasons.append(
+            f"volume_not_expanded "
+            f"volume_ratio={volume_ratio:.4f} "
+            f"min_volume_expansion={min_volume_expansion:.4f}"
+        )
 
     return {
         "breakout": breakout,
         "side": "LONG" if breakout else None,
         "reason": "compression_breakout" if breakout else "breakout_conditions_not_met",
-        "reasons": reasons,
+        "reasons": passed_reasons,
+        "failed_reasons": failed_reasons,
 
         "trend": trend,
         "compression": compression,
