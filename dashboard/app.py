@@ -8,6 +8,9 @@ import streamlit as st
 from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
 
+import requests
+import plotly.graph_objects as go
+
 # =========================
 # CONFIG
 # =========================
@@ -3802,6 +3805,96 @@ with tab_execution:
         st.error(f"Execution Analysis Error: {e}")
         st.exception(e)
             
+            
+@st.cache_data(ttl=60)
+def fetch_recent_klines(symbol, interval="15m", limit=25):
+    url = "https://fapi.binance.com/fapi/v1/klines"
+
+    try:
+        r = requests.get(
+            url,
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=5,
+        )
+        r.raise_for_status()
+
+        df = pd.DataFrame(
+            r.json(),
+            columns=[
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_volume", "trades",
+                "taker_buy_base", "taker_buy_quote", "ignore",
+            ],
+        )
+
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        df["time"] = pd.to_datetime(df["open_time"], unit="ms")
+        return df
+
+    except Exception:
+        return pd.DataFrame()
+    
+def render_mini_chart(row):
+    symbol = row.get("symbol")
+    df = fetch_recent_klines(symbol, "15m", 25)
+
+    if df.empty:
+        st.warning(f"No chart data for {symbol}")
+        return
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Candlestick(
+            x=df["time"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name=symbol,
+        )
+    )
+
+    compression_high = row.get("compression_high")
+    compression_low = row.get("compression_low")
+    breakout_price = row.get("breakout_price")
+    entry_price = row.get("entry_price") or row.get("entry_ready_price")
+
+    if compression_high is not None and not pd.isna(compression_high):
+        fig.add_hline(y=float(compression_high), line_dash="dash")
+
+    if compression_low is not None and not pd.isna(compression_low):
+        fig.add_hline(y=float(compression_low), line_dash="dash")
+
+    if breakout_price is not None and not pd.isna(breakout_price):
+        fig.add_hline(y=float(breakout_price), line_dash="dot")
+
+    if entry_price is not None and not pd.isna(entry_price):
+        fig.add_hline(y=float(entry_price), line_dash="solid")
+
+    fig.update_layout(
+        height=240,
+        margin=dict(l=0, r=0, t=10, b=0),
+        paper_bgcolor="#0f172a",
+        plot_bgcolor="#0f172a",
+        font=dict(color="#cbd5e1", size=10),
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            showgrid=False,
+            showticklabels=False,
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#1e293b",
+            side="right",
+        ),
+        showlegend=False,
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
 
@@ -4012,6 +4105,8 @@ with tab_compression_pipeline:
 
             for _, row in state_df.iterrows():
                 st.html(card_html(row))
+                render_mini_chart(row)
+                st.markdown("<br>", unsafe_allow_html=True)
 
         # =========================
         # OPTIONAL RAW TABLE
@@ -4036,6 +4131,8 @@ with tab_compression_pipeline:
                 "compression_low",
                 "breakout_price",
                 "breakout_volume_ratio",
+                "breakout_extension_pct",
+                "breakout_extension_atr",
                 "pullback_pct",
                 "pullback_detected",
                 "valid_pullback",
