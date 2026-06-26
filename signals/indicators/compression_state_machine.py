@@ -42,7 +42,7 @@ class CompressionWatch:
 
     entry_price: Optional[float] = None
     reason: Optional[str] = None
-    
+
     range_ratio: Optional[float] = None
     atr_ratio: Optional[float] = None
     volume_ratio: Optional[float] = None
@@ -56,6 +56,11 @@ class CompressionWatch:
 
     entry_ready: bool = False
     entry_attempted: bool = False
+
+    breakout_detected: bool = False
+    breakout_confirmed: bool = False
+    pullback_detected: bool = False
+    continuation_detected: bool = False
 
     def to_dict(self):
         data = asdict(self)
@@ -76,7 +81,7 @@ class CompressionStateMachine:
         self.max_pullback_candles = max_pullback_candles
         self.pullback_max_pct = pullback_max_pct
         self.pullback_min_hold_high = pullback_min_hold_high
-        
+
     def active_watches(self):
         return [
             watch.to_dict()
@@ -89,6 +94,70 @@ class CompressionStateMachine:
     def remove(self, symbol):
         if symbol in self.watches:
             del self.watches[symbol]
+
+    def _evaluate_pullback_entry(
+        self,
+        watch: CompressionWatch,
+        symbol: str,
+        close: float,
+        low: float,
+    ):
+        if not watch.breakout_price:
+            watch.state = CompressionState.EXPIRED
+            watch.reason = "missing_breakout_price"
+            return watch.to_dict()
+
+        pullback_pct = (
+            (watch.breakout_price - low) / watch.breakout_price
+        ) * 100
+
+        holds_compression_high = close >= watch.compression_high
+
+        valid_pullback = (
+            pullback_pct <= self.pullback_max_pct
+            and (
+                holds_compression_high
+                if self.pullback_min_hold_high
+                else True
+            )
+        )
+
+        continuation = close >= watch.compression_high
+
+        watch.pullback_pct = round(pullback_pct, 4)
+        watch.valid_pullback = valid_pullback
+        watch.holds_compression_high = holds_compression_high
+        watch.continuation = continuation
+
+        watch.pullback_detected = valid_pullback
+        watch.continuation_detected = continuation
+
+        print(
+            f"[PULLBACK DEBUG] "
+            f"{symbol} "
+            f"waiting={watch.candles_waiting}/{self.max_pullback_candles} "
+            f"pullback_pct={pullback_pct:.2f} "
+            f"valid_pullback={valid_pullback} "
+            f"hold_high={holds_compression_high} "
+            f"continuation={continuation} "
+            f"close={close:.8f} "
+            f"low={low:.8f} "
+            f"breakout_price={watch.breakout_price:.8f} "
+            f"compression_high={watch.compression_high:.8f}"
+        )
+
+        if valid_pullback and continuation:
+            watch.state = CompressionState.ENTRY_READY
+            watch.entry_ready = True
+            watch.entry_price = close
+            watch.reason = "pullback_hold_and_continuation"
+
+            result = watch.to_dict()
+            self.remove(symbol)
+            return result
+
+        watch.reason = "waiting_valid_pullback"
+        return watch.to_dict()
 
     def update(
         self,
@@ -122,7 +191,7 @@ class CompressionStateMachine:
                     range_ratio=compression.get("range_ratio"),
                     atr_ratio=compression.get("atr_ratio"),
                     volume_ratio=compression.get("volume_ratio"),
-                    watch_age=0
+                    watch_age=0,
                 )
 
                 self.watches[symbol] = watch
@@ -153,6 +222,7 @@ class CompressionStateMachine:
                 watch.range_ratio = compression.get("range_ratio", watch.range_ratio)
                 watch.atr_ratio = compression.get("atr_ratio", watch.atr_ratio)
                 watch.volume_ratio = compression.get("volume_ratio", watch.volume_ratio)
+
                 watch.compression_high = max(
                     watch.compression_high,
                     float(compression["compression_high"]),
@@ -165,15 +235,25 @@ class CompressionStateMachine:
                 watch.trend_score = int(trend.get("score", watch.trend_score))
 
             if breakout.get("breakout"):
-                watch.state = CompressionState.BREAKOUT_DETECTED
+                watch.breakout_detected = True
+                watch.breakout_confirmed = True
+
+                watch.state = CompressionState.WAIT_PULLBACK
+
                 watch.breakout_ts = ts
                 watch.breakout_price = close
                 watch.breakout_high = high
                 watch.breakout_volume_ratio = breakout.get("volume_ratio")
-                watch.candles_waiting = 0
-                watch.reason = "breakout_detected"
 
-                return watch.to_dict()
+                watch.candles_waiting = 0
+                watch.reason = "breakout_detected_waiting_pullback"
+
+                return self._evaluate_pullback_entry(
+                    watch=watch,
+                    symbol=symbol,
+                    close=close,
+                    low=low,
+                )
 
             return watch.to_dict()
 
@@ -181,7 +261,13 @@ class CompressionStateMachine:
             watch.state = CompressionState.WAIT_PULLBACK
             watch.candles_waiting = 0
             watch.reason = "waiting_pullback"
-            return watch.to_dict()
+
+            return self._evaluate_pullback_entry(
+                watch=watch,
+                symbol=symbol,
+                close=close,
+                low=low,
+            )
 
         if watch.state == CompressionState.WAIT_PULLBACK:
 
@@ -192,60 +278,11 @@ class CompressionStateMachine:
                 self.remove(symbol)
                 return result
 
-            if not watch.breakout_price:
-                watch.state = CompressionState.EXPIRED
-                watch.reason = "missing_breakout_price"
-                result = watch.to_dict()
-                self.remove(symbol)
-                return result
-
-            pullback_pct = (
-                (watch.breakout_price - low) / watch.breakout_price
-            ) * 100
-
-            holds_compression_high = close >= watch.compression_high
-
-            valid_pullback = (
-                pullback_pct <= self.pullback_max_pct
-                and (
-                    holds_compression_high
-                    if self.pullback_min_hold_high
-                    else True
-                )
+            return self._evaluate_pullback_entry(
+                watch=watch,
+                symbol=symbol,
+                close=close,
+                low=low,
             )
-
-            continuation = close > watch.breakout_price
-            
-            watch.pullback_pct = round(pullback_pct, 4)
-            watch.valid_pullback = valid_pullback
-            watch.holds_compression_high = holds_compression_high
-            watch.continuation = continuation
-
-            print(
-                f"[PULLBACK DEBUG] "
-                f"{symbol} "
-                f"waiting={watch.candles_waiting}/{self.max_pullback_candles} "
-                f"pullback_pct={pullback_pct:.2f} "
-                f"valid_pullback={valid_pullback} "
-                f"hold_high={holds_compression_high} "
-                f"continuation={continuation} "
-                f"close={close:.8f} "  
-                f"low={low:.8f} "
-                f"breakout_price={watch.breakout_price:.8f} "
-                f"compression_high={watch.compression_high:.8f}"
-            )
-
-            if valid_pullback and continuation:
-                watch.state = CompressionState.ENTRY_READY
-                watch.entry_ready = True
-                watch.entry_price = close
-                watch.reason = "pullback_hold_and_continuation"
-
-                result = watch.to_dict()
-                self.remove(symbol)
-                return result
-
-            watch.reason = "waiting_valid_pullback"
-            return watch.to_dict()
 
         return watch.to_dict()

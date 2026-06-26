@@ -3927,6 +3927,10 @@ with tab_compression_pipeline:
                         <div style="color:#cbd5e1;">Pullback: <b>{fmt(row.get("pullback_pct"))}</b></div>
                         <div style="color:#cbd5e1;">Hold High: <b>{bool_icon(row.get("holds_compression_high"))}</b></div>
                         <div style="color:#cbd5e1;">Continuation: <b>{bool_icon(row.get("continuation"))}</b></div>
+                        <div style="color:#cbd5e1;">Breakout Detected: <b>{bool_icon(row.get("breakout_detected"))}</b></div>
+                        <div style="color:#cbd5e1;">Breakout Confirmed: <b>{bool_icon(row.get("breakout_confirmed"))}</b></div>
+                        <div style="color:#cbd5e1;">Pullback Detected: <b>{bool_icon(row.get("pullback_detected"))}</b></div>
+                        <div style="color:#cbd5e1;">Continuation Detected: <b>{bool_icon(row.get("continuation_detected"))}</b></div>
                     </div>
                 </div>
             </div>
@@ -4026,14 +4030,18 @@ with tab_compression_pipeline:
                 "range_ratio",
                 "atr_ratio",
                 "volume_ratio",
+                "breakout_detected",
+                "breakout_confirmed",
                 "compression_high",
                 "compression_low",
                 "breakout_price",
                 "breakout_volume_ratio",
                 "pullback_pct",
+                "pullback_detected",
                 "valid_pullback",
                 "holds_compression_high",
                 "continuation",
+                "continuation_detected",
                 "entry_ready",
             ]
 
