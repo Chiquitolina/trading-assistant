@@ -4098,6 +4098,122 @@ def render_pipeline_card(row):
             )
 
         render_mini_line_chart(row)
+        
+def event_badge(event):
+    colors = {
+        "WATCHING_COMPRESSION": "#8b5cf6",
+        "WATCH_CREATED": "#0ea5e9",
+        "BREAKOUT_DETECTED": "#38bdf8",
+        "WAIT_PULLBACK": "#eab308",
+        "ENTRY_READY": "#22c55e",
+        "EXPIRED": "#ef4444",
+        "IDLE": "#64748b",
+    }
+
+    color = colors.get(str(event), "#64748b")
+
+    return f"""
+    <span style="
+        background:{color};
+        color:white;
+        padding:3px 8px;
+        border-radius:999px;
+        font-size:11px;
+        font-weight:800;
+        white-space:nowrap;
+    ">
+        {event}
+    </span>
+    """
+    
+def render_watch_history_card(history_df, symbol):
+    if history_df.empty:
+        st.info(f"No watch history yet for {symbol}.")
+        return
+
+    rows_html = ""
+
+    view = history_df.head(8).copy()
+
+    for _, row in view.iterrows():
+        event = row.get("event", "N/A")
+
+        rows_html += f"""
+        <tr>
+            <td>{row.get("logged_at", "N/A")}</td>
+            <td>{event_badge(event)}</td>
+            <td>{row.get("reason", "—")}</td>
+            <td>{fmt(row.get("watch_age"), "—")}</td>
+            <td>{fmt(row.get("compression_score"), "—")}</td>
+            <td>{fmt(row.get("trend_score"), "—")}</td>
+            <td>{fmt(row.get("breakout_price"), "N/A")}</td>
+            <td>{fmt(row.get("pullback_pct"), "N/A")}</td>
+            <td>{bool_icon(row.get("valid_pullback")) if not pd.isna(row.get("valid_pullback")) else "N/A"}</td>
+        </tr>
+        """
+
+    html = f"""
+    <div style="
+        border:1px solid #263244;
+        border-radius:14px;
+        padding:16px;
+        margin-top:18px;
+        margin-bottom:22px;
+        background:#0f172a;
+        box-shadow:0 8px 24px rgba(0,0,0,0.28);
+    ">
+        <div style="
+            display:flex;
+            align-items:center;
+            gap:10px;
+            margin-bottom:14px;
+        ">
+            <div style="
+                font-size:20px;
+                font-weight:900;
+                color:#cbd5e1;
+            ">
+                WATCH HISTORY ({symbol})
+            </div>
+            <span style="
+                background:#6d28d9;
+                color:white;
+                padding:3px 8px;
+                border-radius:999px;
+                font-size:11px;
+                font-weight:800;
+            ">
+                {len(history_df)} events
+            </span>
+        </div>
+
+        <table style="
+            width:100%;
+            border-collapse:collapse;
+            color:#cbd5e1;
+            font-size:13px;
+        ">
+            <thead>
+                <tr style="color:#94a3b8; text-align:left;">
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Time</th>
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Event</th>
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Reason</th>
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Age</th>
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Score</th>
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Trend</th>
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Breakout</th>
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Pullback</th>
+                    <th style="padding:10px 8px; border-bottom:1px solid #263244;">Valid</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+    </div>
+    """
+
+    st.html(html)
     
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
@@ -4365,93 +4481,13 @@ with tab_compression_pipeline:
         # ============================================
 
         if selected_symbol != "ALL":
-
             history_df = load_watch_history(
                 selected_symbol,
                 limit=30,
             )
 
-            st.markdown(
-                f"""
-                <div class="watch-history-card">
-                    <div class="watch-history-title">
-                        WATCH HISTORY ({selected_symbol})
-                        <span class="watch-badge">
-                            {len(history_df)} events
-                        </span>
-                    </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            if history_df.empty:
-                st.info(
-                    f"No watch history yet for {selected_symbol}."
-                )
-
-            else:
-
-                history_cols = [
-                    "logged_at",
-                    "event",
-                    "reason",
-                    "watch_age",
-                    "candles_waiting",
-                    "compression_score",
-                    "trend_score",
-                    "compression_high",
-                    "compression_low",
-                    "range_ratio",
-                    "atr_ratio",
-                    "volume_ratio",
-                    "avg_body_pct",
-                    "breakout_detected",
-                    "breakout_reason",
-                    "breakout_volume_ratio",
-                    "breakout_price",
-                    "breakout_extension_pct",
-                    "breakout_extension_atr",
-                    "pullback_pct",
-                    "valid_pullback",
-                    "holds_compression_high",
-                    "continuation",
-                ]
-
-                existing_history_cols = [
-                    c for c in history_cols
-                    if c in history_df.columns
-                ]
-
-                st.dataframe(
-                    history_df[existing_history_cols],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                with st.expander(
-                    "Last 10 candles from latest journal event"
-                ):
-
-                    latest = history_df.iloc[0]
-
-                    candles = latest.get("last_10_candles")
-
-                    if isinstance(candles, list):
-
-                        st.dataframe(
-                            pd.DataFrame(candles),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-
-                    else:
-                        st.info("No last_10_candles available.")
-
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
+            render_watch_history_card(history_df, selected_symbol)
+            
         # =========================
         # OPTIONAL RAW TABLE
         # =========================
