@@ -4001,11 +4001,32 @@ def render_mini_line_chart(row):
         ),
         showlegend=False,
     )
+    
+    st.markdown(
+    """
+    <div style="
+        border: 1px solid #263244;
+        border-top: 0;
+        border-radius: 0 0 14px 14px;
+        padding: 0 16px 10px 16px;
+        margin-top: -16px;
+        margin-bottom: 22px;
+        background: linear-gradient(180deg, #111c31 0%, #0f172a 100%);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+    ">
+    """,
+    unsafe_allow_html=True,
+    )
 
     st.plotly_chart(
     fig,
     use_container_width=True,
     config={"displayModeBar": False}
+    )
+    
+    st.markdown(
+    "</div>",
+    unsafe_allow_html=True,
     )
     
 with tab_compression_pipeline:
@@ -4120,9 +4141,10 @@ with tab_compression_pipeline:
             style="
                     border: 1px solid #263244;
                     border-left: 5px solid {color};
-                    border-radius: 14px;
-                    padding: 16px;
-                    margin-bottom: 6px;
+                    border-radius: 14px 14px 0 0;
+                    border-bottom: 0;
+                    padding: 16px 16px 10px 16px;
+                    margin-bottom: 0px;
                     background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
                     box-shadow: 0 8px 24px rgba(0,0,0,0.28);
                 "
