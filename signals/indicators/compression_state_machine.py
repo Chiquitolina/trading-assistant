@@ -103,7 +103,7 @@ class CompressionStateMachine:
         symbol: str,
         close: float,
         low: float,
-        high: float
+        high: float,
     ):
         if not watch.breakout_price:
             watch.state = CompressionState.EXPIRED

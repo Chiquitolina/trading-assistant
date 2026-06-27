@@ -20,7 +20,10 @@ from engine.live.snapshots.compression_snapshot_manager import CompressionSnapsh
 
 from signals.indicators.trend_detector import detect_trend_up
 from signals.indicators.compression_detector import detect_compression
-from signals.indicators.compression_breakout_detector import detect_compression_breakout
+from signals.indicators.compression_breakout_detector import (
+    detect_compression_breakout,
+    detect_breakout_from_watch,
+)
 from signals.indicators.compression_state_machine import CompressionStateMachine
 
 from engine.live.position.position_manager import PositionManager
@@ -745,10 +748,19 @@ try:
                     if trend.get("trend_up") and compression.get("is_compression"):
                         compression_counts["TREND_AND_COMPRESSION"] += 1
 
-                    breakout = detect_compression_breakout(df_tf)
-                    
-                    last_close = float(df_tf["close"].iloc[-1])
                     watch = compression_machine.get(symbol)
+
+                    if watch is not None:
+                        breakout = detect_breakout_from_watch(
+                            df_tf,
+                            compression_high=watch.compression_high,
+                            volume_lookback=20,
+                            min_volume_expansion=1.5,
+                        )
+                    else:
+                        breakout = detect_compression_breakout(df_tf)
+
+                    last_close = float(df_tf["close"].iloc[-1])
 
                     raw_breakout_up = (
                         watch is not None
