@@ -4001,13 +4001,33 @@ def render_mini_line_chart(row):
         ),
         showlegend=False,
     )
+    
+    st.markdown(
+    """
+    <div style="
+        border: 1px solid #263244;
+        border-top: 0;
+        border-radius: 0 0 14px 14px;
+        padding: 0 16px 10px 16px;
+        margin-top: -16px;
+        margin-bottom: 22px;
+        background:#0f172a;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+    ">
+    """,
+    unsafe_allow_html=True,
+    )
 
     st.plotly_chart(
     fig,
     use_container_width=True,
     config={"displayModeBar": False}
     )
-
+    
+    st.markdown(
+    "</div>",
+    unsafe_allow_html=True,
+    )
     
 def render_pipeline_card(row):
     state = row.get("state", "N/A")
@@ -4015,7 +4035,7 @@ def render_pipeline_card(row):
     color = state_color(state)
     qcolor = score_color(row.get("compression_score", 0))
 
-    with st.container():
+    with st.container(border=True):
 
         # HEADER
         c1, c2 = st.columns([4, 1])
