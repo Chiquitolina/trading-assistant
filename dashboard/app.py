@@ -3940,9 +3940,7 @@ def render_mini_line_chart(row):
             line=dict(
                 color="#a78bfa",
                 width=2,
-            ),
-            fill="tozeroy",
-            fillcolor="rgba(167,139,250,0.08)",
+            )
         )
     )
 
@@ -4116,6 +4114,15 @@ with tab_compression_pipeline:
 
             return f"""
             <div
+            style="
+                    border: 1px solid #263244;
+                    border-left: 5px solid {color};
+                    border-radius: 14px;
+                    padding: 16px;
+                    margin-bottom: 6px;
+                    background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                    box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+                "
             >
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <div>
@@ -4256,18 +4263,11 @@ with tab_compression_pipeline:
             st.markdown(f"### {state} ({len(state_df)})")
 
             for _, row in state_df.iterrows():
-                st.markdown(
-                    '<div class="compression-card-wrap">',
-                    unsafe_allow_html=True,
-                )
+                container = st.container(border=True)
 
-                st.html(card_html(row))
-                render_mini_line_chart(row)
-
-                st.markdown(
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
+                with container:
+                    st.html(card_html(row))
+                    render_mini_line_chart(row)
 
         # ============================================
         # WATCH HISTORY (SOLO SI HAY UN SÍMBOLO)
