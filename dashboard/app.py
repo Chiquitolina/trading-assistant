@@ -3982,13 +3982,12 @@ def render_mini_line_chart(row):
         )
 
     fig.update_layout(
-        height=210,
-        margin=dict(l=0, r=0, t=10, b=0),
+        height=190,
+        margin=dict(l=10, r=10, t=8, b=10),
         paper_bgcolor="#0f172a",
         plot_bgcolor="#0f172a",
         font=dict(color="#cbd5e1", size=10),
         xaxis=dict(
-            rangeslider=dict(visible=False),
             showgrid=True,
             gridcolor="#1e293b",
             showticklabels=False,
@@ -4003,7 +4002,11 @@ def render_mini_line_chart(row):
         showlegend=False,
     )
 
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(
+    fig,
+    use_container_width=True,
+    config={"displayModeBar": False}
+    )
     
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
@@ -4263,11 +4266,8 @@ with tab_compression_pipeline:
             st.markdown(f"### {state} ({len(state_df)})")
 
             for _, row in state_df.iterrows():
-                container = st.container(border=True)
-
-                with container:
-                    st.html(card_html(row))
-                    render_mini_line_chart(row)
+                st.html(card_html(row))
+                render_mini_line_chart(row)
 
         # ============================================
         # WATCH HISTORY (SOLO SI HAY UN SÍMBOLO)
