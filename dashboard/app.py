@@ -4147,7 +4147,7 @@ with tab_compression_pipeline:
                 padding: 16px;
                 margin-top: 18px;
                 margin-bottom: 22px;
-                background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                background:#0f172a;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.28);
             }
 
@@ -4234,7 +4234,7 @@ with tab_compression_pipeline:
                     border-bottom: 0;
                     padding: 16px 16px 10px 16px;
                     margin-bottom: 0px;
-                    background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                    background:#0f172a;
                     box-shadow: 0 8px 24px rgba(0,0,0,0.28);
                 "
             >
