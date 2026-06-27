@@ -4097,7 +4097,7 @@ def render_pipeline_card(row):
                 unsafe_allow_html=True,
             )
 
-        render_mini_line_chart(row)
+        render_mini_chart(row)
         
 def event_badge(event):
     colors = {
