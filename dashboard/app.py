@@ -4035,7 +4035,7 @@ def render_pipeline_card(row):
     color = state_color(state)
     qcolor = score_color(row.get("compression_score", 0))
 
-    with st.container(border=True):
+    with st.container():
 
         # HEADER
         c1, c2 = st.columns([4, 1])
