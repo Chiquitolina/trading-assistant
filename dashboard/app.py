@@ -4218,15 +4218,41 @@ def render_watch_history_card(history_df, symbol):
 
         rows_html += f"""
         <tr style="border-bottom:1px solid #1e293b;">
+
             <td style="padding:12px 8px;">{row.get("logged_at", "N/A")}</td>
+
             <td style="padding:12px 8px;">{event_badge(event)}</td>
+
             <td style="padding:12px 8px;">{row.get("reason","—")}</td>
+
+            <td style="padding:12px 8px; color:#38bdf8;">
+                <b>{fmt(row.get("compression_high"),"—")}</b>
+            </td>
+
+            <td style="padding:12px 8px; color:#22c55e;">
+                <b>{fmt(row.get("compression_low"),"—")}</b>
+            </td><td style="padding:12px 8px;"><b>{fmt(row.get("compression_low"),"—")}</b></td>
+
             <td style="padding:12px 8px;">{fmt(row.get("watch_age"),"—")}</td>
+
             <td style="padding:12px 8px;">{fmt(row.get("compression_score"),"—")}</td>
+
             <td style="padding:12px 8px;">{fmt(row.get("trend_score"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("range_ratio"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("atr_ratio"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("volume_ratio"),"—")}</td>
+
             <td style="padding:12px 8px;">{fmt(row.get("breakout_price"),"N/A")}</td>
+
             <td style="padding:12px 8px;">{fmt(row.get("pullback_pct"),"N/A")}</td>
-            <td style="padding:12px 8px;">{bool_icon(row.get("valid_pullback")) if not pd.isna(row.get("valid_pullback")) else "N/A"}</td>
+
+            <td style="padding:12px 8px;">
+                {bool_icon(row.get("valid_pullback")) if not pd.isna(row.get("valid_pullback")) else "N/A"}
+            </td>
+
         </tr>
         """
 
@@ -4273,15 +4299,35 @@ def render_watch_history_card(history_df, symbol):
         ">
             <thead>
                 <tr style="color:#94a3b8; text-align:left;">
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Time</th>
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Event</th>
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Reason</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">High</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Low</th>
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Age</th>
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Score</th>
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Trend</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Range</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">ATR</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Vol</th>
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Breakout</th>
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Pullback</th>
+
                     <th style="padding:14px 8px; border-bottom:1px solid #263244;">Valid</th>
+
                 </tr>
             </thead>
             <tbody>
