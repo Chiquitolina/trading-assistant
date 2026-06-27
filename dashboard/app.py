@@ -4126,6 +4126,84 @@ def event_badge(event):
     </span>
     """
     
+def detail_value(label, value):
+    return f"""
+    <div style="
+        display:flex;
+        justify-content:space-between;
+        gap:12px;
+        padding:5px 0;
+        border-bottom:1px solid #1e293b;
+        color:#cbd5e1;
+        font-size:13px;
+    ">
+        <span style="color:#94a3b8;">{label}</span>
+        <b>{value}</b>
+    </div>
+    """
+    
+def render_watch_event_detail(row):
+    event = row.get("event", "N/A")
+    logged_at = row.get("logged_at", "N/A")
+
+    html = f"""
+    <div style="
+        border:1px solid #263244;
+        border-radius:14px;
+        padding:16px;
+        background:#0f172a;
+        margin-bottom:14px;
+    ">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+            <div style="font-size:18px; font-weight:900; color:#ffffff;">
+                {event_badge(event)}
+            </div>
+            <div style="font-size:12px; color:#94a3b8;">
+                {logged_at}
+            </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:18px;">
+
+            <div>
+                <div style="font-weight:900; color:#a78bfa; margin-bottom:8px;">Compression</div>
+                {detail_value("Score", fmt(row.get("compression_score"), "—"))}
+                {detail_value("Trend Score", fmt(row.get("trend_score"), "—"))}
+                {detail_value("Watch Age", fmt(row.get("watch_age"), "—"))}
+                {detail_value("Candles Waiting", fmt(row.get("candles_waiting"), "—"))}
+                {detail_value("High", fmt(row.get("compression_high"), "—"))}
+                {detail_value("Low", fmt(row.get("compression_low"), "—"))}
+                {detail_value("Range Ratio", fmt(row.get("range_ratio"), "—"))}
+                {detail_value("ATR Ratio", fmt(row.get("atr_ratio"), "—"))}
+                {detail_value("Volume Ratio", fmt(row.get("volume_ratio"), "—"))}
+                {detail_value("Avg Body %", fmt(row.get("avg_body_pct"), "—"))}
+            </div>
+
+            <div>
+                <div style="font-weight:900; color:#38bdf8; margin-bottom:8px;">Breakout</div>
+                {detail_value("Detected", bool_icon(row.get("breakout_detected")))}
+                {detail_value("Reason", row.get("breakout_reason", "—"))}
+                {detail_value("Price", fmt(row.get("breakout_price"), "—"))}
+                {detail_value("Volume Ratio", fmt(row.get("breakout_volume_ratio"), "—"))}
+                {detail_value("Extension %", fmt(row.get("breakout_extension_pct"), "—"))}
+                {detail_value("Extension ATR", fmt(row.get("breakout_extension_atr"), "—"))}
+            </div>
+
+            <div>
+                <div style="font-weight:900; color:#22c55e; margin-bottom:8px;">Pullback</div>
+                {detail_value("Pullback %", fmt(row.get("pullback_pct"), "—"))}
+                {detail_value("Valid", bool_icon(row.get("valid_pullback")))}
+                {detail_value("Hold High", bool_icon(row.get("holds_compression_high")))}
+                {detail_value("Continuation", bool_icon(row.get("continuation")))}
+                {detail_value("Reason", row.get("reason", "—"))}
+            </div>
+
+        </div>
+    </div>
+    """
+
+    st.html(html)
+    
 def render_watch_history_card(history_df, symbol):
     if history_df.empty:
         st.info(f"No watch history yet for {symbol}.")
@@ -4214,6 +4292,14 @@ def render_watch_history_card(history_df, symbol):
     """
 
     st.html(html)
+
+    st.markdown("#### Event details")
+
+    for i, (_, row) in enumerate(view.iterrows()):
+        with st.expander(f"{row.get('logged_at', 'N/A')} · {row.get('event', 'N/A')}"):
+            render_watch_event_detail(row)
+
+    return
     
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
