@@ -5,6 +5,8 @@ import threading
 import argparse
 from signals.indicators.atr import add_atr
 
+from engine.live.journal.compression_watch_journal import CompressionWatchJournal
+
 import json
 from pathlib import Path
 
@@ -313,6 +315,8 @@ compression_machine = CompressionStateMachine(
     pullback_max_pct=1.2,
     pullback_min_hold_high=True,
 )
+
+compression_watch_journal = CompressionWatchJournal()
 
 # =========================================================
 # STATUS DEFAULT
@@ -812,6 +816,48 @@ try:
                         breakout=breakout,
                         atr=atr
                     )
+                    
+                    if compression_state["state"] != "IDLE":
+                        compression_watch_journal.log(
+                            symbol=symbol,
+                            event=compression_state["state"],
+                            data={
+                                "reason": compression_state.get("reason"),
+                                "watch_age": compression_state.get("watch_age"),
+                                "candles_waiting": compression_state.get("candles_waiting"),
+
+                                "compression_high": compression_state.get("compression_high"),
+                                "compression_low": compression_state.get("compression_low"),
+                                "compression_score": compression_state.get("compression_score"),
+                                "trend_score": compression_state.get("trend_score"),
+
+                                "range_ratio": compression.get("range_ratio"),
+                                "atr_ratio": compression.get("atr_ratio"),
+                                "volume_ratio": compression.get("volume_ratio"),
+                                "avg_body_pct": compression.get("avg_body_pct"),
+                                "compression_reasons": compression.get("reasons"),
+
+                                "breakout_detected": breakout.get("breakout"),
+                                "breakout_reason": breakout.get("reason"),
+                                "breakout_failed_reasons": breakout.get("failed_reasons"),
+                                "breakout_volume_ratio": breakout.get("volume_ratio"),
+
+                                "breakout_price": compression_state.get("breakout_price"),
+                                "breakout_high": compression_state.get("breakout_high"),
+                                "breakout_extension_pct": compression_state.get("breakout_extension_pct"),
+                                "breakout_extension_atr": compression_state.get("breakout_extension_atr"),
+
+                                "pullback_pct": compression_state.get("pullback_pct"),
+                                "valid_pullback": compression_state.get("valid_pullback"),
+                                "holds_compression_high": compression_state.get("holds_compression_high"),
+                                "continuation": compression_state.get("continuation"),
+
+                                "last_candle": df_tf.iloc[-1].to_dict(),
+                                "last_10_candles": prev_df[
+                                    ["open", "high", "low", "close", "volume"]
+                                ].tail(10).to_dict("records"),
+                            }
+                        )
                     
                     compression_counts[compression_state["state"]] += 1
 

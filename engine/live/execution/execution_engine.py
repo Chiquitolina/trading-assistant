@@ -440,6 +440,9 @@ class ExecutionEngine:
             breakout_volume_ratio=ctx.get("breakout_volume_ratio"),
 
             entry_ready_price=ctx.get("entry_ready_price"),
+            
+            breakout_extension_pct=ctx.get("breakout_extension_pct"),
+            breakout_extension_atr=ctx.get("breakout_extension_atr"),
 
             compression_range_pct=ctx.get("compression_range_pct"),
             range_ratio=ctx.get("range_ratio"),
@@ -1496,6 +1499,9 @@ class ExecutionEngine:
             breakout_volume_ratio=ctx.get("breakout_volume_ratio"),
 
             entry_ready_price=ctx.get("entry_ready_price"),
+            
+            breakout_extension_pct=ctx.get("breakout_extension_pct"),
+            breakout_extension_atr=ctx.get("breakout_extension_atr"),
 
             compression_range_pct=ctx.get("compression_range_pct"),
             range_ratio=ctx.get("range_ratio"),
