@@ -11,6 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 import requests
 import plotly.graph_objects as go
 
+
 # =========================
 # CONFIG
 # =========================
@@ -50,6 +51,31 @@ def fmt_price_for_display(x, decimals=10):
         return f"{float(x):.{decimals}f}".rstrip("0").rstrip(".")
     except Exception:
         return str(x)
+    
+def load_watch_history(symbol, base_dir="compression_watch_journal", limit=50):
+    path = Path(base_dir) / f"{symbol}.jsonl"
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    rows = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+
+    if "logged_at" in df.columns:
+        df = df.sort_values("logged_at", ascending=False)
+
+    return df.head(limit)
     
 def safe_metric(metrics_dict, key, is_percent=False):
     value = metrics_dict.get(key, 0)
@@ -3895,6 +3921,92 @@ def render_mini_chart(row):
 
     st.plotly_chart(fig, use_container_width=True)
     
+def render_mini_line_chart(row):
+    symbol = row.get("symbol")
+    df = fetch_recent_klines(symbol, "15m", 40)
+
+    if df.empty:
+        st.warning(f"No chart data for {symbol}")
+        return
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=df["time"],
+            y=df["close"],
+            mode="lines",
+            name=symbol,
+            line=dict(
+                color="#a78bfa",
+                width=2,
+            ),
+            fill="tozeroy",
+            fillcolor="rgba(167,139,250,0.08)",
+        )
+    )
+
+    compression_high = row.get("compression_high")
+    compression_low = row.get("compression_low")
+    breakout_price = row.get("breakout_price")
+    entry_price = row.get("entry_price") or row.get("entry_ready_price")
+
+    if compression_high is not None and not pd.isna(compression_high):
+        fig.add_hline(
+            y=float(compression_high),
+            line_dash="dash",
+            line_color="#38bdf8",
+            line_width=1,
+        )
+
+    if compression_low is not None and not pd.isna(compression_low):
+        fig.add_hline(
+            y=float(compression_low),
+            line_dash="dash",
+            line_color="#38bdf8",
+            line_width=1,
+        )
+
+    if breakout_price is not None and not pd.isna(breakout_price):
+        fig.add_hline(
+            y=float(breakout_price),
+            line_dash="dot",
+            line_color="#22c55e",
+            line_width=1,
+        )
+
+    if entry_price is not None and not pd.isna(entry_price):
+        fig.add_hline(
+            y=float(entry_price),
+            line_dash="solid",
+            line_color="#eab308",
+            line_width=1,
+        )
+
+    fig.update_layout(
+        height=210,
+        margin=dict(l=0, r=0, t=10, b=0),
+        paper_bgcolor="#0f172a",
+        plot_bgcolor="#0f172a",
+        font=dict(color="#cbd5e1", size=10),
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            showgrid=True,
+            gridcolor="#1e293b",
+            showticklabels=False,
+            zeroline=False,
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#1e293b",
+            side="right",
+            zeroline=False,
+        ),
+        showlegend=False,
+    )
+
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
 
@@ -3904,6 +4016,52 @@ with tab_compression_pipeline:
         st.info("No active compression watches.")
 
     else:
+
+        st.markdown(
+            """
+            <style>
+            .compression-card-wrap {
+                border: 1px solid #263244;
+                border-left: 5px solid #a78bfa;
+                border-radius: 14px;
+                padding: 16px;
+                margin-bottom: 22px;
+                background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+            }
+
+            .watch-history-card {
+                border: 1px solid #263244;
+                border-radius: 14px;
+                padding: 16px;
+                margin-top: 18px;
+                margin-bottom: 22px;
+                background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+            }
+
+            .watch-history-title {
+                font-size: 20px;
+                font-weight: 900;
+                color: #cbd5e1;
+                margin-bottom: 12px;
+            }
+
+            .watch-badge {
+                display: inline-block;
+                padding: 3px 8px;
+                border-radius: 999px;
+                background: #6d28d9;
+                color: white;
+                font-size: 11px;
+                font-weight: 800;
+                margin-left: 8px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    
         # =========================
         # PIPELINE SCORE
         # =========================
@@ -3957,15 +4115,8 @@ with tab_compression_pipeline:
             qcolor = score_color(row.get("compression_score", 0))
 
             return f"""
-            <div style="
-                border: 1px solid #263244;
-                border-left: 5px solid {color};
-                border-radius: 14px;
-                padding: 16px;
-                margin-bottom: 14px;
-                background: #0f172a;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-            ">
+            <div
+            >
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <div>
                         <div style="font-size:20px; font-weight:800; color:#ffffff;">
@@ -4073,6 +4224,7 @@ with tab_compression_pipeline:
             view_df = view_df[
                 view_df["symbol"] == selected_symbol
             ].copy()
+            
 
         view_df = view_df[
             view_df["pipeline_score"] >= min_score
@@ -4104,9 +4256,110 @@ with tab_compression_pipeline:
             st.markdown(f"### {state} ({len(state_df)})")
 
             for _, row in state_df.iterrows():
+                st.markdown(
+                    '<div class="compression-card-wrap">',
+                    unsafe_allow_html=True,
+                )
+
                 st.html(card_html(row))
-                render_mini_chart(row)
-                st.markdown("<br>", unsafe_allow_html=True)
+                render_mini_line_chart(row)
+
+                st.markdown(
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+        # ============================================
+        # WATCH HISTORY (SOLO SI HAY UN SÍMBOLO)
+        # ============================================
+
+        if selected_symbol != "ALL":
+
+            history_df = load_watch_history(
+                selected_symbol,
+                limit=30,
+            )
+
+            st.markdown(
+                f"""
+                <div class="watch-history-card">
+                    <div class="watch-history-title">
+                        WATCH HISTORY ({selected_symbol})
+                        <span class="watch-badge">
+                            {len(history_df)} events
+                        </span>
+                    </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if history_df.empty:
+                st.info(
+                    f"No watch history yet for {selected_symbol}."
+                )
+
+            else:
+
+                history_cols = [
+                    "logged_at",
+                    "event",
+                    "reason",
+                    "watch_age",
+                    "candles_waiting",
+                    "compression_score",
+                    "trend_score",
+                    "compression_high",
+                    "compression_low",
+                    "range_ratio",
+                    "atr_ratio",
+                    "volume_ratio",
+                    "avg_body_pct",
+                    "breakout_detected",
+                    "breakout_reason",
+                    "breakout_volume_ratio",
+                    "breakout_price",
+                    "breakout_extension_pct",
+                    "breakout_extension_atr",
+                    "pullback_pct",
+                    "valid_pullback",
+                    "holds_compression_high",
+                    "continuation",
+                ]
+
+                existing_history_cols = [
+                    c for c in history_cols
+                    if c in history_df.columns
+                ]
+
+                st.dataframe(
+                    history_df[existing_history_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                with st.expander(
+                    "Last 10 candles from latest journal event"
+                ):
+
+                    latest = history_df.iloc[0]
+
+                    candles = latest.get("last_10_candles")
+
+                    if isinstance(candles, list):
+
+                        st.dataframe(
+                            pd.DataFrame(candles),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                    else:
+                        st.info("No last_10_candles available.")
+
+            st.markdown(
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
         # =========================
         # OPTIONAL RAW TABLE
