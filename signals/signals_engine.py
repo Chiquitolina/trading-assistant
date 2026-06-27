@@ -19,6 +19,15 @@ MODE = MODE_CONFIG["aggressive"]
 SWING_LOOKBACK = 3
 MIN_SWING_MOVE_PCT = 0.00025
 
+TIMEFRAME_MS = {
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+}
+
 def build_btc_swing_context(
     buffer,
     price: float | None = None,
@@ -266,8 +275,10 @@ def find_last_swing_high(df, idx):
 class SignalEngine:
     def __init__(self, buffer, config, debug=True, mode="default"):
         self.buffer = buffer
+        self.config = config
         self.debug = debug
         self.mode = mode
+        self.trigger_tf = config.get("trigger_tf", "15m")
         self.last_signal_ts = {}
         self.momentum_history = {}
         self.entry_rules = config.get("entry_rules", "standard")
@@ -282,7 +293,7 @@ class SignalEngine:
 
 
     def get_direction(self, symbol):
-        df = pd.DataFrame(self.buffer.get_candles(symbol, "15m"))
+        df = pd.DataFrame(self.buffer.get_candles(symbol, self.trigger_tf))
         if len(df) < 10:
             return Direction.UNKNOWN
 
@@ -714,21 +725,21 @@ class SignalEngine:
         
         candles_1m = self.buffer.get_candles(symbol, "1m")
         candles_5m = self.buffer.get_candles(symbol, "5m")
-        candles_15m = self.buffer.get_candles(symbol, "15m")
+        candles_trigger = self.buffer.get_candles(symbol, self.trigger_tf)
         candles_1h = self.buffer.get_candles(symbol, "1h")
         candles_4h = self.buffer.get_candles(symbol, "4h")
 
-        if not candles_1m or not candles_5m:
+        if not candles_1m or not candles_5m or not candles_trigger:
             return None
 
         if len(candles_1m) < 60 or len(candles_5m) < 100:
             return None
 
-        last_candle = candles_15m[-1]
+        last_candle = candles_trigger[-1]
 
         signal_price = last_candle["close"]
 
-        tf_ms = 15 * 60 * 1000
+        tf_ms = TIMEFRAME_MS.get(self.trigger_tf, 900_000)
         signal_ts = last_candle["timestamp"] + tf_ms - 1
 
         if update_last_ts:
@@ -742,16 +753,23 @@ class SignalEngine:
         df_1m = pd.DataFrame(candles_1m)
         df_5m = pd.DataFrame(candles_5m)
         
-        df_15m = pd.DataFrame(candles_15m) if candles_15m else pd.DataFrame()
+        df_trigger = pd.DataFrame(candles_trigger) if candles_trigger else pd.DataFrame()
+        df_15m = pd.DataFrame(self.buffer.get_candles(symbol, "15m") or [])
         quote_volume_24h = quote_volume_24h_from_15m(df_15m)
         df_1h = pd.DataFrame(candles_1h) if candles_1h else pd.DataFrame()
         df_4h = pd.DataFrame(candles_4h) if candles_4h else pd.DataFrame()
 
         df_1m = add_atr(df_1m, period=14)
         df_5m = add_atr(df_5m, period=14)
-        df_15m = add_atr(df_15m, period=14)
-        df_1h = add_atr(df_1h, period=14)
-        df_4h = add_atr(df_4h, period=14)
+
+        if not df_15m.empty:
+            df_15m = add_atr(df_15m, period=14)
+
+        if not df_1h.empty:
+            df_1h = add_atr(df_1h, period=14)
+
+        if not df_4h.empty:
+            df_4h = add_atr(df_4h, period=14)
 
         df_5m["ema100"] = EMAIndicator(
             df_5m["close"],
@@ -928,7 +946,7 @@ class SignalEngine:
             htf_bearish = False
             trend = Trend.NEUTRAL
 
-        direction_15m = trade_direction(df_15m)
+        direction_trigger = trade_direction(df_trigger)
 
         momentum_5m_value = momentum_5m(df_5m)
 
@@ -1001,7 +1019,7 @@ class SignalEngine:
             # CORE SIGNAL
             # =========================
             trend=trend,
-            direction=direction_15m,
+            direction=direction_trigger,
             momentum=momentum_5m_value,
             micro=micro,
 

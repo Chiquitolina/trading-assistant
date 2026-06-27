@@ -3,7 +3,6 @@ import os
 import time
 import threading
 import argparse
-from signals.indicators.atr import add_atr
 
 from engine.live.journal.compression_watch_journal import CompressionWatchJournal
 
@@ -15,18 +14,11 @@ from signals.indicators.direction import trade_direction
 
 from signals.utils.logger import BotLogger
 
-from models.trade_action import TradeAction
-
 from signals.snapshots.signal_compression_snapshot_builder import SignalCompressionSnapshotBuilder
 from engine.live.snapshots.compression_snapshot_manager import CompressionSnapshotManager
 
-from signals.indicators.trend_detector import detect_trend_up
-from signals.indicators.compression_detector import detect_compression
-from signals.indicators.compression_breakout_detector import (
-    detect_compression_breakout,
-    detect_breakout_from_watch,
-)
-from signals.indicators.compression_state_machine import CompressionStateMachine
+from engine.live.strategy.modes.compression_strategy import CompressionStrategy
+from engine.live.execution.strategies.compression_execution_strategy import CompressionExecutionStrategy
 
 from engine.live.position.position_manager import PositionManager
 from engine.live.ws.ws_client import WSClient
@@ -57,8 +49,6 @@ from engine.live.status_writer import StatusWriter
 from enums.actions import Action
 
 from engine.live.status_helper import update_status
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.market_context.btc_velocity_context import BTCVelocityContextService
 
@@ -132,12 +122,14 @@ DAYS_BY_TF = {
     "1m": 1,
     "5m": 2,
     "15m": 3,
+    "30m": 5,
     "1h": 7,
     "4h": 25,
     "1d": 180,
 }
 
 STATUS_INTERVAL = 3
+MAX_COMPRESSION_ENTRIES_PER_BATCH = 2
 
 # =========================================================
 # INIT BUFFER
@@ -194,14 +186,14 @@ for symbol in SYMBOLS:
 last_direction_by_symbol = {}
 
 for symbol in SYMBOLS:
-    candles_15m = buffer.get_candles(symbol, "15m")
+    candles_trigger = buffer.get_candles(symbol, TRIGGER_TF)
 
-    if not candles_15m:
+    if not candles_trigger:
         continue
 
-    df_15m = pd.DataFrame(candles_15m)
+    df_trigger = pd.DataFrame(candles_trigger)
 
-    direction = trade_direction(df_15m)
+    direction = trade_direction(df_trigger)
 
     last_direction_by_symbol[symbol] = direction
 
@@ -278,11 +270,13 @@ trade_manager = TradeManager(
 
 position_manager = PositionManager(exchange)
 
-if STRATEGY_MODE in ("direction", "compression"):
+if STRATEGY_MODE == "compression":
+    execution_strategy = CompressionExecutionStrategy()
+elif STRATEGY_MODE == "direction":
     execution_strategy = DirectionExecutionStrategy()
 else:
     execution_strategy = DefaultExecutionStrategy()
-
+    
 execution = ExecutionEngine(
     exchange,
     position_manager,
@@ -306,17 +300,22 @@ strategy_router = StrategyRouter(
 
 btc_context_service = BTCVelocityContextService()
 
-compression_snapshot_builder = SignalCompressionSnapshotBuilder(buffer)
+compression_snapshot_builder = SignalCompressionSnapshotBuilder(
+    buffer,
+    trigger_tf=TRIGGER_TF,
+)
 compression_snapshot_manager = CompressionSnapshotManager()
 
-compression_machine = CompressionStateMachine(
+compression_watch_journal = CompressionWatchJournal()
+
+compression_strategy = CompressionStrategy(
+    buffer=buffer,
+    journal=compression_watch_journal,
     max_watch_candles=8,
     max_pullback_candles=5,
     pullback_max_pct=1.2,
     pullback_min_hold_high=True,
 )
-
-compression_watch_journal = CompressionWatchJournal()
 
 # =========================================================
 # STATUS DEFAULT
@@ -346,6 +345,8 @@ status_writer.write({
     
     # 🔥 NUEVO
     "strategy_mode": STRATEGY_MODE,
+    "trigger_tf": TRIGGER_TF,
+    
     "last_executed_strategy": None,
     "last_router_action": None,
     "last_router_reason": None,
@@ -463,7 +464,9 @@ def write_heartbeat():
         "signal_direction": last_signal_direction,
         "signal_momentum": last_signal_momentum,
 
-        "strategy_mode": current_status.get("strategy_mode"),
+        "strategy_mode": STRATEGY_MODE,
+        "trigger_tf": TRIGGER_TF,
+        
         "last_executed_strategy": current_status.get("last_executed_strategy"),
         "last_router_action": current_status.get("last_router_action"),
         "last_router_reason": current_status.get("last_router_reason"),
@@ -475,7 +478,7 @@ def write_heartbeat():
 
 try:
     
-    max_15m_queue = 0
+    max_trigger_queue = 0
 
     while True:
 
@@ -546,23 +549,23 @@ try:
                 )
 
         # =================================================
-        # 15m CLOSED
+        # TRIGGER TF CLOSED
         # =================================================
         
         closed_events_snapshot = buffer.closed_events_snapshot()
 
-        pending_15m = sum(
+        pending_trigger = sum(
             1
             for _, tf in closed_events_snapshot
             if tf == TRIGGER_TF
         )
 
-        if pending_15m > 0:
-            max_15m_queue = max(max_15m_queue, pending_15m)
+        if pending_trigger > 0:
+            max_trigger_queue = max(max_trigger_queue, pending_trigger)
 
             print(
-                f"\033[93m[15M QUEUE]\033[0m "
-                f"pending={pending_15m} max={max_15m_queue}"
+                f"\033[93m[{TRIGGER_TF} QUEUE]\033[0m "
+                f"pending={pending_trigger} max={max_trigger_queue}"
             )
 
         symbols_to_process = []
@@ -578,33 +581,16 @@ try:
         if symbols_to_process:
 
             print(
-                f"\033[93m[15M BATCH]\033[0m "
+                f"\033[93m[{TRIGGER_TF} BATCH]\033[0m "
                 f"symbols={len(symbols_to_process)}"
             )
 
             batch_started = time.perf_counter()
             max_delay_seen = 0
+            compression_entries_opened_in_batch = 0
             
-            compression_counts = {
-                "IDLE": 0,
-                "WATCHING_COMPRESSION": 0,
-                "BREAKOUT_DETECTED": 0,
-                "WAIT_PULLBACK": 0,
-                "ENTRY_READY": 0,
-                "EXPIRED": 0,
-                "SKIPPED_NOT_ENOUGH_CANDLES": 0,
-
-                "TREND_UP_TRUE": 0,
-                "TREND_UP_FALSE": 0,
-                "COMPRESSION_TRUE": 0,
-                "COMPRESSION_FALSE": 0,
-                "TREND_AND_COMPRESSION": 0,
-                
-                "RAW_BREAKOUT_UP": 0,
-                "BREAKOUT_TRUE": 0,
-                "BREAKOUT_FALSE": 0,
-                "RAW_BREAKOUT_BUT_FALSE": 0,
-            }
+            if STRATEGY_MODE == "compression":
+                compression_strategy.reset_stats()
 
             for symbol in symbols_to_process:
 
@@ -704,185 +690,21 @@ try:
                 )
 
                 logger.debug("===========================\n")
-
+                
+                compression_signal_context = {}
+                
                 if STRATEGY_MODE == "compression":
-                    candles = buffer.get_candles(symbol, TRIGGER_TF)
 
-                    if len(candles) < 80:
-                        compression_counts["SKIPPED_NOT_ENOUGH_CANDLES"] += 1
-                        continue
-
-                    df_tf = pd.DataFrame(candles)
-
-                    df_tf = add_atr(df_tf)
-
-                    prev_df = df_tf.iloc[:-1].copy()
-
-                    atr = float(df_tf["atr"].iloc[-1])
-
-                    trend = detect_trend_up(
-                        prev_df,
-                        lookback=20,
-                        ema_fast=20,
-                        ema_slow=50,
-                        min_score=4,
-                    )
-
-                    compression = detect_compression(
-                        prev_df,
-                        lookback=10,
-                        base_lookback=40,
-                        max_range_ratio=0.65,
-                        max_atr_ratio=0.75,
-                        max_volume_ratio=0.95,
-                        max_body_pct=0.50,
-                        min_score=3,
-                    )
-                    
-                    if trend.get("trend_up"):
-                        compression_counts["TREND_UP_TRUE"] += 1
-                    else:
-                        compression_counts["TREND_UP_FALSE"] += 1
-
-                    if compression.get("is_compression"):
-                        compression_counts["COMPRESSION_TRUE"] += 1
-                    else:
-                        compression_counts["COMPRESSION_FALSE"] += 1
-
-                    if trend.get("trend_up") and compression.get("is_compression"):
-                        compression_counts["TREND_AND_COMPRESSION"] += 1
-
-                    watch = compression_machine.get(symbol)
-
-                    if watch is not None:
-                        breakout = detect_breakout_from_watch(
-                            df_tf,
-                            compression_high=watch.compression_high,
-                            volume_lookback=20,
-                            min_volume_expansion=1.5,
-                        )
-                    else:
-                        breakout = detect_compression_breakout(df_tf)
-
-                    last_close = float(df_tf["close"].iloc[-1])
-
-                    raw_breakout_up = (
-                        watch is not None
-                        and last_close > float(watch.compression_high)
-                    )
-
-                    if raw_breakout_up:
-                        compression_counts["RAW_BREAKOUT_UP"] += 1
-
-                    if breakout.get("breakout"):
-                        compression_counts["BREAKOUT_TRUE"] += 1
-                    else:
-                        compression_counts["BREAKOUT_FALSE"] += 1
-
-                    if raw_breakout_up and not breakout.get("breakout"):
-                        compression_counts["RAW_BREAKOUT_BUT_FALSE"] += 1
-
-                        print(
-                            f"[BREAKOUT AUDIT] "
-                            f"{symbol} "
-                            f"close={last_close:.8f} "
-                            f"compression_high={float(watch.compression_high):.8f} "
-                            f"breakout={breakout.get('breakout')} "
-                            f"reason={breakout.get('reason')} "
-                            f"score={breakout.get('score')} "
-                            f"volume_ratio={breakout.get('volume_ratio')}",
-                            f"failed={breakout.get('failed_reasons')}"
-                        )
-                        
-                    # <<< AGREGAR ACÁ >>>
-                    if watch is not None and raw_breakout_up and not breakout.get("breakout"):
-                        print(
-                            f"[WATCH AUDIT] "
-                            f"{symbol} "
-                            f"state={watch.state.value} "
-                            f"created={watch.created_ts} "
-                            f"compression_now={compression.get('is_compression')} "
-                            f"breakout={breakout.get('breakout')} "
-                            f"reason={breakout.get('reason')} "
-                            f"close={last_close:.8f} "
-                            f"watch_high={float(watch.compression_high):.8f}"
-                        )
-
-                    compression_state = compression_machine.update(
+                    compression_result = compression_strategy.evaluate(
                         symbol=symbol,
-                        candle=df_tf.iloc[-1].to_dict(),
-                        trend=trend,
-                        compression=compression,
-                        breakout=breakout,
-                        atr=atr
+                        signal=signal,
+                        tf=TRIGGER_TF,
+                        btc_context=btc_context,
+                        current_position=execution.get_position(symbol),
                     )
-                    
-                    if compression_state["state"] != "IDLE":
-                        compression_watch_journal.log(
-                            symbol=symbol,
-                            event=compression_state["state"],
-                            data={
-                                "reason": compression_state.get("reason"),
-                                "watch_age": compression_state.get("watch_age"),
-                                "candles_waiting": compression_state.get("candles_waiting"),
 
-                                "compression_high": compression_state.get("compression_high"),
-                                "compression_low": compression_state.get("compression_low"),
-                                "compression_score": compression_state.get("compression_score"),
-                                "trend_score": compression_state.get("trend_score"),
-
-                                "range_ratio": compression.get("range_ratio"),
-                                "atr_ratio": compression.get("atr_ratio"),
-                                "volume_ratio": compression.get("volume_ratio"),
-                                "avg_body_pct": compression.get("avg_body_pct"),
-                                "compression_reasons": compression.get("reasons"),
-
-                                "breakout_detected": breakout.get("breakout"),
-                                "breakout_reason": breakout.get("reason"),
-                                "breakout_failed_reasons": breakout.get("failed_reasons"),
-                                "breakout_volume_ratio": breakout.get("volume_ratio"),
-
-                                "breakout_price": compression_state.get("breakout_price"),
-                                "breakout_high": compression_state.get("breakout_high"),
-                                "breakout_extension_pct": compression_state.get("breakout_extension_pct"),
-                                "breakout_extension_atr": compression_state.get("breakout_extension_atr"),
-
-                                "pullback_pct": compression_state.get("pullback_pct"),
-                                "valid_pullback": compression_state.get("valid_pullback"),
-                                "holds_compression_high": compression_state.get("holds_compression_high"),
-                                "continuation": compression_state.get("continuation"),
-
-                                "last_candle": df_tf.iloc[-1].to_dict(),
-                                "last_10_candles": prev_df[
-                                    ["open", "high", "low", "close", "volume"]
-                                ].tail(10).to_dict("records"),
-                            }
-                        )
-                    
-                    compression_counts[compression_state["state"]] += 1
-
-                    if compression_state["state"] != "IDLE":
-                        print(
-                            f"\033[96m[COMPRESSION]\033[0m "
-                            f"symbol={symbol} "
-                            f"state={compression_state['state']} "
-                            f"reason={compression_state.get('reason')}"
-                        )
-
-                    if compression_state["state"] == "ENTRY_READY":
-                        trade_action = TradeAction(
-                            action=Action.LONG,
-                            signal=signal,
-                            reason="compression_breakout",
-                            strategy_name="compression"
-                        )
-                    else:
-                        trade_action = TradeAction(
-                            action=Action.HOLD,
-                            signal=signal,
-                            reason=compression_state.get("reason", "compression_waiting"),
-                            strategy_name="compression"
-                        )
+                    trade_action = compression_result.trade_action
+                    compression_signal_context = compression_result.signal_context
 
                 else:
                     trade_action = strategy_router.evaluate(
@@ -890,7 +712,7 @@ try:
                         previous_direction=previous_direction,
                         current_position=execution.get_position(symbol)
                     )
-                
+                                  
                 last_direction_by_symbol[symbol] = signal.direction
 
                 update_status(
@@ -906,6 +728,20 @@ try:
                         f"action={trade_action.action.value} "
                         f"reason={trade_action.reason}"
                     )
+                    
+                if (
+                    STRATEGY_MODE == "compression"
+                    and trade_action.action != Action.HOLD
+                    and compression_entries_opened_in_batch >= MAX_COMPRESSION_ENTRIES_PER_BATCH
+                ):
+                    print(
+                        f"\033[93m[COMPRESSION BATCH LIMIT]\033[0m "
+                        f"symbol={symbol} "
+                        f"blocked=max_entries_per_batch "
+                        f"opened={compression_entries_opened_in_batch}/"
+                        f"{MAX_COMPRESSION_ENTRIES_PER_BATCH}"
+                    )
+                    continue
 
                 logger.debug(
                     f"\033[93m[LIVE MAIN]\033[0m "
@@ -984,60 +820,10 @@ try:
                 if STRATEGY_MODE == "compression":
                     plan.signal_context = {
                         **(plan.signal_context or {}),
+                        **compression_signal_context,
 
-                        "trend": signal.trend.value,
-                        "direction": signal.direction.value,
-                        "momentum": signal.momentum.value,
-
-                        "strategy_name": "compression",
-
-                        "compression_state": compression_state.get("state"),
-                        "compression_reason": compression_state.get("reason"),
-
-                        "compression_created_ts": compression_state.get("created_ts"),
-                        "compression_updated_ts": compression_state.get("updated_ts"),
-                        "compression_candles_waiting": compression_state.get("candles_waiting"),
-
-                        "trend_score": compression_state.get("trend_score") or trend.get("score"),
-                        "trend_reasons": trend.get("reasons"),
-                        "compression_trend_up": trend.get("trend_up"),
-
-                        "compression_score": compression_state.get("compression_score") or compression.get("score"),
-                        "compression_reasons": compression.get("reasons"),
-                        "compression_is_compression": compression.get("is_compression"),
-
-                        "compression_high": compression_state.get("compression_high"),
-                        "compression_low": compression_state.get("compression_low"),
-                        "compression_range_pct": compression.get("compression_range_pct"),
-
-                        "range_ratio": compression.get("range_ratio"),
-                        "atr_ratio": compression.get("atr_ratio"),
-                        "volume_ratio": compression.get("volume_ratio"),
-                        "avg_body_pct": compression.get("avg_body_pct"),
-
-                        "breakout_detected": breakout.get("breakout"),
-                        "breakout_ts": compression_state.get("breakout_ts"),
-                        "breakout_price": compression_state.get("breakout_price"),
-                        "breakout_high": compression_state.get("breakout_high"),
-                        "breakout_volume_ratio": compression_state.get("breakout_volume_ratio"),
-                        
-                        "breakout_extension_pct": compression_state.get("breakout_extension_pct"),
-                        "breakout_extension_atr": compression_state.get("breakout_extension_atr"),
-
-                        "entry_ready_price": compression_state.get("entry_price"),
                     }
                 
-                plan.signal_context = {
-                    **(plan.signal_context or {}),
-
-                    "btc_velocity_15m": btc_context.velocity_15m,
-                    "btc_velocity_1h": btc_context.velocity_1h,
-                    "btc_direction_15m": btc_context.direction_15m,
-                    "btc_direction_1h": btc_context.direction_1h,
-                    "btc_context_state": btc_context.state,
-                    "btc_context_reason": btc_context.reason,
-                }
-
                 logger.debug(
                     f"[DEBUG PLAN] "
                     f"signal_price={signal.signal_price} "
@@ -1059,6 +845,12 @@ try:
                         trade_action=trade_action,
                         plan=plan
                     )
+                    
+                    if (
+                        STRATEGY_MODE == "compression"
+                        and executed
+                    ):
+                        compression_entries_opened_in_batch += 1
 
                     exec_elapsed = time.perf_counter() - exec_started
 
@@ -1084,12 +876,12 @@ try:
 
             if STRATEGY_MODE == "compression":
 
-                alive_watches = len(compression_machine.watches)
+                alive_watches = compression_strategy.alive_watches_count()
 
                 print(
                     f"[COMPRESSION SUMMARY] "
                     f"alive_watches={alive_watches} "
-                    f"{compression_counts}"
+                    f"{compression_strategy.get_stats()}"
                 )
                 
                 pipeline_path = Path("compression_pipeline.json")
@@ -1097,7 +889,7 @@ try:
 
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(
-                        compression_machine.active_watches(),
+                        compression_strategy.active_watches(),
                         f,
                         indent=4,
                         default=str
@@ -1108,7 +900,7 @@ try:
                 print(f"[PIPELINE] Saved -> {pipeline_path.resolve()}")
 
             print(
-                f"\033[95m[15M BATCH SUMMARY]\033[0m "
+                f"\033[95m[{TRIGGER_TF} BATCH SUMMARY]\033[0m "
                 f"symbols={len(symbols_to_process)} "
                 f"elapsed={batch_elapsed:.2f}s "
                 f"max_delay={max_delay_seen:.2f}s"
@@ -1135,6 +927,8 @@ except KeyboardInterrupt:
         "signal_trend": None,
         "signal_direction": None,
         "signal_momentum": None,
+        "strategy_mode": STRATEGY_MODE,
+        "trigger_tf": TRIGGER_TF,
     })
 
     print(

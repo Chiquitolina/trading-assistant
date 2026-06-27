@@ -1,5 +1,109 @@
 import pandas as pd
+import numpy as np
 
+def classify_compression_shape(upper_slope, lower_slope, flat_threshold=0.03):
+    upper_flat = abs(upper_slope) <= flat_threshold
+    lower_flat = abs(lower_slope) <= flat_threshold
+
+    if upper_flat and lower_flat:
+        return "horizontal_range"
+
+    if upper_slope < -flat_threshold and lower_slope > flat_threshold:
+        return "symmetrical_triangle"
+
+    if upper_flat and lower_slope > flat_threshold:
+        return "ascending_triangle"
+
+    if upper_slope < -flat_threshold and lower_flat:
+        return "descending_triangle"
+
+    if upper_slope > flat_threshold and lower_slope > flat_threshold:
+        return "ascending_channel"
+
+    if upper_slope < -flat_threshold and lower_slope < -flat_threshold:
+        return "descending_channel"
+
+    return "irregular"
+
+
+def compute_compression_features(recent, compression_high, compression_low):
+    duration = len(recent)
+
+    compression_height = compression_high - compression_low
+    
+    if compression_high <= compression_low:
+        return {
+            "compression_height_pct": 0,
+            "compression_duration": int(duration),
+            "upper_slope": 0,
+            "lower_slope": 0,
+            "slope_difference": 0,
+            "touches_high": 0,
+            "touches_low": 0,
+            "inside_ratio": 0,
+            "compression_shape": "invalid_range",
+            "compression_quality_label": "BAD_SHAPE",
+        }
+        
+    compression_height_pct = (
+        compression_height / compression_low * 100
+        if compression_low > 0
+        else 999
+    )
+
+    x = np.arange(duration)
+
+    upper_raw_slope = np.polyfit(x, recent["high"].values, 1)[0]
+    lower_raw_slope = np.polyfit(x, recent["low"].values, 1)[0]
+
+    avg_price = recent["close"].mean()
+
+    upper_slope = upper_raw_slope / avg_price * 100
+    lower_slope = lower_raw_slope / avg_price * 100
+
+    slope_difference = abs(upper_slope - lower_slope)
+
+    tolerance_price = compression_height * 0.15
+
+    touches_high = (
+        (recent["high"] >= compression_high - tolerance_price)
+        & (recent["high"] <= compression_high + tolerance_price)
+    ).sum()
+
+    touches_low = (
+        (recent["low"] <= compression_low + tolerance_price)
+        & (recent["low"] >= compression_low - tolerance_price)
+    ).sum()
+
+    inside_ratio = (
+        (recent["high"] <= compression_high)
+        & (recent["low"] >= compression_low)
+    ).mean()
+
+    compression_shape = classify_compression_shape(
+        upper_slope,
+        lower_slope,
+    )
+
+    if inside_ratio >= 0.80 and touches_high >= 2 and touches_low >= 2:
+        compression_quality_label = "GOOD_SHAPE"
+    elif inside_ratio >= 0.60:
+        compression_quality_label = "OK_SHAPE"
+    else:
+        compression_quality_label = "BAD_SHAPE"
+
+    return {
+        "compression_height_pct": round(float(compression_height_pct), 4),
+        "compression_duration": int(duration),
+        "upper_slope": round(float(upper_slope), 6),
+        "lower_slope": round(float(lower_slope), 6),
+        "slope_difference": round(float(slope_difference), 6),
+        "touches_high": int(touches_high),
+        "touches_low": int(touches_low),
+        "inside_ratio": round(float(inside_ratio), 4),
+        "compression_shape": compression_shape,
+        "compression_quality_label": compression_quality_label,
+    }
 
 def detect_compression(
     df: pd.DataFrame,
@@ -96,6 +200,12 @@ def detect_compression(
         if close > 0
         else 999
     )
+    
+    features = compute_compression_features(
+    recent=recent,
+    compression_high=compression_high,
+    compression_low=compression_low,
+    )
 
     score = 0
     reasons = []
@@ -135,6 +245,8 @@ def detect_compression(
         "compression_high": float(compression_high),
         "compression_low": float(compression_low),
         "compression_range_pct": round(float(compression_range_pct), 4),
+        
+        **features,
 
         "recent_range_avg": float(recent_range_avg),
         "base_range_avg": float(base_range_avg),

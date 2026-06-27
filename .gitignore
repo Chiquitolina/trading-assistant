@@ -104,3 +104,6 @@ compression_breakout_test.csv
 compression_state_machine_test.csv
 compression_snapshots
 live_signals_multi_asset.csv
+snapshots
+compression_watch_journal
+reports

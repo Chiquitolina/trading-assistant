@@ -32,9 +32,17 @@ class SignalCompressionSnapshot:
     candle_progress_pct: float | None = None
 
     btc_corr_7d: float | None = None
-    beta_vs_btc: float | None = None
-    r2_vs_btc: float | None = None
-    vol_ratio_vs_btc: float | None = None
+    btc_corr_30d: float | None = None
+
+    beta_vs_btc_7d: float | None = None
+    beta_vs_btc_30d: float | None = None
+
+    r2_vs_btc_7d: float | None = None
+    r2_vs_btc_30d: float | None = None
+
+    vol_ratio_vs_btc_7d: float | None = None
+
     outperformance_7d: float | None = None
+    outperformance_30d: float | None = None
 
     tags: list[str] = field(default_factory=list)

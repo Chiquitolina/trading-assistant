@@ -449,6 +449,25 @@ class ExecutionEngine:
             atr_ratio=ctx.get("atr_ratio"),
             volume_ratio=ctx.get("volume_ratio"),
             avg_body_pct=ctx.get("avg_body_pct"),
+            
+            compression_created_ts=ctx.get("compression_created_ts"),
+            compression_updated_ts=ctx.get("compression_updated_ts"),
+            compression_candles_waiting=ctx.get("compression_candles_waiting"),
+
+            compression_height_pct=ctx.get("compression_height_pct"),
+            compression_duration=ctx.get("compression_duration"),
+
+            upper_slope=ctx.get("upper_slope"),
+            lower_slope=ctx.get("lower_slope"),
+            slope_difference=ctx.get("slope_difference"),
+
+            touches_high=ctx.get("touches_high"),
+            touches_low=ctx.get("touches_low"),
+
+            inside_ratio=ctx.get("inside_ratio"),
+
+            compression_shape=ctx.get("compression_shape"),
+            compression_quality_label=ctx.get("compression_quality_label"),
         )
 
         try:
@@ -1508,6 +1527,25 @@ class ExecutionEngine:
             atr_ratio=ctx.get("atr_ratio"),
             volume_ratio=ctx.get("volume_ratio"),
             avg_body_pct=ctx.get("avg_body_pct"),
+            
+            compression_created_ts=ctx.get("compression_created_ts"),
+            compression_updated_ts=ctx.get("compression_updated_ts"),
+            compression_candles_waiting=ctx.get("compression_candles_waiting"),
+
+            compression_height_pct=ctx.get("compression_height_pct"),
+            compression_duration=ctx.get("compression_duration"),
+
+            upper_slope=ctx.get("upper_slope"),
+            lower_slope=ctx.get("lower_slope"),
+            slope_difference=ctx.get("slope_difference"),
+
+            touches_high=ctx.get("touches_high"),
+            touches_low=ctx.get("touches_low"),
+
+            inside_ratio=ctx.get("inside_ratio"),
+
+            compression_shape=ctx.get("compression_shape"),
+            compression_quality_label=ctx.get("compression_quality_label"),
         )
         
         try:

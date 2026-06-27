@@ -5,6 +5,7 @@ from typing import Optional
 
 class CompressionState(Enum):
     IDLE = "IDLE"
+    WATCH_CREATED = "WATCH_CREATED"
     WATCHING_COMPRESSION = "WATCHING_COMPRESSION"
     BREAKOUT_DETECTED = "BREAKOUT_DETECTED"
     WAIT_PULLBACK = "WAIT_PULLBACK"
@@ -31,6 +32,21 @@ class CompressionWatch:
     compression_low: float
     compression_score: int
     trend_score: int
+    
+    compression_height_pct: Optional[float] = None
+    compression_duration: Optional[int] = None
+
+    upper_slope: Optional[float] = None
+    lower_slope: Optional[float] = None
+    slope_difference: Optional[float] = None
+
+    touches_high: Optional[int] = None
+    touches_low: Optional[int] = None
+
+    inside_ratio: Optional[float] = None
+
+    compression_shape: Optional[str] = None
+    compression_quality_label: Optional[str] = None
 
     breakout_ts: Optional[int] = None
     breakout_price: Optional[float] = None
@@ -52,6 +68,9 @@ class CompressionWatch:
     watch_age: int = 0
 
     pullback_pct: Optional[float] = None
+    pullback_from_breakout_pct: Optional[float] = None
+    distance_above_compression_high_pct: Optional[float] = None
+    
     valid_pullback: Optional[bool] = None
     holds_compression_high: Optional[bool] = None
     continuation: Optional[bool] = None
@@ -110,9 +129,16 @@ class CompressionStateMachine:
             watch.reason = "missing_breakout_price"
             return watch.to_dict()
 
-        pullback_pct = (
+        pullback_from_breakout_pct = (
             (watch.breakout_price - low) / watch.breakout_price
         ) * 100
+
+        distance_above_compression_high_pct = (
+            (low - watch.compression_high) / watch.compression_high
+        ) * 100
+
+        # Por ahora mantenemos el comportamiento viejo
+        pullback_pct = pullback_from_breakout_pct
 
         holds_compression_high = close >= watch.compression_high
 
@@ -128,6 +154,9 @@ class CompressionStateMachine:
         continuation = close >= watch.compression_high
 
         watch.pullback_pct = round(pullback_pct, 4)
+        watch.pullback_from_breakout_pct = round(pullback_from_breakout_pct, 4)
+        watch.distance_above_compression_high_pct = round(distance_above_compression_high_pct, 4)
+        
         watch.valid_pullback = valid_pullback
         watch.holds_compression_high = holds_compression_high
         watch.continuation = continuation
@@ -170,6 +199,8 @@ class CompressionStateMachine:
             "\n"
             "----- EVALUATION -----\n"
             f"Pullback %          : {pullback_pct:.3f}%\n"
+            f"Pullback From BO   : {pullback_from_breakout_pct:.3f}%\n"
+            f"Distance Above Hi  : {distance_above_compression_high_pct:.3f}%\n"
             f"Hold Compression    : {holds_compression_high}\n"
             f"Continuation        : {continuation}\n"
             f"Valid Pullback      : {valid_pullback}\n"
@@ -189,6 +220,8 @@ class CompressionStateMachine:
             f"{symbol} "
             f"waiting={watch.candles_waiting}/{self.max_pullback_candles} "
             f"pullback_pct={pullback_pct:.2f} "
+            f"pullback_from_bo={pullback_from_breakout_pct:.2f} "
+            f"dist_above_hi={distance_above_compression_high_pct:.2f} "
             f"valid_pullback={valid_pullback} "
             f"hold_high={holds_compression_high} "
             f"continuation={continuation} "
@@ -230,6 +263,8 @@ class CompressionStateMachine:
             f"[PULLBACK REJECTED] {symbol}\n"
             "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
             f"Pullback %     : {pullback_pct:.3f}%\n"
+            f"Pullback BO    : {pullback_from_breakout_pct:.3f}%\n"
+            f"Dist Above Hi  : {distance_above_compression_high_pct:.3f}%\n"
             f"Hold High      : {holds_compression_high}\n"
             f"Continuation   : {continuation}\n"
             f"Valid Pullback : {valid_pullback}\n"
@@ -266,7 +301,7 @@ class CompressionStateMachine:
             if trend.get("trend_up") and compression.get("is_compression"):
                 watch = CompressionWatch(
                     symbol=symbol,
-                    state=CompressionState.WATCHING_COMPRESSION,
+                    state=CompressionState.WATCH_CREATED,
                     created_ts=ts,
                     updated_ts=ts,
                     compression_high=float(compression["compression_high"]),
@@ -279,6 +314,20 @@ class CompressionStateMachine:
                     atr_ratio=compression.get("atr_ratio"),
                     volume_ratio=compression.get("volume_ratio"),
                     watch_age=0,
+                    compression_height_pct=compression.get("compression_height_pct"),
+                    compression_duration=compression.get("compression_duration"),
+
+                    upper_slope=compression.get("upper_slope"),
+                    lower_slope=compression.get("lower_slope"),
+                    slope_difference=compression.get("slope_difference"),
+
+                    touches_high=compression.get("touches_high"),
+                    touches_low=compression.get("touches_low"),
+
+                    inside_ratio=compression.get("inside_ratio"),
+
+                    compression_shape=compression.get("compression_shape"),
+                    compression_quality_label=compression.get("compression_quality_label"),
                 )
 
                 self.watches[symbol] = watch
@@ -293,6 +342,15 @@ class CompressionStateMachine:
         watch.updated_ts = ts
         watch.candles_waiting += 1
         watch.watch_age += 1
+        
+        # ============================================
+        # First candle after watch creation
+        # ============================================
+
+        if watch.state == CompressionState.WATCH_CREATED:
+            watch.state = CompressionState.WATCHING_COMPRESSION
+            watch.reason = "watch_created_now_watching"
+            return watch.to_dict()
 
         if (
             watch.state == CompressionState.WATCHING_COMPRESSION
@@ -309,15 +367,34 @@ class CompressionStateMachine:
                 watch.range_ratio = compression.get("range_ratio", watch.range_ratio)
                 watch.atr_ratio = compression.get("atr_ratio", watch.atr_ratio)
                 watch.volume_ratio = compression.get("volume_ratio", watch.volume_ratio)
+                
+                old_high = watch.compression_high
+                old_low = watch.compression_low
 
-                watch.compression_high = max(
-                    watch.compression_high,
-                    float(compression["compression_high"]),
-                )
-                watch.compression_low = min(
-                    watch.compression_low,
-                    float(compression["compression_low"]),
-                )
+                new_high = float(compression["compression_high"])
+                new_low = float(compression["compression_low"])
+
+                if new_high != old_high or new_low != old_low:
+                    print(
+                        f"[WATCH LEVEL WOULD_UPDATE_BUT_FROZEN] {symbol} "
+                        f"frozen_high={old_high:.8f} detected_high={new_high:.8f} "
+                        f"frozen_low={old_low:.8f} detected_low={new_low:.8f}"
+                    )
+                    
+                # ============================================
+                # Freeze compression levels after watch creation
+                # ============================================
+
+
+                #watch.compression_high = max(
+                #    watch.compression_high,
+                #    float(compression["compression_high"]),
+                #)
+                #watch.compression_low = min(
+                #    watch.compression_low,
+                #    float(compression["compression_low"]),
+                #)
+                
                 watch.compression_score = int(compression.get("score", 0))
                 watch.trend_score = int(trend.get("score", watch.trend_score))
 

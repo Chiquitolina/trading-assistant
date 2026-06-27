@@ -11,6 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 import requests
 import plotly.graph_objects as go
 
+import numpy as np
 
 # =========================
 # CONFIG
@@ -709,6 +710,7 @@ def load_status():
             "last_plan_sl": raw.get("last_plan_sl"),
             
             "strategy_mode": raw.get("strategy_mode"),
+            "trigger_tf": raw.get("trigger_tf", "N/A"),
             "last_router_reason": raw.get("last_router_reason"),
 
             "updated_at": updated_at_raw,
@@ -755,6 +757,7 @@ numeric_cols = [
 for col in numeric_cols:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+        
 
 # =========================
 # CALCULATE ENTRY DISTANCE
@@ -771,6 +774,115 @@ else:
 # RAW DF FOR CALCS / CHARTS
 # =========================
 df_raw = df.copy()
+
+# =========================
+# COMPRESSION ENTRY QUALITY
+# =========================
+compression_numeric_cols = [
+    "real_entry",
+    "compression_high",
+    "compression_low",
+    "breakout_price",
+    "breakout_extension_pct",
+    "breakout_extension_atr",
+    "breakout_volume_ratio",
+    "compression_score",
+    "trend_score",
+    "pnl",
+    "max_favorable_pct",
+    "max_adverse_pct",
+]
+
+for col in compression_numeric_cols:
+    if col in df_raw.columns:
+        df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
+
+required_compression_cols = [
+    "side",
+    "real_entry",
+    "compression_high",
+    "compression_low",
+    "breakout_price",
+]
+
+if all(col in df_raw.columns for col in required_compression_cols):
+
+    df_raw["entry_vs_compression_pct"] = np.where(
+        df_raw["side"].astype(str).str.upper() == "LONG",
+        (
+            (df_raw["real_entry"] - df_raw["compression_high"])
+            / df_raw["compression_high"]
+            * 100
+        ),
+        (
+            (df_raw["compression_low"] - df_raw["real_entry"])
+            / df_raw["compression_low"]
+            * 100
+        )
+    )
+
+    df_raw["entry_vs_breakout_pct"] = np.where(
+        df_raw["side"].astype(str).str.upper() == "LONG",
+        (
+            (df_raw["real_entry"] - df_raw["breakout_price"])
+            / df_raw["breakout_price"]
+            * 100
+        ),
+        (
+            (df_raw["breakout_price"] - df_raw["real_entry"])
+            / df_raw["breakout_price"]
+            * 100
+        )
+    )
+
+    df_raw["entry_vs_compression_pct"] = df_raw["entry_vs_compression_pct"].round(4)
+    df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
+
+    df_raw["late_entry"] = df_raw["entry_vs_compression_pct"] > 1.0
+    
+    # =========================
+    # COMPRESSION STOP ANALYSIS
+    # =========================
+
+    df_raw["compression_height"] = (
+        df_raw["compression_high"] - df_raw["compression_low"]
+    )
+
+    df_raw["entry_to_compression_low_pct"] = np.where(
+        df_raw["side"].str.upper() == "LONG",
+
+        (
+            (df_raw["real_entry"] - df_raw["compression_low"])
+            / df_raw["compression_low"]
+            * 100
+        ),
+
+        (
+            (df_raw["compression_high"] - df_raw["real_entry"])
+            / df_raw["compression_high"]
+            * 100
+        )
+    )
+
+    df_raw["sl_to_compression_low_pct"] = np.where(
+        df_raw["side"].str.upper() == "LONG",
+
+        (
+            (df_raw["compression_low"] - df_raw["sl"])
+            / df_raw["compression_low"]
+            * 100
+        ),
+
+        (
+            (df_raw["sl"] - df_raw["compression_high"])
+            / df_raw["compression_high"]
+            * 100
+        )
+    )
+else:
+    df_raw["entry_vs_compression_pct"] = np.nan
+    df_raw["entry_vs_breakout_pct"] = np.nan
+    df_raw["late_entry"] = False
 
 for col in ["signal_ts", "entry_ts", "exit_ts"]:
     if col in df_raw.columns:
@@ -882,6 +994,8 @@ last_plan_sl = status["last_plan_sl"]
 strategy_mode = status["strategy_mode"]
 last_router_reason = status["last_router_reason"]
 
+trigger_tf = status.get("trigger_tf", "N/A")
+
 updated_at = status["updated_at"]
 
 if last_signal in (None, "", "N/A"):
@@ -915,8 +1029,8 @@ with st.container(border=True):
     
     with c8:
         st.metric(
-                "STRATEGY",
-                status.get("strategy_mode", "N/A")
+            "STRATEGY / TF",
+            f"{strategy_mode} / {trigger_tf}"
         )
 
     with c9:
@@ -990,7 +1104,7 @@ if df_raw.empty:
     st.info("📭 No trades yet")
     st.stop()
     
-tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution, tab_compressions, tab_compression_pipeline = st.tabs([
+tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution, tab_compressions, tab_compression_quality, tab_compression_pipeline = st.tabs([
     "📊 Overview",
     "📐 MFE / MAE",
     "🧠 Setups",
@@ -998,6 +1112,7 @@ tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execut
     "❌ Bad Decisions x",
     "⏱️ Execution Analysis",
     "Compressions",
+    "🎯 Compression Entry Quality",
     "Compression Pipeline"
 ])
 
@@ -1048,19 +1163,37 @@ with tab_overview:
             "Sirve para detectar si el sistema está recibiendo más señales en contexto BTC bullish o bearish."
         )
 
+    overview_metrics = calculate_metrics(df_view.to_dict("records"))
+
+    net_pnl_usd = safe_sum(df_view, "pnl_usd")
+    best_trade = safe_max(df_view, "pnl")
+
+    st.markdown("### 📊 Performance")
+
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
-    total_trades = len(df_view)
-    net_pnl_pct = safe_sum(df_view, "pnl")
-    net_pnl_usd = safe_sum(df_view, "pnl_usd")
-    winrate = round((df_view["pnl"] > 0).mean() * 100, 2) if len(df_raw) and "pnl" in df_view.columns else 0
-
-    col1.metric("Trades", total_trades)
-    col2.metric("Net PnL %", f"{net_pnl_pct}%")
+    col1.metric("Trades", overview_metrics["trades"])
+    col2.metric("Net PnL %", f'{overview_metrics["net_pnl"]}%')
     col3.metric("Net PnL USD", f"{net_pnl_usd} USDT")
-    col4.metric("Winrate", f"{winrate}%")
-    col5.metric("Avg PnL %", safe_mean(df_view, "pnl"))
-    col6.metric("Best Trade %", safe_max(df_view, "pnl"))
+    col4.metric("Winrate", f'{overview_metrics["winrate"]}%')
+    col5.metric("Profit Factor", overview_metrics["profit_factor"])
+    col6.metric("Expectancy", overview_metrics["expectancy"])
+
+    col7, col8, col9, col10, col11, col12 = st.columns(6)
+
+    col7.metric("Gross PnL", overview_metrics["gross_pnl"])
+    col8.metric("Fees", overview_metrics["fees"])
+    col9.metric("Fees / Trade", overview_metrics["fees_per_trade"])
+    col10.metric("Avg Win", overview_metrics["avg_win"])
+    col11.metric("Avg Loss", overview_metrics["avg_loss"])
+    col12.metric("Max DD", overview_metrics["max_drawdown"])
+
+    col13, col14, col15, col16 = st.columns(4)
+
+    col13.metric("Best Trade %", best_trade)
+    col14.metric("Fee Impact", overview_metrics["fee_impact"])
+    col15.metric("Fee Drag", overview_metrics["fee_drag"])
+    col16.metric("Fee / Avg Win", overview_metrics["fee_to_avg_win"])
         
         #st.markdown("### 📊 Performance by Volume Tier")
 
@@ -1370,6 +1503,19 @@ with tab_overview:
         table_df["entry_distance_pct"] = table_df["entry_distance_pct"].map(
             lambda x: f"{x:.4f}%" if pd.notnull(x) else "0.0000%"
         )
+    
+    # NUEVO
+    for pct_col in [
+        "entry_vs_compression_pct",
+        "entry_vs_breakout_pct",
+        "breakout_extension_pct",
+        "breakout_extension_atr",
+        "breakout_volume_ratio",
+    ]:
+        if pct_col in table_df.columns:
+            table_df[pct_col] = table_df[pct_col].map(
+                lambda x: f"{x:.4f}" if pd.notnull(x) else "-"
+            )
 
     if "pnl" in table_df.columns:
         table_df["pnl"] = table_df["pnl"].map(
@@ -1418,6 +1564,10 @@ with tab_overview:
         "tp3",
         "entry_price",
         "mark_price",
+        "compression_high",
+        "compression_low",
+        "breakout_price",
+        "entry_ready_price",
     ]
 
     for col in price_cols:
@@ -3887,12 +4037,41 @@ def render_mini_chart(row):
     compression_low = row.get("compression_low")
     breakout_price = row.get("breakout_price")
     entry_price = row.get("entry_price") or row.get("entry_ready_price")
+    
+    # ==========================
+    # COMPRESSION ZONE
+    # ==========================
+
+    if (
+        compression_high is not None
+        and compression_low is not None
+        and not pd.isna(compression_high)
+        and not pd.isna(compression_low)
+    ):
+        fig.add_hrect(
+            y0=float(compression_low),
+            y1=float(compression_high),
+            fillcolor="#8b5cf6",
+            opacity=0.10,
+            line_width=0,
+            layer="below",
+        )
 
     if compression_high is not None and not pd.isna(compression_high):
-        fig.add_hline(y=float(compression_high), line_dash="dash")
+        fig.add_hline(
+            y=float(compression_high),
+            line_dash="dash",
+            line_color="#38bdf8",
+            line_width=1,
+        )
 
     if compression_low is not None and not pd.isna(compression_low):
-        fig.add_hline(y=float(compression_low), line_dash="dash")
+        fig.add_hline(
+            y=float(compression_low),
+            line_dash="dash",
+            line_color="#22c55e",
+            line_width=1,
+        )
 
     if breakout_price is not None and not pd.isna(breakout_price):
         fig.add_hline(y=float(breakout_price), line_dash="dot")
@@ -3919,7 +4098,11 @@ def render_mini_chart(row):
         showlegend=False,
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
     
 def render_mini_line_chart(row):
     symbol = row.get("symbol")
@@ -4002,32 +4185,674 @@ def render_mini_line_chart(row):
         showlegend=False,
     )
     
-    st.markdown(
-    """
-    <div style="
-        border: 1px solid #263244;
-        border-top: 0;
-        border-radius: 0 0 14px 14px;
-        padding: 0 16px 10px 16px;
-        margin-top: -16px;
-        margin-bottom: 22px;
-        background: linear-gradient(180deg, #111c31 0%, #0f172a 100%);
-        box-shadow: 0 8px 24px rgba(0,0,0,0.28);
-    ">
-    """,
-    unsafe_allow_html=True,
-    )
 
     st.plotly_chart(
     fig,
     use_container_width=True,
     config={"displayModeBar": False}
     )
+
     
-    st.markdown(
-    "</div>",
-    unsafe_allow_html=True,
-    )
+def render_pipeline_card(row):
+    state = row.get("state", "N/A")
+    symbol = row.get("symbol", "N/A")
+    color = state_color(state)
+    qcolor = score_color(row.get("compression_score", 0))
+
+    with st.container(border=True):
+
+        # HEADER
+        c1, c2 = st.columns([4, 1])
+
+        with c1:
+            st.markdown(f"### {symbol}")
+            st.markdown(
+                f"""
+                <span style="
+                    background:{color};
+                    color:#020617;
+                    padding:4px 9px;
+                    border-radius:999px;
+                    font-size:11px;
+                    font-weight:800;
+                ">
+                    {state}
+                </span>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with c2:
+            st.markdown(
+                f"""
+                <div style="text-align:right;">
+                    <div style="font-size:11px; color:#94a3b8;">Pipeline Score</div>
+                    <div style="font-size:28px; font-weight:900; color:{color};">
+                        {fmt(row.get("pipeline_score"))}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+
+        # METRICS
+        m1, m2, m3 = st.columns(3)
+
+        with m1:
+            st.markdown("##### Compression")
+            st.markdown(
+                f"""
+                <div style="color:{qcolor}; font-size:18px; font-weight:900;">
+                    Score {fmt(row.get("compression_score"))}
+                </div>
+                Range: <b>{fmt(row.get("range_ratio"))}</b><br>
+                ATR: <b>{fmt(row.get("atr_ratio"))}</b><br>
+                Vol: <b>{fmt(row.get("volume_ratio"))}</b>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with m2:
+            st.markdown("##### Trend / Age")
+            st.markdown(
+                f"""
+                Trend Score: <b>{fmt(row.get("trend_score"))}</b><br>
+                Watch Age: <b>{fmt(row.get("watch_age"))}</b><br>
+                Waiting: <b>{fmt(row.get("candles_waiting"))}</b><br>
+                Reason: <b>{row.get("reason", "N/A")}</b>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with m3:
+            st.markdown("##### Breakout / Pullback")
+            st.markdown(
+                f"""
+                Breakout Price: <b>{fmt(row.get("breakout_price"))}</b><br>
+                Pullback: <b>{fmt(row.get("pullback_pct"))}</b><br>
+                Hold High: <b>{bool_icon(row.get("holds_compression_high"))}</b><br>
+                Continuation: <b>{bool_icon(row.get("continuation"))}</b><br>
+                Breakout Detected: <b>{bool_icon(row.get("breakout_detected"))}</b><br>
+                Pullback Detected: <b>{bool_icon(row.get("pullback_detected"))}</b>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        render_mini_chart(row)
+        
+def event_badge(event):
+    colors = {
+        "WATCHING_COMPRESSION": "#8b5cf6",
+        "WATCH_CREATED": "#0ea5e9",
+        "BREAKOUT_DETECTED": "#38bdf8",
+        "WAIT_PULLBACK": "#eab308",
+        "ENTRY_READY": "#22c55e",
+        "EXPIRED": "#ef4444",
+        "IDLE": "#64748b",
+    }
+
+    color = colors.get(str(event), "#64748b")
+
+    return f"""
+    <span style="
+        background:{color};
+        color:white;
+        padding:3px 8px;
+        border-radius:999px;
+        font-size:11px;
+        font-weight:800;
+        white-space:nowrap;
+    ">
+        {event}
+    </span>
+    """
+    
+def detail_value(label, value):
+    return f"""
+    <div style="
+        display:flex;
+        justify-content:space-between;
+        gap:12px;
+        padding:5px 0;
+        border-bottom:1px solid #1e293b;
+        color:#cbd5e1;
+        font-size:13px;
+    ">
+        <span style="color:#94a3b8;">{label}</span>
+        <b>{value}</b>
+    </div>
+    """
+    
+def render_watch_event_detail(row):
+    event = row.get("event", "N/A")
+    logged_at = row.get("logged_at", "N/A")
+
+    html = f"""
+    <div style="
+        border:1px solid #263244;
+        border-radius:14px;
+        padding:16px;
+        background:#0f172a;
+        margin-bottom:14px;
+    ">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+            <div style="font-size:18px; font-weight:900; color:#ffffff;">
+                {event_badge(event)}
+            </div>
+            <div style="font-size:12px; color:#94a3b8;">
+                {logged_at}
+            </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:18px;">
+
+            <div>
+                <div style="font-weight:900; color:#a78bfa; margin-bottom:8px;">Compression</div>
+                {detail_value("Score", fmt(row.get("compression_score"), "—"))}
+                {detail_value("Trend Score", fmt(row.get("trend_score"), "—"))}
+                {detail_value("Watch Age", fmt(row.get("watch_age"), "—"))}
+                {detail_value("Candles Waiting", fmt(row.get("candles_waiting"), "—"))}
+                {detail_value("High", fmt(row.get("compression_high"), "—"))}
+                {detail_value("Low", fmt(row.get("compression_low"), "—"))}
+                {detail_value("Range Ratio", fmt(row.get("range_ratio"), "—"))}
+                {detail_value("ATR Ratio", fmt(row.get("atr_ratio"), "—"))}
+                {detail_value("Volume Ratio", fmt(row.get("volume_ratio"), "—"))}
+                {detail_value("Avg Body %", fmt(row.get("avg_body_pct"), "—"))}
+            </div>
+
+            <div>
+                <div style="font-weight:900; color:#38bdf8; margin-bottom:8px;">Breakout</div>
+                {detail_value("Detected", bool_icon(row.get("breakout_detected")))}
+                {detail_value("Reason", row.get("breakout_reason", "—"))}
+                {detail_value("Price", fmt(row.get("breakout_price"), "—"))}
+                {detail_value("Volume Ratio", fmt(row.get("breakout_volume_ratio"), "—"))}
+                {detail_value("Extension %", fmt(row.get("breakout_extension_pct"), "—"))}
+                {detail_value("Extension ATR", fmt(row.get("breakout_extension_atr"), "—"))}
+            </div>
+
+            <div>
+                <div style="font-weight:900; color:#22c55e; margin-bottom:8px;">Pullback</div>
+                {detail_value("Pullback %", fmt(row.get("pullback_pct"), "—"))}
+                {detail_value("Valid", bool_icon(row.get("valid_pullback")))}
+                {detail_value("Hold High", bool_icon(row.get("holds_compression_high")))}
+                {detail_value("Continuation", bool_icon(row.get("continuation")))}
+                {detail_value("Reason", row.get("reason", "—"))}
+            </div>
+
+        </div>
+    </div>
+    """
+
+    st.html(html)
+    
+def render_watch_history_card(history_df, symbol):
+    if history_df.empty:
+        st.info(f"No watch history yet for {symbol}.")
+        return
+
+    rows_html = ""
+
+    view = history_df.head(8).copy()
+
+    for _, row in view.iterrows():
+        event = row.get("event", "N/A")
+
+        rows_html += f"""
+        <tr style="border-bottom:1px solid #1e293b;">
+
+            <td style="padding:12px 8px;">{row.get("logged_at", "N/A")}</td>
+
+            <td style="padding:12px 8px;">{event_badge(event)}</td>
+
+            <td style="padding:12px 8px;">{row.get("reason","—")}</td>
+
+            <td style="padding:12px 8px; color:#38bdf8;">
+                <b>{fmt(row.get("compression_high"),"—")}</b>
+            </td>
+
+            <td style="padding:12px 8px; color:#22c55e;">
+                <b>{fmt(row.get("compression_low"),"—")}</b>
+            </td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("watch_age"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("compression_score"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("trend_score"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("range_ratio"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("atr_ratio"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("volume_ratio"),"—")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("breakout_price"),"N/A")}</td>
+
+            <td style="padding:12px 8px;">{fmt(row.get("pullback_pct"),"N/A")}</td>
+
+            <td style="padding:12px 8px;">
+                {bool_icon(row.get("valid_pullback")) if not pd.isna(row.get("valid_pullback")) else "N/A"}
+            </td>
+
+        </tr>
+        """
+
+    html = f"""
+    <div style="
+        border:1px solid #263244;
+        border-radius:14px;
+        padding:16px;
+        margin-top:18px;
+        margin-bottom:22px;
+        background:#0f172a;
+        box-shadow:0 8px 24px rgba(0,0,0,0.28);
+    ">
+        <div style="
+            display:flex;
+            align-items:center;
+            gap:10px;
+            margin-bottom:14px;
+        ">
+            <div style="
+                font-size:20px;
+                font-weight:900;
+                color:#cbd5e1;
+            ">
+                WATCH HISTORY ({symbol})
+            </div>
+            <span style="
+                background:#6d28d9;
+                color:white;
+                padding:3px 8px;
+                border-radius:999px;
+                font-size:11px;
+                font-weight:800;
+            ">
+                {len(history_df)} events
+            </span>
+        </div>
+
+        <table class="watch-history-table" style="
+            width:100%;
+            border-collapse:collapse;
+            color:#cbd5e1;
+            font-size:13px;
+        ">
+            <thead>
+                <tr style="color:#94a3b8; text-align:left;">
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Time</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Event</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Reason</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">High</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Low</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Age</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Score</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Trend</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Range</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">ATR</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Vol</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Breakout</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Pullback</th>
+
+                    <th style="padding:14px 8px; border-bottom:1px solid #263244;">Valid</th>
+
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+    </div>
+    """
+
+    st.html(html)
+
+    st.markdown("#### Event details")
+
+    for i, (_, row) in enumerate(view.iterrows()):
+        with st.expander(f"{row.get('logged_at', 'N/A')} · {row.get('event', 'N/A')}"):
+            render_watch_event_detail(row)
+
+    return
+
+with tab_compression_quality:
+
+    st.markdown("---")
+    st.subheader("🎯 Compression Entry Quality")
+
+    required_cols = [
+        "side",
+        "pnl",
+        "real_entry",
+        "compression_high",
+        "compression_low",
+        "breakout_price",
+        "entry_vs_compression_pct",
+        "entry_vs_breakout_pct",
+        "breakout_extension_atr",
+        "breakout_extension_pct",
+        "breakout_volume_ratio",
+    ]
+
+    missing_cols = [c for c in required_cols if c not in df_view.columns]
+
+    if missing_cols:
+        st.info(f"Missing columns: {missing_cols}")
+
+    else:
+        qdf = df_view.copy()
+
+        for col in [
+            "pnl",
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]:
+            if col in qdf.columns:
+                qdf[col] = pd.to_numeric(qdf[col], errors="coerce")
+
+        qdf = qdf.dropna(subset=["pnl", "entry_vs_compression_pct"])
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Compression trades", len(qdf))
+        c2.metric("Avg Entry Distance", f"{qdf['entry_vs_compression_pct'].mean():.3f}%")
+        c3.metric("Max Entry Distance", f"{qdf['entry_vs_compression_pct'].max():.3f}%")
+        c4.metric("Late Entries > 1%", int((qdf["entry_vs_compression_pct"] > 1.0).sum()))
+
+        st.markdown("### Entry Distance from Compression")
+
+        distance_bins = [-999, 0, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 999]
+        distance_labels = [
+            "< 0%",
+            "0% - 0.25%",
+            "0.25% - 0.50%",
+            "0.50% - 0.75%",
+            "0.75% - 1.00%",
+            "1.00% - 1.50%",
+            "1.50% - 2.00%",
+            "> 2.00%",
+        ]
+
+        qdf["entry_distance_bucket"] = pd.cut(
+            qdf["entry_vs_compression_pct"],
+            bins=distance_bins,
+            labels=distance_labels,
+            include_lowest=True,
+        )
+
+        entry_distance_summary = (
+            qdf
+            .groupby("entry_distance_bucket", observed=False)
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                avg_mfe=("max_favorable_pct", "mean"),
+                avg_mae=("max_adverse_pct", "mean"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "total_pnl", "avg_mfe", "avg_mae"]:
+            if col in entry_distance_summary.columns:
+                entry_distance_summary[col] = entry_distance_summary[col].round(4)
+
+        st.dataframe(entry_distance_summary, use_container_width=True)
+        
+        st.markdown("### Entry Distance × Breakout ATR")
+
+        qdf["entry_distance_simple"] = pd.cut(
+            qdf["entry_vs_compression_pct"],
+            bins=[-999, 0.5, 1.0, 1.5, 2.0, 999],
+            labels=["<0.5%", "0.5-1%", "1-1.5%", "1.5-2%", ">2%"],
+            include_lowest=True,
+        )
+
+        qdf["breakout_atr_simple"] = pd.cut(
+            qdf["breakout_extension_atr"],
+            bins=[-999, 0.5, 1.0, 1.5, 2.0, 3.0, 999],
+            labels=["<0.5 ATR", "0.5-1 ATR", "1-1.5 ATR", "1.5-2 ATR", "2-3 ATR", ">3 ATR"],
+            include_lowest=True,
+        )
+
+        combo_atr_df = (
+            qdf
+            .dropna(subset=["entry_distance_simple", "breakout_atr_simple"])
+            .groupby(["entry_distance_simple", "breakout_atr_simple"], observed=False)
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "total_pnl"]:
+            combo_atr_df[col] = combo_atr_df[col].round(4)
+
+        combo_atr_df = combo_atr_df[combo_atr_df["trades"] > 0]
+
+        st.dataframe(
+            combo_atr_df.sort_values(
+                ["pf", "total_pnl"],
+                ascending=False,
+                na_position="last"
+            ),
+            use_container_width=True
+        )
+        
+        st.markdown("### Entry Distance × Breakout Volume")
+
+        qdf["breakout_volume_bucket"] = pd.cut(
+            qdf["breakout_volume_ratio"],
+            bins=[-999, 1.5, 2.0, 3.0, 5.0, 999],
+            labels=["<1.5x", "1.5-2x", "2-3x", "3-5x", ">5x"],
+            include_lowest=True,
+        )
+
+        combo_volume_df = (
+            qdf
+            .dropna(subset=["entry_distance_simple", "breakout_volume_bucket"])
+            .groupby(["entry_distance_simple", "breakout_volume_bucket"], observed=False)
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "total_pnl"]:
+            combo_volume_df[col] = combo_volume_df[col].round(4)
+
+        combo_volume_df = combo_volume_df[combo_volume_df["trades"] > 0]
+
+        st.dataframe(
+            combo_volume_df.sort_values(
+                ["pf", "total_pnl"],
+                ascending=False,
+                na_position="last"
+            ),
+            use_container_width=True
+        )
+
+        st.markdown("### SL Late Entry Cases")
+
+        sl_late_df = qdf.copy()
+
+        if "exit_reason" in sl_late_df.columns:
+            sl_late_df = sl_late_df[
+                sl_late_df["exit_reason"].astype(str).str.upper() == "SL"
+            ]
+
+        sl_cols = [
+            "symbol",
+            "side",
+            "entry_ts_dt",
+            "pnl",
+            "real_entry",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+            "compression_score",
+            "trend_score",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        existing_sl_cols = [c for c in sl_cols if c in sl_late_df.columns]
+
+        st.dataframe(
+            sl_late_df[existing_sl_cols]
+            .sort_values("entry_vs_compression_pct", ascending=False)
+            .head(50),
+            use_container_width=True
+        )
+
+        st.markdown("### Breakout Extension ATR")
+
+        atr_bins = [-999, 0.25, 0.50, 1.00, 1.50, 2.00, 3.00, 999]
+        atr_labels = [
+            "< 0.25 ATR",
+            "0.25 - 0.50 ATR",
+            "0.50 - 1.00 ATR",
+            "1.00 - 1.50 ATR",
+            "1.50 - 2.00 ATR",
+            "2.00 - 3.00 ATR",
+            "> 3.00 ATR",
+        ]
+
+        qdf["breakout_atr_bucket"] = pd.cut(
+            qdf["breakout_extension_atr"],
+            bins=atr_bins,
+            labels=atr_labels,
+            include_lowest=True,
+        )
+
+        breakout_atr_summary = (
+            qdf
+            .dropna(subset=["breakout_atr_bucket"])
+            .groupby("breakout_atr_bucket", observed=False)
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                avg_entry_distance=("entry_vs_compression_pct", "mean"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "total_pnl", "avg_entry_distance"]:
+            breakout_atr_summary[col] = breakout_atr_summary[col].round(4)
+
+        st.dataframe(breakout_atr_summary, use_container_width=True)
+
+        st.markdown("### Late Entry Cases")
+
+        late_cols = [
+            "symbol",
+            "side",
+            "entry_ts_dt",
+            "exit_reason",
+            "pnl",
+            "real_entry",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+            "compression_score",
+            "trend_score",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        existing_late_cols = [c for c in late_cols if c in qdf.columns]
+
+        late_df = (
+            qdf[existing_late_cols]
+            .sort_values("entry_vs_compression_pct", ascending=False)
+        )
+
+        st.dataframe(
+            late_df.head(50),
+            use_container_width=True
+        )
+
+        st.markdown("### Entry Distance vs PnL")
+
+        scatter_df = qdf.dropna(subset=["entry_vs_compression_pct", "pnl"]).copy()
+
+        if not scatter_df.empty:
+            fig = go.Figure()
+
+            fig.add_trace(
+                go.Scatter(
+                    x=scatter_df["entry_vs_compression_pct"],
+                    y=scatter_df["pnl"],
+                    mode="markers",
+                    text=scatter_df["symbol"] if "symbol" in scatter_df.columns else None,
+                    customdata=scatter_df[["side", "exit_reason"]] if all(c in scatter_df.columns for c in ["side", "exit_reason"]) else None,
+                    hovertemplate=(
+                        "Entry distance: %{x:.3f}%<br>"
+                        "PnL: %{y:.3f}%<br>"
+                        "Symbol: %{text}<br>"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+            fig.update_layout(
+                xaxis_title="Entry distance from compression (%)",
+                yaxis_title="PnL (%)",
+                height=450,
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
     
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
@@ -4048,7 +4873,7 @@ with tab_compression_pipeline:
                 border-radius: 14px;
                 padding: 16px;
                 margin-bottom: 22px;
-                background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                background:#0f172a;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.28);
             }
 
@@ -4058,7 +4883,7 @@ with tab_compression_pipeline:
                 padding: 16px;
                 margin-top: 18px;
                 margin-bottom: 22px;
-                background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                background:#0f172a;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.28);
             }
 
@@ -4125,6 +4950,7 @@ with tab_compression_pipeline:
         def state_color(state):
             return {
                 "ENTRY_READY": "#22c55e",
+                "WATCH_CREATED": "#0ea5e9",
                 "WAIT_PULLBACK": "#eab308",
                 "BREAKOUT_DETECTED": "#38bdf8",
                 "WATCHING_COMPRESSION": "#a78bfa",
@@ -4145,7 +4971,7 @@ with tab_compression_pipeline:
                     border-bottom: 0;
                     padding: 16px 16px 10px 16px;
                     margin-bottom: 0px;
-                    background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                    background:#0f172a;
                     box-shadow: 0 8px 24px rgba(0,0,0,0.28);
                 "
             >
@@ -4218,13 +5044,14 @@ with tab_compression_pipeline:
 
         state_counts = pipeline_df["state"].value_counts()
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
 
         c1.metric("ENTRY_READY", int(state_counts.get("ENTRY_READY", 0)))
-        c2.metric("WAIT_PULLBACK", int(state_counts.get("WAIT_PULLBACK", 0)))
-        c3.metric("BREAKOUT", int(state_counts.get("BREAKOUT_DETECTED", 0)))
-        c4.metric("WATCHING", int(state_counts.get("WATCHING_COMPRESSION", 0)))
-        c5.metric("EXPIRED", int(state_counts.get("EXPIRED", 0)))
+        c2.metric("WATCH_CREATED", int(state_counts.get("WATCH_CREATED", 0)))
+        c3.metric("WAIT_PULLBACK", int(state_counts.get("WAIT_PULLBACK", 0)))
+        c4.metric("BREAKOUT", int(state_counts.get("BREAKOUT_DETECTED", 0)))
+        c5.metric("WATCHING", int(state_counts.get("WATCHING_COMPRESSION", 0)))
+        c6.metric("EXPIRED", int(state_counts.get("EXPIRED", 0)))
 
         st.markdown("---")
 
@@ -4273,6 +5100,7 @@ with tab_compression_pipeline:
 
         states_order = [
             "ENTRY_READY",
+            "WATCH_CREATED",
             "WAIT_PULLBACK",
             "BREAKOUT_DETECTED",
             "WATCHING_COMPRESSION",
@@ -4288,101 +5116,20 @@ with tab_compression_pipeline:
             st.markdown(f"### {state} ({len(state_df)})")
 
             for _, row in state_df.iterrows():
-                st.html(card_html(row))
-                render_mini_line_chart(row)
+                render_pipeline_card(row)
 
         # ============================================
         # WATCH HISTORY (SOLO SI HAY UN SÍMBOLO)
         # ============================================
 
         if selected_symbol != "ALL":
-
             history_df = load_watch_history(
                 selected_symbol,
                 limit=30,
             )
 
-            st.markdown(
-                f"""
-                <div class="watch-history-card">
-                    <div class="watch-history-title">
-                        WATCH HISTORY ({selected_symbol})
-                        <span class="watch-badge">
-                            {len(history_df)} events
-                        </span>
-                    </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            if history_df.empty:
-                st.info(
-                    f"No watch history yet for {selected_symbol}."
-                )
-
-            else:
-
-                history_cols = [
-                    "logged_at",
-                    "event",
-                    "reason",
-                    "watch_age",
-                    "candles_waiting",
-                    "compression_score",
-                    "trend_score",
-                    "compression_high",
-                    "compression_low",
-                    "range_ratio",
-                    "atr_ratio",
-                    "volume_ratio",
-                    "avg_body_pct",
-                    "breakout_detected",
-                    "breakout_reason",
-                    "breakout_volume_ratio",
-                    "breakout_price",
-                    "breakout_extension_pct",
-                    "breakout_extension_atr",
-                    "pullback_pct",
-                    "valid_pullback",
-                    "holds_compression_high",
-                    "continuation",
-                ]
-
-                existing_history_cols = [
-                    c for c in history_cols
-                    if c in history_df.columns
-                ]
-
-                st.dataframe(
-                    history_df[existing_history_cols],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                with st.expander(
-                    "Last 10 candles from latest journal event"
-                ):
-
-                    latest = history_df.iloc[0]
-
-                    candles = latest.get("last_10_candles")
-
-                    if isinstance(candles, list):
-
-                        st.dataframe(
-                            pd.DataFrame(candles),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-
-                    else:
-                        st.info("No last_10_candles available.")
-
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
+            render_watch_history_card(history_df, selected_symbol)
+            
         # =========================
         # OPTIONAL RAW TABLE
         # =========================
