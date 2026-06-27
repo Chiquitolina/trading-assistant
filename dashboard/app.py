@@ -4116,8 +4116,6 @@ def render_pipeline_card(row):
                 unsafe_allow_html=True,
             )
 
-        st.markdown("---")
-
         render_mini_line_chart(row)
     
 with tab_compression_pipeline:
@@ -4139,7 +4137,7 @@ with tab_compression_pipeline:
                 border-radius: 14px;
                 padding: 16px;
                 margin-bottom: 22px;
-                background: linear-gradient(180deg, #0f172a 0%, #111c31 100%);
+                background:#0f172a;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.28);
             }
 
