@@ -4029,6 +4029,97 @@ def render_mini_line_chart(row):
     unsafe_allow_html=True,
     )
     
+def render_pipeline_card(row):
+    state = row.get("state", "N/A")
+    symbol = row.get("symbol", "N/A")
+    color = state_color(state)
+    qcolor = score_color(row.get("compression_score", 0))
+
+    with st.container(border=True):
+
+        # HEADER
+        c1, c2 = st.columns([4, 1])
+
+        with c1:
+            st.markdown(f"### {symbol}")
+            st.markdown(
+                f"""
+                <span style="
+                    background:{color};
+                    color:#020617;
+                    padding:4px 9px;
+                    border-radius:999px;
+                    font-size:11px;
+                    font-weight:800;
+                ">
+                    {state}
+                </span>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with c2:
+            st.markdown(
+                f"""
+                <div style="text-align:right;">
+                    <div style="font-size:11px; color:#94a3b8;">Pipeline Score</div>
+                    <div style="font-size:28px; font-weight:900; color:{color};">
+                        {fmt(row.get("pipeline_score"))}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+
+        # METRICS
+        m1, m2, m3 = st.columns(3)
+
+        with m1:
+            st.markdown("##### Compression")
+            st.markdown(
+                f"""
+                <div style="color:{qcolor}; font-size:18px; font-weight:900;">
+                    Score {fmt(row.get("compression_score"))}
+                </div>
+                Range: <b>{fmt(row.get("range_ratio"))}</b><br>
+                ATR: <b>{fmt(row.get("atr_ratio"))}</b><br>
+                Vol: <b>{fmt(row.get("volume_ratio"))}</b>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with m2:
+            st.markdown("##### Trend / Age")
+            st.markdown(
+                f"""
+                Trend Score: <b>{fmt(row.get("trend_score"))}</b><br>
+                Watch Age: <b>{fmt(row.get("watch_age"))}</b><br>
+                Waiting: <b>{fmt(row.get("candles_waiting"))}</b><br>
+                Reason: <b>{row.get("reason", "N/A")}</b>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with m3:
+            st.markdown("##### Breakout / Pullback")
+            st.markdown(
+                f"""
+                Breakout Price: <b>{fmt(row.get("breakout_price"))}</b><br>
+                Pullback: <b>{fmt(row.get("pullback_pct"))}</b><br>
+                Hold High: <b>{bool_icon(row.get("holds_compression_high"))}</b><br>
+                Continuation: <b>{bool_icon(row.get("continuation"))}</b><br>
+                Breakout Detected: <b>{bool_icon(row.get("breakout_detected"))}</b><br>
+                Pullback Detected: <b>{bool_icon(row.get("pullback_detected"))}</b>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+
+        render_mini_line_chart(row)
+    
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
 
@@ -4288,8 +4379,7 @@ with tab_compression_pipeline:
             st.markdown(f"### {state} ({len(state_df)})")
 
             for _, row in state_df.iterrows():
-                st.html(card_html(row))
-                render_mini_line_chart(row)
+                render_pipeline_card(row)
 
         # ============================================
         # WATCH HISTORY (SOLO SI HAY UN SÍMBOLO)
