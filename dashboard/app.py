@@ -4488,6 +4488,95 @@ with tab_compression_pipeline:
 
             render_watch_history_card(history_df, selected_symbol)
             
+            if selected_symbol != "ALL":
+
+                history_df = load_watch_history(
+                    selected_symbol,
+                    limit=30,
+                )
+
+                st.markdown(
+                    f"""
+                    <div class="watch-history-card">
+                        <div class="watch-history-title">
+                            WATCH HISTORY ({selected_symbol})
+                            <span class="watch-badge">
+                                {len(history_df)} events
+                            </span>
+                        </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                if history_df.empty:
+                    st.info(
+                        f"No watch history yet for {selected_symbol}."
+                    )
+
+                else:
+
+                    history_cols = [
+                        "logged_at",
+                        "event",
+                        "reason",
+                        "watch_age",
+                        "candles_waiting",
+                        "compression_score",
+                        "trend_score",
+                        "compression_high",
+                        "compression_low",
+                        "range_ratio",
+                        "atr_ratio",
+                        "volume_ratio",
+                        "avg_body_pct",
+                        "breakout_detected",
+                        "breakout_reason",
+                        "breakout_volume_ratio",
+                        "breakout_price",
+                        "breakout_extension_pct",
+                        "breakout_extension_atr",
+                        "pullback_pct",
+                        "valid_pullback",
+                        "holds_compression_high",
+                        "continuation",
+                    ]
+
+                    existing_history_cols = [
+                        c for c in history_cols
+                        if c in history_df.columns
+                    ]
+
+                    st.dataframe(
+                        history_df[existing_history_cols],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    with st.expander(
+                        "Last 10 candles from latest journal event"
+                    ):
+
+                        latest = history_df.iloc[0]
+
+                        candles = latest.get("last_10_candles")
+
+                        if isinstance(candles, list):
+
+                            st.dataframe(
+                                pd.DataFrame(candles),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                        else:
+                            st.info("No last_10_candles available.")
+
+                st.markdown(
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            
         # =========================
         # OPTIONAL RAW TABLE
         # =========================
