@@ -4231,7 +4231,7 @@ def render_watch_history_card(history_df, symbol):
 
             <td style="padding:12px 8px; color:#22c55e;">
                 <b>{fmt(row.get("compression_low"),"—")}</b>
-            </td><td style="padding:12px 8px;"><b>{fmt(row.get("compression_low"),"—")}</b></td>
+            </td>
 
             <td style="padding:12px 8px;">{fmt(row.get("watch_age"),"—")}</td>
 
