@@ -309,6 +309,19 @@ class CompressionStateMachine:
                 watch.range_ratio = compression.get("range_ratio", watch.range_ratio)
                 watch.atr_ratio = compression.get("atr_ratio", watch.atr_ratio)
                 watch.volume_ratio = compression.get("volume_ratio", watch.volume_ratio)
+                
+                old_high = watch.compression_high
+                old_low = watch.compression_low
+
+                new_high = float(compression["compression_high"])
+                new_low = float(compression["compression_low"])
+
+                if new_high != old_high or new_low != old_low:
+                    print(
+                        f"[WATCH LEVEL UPDATED] {symbol} "
+                        f"old_high={old_high:.8f} new_high={new_high:.8f} "
+                        f"old_low={old_low:.8f} new_low={new_low:.8f}"
+                    )
 
                 watch.compression_high = max(
                     watch.compression_high,
