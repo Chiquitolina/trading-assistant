@@ -4537,7 +4537,7 @@ with tab_compression_pipeline:
 
         state_counts = pipeline_df["state"].value_counts()
 
-        c1, c2, c3, c4, c5, c6 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
 
         c1.metric("ENTRY_READY", int(state_counts.get("ENTRY_READY", 0)))
         c2.metric("WATCH_CREATED", int(state_counts.get("WATCH_CREATED", 0)))
