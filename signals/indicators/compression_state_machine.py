@@ -5,6 +5,7 @@ from typing import Optional
 
 class CompressionState(Enum):
     IDLE = "IDLE"
+    WATCH_CREATED = "WATCH_CREATED"
     WATCHING_COMPRESSION = "WATCHING_COMPRESSION"
     BREAKOUT_DETECTED = "BREAKOUT_DETECTED"
     WAIT_PULLBACK = "WAIT_PULLBACK"
@@ -266,7 +267,7 @@ class CompressionStateMachine:
             if trend.get("trend_up") and compression.get("is_compression"):
                 watch = CompressionWatch(
                     symbol=symbol,
-                    state=CompressionState.WATCHING_COMPRESSION,
+                    state=CompressionState.WATCH_CREATED,
                     created_ts=ts,
                     updated_ts=ts,
                     compression_high=float(compression["compression_high"]),
@@ -293,6 +294,15 @@ class CompressionStateMachine:
         watch.updated_ts = ts
         watch.candles_waiting += 1
         watch.watch_age += 1
+        
+        # ============================================
+        # First candle after watch creation
+        # ============================================
+
+        if watch.state == CompressionState.WATCH_CREATED:
+            watch.state = CompressionState.WATCHING_COMPRESSION
+            watch.reason = "watch_created_now_watching"
+            return watch.to_dict()
 
         if (
             watch.state == CompressionState.WATCHING_COMPRESSION

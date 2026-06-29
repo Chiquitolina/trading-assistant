@@ -4443,6 +4443,7 @@ with tab_compression_pipeline:
         def state_color(state):
             return {
                 "ENTRY_READY": "#22c55e",
+                "WATCH_CREATED": "#0ea5e9",
                 "WAIT_PULLBACK": "#eab308",
                 "BREAKOUT_DETECTED": "#38bdf8",
                 "WATCHING_COMPRESSION": "#a78bfa",
@@ -4536,13 +4537,14 @@ with tab_compression_pipeline:
 
         state_counts = pipeline_df["state"].value_counts()
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(5)
 
         c1.metric("ENTRY_READY", int(state_counts.get("ENTRY_READY", 0)))
-        c2.metric("WAIT_PULLBACK", int(state_counts.get("WAIT_PULLBACK", 0)))
-        c3.metric("BREAKOUT", int(state_counts.get("BREAKOUT_DETECTED", 0)))
-        c4.metric("WATCHING", int(state_counts.get("WATCHING_COMPRESSION", 0)))
-        c5.metric("EXPIRED", int(state_counts.get("EXPIRED", 0)))
+        c2.metric("WATCH_CREATED", int(state_counts.get("WATCH_CREATED", 0)))
+        c3.metric("WAIT_PULLBACK", int(state_counts.get("WAIT_PULLBACK", 0)))
+        c4.metric("BREAKOUT", int(state_counts.get("BREAKOUT_DETECTED", 0)))
+        c5.metric("WATCHING", int(state_counts.get("WATCHING_COMPRESSION", 0)))
+        c6.metric("EXPIRED", int(state_counts.get("EXPIRED", 0)))
 
         st.markdown("---")
 
@@ -4591,6 +4593,7 @@ with tab_compression_pipeline:
 
         states_order = [
             "ENTRY_READY",
+            "WATCH_CREATED",
             "WAIT_PULLBACK",
             "BREAKOUT_DETECTED",
             "WATCHING_COMPRESSION",
