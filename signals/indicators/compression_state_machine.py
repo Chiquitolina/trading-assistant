@@ -318,19 +318,25 @@ class CompressionStateMachine:
 
                 if new_high != old_high or new_low != old_low:
                     print(
-                        f"[WATCH LEVEL UPDATED] {symbol} "
-                        f"old_high={old_high:.8f} new_high={new_high:.8f} "
-                        f"old_low={old_low:.8f} new_low={new_low:.8f}"
+                        f"[WATCH LEVEL WOULD_UPDATE_BUT_FROZEN] {symbol} "
+                        f"frozen_high={old_high:.8f} detected_high={new_high:.8f} "
+                        f"frozen_low={old_low:.8f} detected_low={new_low:.8f}"
                     )
+                    
+                # ============================================
+                # Freeze compression levels after watch creation
+                # ============================================
 
-                watch.compression_high = max(
-                    watch.compression_high,
-                    float(compression["compression_high"]),
-                )
-                watch.compression_low = min(
-                    watch.compression_low,
-                    float(compression["compression_low"]),
-                )
+
+                #watch.compression_high = max(
+                #    watch.compression_high,
+                #    float(compression["compression_high"]),
+                #)
+                #watch.compression_low = min(
+                #    watch.compression_low,
+                #    float(compression["compression_low"]),
+                #)
+                
                 watch.compression_score = int(compression.get("score", 0))
                 watch.trend_score = int(trend.get("score", watch.trend_score))
 

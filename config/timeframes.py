@@ -51,7 +51,7 @@ MODE_CONFIG = {
         "allow_longs": True,
         "allow_shorts": False,
 
-        "use_fixed_levels": True,
+        "use_fixed_levels": False,
         "fixed_tp_pct": 0.30,
         "fixed_sl_pct": 0.40,
 
