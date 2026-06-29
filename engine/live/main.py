@@ -587,6 +587,7 @@ try:
             
             compression_counts = {
                 "IDLE": 0,
+                "WATCH_CREATED": 0,
                 "WATCHING_COMPRESSION": 0,
                 "BREAKOUT_DETECTED": 0,
                 "WAIT_PULLBACK": 0,
