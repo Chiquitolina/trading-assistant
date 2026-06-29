@@ -3887,12 +3887,41 @@ def render_mini_chart(row):
     compression_low = row.get("compression_low")
     breakout_price = row.get("breakout_price")
     entry_price = row.get("entry_price") or row.get("entry_ready_price")
+    
+    # ==========================
+    # COMPRESSION ZONE
+    # ==========================
+
+    if (
+        compression_high is not None
+        and compression_low is not None
+        and not pd.isna(compression_high)
+        and not pd.isna(compression_low)
+    ):
+        fig.add_hrect(
+            y0=float(compression_low),
+            y1=float(compression_high),
+            fillcolor="#8b5cf6",
+            opacity=0.10,
+            line_width=0,
+            layer="below",
+        )
 
     if compression_high is not None and not pd.isna(compression_high):
-        fig.add_hline(y=float(compression_high), line_dash="dash")
+        fig.add_hline(
+            y=float(compression_high),
+            line_dash="dash",
+            line_color="#38bdf8",
+            line_width=1,
+        )
 
     if compression_low is not None and not pd.isna(compression_low):
-        fig.add_hline(y=float(compression_low), line_dash="dash")
+        fig.add_hline(
+            y=float(compression_low),
+            line_dash="dash",
+            line_color="#22c55e",
+            line_width=1,
+        )
 
     if breakout_price is not None and not pd.isna(breakout_price):
         fig.add_hline(y=float(breakout_price), line_dash="dot")
@@ -3919,7 +3948,11 @@ def render_mini_chart(row):
         showlegend=False,
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
     
 def render_mini_line_chart(row):
     symbol = row.get("symbol")
