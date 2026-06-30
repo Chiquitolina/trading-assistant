@@ -341,6 +341,8 @@ status_writer.write({
     
     # 🔥 NUEVO
     "strategy_mode": STRATEGY_MODE,
+    "trigger_tf": TRIGGER_TF,
+    
     "last_executed_strategy": None,
     "last_router_action": None,
     "last_router_reason": None,
@@ -458,7 +460,9 @@ def write_heartbeat():
         "signal_direction": last_signal_direction,
         "signal_momentum": last_signal_momentum,
 
-        "strategy_mode": current_status.get("strategy_mode"),
+        "strategy_mode": STRATEGY_MODE,
+        "trigger_tf": TRIGGER_TF,
+        
         "last_executed_strategy": current_status.get("last_executed_strategy"),
         "last_router_action": current_status.get("last_router_action"),
         "last_router_reason": current_status.get("last_router_reason"),
@@ -919,6 +923,8 @@ except KeyboardInterrupt:
         "signal_trend": None,
         "signal_direction": None,
         "signal_momentum": None,
+        "strategy_mode": STRATEGY_MODE,
+        "trigger_tf": TRIGGER_TF,
     })
 
     print(
