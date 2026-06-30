@@ -53,6 +53,9 @@ class CompressionWatch:
     watch_age: int = 0
 
     pullback_pct: Optional[float] = None
+    pullback_from_breakout_pct: Optional[float] = None
+    distance_above_compression_high_pct: Optional[float] = None
+    
     valid_pullback: Optional[bool] = None
     holds_compression_high: Optional[bool] = None
     continuation: Optional[bool] = None
@@ -111,9 +114,16 @@ class CompressionStateMachine:
             watch.reason = "missing_breakout_price"
             return watch.to_dict()
 
-        pullback_pct = (
+        pullback_from_breakout_pct = (
             (watch.breakout_price - low) / watch.breakout_price
         ) * 100
+
+        distance_above_compression_high_pct = (
+            (low - watch.compression_high) / watch.compression_high
+        ) * 100
+
+        # Por ahora mantenemos el comportamiento viejo
+        pullback_pct = pullback_from_breakout_pct
 
         holds_compression_high = close >= watch.compression_high
 
@@ -129,6 +139,9 @@ class CompressionStateMachine:
         continuation = close >= watch.compression_high
 
         watch.pullback_pct = round(pullback_pct, 4)
+        watch.pullback_from_breakout_pct = round(pullback_from_breakout_pct, 4)
+        watch.distance_above_compression_high_pct = round(distance_above_compression_high_pct, 4)
+        
         watch.valid_pullback = valid_pullback
         watch.holds_compression_high = holds_compression_high
         watch.continuation = continuation
@@ -171,6 +184,8 @@ class CompressionStateMachine:
             "\n"
             "----- EVALUATION -----\n"
             f"Pullback %          : {pullback_pct:.3f}%\n"
+            f"Pullback From BO   : {pullback_from_breakout_pct:.3f}%\n"
+            f"Distance Above Hi  : {distance_above_compression_high_pct:.3f}%\n"
             f"Hold Compression    : {holds_compression_high}\n"
             f"Continuation        : {continuation}\n"
             f"Valid Pullback      : {valid_pullback}\n"
@@ -190,6 +205,8 @@ class CompressionStateMachine:
             f"{symbol} "
             f"waiting={watch.candles_waiting}/{self.max_pullback_candles} "
             f"pullback_pct={pullback_pct:.2f} "
+            f"pullback_from_bo={pullback_from_breakout_pct:.2f} "
+            f"dist_above_hi={distance_above_compression_high_pct:.2f} "
             f"valid_pullback={valid_pullback} "
             f"hold_high={holds_compression_high} "
             f"continuation={continuation} "
@@ -231,6 +248,8 @@ class CompressionStateMachine:
             f"[PULLBACK REJECTED] {symbol}\n"
             "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
             f"Pullback %     : {pullback_pct:.3f}%\n"
+            f"Pullback BO    : {pullback_from_breakout_pct:.3f}%\n"
+            f"Dist Above Hi  : {distance_above_compression_high_pct:.3f}%\n"
             f"Hold High      : {holds_compression_high}\n"
             f"Continuation   : {continuation}\n"
             f"Valid Pullback : {valid_pullback}\n"
