@@ -710,6 +710,7 @@ def load_status():
             "last_plan_sl": raw.get("last_plan_sl"),
             
             "strategy_mode": raw.get("strategy_mode"),
+            "trigger_tf": raw.get("trigger_tf", "N/A"),
             "last_router_reason": raw.get("last_router_reason"),
 
             "updated_at": updated_at_raw,
@@ -953,6 +954,8 @@ last_plan_sl = status["last_plan_sl"]
 strategy_mode = status["strategy_mode"]
 last_router_reason = status["last_router_reason"]
 
+trigger_tf = status.get("trigger_tf", "N/A")
+
 updated_at = status["updated_at"]
 
 if last_signal in (None, "", "N/A"):
@@ -986,8 +989,8 @@ with st.container(border=True):
     
     with c8:
         st.metric(
-                "STRATEGY",
-                status.get("strategy_mode", "N/A")
+            "STRATEGY / TF",
+            f"{strategy_mode} / {trigger_tf}"
         )
 
     with c9:
