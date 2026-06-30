@@ -4561,6 +4561,129 @@ with tab_compression_quality:
                 entry_distance_summary[col] = entry_distance_summary[col].round(4)
 
         st.dataframe(entry_distance_summary, use_container_width=True)
+        
+        st.markdown("### Entry Distance × Breakout ATR")
+
+        qdf["entry_distance_simple"] = pd.cut(
+            qdf["entry_vs_compression_pct"],
+            bins=[-999, 0.5, 1.0, 1.5, 2.0, 999],
+            labels=["<0.5%", "0.5-1%", "1-1.5%", "1.5-2%", ">2%"],
+            include_lowest=True,
+        )
+
+        qdf["breakout_atr_simple"] = pd.cut(
+            qdf["breakout_extension_atr"],
+            bins=[-999, 0.5, 1.0, 1.5, 2.0, 3.0, 999],
+            labels=["<0.5 ATR", "0.5-1 ATR", "1-1.5 ATR", "1.5-2 ATR", "2-3 ATR", ">3 ATR"],
+            include_lowest=True,
+        )
+
+        combo_atr_df = (
+            qdf
+            .dropna(subset=["entry_distance_simple", "breakout_atr_simple"])
+            .groupby(["entry_distance_simple", "breakout_atr_simple"], observed=False)
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "total_pnl"]:
+            combo_atr_df[col] = combo_atr_df[col].round(4)
+
+        combo_atr_df = combo_atr_df[combo_atr_df["trades"] > 0]
+
+        st.dataframe(
+            combo_atr_df.sort_values(
+                ["pf", "total_pnl"],
+                ascending=False,
+                na_position="last"
+            ),
+            use_container_width=True
+        )
+        
+        st.markdown("### Entry Distance × Breakout Volume")
+
+        qdf["breakout_volume_bucket"] = pd.cut(
+            qdf["breakout_volume_ratio"],
+            bins=[-999, 1.5, 2.0, 3.0, 5.0, 999],
+            labels=["<1.5x", "1.5-2x", "2-3x", "3-5x", ">5x"],
+            include_lowest=True,
+        )
+
+        combo_volume_df = (
+            qdf
+            .dropna(subset=["entry_distance_simple", "breakout_volume_bucket"])
+            .groupby(["entry_distance_simple", "breakout_volume_bucket"], observed=False)
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "total_pnl"]:
+            combo_volume_df[col] = combo_volume_df[col].round(4)
+
+        combo_volume_df = combo_volume_df[combo_volume_df["trades"] > 0]
+
+        st.dataframe(
+            combo_volume_df.sort_values(
+                ["pf", "total_pnl"],
+                ascending=False,
+                na_position="last"
+            ),
+            use_container_width=True
+        )
+
+        st.markdown("### SL Late Entry Cases")
+
+        sl_late_df = qdf.copy()
+
+        if "exit_reason" in sl_late_df.columns:
+            sl_late_df = sl_late_df[
+                sl_late_df["exit_reason"].astype(str).str.upper() == "SL"
+            ]
+
+        sl_cols = [
+            "symbol",
+            "side",
+            "entry_ts_dt",
+            "pnl",
+            "real_entry",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+            "compression_score",
+            "trend_score",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        existing_sl_cols = [c for c in sl_cols if c in sl_late_df.columns]
+
+        st.dataframe(
+            sl_late_df[existing_sl_cols]
+            .sort_values("entry_vs_compression_pct", ascending=False)
+            .head(50),
+            use_container_width=True
+        )
 
         st.markdown("### Breakout Extension ATR")
 
