@@ -128,6 +128,7 @@ DAYS_BY_TF = {
 }
 
 STATUS_INTERVAL = 3
+MAX_COMPRESSION_ENTRIES_PER_BATCH = 2
 
 # =========================================================
 # INIT BUFFER
@@ -578,6 +579,7 @@ try:
 
             batch_started = time.perf_counter()
             max_delay_seen = 0
+            compression_entries_opened_in_batch = 0
             
             if STRATEGY_MODE == "compression":
                 compression_strategy.reset_stats()
@@ -718,6 +720,20 @@ try:
                         f"action={trade_action.action.value} "
                         f"reason={trade_action.reason}"
                     )
+                    
+                if (
+                    STRATEGY_MODE == "compression"
+                    and trade_action.action != Action.HOLD
+                    and compression_entries_opened_in_batch >= MAX_COMPRESSION_ENTRIES_PER_BATCH
+                ):
+                    print(
+                        f"\033[93m[COMPRESSION BATCH LIMIT]\033[0m "
+                        f"symbol={symbol} "
+                        f"blocked=max_entries_per_batch "
+                        f"opened={compression_entries_opened_in_batch}/"
+                        f"{MAX_COMPRESSION_ENTRIES_PER_BATCH}"
+                    )
+                    continue
 
                 logger.debug(
                     f"\033[93m[LIVE MAIN]\033[0m "
@@ -821,6 +837,12 @@ try:
                         trade_action=trade_action,
                         plan=plan
                     )
+                    
+                    if (
+                        STRATEGY_MODE == "compression"
+                        and executed
+                    ):
+                        compression_entries_opened_in_batch += 1
 
                     exec_elapsed = time.perf_counter() - exec_started
 
