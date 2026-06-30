@@ -11,6 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 import requests
 import plotly.graph_objects as go
 
+import numpy as np
 
 # =========================
 # CONFIG
@@ -755,6 +756,7 @@ numeric_cols = [
 for col in numeric_cols:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+        
 
 # =========================
 # CALCULATE ENTRY DISTANCE
@@ -771,6 +773,75 @@ else:
 # RAW DF FOR CALCS / CHARTS
 # =========================
 df_raw = df.copy()
+
+# =========================
+# COMPRESSION ENTRY QUALITY
+# =========================
+compression_numeric_cols = [
+    "real_entry",
+    "compression_high",
+    "compression_low",
+    "breakout_price",
+    "breakout_extension_pct",
+    "breakout_extension_atr",
+    "breakout_volume_ratio",
+    "compression_score",
+    "trend_score",
+    "pnl",
+    "max_favorable_pct",
+    "max_adverse_pct",
+]
+
+for col in compression_numeric_cols:
+    if col in df_raw.columns:
+        df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
+
+required_compression_cols = [
+    "side",
+    "real_entry",
+    "compression_high",
+    "compression_low",
+    "breakout_price",
+]
+
+if all(col in df_raw.columns for col in required_compression_cols):
+
+    df_raw["entry_vs_compression_pct"] = np.where(
+        df_raw["side"].astype(str).str.upper() == "LONG",
+        (
+            (df_raw["real_entry"] - df_raw["compression_high"])
+            / df_raw["compression_high"]
+            * 100
+        ),
+        (
+            (df_raw["compression_low"] - df_raw["real_entry"])
+            / df_raw["compression_low"]
+            * 100
+        )
+    )
+
+    df_raw["entry_vs_breakout_pct"] = np.where(
+        df_raw["side"].astype(str).str.upper() == "LONG",
+        (
+            (df_raw["real_entry"] - df_raw["breakout_price"])
+            / df_raw["breakout_price"]
+            * 100
+        ),
+        (
+            (df_raw["breakout_price"] - df_raw["real_entry"])
+            / df_raw["breakout_price"]
+            * 100
+        )
+    )
+
+    df_raw["entry_vs_compression_pct"] = df_raw["entry_vs_compression_pct"].round(4)
+    df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
+
+    df_raw["late_entry"] = df_raw["entry_vs_compression_pct"] > 1.0
+else:
+    df_raw["entry_vs_compression_pct"] = np.nan
+    df_raw["entry_vs_breakout_pct"] = np.nan
+    df_raw["late_entry"] = False
 
 for col in ["signal_ts", "entry_ts", "exit_ts"]:
     if col in df_raw.columns:
@@ -990,7 +1061,7 @@ if df_raw.empty:
     st.info("📭 No trades yet")
     st.stop()
     
-tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution, tab_compressions, tab_compression_pipeline = st.tabs([
+tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution, tab_compressions, tab_compression_quality, tab_compression_pipeline = st.tabs([
     "📊 Overview",
     "📐 MFE / MAE",
     "🧠 Setups",
@@ -998,6 +1069,7 @@ tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execut
     "❌ Bad Decisions x",
     "⏱️ Execution Analysis",
     "Compressions",
+    "🎯 Compression Entry Quality",
     "Compression Pipeline"
 ])
 
@@ -1370,6 +1442,19 @@ with tab_overview:
         table_df["entry_distance_pct"] = table_df["entry_distance_pct"].map(
             lambda x: f"{x:.4f}%" if pd.notnull(x) else "0.0000%"
         )
+    
+    # NUEVO
+    for pct_col in [
+        "entry_vs_compression_pct",
+        "entry_vs_breakout_pct",
+        "breakout_extension_pct",
+        "breakout_extension_atr",
+        "breakout_volume_ratio",
+    ]:
+        if pct_col in table_df.columns:
+            table_df[pct_col] = table_df[pct_col].map(
+                lambda x: f"{x:.4f}" if pd.notnull(x) else "-"
+            )
 
     if "pnl" in table_df.columns:
         table_df["pnl"] = table_df["pnl"].map(
@@ -1418,6 +1503,10 @@ with tab_overview:
         "tp3",
         "entry_price",
         "mark_price",
+        "compression_high",
+        "compression_low",
+        "breakout_price",
+        "entry_ready_price",
     ]
 
     for col in price_cols:
@@ -4379,6 +4468,207 @@ def render_watch_history_card(history_df, symbol):
             render_watch_event_detail(row)
 
     return
+
+with tab_compression_quality:
+
+    st.markdown("---")
+    st.subheader("🎯 Compression Entry Quality")
+
+    required_cols = [
+        "side",
+        "pnl",
+        "real_entry",
+        "compression_high",
+        "compression_low",
+        "breakout_price",
+        "entry_vs_compression_pct",
+        "entry_vs_breakout_pct",
+        "breakout_extension_atr",
+        "breakout_extension_pct",
+        "breakout_volume_ratio",
+    ]
+
+    missing_cols = [c for c in required_cols if c not in df_view.columns]
+
+    if missing_cols:
+        st.info(f"Missing columns: {missing_cols}")
+
+    else:
+        qdf = df_view.copy()
+
+        for col in [
+            "pnl",
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]:
+            if col in qdf.columns:
+                qdf[col] = pd.to_numeric(qdf[col], errors="coerce")
+
+        qdf = qdf.dropna(subset=["pnl", "entry_vs_compression_pct"])
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Compression trades", len(qdf))
+        c2.metric("Avg Entry Distance", f"{qdf['entry_vs_compression_pct'].mean():.3f}%")
+        c3.metric("Max Entry Distance", f"{qdf['entry_vs_compression_pct'].max():.3f}%")
+        c4.metric("Late Entries > 1%", int((qdf["entry_vs_compression_pct"] > 1.0).sum()))
+
+        st.markdown("### Entry Distance from Compression")
+
+        distance_bins = [-999, 0, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 999]
+        distance_labels = [
+            "< 0%",
+            "0% - 0.25%",
+            "0.25% - 0.50%",
+            "0.50% - 0.75%",
+            "0.75% - 1.00%",
+            "1.00% - 1.50%",
+            "1.50% - 2.00%",
+            "> 2.00%",
+        ]
+
+        qdf["entry_distance_bucket"] = pd.cut(
+            qdf["entry_vs_compression_pct"],
+            bins=distance_bins,
+            labels=distance_labels,
+            include_lowest=True,
+        )
+
+        entry_distance_summary = (
+            qdf
+            .groupby("entry_distance_bucket", observed=False)
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                avg_mfe=("max_favorable_pct", "mean"),
+                avg_mae=("max_adverse_pct", "mean"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "total_pnl", "avg_mfe", "avg_mae"]:
+            if col in entry_distance_summary.columns:
+                entry_distance_summary[col] = entry_distance_summary[col].round(4)
+
+        st.dataframe(entry_distance_summary, use_container_width=True)
+
+        st.markdown("### Breakout Extension ATR")
+
+        atr_bins = [-999, 0.25, 0.50, 1.00, 1.50, 2.00, 3.00, 999]
+        atr_labels = [
+            "< 0.25 ATR",
+            "0.25 - 0.50 ATR",
+            "0.50 - 1.00 ATR",
+            "1.00 - 1.50 ATR",
+            "1.50 - 2.00 ATR",
+            "2.00 - 3.00 ATR",
+            "> 3.00 ATR",
+        ]
+
+        qdf["breakout_atr_bucket"] = pd.cut(
+            qdf["breakout_extension_atr"],
+            bins=atr_bins,
+            labels=atr_labels,
+            include_lowest=True,
+        )
+
+        breakout_atr_summary = (
+            qdf
+            .dropna(subset=["breakout_atr_bucket"])
+            .groupby("breakout_atr_bucket", observed=False)
+            .agg(
+                trades=("pnl", "count"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                avg_entry_distance=("entry_vs_compression_pct", "mean"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        for col in ["avg_pnl", "total_pnl", "avg_entry_distance"]:
+            breakout_atr_summary[col] = breakout_atr_summary[col].round(4)
+
+        st.dataframe(breakout_atr_summary, use_container_width=True)
+
+        st.markdown("### Late Entry Cases")
+
+        late_cols = [
+            "symbol",
+            "side",
+            "entry_ts_dt",
+            "exit_reason",
+            "pnl",
+            "real_entry",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+            "compression_score",
+            "trend_score",
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        existing_late_cols = [c for c in late_cols if c in qdf.columns]
+
+        late_df = (
+            qdf[existing_late_cols]
+            .sort_values("entry_vs_compression_pct", ascending=False)
+        )
+
+        st.dataframe(
+            late_df.head(50),
+            use_container_width=True
+        )
+
+        st.markdown("### Entry Distance vs PnL")
+
+        scatter_df = qdf.dropna(subset=["entry_vs_compression_pct", "pnl"]).copy()
+
+        if not scatter_df.empty:
+            fig = go.Figure()
+
+            fig.add_trace(
+                go.Scatter(
+                    x=scatter_df["entry_vs_compression_pct"],
+                    y=scatter_df["pnl"],
+                    mode="markers",
+                    text=scatter_df["symbol"] if "symbol" in scatter_df.columns else None,
+                    customdata=scatter_df[["side", "exit_reason"]] if all(c in scatter_df.columns for c in ["side", "exit_reason"]) else None,
+                    hovertemplate=(
+                        "Entry distance: %{x:.3f}%<br>"
+                        "PnL: %{y:.3f}%<br>"
+                        "Symbol: %{text}<br>"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+            fig.update_layout(
+                xaxis_title="Entry distance from compression (%)",
+                yaxis_title="PnL (%)",
+                height=450,
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
     
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
