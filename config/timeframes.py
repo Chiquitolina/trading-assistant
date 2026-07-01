@@ -40,12 +40,12 @@ MODE_CONFIG = {
     },
     
     "compression": {
-        "timeframes": ["1m", "5m", "15m", "1h", "4h"],
-        "trigger_tf": "15m",
+        "timeframes": ["1m", "5m", "15m", "30m", "1h", "4h"],
+        "trigger_tf": "30m",
         "min_atr_pct": 0.20,
         "min_atr": 120,
-        "entry_tf": "15m",
-        "atr_tf": "15m",
+        "entry_tf": "30m",
+        "atr_tf": "30m",
         "entry_rules": "standard",
 
         "allow_longs": True,
@@ -56,7 +56,7 @@ MODE_CONFIG = {
         "fixed_sl_pct": 0.40,
 
         "compression_enabled": True,
-        "compression_tf": "15m",
+        "compression_tf": "30m",
     }
 }
 
@@ -95,7 +95,15 @@ TIMEFRAME_CONFIGS = {
         "volume_lookback": 20,
         "min_quote_volume": 10_000_000
     },
-
+    "30m": {
+        "timeframe": "30m",
+        "ms_per_candle": 1_800_000,
+        "candles": 100,
+        "atr_period": 14,
+        "atr_expansion": 1.025,
+        "volume_lookback": 20,
+        "min_quote_volume": 10_000_000
+    },
     "1h": {
         "timeframe": "1h",
         "ms_per_candle": 3_600_000,

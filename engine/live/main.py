@@ -122,6 +122,7 @@ DAYS_BY_TF = {
     "1m": 1,
     "5m": 2,
     "15m": 3,
+    "30m": 5,
     "1h": 7,
     "4h": 25,
     "1d": 180,
@@ -185,14 +186,14 @@ for symbol in SYMBOLS:
 last_direction_by_symbol = {}
 
 for symbol in SYMBOLS:
-    candles_15m = buffer.get_candles(symbol, "15m")
+    candles_trigger = buffer.get_candles(symbol, TRIGGER_TF)
 
-    if not candles_15m:
+    if not candles_trigger:
         continue
 
-    df_15m = pd.DataFrame(candles_15m)
+    df_trigger = pd.DataFrame(candles_trigger)
 
-    direction = trade_direction(df_15m)
+    direction = trade_direction(df_trigger)
 
     last_direction_by_symbol[symbol] = direction
 
@@ -299,7 +300,10 @@ strategy_router = StrategyRouter(
 
 btc_context_service = BTCVelocityContextService()
 
-compression_snapshot_builder = SignalCompressionSnapshotBuilder(buffer)
+compression_snapshot_builder = SignalCompressionSnapshotBuilder(
+    buffer,
+    trigger_tf=TRIGGER_TF,
+)
 compression_snapshot_manager = CompressionSnapshotManager()
 
 compression_watch_journal = CompressionWatchJournal()
@@ -474,7 +478,7 @@ def write_heartbeat():
 
 try:
     
-    max_15m_queue = 0
+    max_trigger_queue = 0
 
     while True:
 
@@ -545,23 +549,23 @@ try:
                 )
 
         # =================================================
-        # 15m CLOSED
+        # TRIGGER TF CLOSED
         # =================================================
         
         closed_events_snapshot = buffer.closed_events_snapshot()
 
-        pending_15m = sum(
+        pending_trigger = sum(
             1
             for _, tf in closed_events_snapshot
             if tf == TRIGGER_TF
         )
 
-        if pending_15m > 0:
-            max_15m_queue = max(max_15m_queue, pending_15m)
+        if pending_trigger > 0:
+            max_trigger_queue = max(max_trigger_queue, pending_trigger)
 
             print(
-                f"\033[93m[15M QUEUE]\033[0m "
-                f"pending={pending_15m} max={max_15m_queue}"
+                f"\033[93m[{TRIGGER_TF} QUEUE]\033[0m "
+                f"pending={pending_trigger} max={max_trigger_queue}"
             )
 
         symbols_to_process = []
@@ -577,7 +581,7 @@ try:
         if symbols_to_process:
 
             print(
-                f"\033[93m[15M BATCH]\033[0m "
+                f"\033[93m[{TRIGGER_TF} BATCH]\033[0m "
                 f"symbols={len(symbols_to_process)}"
             )
 
@@ -896,7 +900,7 @@ try:
                 print(f"[PIPELINE] Saved -> {pipeline_path.resolve()}")
 
             print(
-                f"\033[95m[15M BATCH SUMMARY]\033[0m "
+                f"\033[95m[{TRIGGER_TF} BATCH SUMMARY]\033[0m "
                 f"symbols={len(symbols_to_process)} "
                 f"elapsed={batch_elapsed:.2f}s "
                 f"max_delay={max_delay_seen:.2f}s"

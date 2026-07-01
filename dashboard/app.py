@@ -839,6 +839,46 @@ if all(col in df_raw.columns for col in required_compression_cols):
     df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
 
     df_raw["late_entry"] = df_raw["entry_vs_compression_pct"] > 1.0
+    
+    # =========================
+    # COMPRESSION STOP ANALYSIS
+    # =========================
+
+    df_raw["compression_height"] = (
+        df_raw["compression_high"] - df_raw["compression_low"]
+    )
+
+    df_raw["entry_to_compression_low_pct"] = np.where(
+        df_raw["side"].str.upper() == "LONG",
+
+        (
+            (df_raw["real_entry"] - df_raw["compression_low"])
+            / df_raw["compression_low"]
+            * 100
+        ),
+
+        (
+            (df_raw["compression_high"] - df_raw["real_entry"])
+            / df_raw["compression_high"]
+            * 100
+        )
+    )
+
+    df_raw["sl_to_compression_low_pct"] = np.where(
+        df_raw["side"].str.upper() == "LONG",
+
+        (
+            (df_raw["compression_low"] - df_raw["sl"])
+            / df_raw["compression_low"]
+            * 100
+        ),
+
+        (
+            (df_raw["sl"] - df_raw["compression_high"])
+            / df_raw["compression_high"]
+            * 100
+        )
+    )
 else:
     df_raw["entry_vs_compression_pct"] = np.nan
     df_raw["entry_vs_breakout_pct"] = np.nan

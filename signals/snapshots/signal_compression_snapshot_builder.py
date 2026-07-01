@@ -3,13 +3,26 @@ import pandas as pd
 
 from models.signal_compression_snapshot import SignalCompressionSnapshot
 
+TIMEFRAME_MS = {
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+}
+
 class SignalCompressionSnapshotBuilder:
 
-    def __init__(self, buffer):
+    def __init__(self, buffer, trigger_tf: str = "15m"):
         self.buffer = buffer
+        self.trigger_tf = trigger_tf
 
-
-    def _candle_progress_pct(self, df: pd.DataFrame | None) -> float | None:
+    def _candle_progress_pct(
+        self,
+        df: pd.DataFrame | None,
+        tf: str | None = None,
+    ) -> float | None:
         if df is None or df.empty:
             return None
 
@@ -19,7 +32,11 @@ class SignalCompressionSnapshotBuilder:
         last_ts = int(df.iloc[-1]["timestamp"])
 
         # 15m en ms
-        tf_ms = 15 * 60 * 1000
+        tf = tf or self.trigger_tf
+        tf_ms = TIMEFRAME_MS.get(tf)
+
+        if tf_ms is None:
+            return None
 
         now_ms = int(time.time() * 1000)
 
@@ -123,9 +140,15 @@ class SignalCompressionSnapshotBuilder:
 
     def build(self, symbol: str) -> SignalCompressionSnapshot | None:
 
+        trigger_tf = self.trigger_tf
+
+        df_trigger = self._df(symbol, trigger_tf)
         df_15m = self._df(symbol, "15m")
         df_1h = self._df(symbol, "1h")
         df_4h = self._df(symbol, "4h")
+
+        if df_trigger is None or df_trigger.empty:
+            return None
 
         if df_15m is None or df_15m.empty:
             return None
@@ -138,7 +161,7 @@ class SignalCompressionSnapshotBuilder:
         # ==========================
         # TREND
         # ==========================
-        snapshot.trend_15m = self._trend(df_15m)
+        snapshot.trend_15m = self._trend(df_trigger)
         snapshot.trend_1h = self._trend(df_1h)
         snapshot.trend_4h = self._trend(df_4h)
 
@@ -152,15 +175,18 @@ class SignalCompressionSnapshotBuilder:
         # ==========================
         # VOLUME
         # ==========================
-        snapshot.volume_ratio_15m = self._volume_ratio(df_15m)
+        snapshot.volume_ratio_15m = self._volume_ratio(df_trigger)
         snapshot.volume_ratio_1h = self._volume_ratio(df_1h)
 
         # ==========================
         # STRUCTURE
         # ==========================
-        snapshot.move_3bars_pct = self._move_pct(df_15m, bars=3)
+        snapshot.move_3bars_pct = self._move_pct(df_trigger, bars=3)
         snapshot.dist_ema20_1h_pct = self._dist_ema_pct(df_1h, "ema20")
-        snapshot.candle_progress_pct = self._candle_progress_pct(df_15m)
+        snapshot.candle_progress_pct = self._candle_progress_pct(
+            df_trigger,
+            trigger_tf,
+        )
 
         # ==========================
         # COMPRESSION
@@ -171,7 +197,7 @@ class SignalCompressionSnapshotBuilder:
             snapshot.compression_low,
             snapshot.range_ratio_15m,
             snapshot.atr_ratio_15m,
-        ) = self._compression(df_15m)
+        ) = self._compression(df_trigger)
 
         # ==========================
         # BREAKOUT
@@ -180,7 +206,7 @@ class SignalCompressionSnapshotBuilder:
             snapshot.breakout_side,
             snapshot.breakout_score,
         ) = self._breakout(
-            df_15m,
+            df_trigger,
             snapshot.compression_high,
             snapshot.compression_low,
         )
