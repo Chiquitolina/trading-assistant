@@ -1163,19 +1163,37 @@ with tab_overview:
             "Sirve para detectar si el sistema está recibiendo más señales en contexto BTC bullish o bearish."
         )
 
+    overview_metrics = calculate_metrics(df_view.to_dict("records"))
+
+    net_pnl_usd = safe_sum(df_view, "pnl_usd")
+    best_trade = safe_max(df_view, "pnl")
+
+    st.markdown("### 📊 Performance")
+
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
-    total_trades = len(df_view)
-    net_pnl_pct = safe_sum(df_view, "pnl")
-    net_pnl_usd = safe_sum(df_view, "pnl_usd")
-    winrate = round((df_view["pnl"] > 0).mean() * 100, 2) if len(df_raw) and "pnl" in df_view.columns else 0
-
-    col1.metric("Trades", total_trades)
-    col2.metric("Net PnL %", f"{net_pnl_pct}%")
+    col1.metric("Trades", overview_metrics["trades"])
+    col2.metric("Net PnL %", f'{overview_metrics["net_pnl"]}%')
     col3.metric("Net PnL USD", f"{net_pnl_usd} USDT")
-    col4.metric("Winrate", f"{winrate}%")
-    col5.metric("Avg PnL %", safe_mean(df_view, "pnl"))
-    col6.metric("Best Trade %", safe_max(df_view, "pnl"))
+    col4.metric("Winrate", f'{overview_metrics["winrate"]}%')
+    col5.metric("Profit Factor", overview_metrics["profit_factor"])
+    col6.metric("Expectancy", overview_metrics["expectancy"])
+
+    col7, col8, col9, col10, col11, col12 = st.columns(6)
+
+    col7.metric("Gross PnL", overview_metrics["gross_pnl"])
+    col8.metric("Fees", overview_metrics["fees"])
+    col9.metric("Fees / Trade", overview_metrics["fees_per_trade"])
+    col10.metric("Avg Win", overview_metrics["avg_win"])
+    col11.metric("Avg Loss", overview_metrics["avg_loss"])
+    col12.metric("Max DD", overview_metrics["max_drawdown"])
+
+    col13, col14, col15, col16 = st.columns(4)
+
+    col13.metric("Best Trade %", best_trade)
+    col14.metric("Fee Impact", overview_metrics["fee_impact"])
+    col15.metric("Fee Drag", overview_metrics["fee_drag"])
+    col16.metric("Fee / Avg Win", overview_metrics["fee_to_avg_win"])
         
         #st.markdown("### 📊 Performance by Volume Tier")
 
