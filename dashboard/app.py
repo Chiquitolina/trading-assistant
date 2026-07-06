@@ -24,13 +24,41 @@ load_dotenv(BASE_DIR / ".env")
 from engine.backtest.metrics import calculate_metrics  # noqa
 from dashboard.analytics.mfe_mae import build_mfe_mae_report
 
+from dashboard.services.trade_inspector_service import (
+    TradeInspectorService,
+)
+
+from dashboard.charts.trade_inspector_chart import (
+    build_trade_inspector_chart,
+)
+
 TRADES_FILE = BASE_DIR / "trades.csv"
 PAPER_SIGNALS_FILE = BASE_DIR / "paper_signals.csv"
 STATUS_FILE = BASE_DIR / "status.json"
+
+POST_TRADE_REPLAY_FILE = (
+    BASE_DIR
+    / "reports"
+    / "post_trade_replay.csv"
+)
+
+TP_SL_SCENARIOS_FILE = (
+    BASE_DIR
+    / "reports"
+    / "tp_sl_scenarios.csv"
+)
+
+PARTIAL_TP_SCENARIOS_FILE = (
+    BASE_DIR
+    / "reports"
+    / "partial_tp_scenarios.csv"
+)
 TZ = "America/Argentina/Buenos_Aires"
 SYMBOL = "BTCUSDT"
 STATUS_TTL_SECONDS = 10
 CANDLE_MINUTES = 15
+
+trade_inspector_service = TradeInspectorService()
 
 st.set_page_config(
     page_title="Trade Journal",
@@ -38,12 +66,47 @@ st.set_page_config(
 )
 
 st.title("📊 Trade Journal Dashboard")
-st_autorefresh(interval=2000, key="dashboard_refresh")
+REFRESH_SECONDS = st.sidebar.slider(
+    "Auto refresh seconds",
+    min_value=2,
+    max_value=60,
+    value=10,
+    step=1,
+)
+
+st_autorefresh(
+    interval=REFRESH_SECONDS * 1000,
+    key="dashboard_refresh",
+)
+
+@st.cache_data(ttl=10)
+def load_csv_cached(path):
+    path = Path(path)
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    return pd.read_csv(path)
 
 
 # =========================
 # HELPERS
 # =========================
+
+def timeframe_to_minutes(timeframe):
+    mapping = {
+        "1m": 1,
+        "3m": 3,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "2h": 120,
+        "4h": 240,
+    }
+
+    return mapping.get(timeframe, 30)
+
 def fmt_price_for_display(x, decimals=10):
     if x in (None, "", "N/A"):
         return "-"
@@ -90,6 +153,741 @@ def safe_metric(metrics_dict, key, is_percent=False):
         return f"{value:.2f}%"
 
     return round(value, 2)
+
+def render_bucket_robustness_explorer(
+    source_df,
+    summary_df,
+    first_bucket_col,
+    second_bucket_col,
+    first_bucket_label,
+    second_bucket_label,
+    key_prefix,
+):
+    st.markdown("#### 🔎 Analyze selected buckets")
+
+    if source_df.empty or summary_df.empty:
+        st.info("No bucket combinations available.")
+        return
+
+    required = [
+        "symbol",
+        "pnl",
+        first_bucket_col,
+        second_bucket_col,
+    ]
+
+    missing = [
+        col for col in required
+        if col not in source_df.columns
+    ]
+
+    if missing:
+        st.info(f"Missing explorer columns: {missing}")
+        return
+
+    options_df = summary_df.copy()
+
+    options_df = options_df[
+        options_df["trades"] > 0
+    ].copy()
+
+    options_df["first_bucket_value"] = (
+        options_df[first_bucket_col].astype(str)
+    )
+
+    options_df["second_bucket_value"] = (
+        options_df[second_bucket_col].astype(str)
+    )
+
+    options_df["bucket_key"] = (
+        options_df["first_bucket_value"]
+        + " || "
+        + options_df["second_bucket_value"]
+    )
+
+    options_df["bucket_label"] = (
+        options_df["first_bucket_value"]
+        + " × "
+        + options_df["second_bucket_value"]
+        + " — "
+        + options_df["trades"].astype(int).astype(str)
+        + " trades"
+        + " | WR "
+        + options_df["winrate"].round(2).astype(str)
+        + "%"
+        + " | PF "
+        + options_df["pf"].fillna(0).round(2).astype(str)
+    )
+
+    options_df = options_df.sort_values(
+        ["pf", "total_pnl"],
+        ascending=False,
+        na_position="last",
+    )
+
+    label_to_key = dict(zip(
+        options_df["bucket_label"],
+        options_df["bucket_key"],
+    ))
+
+    selected_labels = st.multiselect(
+        "Select one or more bucket combinations",
+        options=options_df["bucket_label"].tolist(),
+        key=f"{key_prefix}_selected_buckets",
+    )
+
+    if not selected_labels:
+        st.caption(
+            "Select one or more rows to inspect their trades together."
+        )
+        return
+
+    selected_keys = {
+        label_to_key[label]
+        for label in selected_labels
+    }
+
+    work = source_df.copy()
+
+    work["_first_bucket"] = (
+        work[first_bucket_col].astype(str)
+    )
+
+    work["_second_bucket"] = (
+        work[second_bucket_col].astype(str)
+    )
+
+    work["_bucket_key"] = (
+        work["_first_bucket"]
+        + " || "
+        + work["_second_bucket"]
+    )
+
+    selected_rows = work[
+        work["_bucket_key"].isin(selected_keys)
+    ].copy()
+
+    selected_rows["pnl"] = pd.to_numeric(
+        selected_rows["pnl"],
+        errors="coerce",
+    )
+
+    selected_rows = selected_rows.dropna(subset=["pnl"])
+
+    # ==========================================
+    # TRADE KEY
+    # ==========================================
+    if "trade_id" in selected_rows.columns:
+        selected_rows["trade_key"] = (
+            selected_rows["trade_id"].astype(str)
+        )
+
+    elif "entry_ts" in selected_rows.columns:
+        selected_rows["trade_key"] = (
+            selected_rows["symbol"].astype(str)
+            + "_"
+            + selected_rows["entry_ts"].astype(str)
+        )
+
+    elif "entry_ts_dt" in selected_rows.columns:
+        selected_rows["trade_key"] = (
+            selected_rows["symbol"].astype(str)
+            + "_"
+            + selected_rows["entry_ts_dt"].astype(str)
+        )
+
+    else:
+        selected_rows["trade_key"] = (
+            selected_rows["symbol"].astype(str)
+            + "_row_"
+            + selected_rows.index.astype(str)
+        )
+
+    total_rows = len(selected_rows)
+    unique_trades = selected_rows["trade_key"].nunique()
+    duplicate_rows = selected_rows["trade_key"].duplicated().sum()
+
+    # Los reportes estadísticos utilizan trades únicos.
+    edge_df = selected_rows.drop_duplicates(
+        subset=["trade_key"],
+        keep="first",
+    ).copy()
+
+    edge_df["is_win"] = edge_df["pnl"] > 0
+
+    # ==========================================
+    # TIMESTAMP
+    # ==========================================
+    if "entry_ts_dt" in edge_df.columns:
+        edge_df["entry_datetime"] = pd.to_datetime(
+            edge_df["entry_ts_dt"],
+            errors="coerce",
+            utc=True,
+        )
+
+    elif "entry_ts" in edge_df.columns:
+        numeric_entry_ts = pd.to_numeric(
+            edge_df["entry_ts"],
+            errors="coerce",
+        )
+
+        edge_df["entry_datetime"] = pd.to_datetime(
+            numeric_entry_ts,
+            unit="ms",
+            errors="coerce",
+            utc=True,
+        )
+
+        missing_datetime = edge_df["entry_datetime"].isna()
+
+        if missing_datetime.any():
+            edge_df.loc[
+                missing_datetime,
+                "entry_datetime",
+            ] = pd.to_datetime(
+                edge_df.loc[missing_datetime, "entry_ts"],
+                errors="coerce",
+                utc=True,
+            )
+
+    else:
+        edge_df["entry_datetime"] = pd.NaT
+
+    edge_df["entry_date"] = (
+        edge_df["entry_datetime"].dt.date
+    )
+
+    edge_df["entry_30m"] = (
+        edge_df["entry_datetime"].dt.floor("30min")
+    )
+
+    # ==========================================
+    # SUMMARY HELPERS
+    # ==========================================
+    def edge_summary(data):
+        if data.empty:
+            return {
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "winrate": 0.0,
+                "total_pnl": 0.0,
+                "avg_pnl": 0.0,
+                "pf": None,
+                "avg_mfe": None,
+                "avg_mae": None,
+            }
+
+        pnl = pd.to_numeric(
+            data["pnl"],
+            errors="coerce",
+        ).dropna()
+
+        wins = int((pnl > 0).sum())
+        losses = int((pnl <= 0).sum())
+        
+        avg_mfe = (
+            pd.to_numeric(
+                data["max_favorable_pct"],
+                errors="coerce",
+            ).mean()
+            if "max_favorable_pct" in data.columns
+            else None
+        )
+
+        avg_mae = (
+            pd.to_numeric(
+                data["max_adverse_pct"],
+                errors="coerce",
+            ).mean()
+            if "max_adverse_pct" in data.columns
+            else None
+        )
+
+        return {
+            "trades": len(pnl),
+            "wins": wins,
+            "losses": losses,
+            "winrate": (
+                wins / len(pnl) * 100
+                if len(pnl) > 0
+                else 0
+            ),
+            "total_pnl": pnl.sum(),
+            "avg_pnl": pnl.mean(),
+            "pf": profit_factor(pnl),
+            "avg_mfe": avg_mfe,
+            "avg_mae": avg_mae,
+        }
+
+    def render_summary_metrics(data):
+        result = edge_summary(data)
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Trades", result["trades"])
+        c2.metric("Winrate", f'{result["winrate"]:.2f}%')
+        c3.metric("Total PnL", f'{result["total_pnl"]:.4f}')
+        c4.metric(
+            "Profit Factor",
+            (
+                f'{result["pf"]:.2f}'
+                if result["pf"] is not None
+                else "∞"
+            ),
+        )
+        
+        c5, c6 = st.columns(2)
+
+        c5.metric(
+            "Avg MFE",
+            (
+                f'{result["avg_mfe"]:.4f}%'
+                if pd.notna(result["avg_mfe"])
+                else "N/A"
+            ),
+        )
+
+        c6.metric(
+            "Avg MAE",
+            (
+                f'{result["avg_mae"]:.4f}%'
+                if pd.notna(result["avg_mae"])
+                else "N/A"
+            ),
+        )
+
+    def build_group_report(data, group_col):
+        valid = data.dropna(subset=[group_col]).copy()
+
+        if valid.empty:
+            return pd.DataFrame()
+
+        report = (
+            valid
+            .groupby(group_col, dropna=False)
+            .agg(
+                trades=("trade_key", "nunique"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                losses=("pnl", lambda x: int((x <= 0).sum())),
+                winrate=(
+                    "pnl",
+                    lambda x: round((x > 0).mean() * 100, 2),
+                ),
+                avg_pnl=("pnl", "mean"),
+                total_pnl=("pnl", "sum"),
+                avg_mfe=("max_favorable_pct", "mean"),
+                avg_mae=("max_adverse_pct", "mean"),
+                pf=("pnl", profit_factor),
+            )
+            .reset_index()
+        )
+
+        report["trade_share_pct"] = (
+            report["trades"]
+            / edge_df["trade_key"].nunique()
+            * 100
+        ).round(2)
+
+        for col in [
+            "avg_pnl",
+            "total_pnl",
+            "avg_mfe",
+            "avg_mae",
+        ]:
+            report[col] = report[col].round(4)
+
+        return report.sort_values(
+            ["trades", "total_pnl"],
+            ascending=False,
+        )
+
+    # ==========================================
+    # MAIN METRICS
+    # ==========================================
+    st.markdown(
+        f"##### Selected edge: "
+        f"{first_bucket_label} × {second_bucket_label}"
+    )
+
+    u1, u2, u3 = st.columns(3)
+
+    u1.metric("Selected rows", total_rows)
+    u2.metric("Unique trades", unique_trades)
+    u3.metric("Duplicate rows", int(duplicate_rows))
+
+    render_summary_metrics(edge_df)
+
+    if duplicate_rows > 0:
+        st.warning(
+            "Duplicate rows were excluded from all statistical reports."
+        )
+    else:
+        st.success(
+            "All selected rows correspond to unique trades."
+        )
+
+    (
+        trades_tab,
+        days_tab,
+        symbols_tab,
+        batches_tab,
+        btc_tab,
+        robustness_tab,
+    ) = st.tabs([
+        "All Trades",
+        "By Day",
+        "By Symbol",
+        "30m Batches",
+        "BTC Context",
+        "Robustness",
+    ])
+
+    # ==========================================
+    # ALL TRADES
+    # ==========================================
+    with trades_tab:
+        preferred_cols = [
+            "trade_key",
+            "symbol",
+            "side",
+            "entry_ts_dt",
+            "exit_ts_dt",
+            "pnl",
+            "exit_reason",
+            first_bucket_col,
+            second_bucket_col,
+            "real_entry",
+            "tp",
+            "sl",
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+            "compression_shape",
+            "compression_quality_label",
+            "compression_score",
+            "trend_score",
+            "range_ratio",
+            "atr_ratio",
+            "volume_ratio",
+            "max_favorable_pct",
+            "max_adverse_pct",
+            "btc_corr_5m_1h",
+            "btc_beta_5m_1h",
+            "btc_r2_5m_1h",
+        ]
+
+        available_cols = [
+            col for col in preferred_cols
+            if col in edge_df.columns
+        ]
+
+        trade_detail_df = edge_df.sort_values(
+            "entry_datetime"
+            if edge_df["entry_datetime"].notna().any()
+            else "pnl",
+            ascending=False,
+        )
+
+        st.dataframe(
+            trade_detail_df[available_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ==========================================
+    # BY DAY
+    # ==========================================
+    with days_tab:
+        day_report = build_group_report(
+            edge_df,
+            "entry_date",
+        )
+
+        if day_report.empty:
+            st.info("No valid entry dates available.")
+
+        else:
+            d1, d2 = st.columns(2)
+
+            d1.metric(
+                "Unique Days",
+                day_report["entry_date"].nunique(),
+            )
+            d2.metric(
+                "Largest Day Share",
+                f'{day_report["trade_share_pct"].max():.2f}%',
+            )
+
+            st.dataframe(
+                day_report,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # ==========================================
+    # BY SYMBOL
+    # ==========================================
+    with symbols_tab:
+        symbol_report = build_group_report(
+            edge_df,
+            "symbol",
+        )
+
+        if symbol_report.empty:
+            st.info("No symbols available.")
+
+        else:
+            s1, s2 = st.columns(2)
+
+            s1.metric(
+                "Unique Symbols",
+                edge_df["symbol"].nunique(),
+            )
+            s2.metric(
+                "Largest Symbol Share",
+                f'{symbol_report["trade_share_pct"].max():.2f}%',
+            )
+
+            st.dataframe(
+                symbol_report,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # ==========================================
+    # 30M BATCHES
+    # ==========================================
+    with batches_tab:
+        valid_batches = edge_df.dropna(
+            subset=["entry_30m"]
+        )
+
+        if valid_batches.empty:
+            st.info("No valid entry timestamps available.")
+
+        else:
+            batch_report = (
+                valid_batches
+                .groupby("entry_30m")
+                .agg(
+                    trades=("trade_key", "nunique"),
+                    symbols=(
+                        "symbol",
+                        lambda x: ", ".join(
+                            sorted(set(x.astype(str)))
+                        ),
+                    ),
+                    wins=("pnl", lambda x: int((x > 0).sum())),
+                    losses=("pnl", lambda x: int((x <= 0).sum())),
+                    total_pnl=("pnl", "sum"),
+                    pf=("pnl", profit_factor),
+                )
+                .reset_index()
+                .sort_values(
+                    ["trades", "total_pnl"],
+                    ascending=False,
+                )
+            )
+
+            batch_report["trade_share_pct"] = (
+                batch_report["trades"]
+                / unique_trades
+                * 100
+            ).round(2)
+
+            batch_report["total_pnl"] = (
+                batch_report["total_pnl"].round(4)
+            )
+
+            b1, b2 = st.columns(2)
+
+            b1.metric(
+                "Unique 30m Batches",
+                len(batch_report),
+            )
+            b2.metric(
+                "Largest Batch",
+                int(batch_report["trades"].max()),
+            )
+
+            st.dataframe(
+                batch_report,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # ==========================================
+    # BTC CONTEXT
+    # ==========================================
+    with btc_tab:
+        btc_context_cols = []
+
+        for col in edge_df.columns:
+            if "btc" not in col.lower():
+                continue
+
+            unique_values = edge_df[col].nunique(
+                dropna=True
+            )
+
+            if 1 < unique_values <= 30:
+                btc_context_cols.append(col)
+
+        if not btc_context_cols:
+            st.info(
+                "No categorical BTC context columns available."
+            )
+
+        else:
+            selected_btc_cols = st.multiselect(
+                "BTC context dimensions",
+                options=btc_context_cols,
+                default=btc_context_cols[:3],
+                key=f"{key_prefix}_btc_dimensions",
+            )
+
+            if not selected_btc_cols:
+                st.caption(
+                    "Select at least one BTC context dimension."
+                )
+
+            for btc_col in selected_btc_cols:
+                st.markdown(f"##### {btc_col}")
+
+                btc_report = build_group_report(
+                    edge_df,
+                    btc_col,
+                )
+
+                st.dataframe(
+                    btc_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    # ==========================================
+    # ROBUSTNESS TEST
+    # ==========================================
+    with robustness_tab:
+        robustness_rows = []
+
+        baseline = edge_summary(edge_df)
+
+        robustness_rows.append({
+            "scenario": "Original selected buckets",
+            **baseline,
+        })
+
+        # Remove the day producing the most PnL.
+        valid_days = edge_df.dropna(
+            subset=["entry_date"]
+        )
+
+        if not valid_days.empty:
+            pnl_by_day = valid_days.groupby(
+                "entry_date"
+            )["pnl"].sum()
+
+            best_day = pnl_by_day.idxmax()
+
+            without_best_day = edge_df[
+                edge_df["entry_date"] != best_day
+            ]
+
+            robustness_rows.append({
+                "scenario": f"Without best day: {best_day}",
+                **edge_summary(without_best_day),
+            })
+
+        # Remove the symbol producing the most PnL.
+        if "symbol" in edge_df.columns:
+            pnl_by_symbol = edge_df.groupby(
+                "symbol"
+            )["pnl"].sum()
+
+            if not pnl_by_symbol.empty:
+                best_symbol = pnl_by_symbol.idxmax()
+
+                without_best_symbol = edge_df[
+                    edge_df["symbol"] != best_symbol
+                ]
+
+                robustness_rows.append({
+                    "scenario": (
+                        f"Without best symbol: {best_symbol}"
+                    ),
+                    **edge_summary(without_best_symbol),
+                })
+
+        # Remove batch containing the most trades.
+        valid_batches = edge_df.dropna(
+            subset=["entry_30m"]
+        )
+
+        if not valid_batches.empty:
+            batch_sizes = valid_batches.groupby(
+                "entry_30m"
+            )["trade_key"].nunique()
+
+            largest_batch = batch_sizes.idxmax()
+
+            without_largest_batch = edge_df[
+                edge_df["entry_30m"] != largest_batch
+            ]
+
+            robustness_rows.append({
+                "scenario": (
+                    f"Without largest batch: {largest_batch}"
+                ),
+                **edge_summary(without_largest_batch),
+            })
+
+        robustness_df = pd.DataFrame(
+            robustness_rows
+        )
+
+        for col in [
+            "winrate",
+            "total_pnl",
+            "avg_pnl",
+            "pf",
+        ]:
+            if col in robustness_df.columns:
+                robustness_df[col] = pd.to_numeric(
+                    robustness_df[col],
+                    errors="coerce",
+                ).round(4)
+
+        st.dataframe(
+            robustness_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if len(robustness_df) > 1:
+            positive_after_tests = (
+                robustness_df.iloc[1:]["total_pnl"] > 0
+            ).all()
+
+            pf_after_tests = (
+                robustness_df.iloc[1:]["pf"]
+                .fillna(999)
+                > 1
+            ).all()
+
+            if positive_after_tests and pf_after_tests:
+                st.success(
+                    "The selected edge remains positive after all "
+                    "concentration tests."
+                )
+            else:
+                st.warning(
+                    "The selected edge weakens after removing one "
+                    "of its main concentration sources."
+                )
 
 def load_compression_snapshots(base_dir="compression_snapshots"):
     base_path = Path(base_dir)
@@ -181,6 +979,715 @@ def profit_factor(x):
     losses = abs(x[x < 0].sum())
     return round(wins / losses, 2) if losses > 0 else None
 
+def replay_profit_factor(values):
+    values = pd.to_numeric(
+        values,
+        errors="coerce",
+    ).dropna()
+
+    gross_profit = values[values > 0].sum()
+    gross_loss = abs(values[values < 0].sum())
+
+    if gross_loss == 0:
+        return None
+
+    return gross_profit / gross_loss
+
+
+def replay_max_drawdown(
+    data,
+    pnl_col,
+    time_col="entry_ts",
+):
+    if (
+        data.empty
+        or pnl_col not in data.columns
+        or time_col not in data.columns
+    ):
+        return 0.0
+
+    work = data.copy()
+
+    work[pnl_col] = pd.to_numeric(
+        work[pnl_col],
+        errors="coerce",
+    )
+
+    work[time_col] = pd.to_datetime(
+        work[time_col],
+        utc=True,
+        errors="coerce",
+    )
+
+    work = (
+        work
+        .dropna(subset=[pnl_col, time_col])
+        .sort_values(time_col)
+    )
+
+    if work.empty:
+        return 0.0
+
+    equity = work[pnl_col].cumsum()
+
+    equity = pd.concat(
+        [
+            pd.Series([0.0]),
+            equity.reset_index(drop=True),
+        ],
+        ignore_index=True,
+    )
+
+    equity_peak = equity.cummax()
+    drawdown = equity - equity_peak
+
+    return float(drawdown.min())
+
+
+def normalize_replay_bool(series):
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False)
+
+    return (
+        series
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin(["true", "1", "yes"])
+    )
+
+def compression_profit_factor(series):
+    pnl = pd.to_numeric(series, errors="coerce").dropna()
+
+    gross_profit = pnl[pnl > 0].sum()
+    gross_loss = abs(pnl[pnl < 0].sum())
+
+    if gross_loss == 0:
+        return None
+
+    return round(gross_profit / gross_loss, 2)
+
+
+def build_compression_analytics_report(
+    data: pd.DataFrame,
+    group_cols: list[str],
+    min_trades: int = 1,
+) -> pd.DataFrame:
+    """
+    Builds a performance report for one or more compression dimensions.
+
+    Examples:
+        ["compression_shape"]
+        ["compression_quality_label"]
+        ["side", "compression_shape"]
+        ["compression_shape", "compression_duration_bucket"]
+    """
+
+    required_cols = group_cols + ["pnl"]
+
+    missing = [col for col in required_cols if col not in data.columns]
+
+    if missing:
+        return pd.DataFrame()
+
+    work = data.copy()
+
+    work["pnl"] = pd.to_numeric(work["pnl"], errors="coerce")
+
+    for col in ["max_favorable_pct", "max_adverse_pct", "pnl_usd"]:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    work = work.dropna(subset=group_cols + ["pnl"])
+
+    if work.empty:
+        return pd.DataFrame()
+
+    aggregations = {
+        "trades": ("pnl", "count"),
+        "wins": ("pnl", lambda x: int((x > 0).sum())),
+        "losses": ("pnl", lambda x: int((x <= 0).sum())),
+        "winrate": (
+            "pnl",
+            lambda x: round((x > 0).mean() * 100, 2),
+        ),
+        "avg_pnl": ("pnl", "mean"),
+        "total_pnl": ("pnl", "sum"),
+        "median_pnl": ("pnl", "median"),
+        "avg_win": (
+            "pnl",
+            lambda x: x[x > 0].mean() if (x > 0).any() else 0,
+        ),
+        "avg_loss": (
+            "pnl",
+            lambda x: x[x <= 0].mean() if (x <= 0).any() else 0,
+        ),
+        "profit_factor": ("pnl", compression_profit_factor),
+    }
+
+    if "max_favorable_pct" in work.columns:
+        aggregations["avg_mfe"] = ("max_favorable_pct", "mean")
+
+    if "max_adverse_pct" in work.columns:
+        aggregations["avg_mae"] = ("max_adverse_pct", "mean")
+
+    if "pnl_usd" in work.columns:
+        aggregations["total_pnl_usd"] = ("pnl_usd", "sum")
+
+    report = (
+        work
+        .groupby(group_cols, observed=False)
+        .agg(**aggregations)
+        .reset_index()
+    )
+
+    report = report[report["trades"] >= min_trades].copy()
+
+    numeric_round_cols = [
+        "avg_pnl",
+        "total_pnl",
+        "median_pnl",
+        "avg_win",
+        "avg_loss",
+        "avg_mfe",
+        "avg_mae",
+        "total_pnl_usd",
+    ]
+
+    for col in numeric_round_cols:
+        if col in report.columns:
+            report[col] = report[col].round(4)
+
+    if report.empty:
+        return report
+
+    report = report.sort_values(
+        by=["profit_factor", "total_pnl", "winrate", "trades"],
+        ascending=[False, False, False, False],
+        na_position="last",
+    )
+
+    return report
+
+
+def add_compression_analytics_buckets(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Creates categorical buckets without modifying the original dataframe.
+    """
+
+    out = data.copy()
+
+    numeric_cols = [
+        # Detector
+        "compression_score",
+        "range_ratio",
+        "atr_ratio",
+        "volume_ratio",
+        "avg_body_pct",
+        "compression_range_pct",
+
+        # Structure
+        "compression_height_pct",
+        "compression_duration",
+        "upper_slope",
+        "lower_slope",
+        "slope_difference",
+        "touches_high",
+        "touches_low",
+        "inside_ratio",
+        
+        # Breakout
+        "breakout_volume_ratio",
+        "breakout_extension_pct",
+        "breakout_extension_atr",
+
+        # Entry
+        "entry_distance_pct",
+        "entry_vs_compression_pct",
+        "entry_vs_breakout_pct",
+    ]
+
+    for col in numeric_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+            
+    # =========================
+    # DETECTOR COMPONENTS
+    # =========================
+
+    # Compression score: cantidad de condiciones cumplidas
+    if "compression_score" in out.columns:
+        out["compression_score_bucket"] = pd.cut(
+            out["compression_score"],
+            bins=[-np.inf, 0.5, 1.5, 2.5, 3.5, 4.5, np.inf],
+            labels=[
+                "Score 0",
+                "Score 1",
+                "Score 2",
+                "Score 3",
+                "Score 4",
+                "Score > 4",
+            ],
+        )
+
+    # Contracción del rango
+    if "range_ratio" in out.columns:
+        out["range_ratio_bucket"] = pd.cut(
+            out["range_ratio"],
+            bins=[
+                -np.inf,
+                0.50,
+                0.65,
+                0.75,
+                0.85,
+                1.00,
+                np.inf,
+            ],
+            labels=[
+                "<= 0.50",
+                "0.50 - 0.65",
+                "0.65 - 0.75",
+                "0.75 - 0.85",
+                "0.85 - 1.00",
+                "> 1.00",
+            ],
+        )
+
+    # Contracción del ATR
+    if "atr_ratio" in out.columns:
+        out["atr_ratio_bucket"] = pd.cut(
+            out["atr_ratio"],
+            bins=[
+                -np.inf,
+                0.50,
+                0.65,
+                0.75,
+                0.85,
+                1.00,
+                np.inf,
+            ],
+            labels=[
+                "<= 0.50",
+                "0.50 - 0.65",
+                "0.65 - 0.75",
+                "0.75 - 0.85",
+                "0.85 - 1.00",
+                "> 1.00",
+            ],
+        )
+
+    # Comportamiento del volumen durante la compresión
+    if "volume_ratio" in out.columns:
+        out["volume_ratio_bucket"] = pd.cut(
+            out["volume_ratio"],
+            bins=[
+                -np.inf,
+                0.60,
+                0.80,
+                1.00,
+                1.10,
+                1.30,
+                np.inf,
+            ],
+            labels=[
+                "<= 0.60",
+                "0.60 - 0.80",
+                "0.80 - 1.00",
+                "1.00 - 1.10",
+                "1.10 - 1.30",
+                "> 1.30",
+            ],
+        )
+
+    # Cuerpo promedio respecto del rango de cada vela
+    if "avg_body_pct" in out.columns:
+        out["avg_body_pct_bucket"] = pd.cut(
+            out["avg_body_pct"],
+            bins=[
+                -np.inf,
+                0.25,
+                0.35,
+                0.45,
+                0.55,
+                0.70,
+                np.inf,
+            ],
+            labels=[
+                "<= 0.25",
+                "0.25 - 0.35",
+                "0.35 - 0.45",
+                "0.45 - 0.55",
+                "0.55 - 0.70",
+                "> 0.70",
+            ],
+        )
+
+    # Altura total del rango respecto del precio
+    if "compression_range_pct" in out.columns:
+        out["compression_range_pct_bucket"] = pd.cut(
+            out["compression_range_pct"],
+            bins=[
+                -np.inf,
+                0.50,
+                0.75,
+                1.00,
+                1.50,
+                2.00,
+                3.00,
+                5.00,
+                np.inf,
+            ],
+            labels=[
+                "<= 0.50%",
+                "0.50% - 0.75%",
+                "0.75% - 1.00%",
+                "1.00% - 1.50%",
+                "1.50% - 2.00%",
+                "2.00% - 3.00%",
+                "3.00% - 5.00%",
+                "> 5.00%",
+            ],
+        )
+
+    # =========================
+    # COMPRESSION DURATION
+    # =========================
+    if "compression_duration" in out.columns:
+        out["compression_duration_bucket"] = pd.cut(
+            out["compression_duration"],
+            bins=[-np.inf, 5, 10, 15, 20, 30, 50, np.inf],
+            labels=[
+                "<= 5",
+                "6 - 10",
+                "11 - 15",
+                "16 - 20",
+                "21 - 30",
+                "31 - 50",
+                "> 50",
+            ],
+        )
+
+    # =========================
+    # COMPRESSION HEIGHT %
+    # =========================
+    if "compression_height_pct" in out.columns:
+        out["compression_height_bucket"] = pd.cut(
+            out["compression_height_pct"],
+            bins=[
+                -np.inf,
+                0.25,
+                0.50,
+                0.75,
+                1.00,
+                1.50,
+                2.00,
+                3.00,
+                np.inf,
+            ],
+            labels=[
+                "<= 0.25%",
+                "0.25% - 0.50%",
+                "0.50% - 0.75%",
+                "0.75% - 1.00%",
+                "1.00% - 1.50%",
+                "1.50% - 2.00%",
+                "2.00% - 3.00%",
+                "> 3.00%",
+            ],
+        )
+
+    # =========================
+    # INSIDE RATIO
+    # =========================
+    if "inside_ratio" in out.columns:
+        out["inside_ratio_bucket"] = pd.cut(
+            out["inside_ratio"],
+            bins=[
+                -np.inf,
+                0.50,
+                0.60,
+                0.70,
+                0.80,
+                0.90,
+                0.95,
+                np.inf,
+            ],
+            labels=[
+                "<= 0.50",
+                "0.50 - 0.60",
+                "0.60 - 0.70",
+                "0.70 - 0.80",
+                "0.80 - 0.90",
+                "0.90 - 0.95",
+                "> 0.95",
+            ],
+        )
+
+    # =========================
+    # TOUCHES
+    # =========================
+    if "touches_high" in out.columns and "touches_low" in out.columns:
+        out["total_touches"] = (
+            out["touches_high"].fillna(0)
+            + out["touches_low"].fillna(0)
+        )
+
+        out["total_touches_bucket"] = pd.cut(
+            out["total_touches"],
+            bins=[-np.inf, 2, 3, 4, 5, 6, 8, np.inf],
+            labels=[
+                "<= 2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7 - 8",
+                "> 8",
+            ],
+        )
+
+        out["touch_balance"] = (
+            out["touches_high"] - out["touches_low"]
+        ).abs()
+        
+        out["touch_imbalance_signed"] = (
+            out["touches_high"]
+            - out["touches_low"]
+        )
+
+        out["touch_imbalance_direction"] = pd.cut(
+            out["touch_imbalance_signed"],
+            bins=[
+                -np.inf,
+                -2.5,
+                -1.5,
+                -0.5,
+                0.5,
+                1.5,
+                2.5,
+                np.inf,
+            ],
+            labels=[
+                "More Low Touches > 2",
+                "More Low Touches 2",
+                "More Low Touches 1",
+                "Balanced",
+                "More High Touches 1",
+                "More High Touches 2",
+                "More High Touches > 2",
+            ],
+        )
+
+        out["touch_balance_bucket"] = pd.cut(
+            out["touch_balance"],
+            bins=[-np.inf, 0, 1, 2, np.inf],
+            labels=[
+                "Balanced",
+                "Difference 1",
+                "Difference 2",
+                "Difference > 2",
+            ],
+        )
+
+    # =========================
+    # SLOPE MAGNITUDE
+    # =========================
+    if "upper_slope" in out.columns:
+        out["upper_slope_abs"] = out["upper_slope"].abs()
+
+        out["upper_slope_bucket"] = pd.cut(
+            out["upper_slope_abs"],
+            bins=[-np.inf, 0.02, 0.05, 0.10, 0.20, np.inf],
+            labels=[
+                "Flat",
+                "Very Low",
+                "Low",
+                "Medium",
+                "High",
+            ],
+        )
+
+    if "lower_slope" in out.columns:
+        out["lower_slope_abs"] = out["lower_slope"].abs()
+
+        out["lower_slope_bucket"] = pd.cut(
+            out["lower_slope_abs"],
+            bins=[-np.inf, 0.02, 0.05, 0.10, 0.20, np.inf],
+            labels=[
+                "Flat",
+                "Very Low",
+                "Low",
+                "Medium",
+                "High",
+            ],
+        )
+
+    if "slope_difference" in out.columns:
+        out["slope_difference_abs"] = out["slope_difference"].abs()
+
+        out["slope_difference_bucket"] = pd.cut(
+            out["slope_difference_abs"],
+            bins=[-np.inf, 0.02, 0.05, 0.10, 0.20, np.inf],
+            labels=[
+                "Very Similar",
+                "Similar",
+                "Moderate Difference",
+                "Large Difference",
+                "Very Large Difference",
+            ],
+        )
+
+    # =========================
+    # BREAKOUT QUALITY
+    # =========================
+
+    # Volumen de la vela de breakout respecto del volumen de referencia
+    if "breakout_volume_ratio" in out.columns:
+        out["breakout_volume_ratio_bucket"] = pd.cut(
+            out["breakout_volume_ratio"],
+            bins=[
+                -np.inf,
+                0.75,
+                1.00,
+                1.25,
+                1.50,
+                2.00,
+                3.00,
+                np.inf,
+            ],
+            labels=[
+                "<= 0.75x",
+                "0.75x - 1.00x",
+                "1.00x - 1.25x",
+                "1.25x - 1.50x",
+                "1.50x - 2.00x",
+                "2.00x - 3.00x",
+                "> 3.00x",
+            ],
+        )
+
+    # Extensión porcentual alcanzada por el breakout
+    if "breakout_extension_pct" in out.columns:
+        out["breakout_extension_pct_bucket"] = pd.cut(
+            out["breakout_extension_pct"],
+            bins=[
+                -np.inf,
+                0,
+                0.25,
+                0.50,
+                0.75,
+                1.00,
+                1.50,
+                2.00,
+                np.inf,
+            ],
+            labels=[
+                "<= 0%",
+                "0% - 0.25%",
+                "0.25% - 0.50%",
+                "0.50% - 0.75%",
+                "0.75% - 1.00%",
+                "1.00% - 1.50%",
+                "1.50% - 2.00%",
+                "> 2.00%",
+            ],
+        )
+
+    # =========================
+    # ENTRY LOCATION
+    # =========================
+    entry_bucket_configs = {
+        "entry_distance_pct": "entry_distance_bucket_analytics",
+        "entry_vs_compression_pct": "entry_vs_compression_bucket",
+    }
+
+    for source_col, bucket_col in entry_bucket_configs.items():
+        if source_col not in out.columns:
+            continue
+
+        out[bucket_col] = pd.cut(
+            out[source_col],
+            bins=[
+                -np.inf,
+                0,
+                0.10,
+                0.25,
+                0.50,
+                0.75,
+                1.00,
+                1.50,
+                2.00,
+                np.inf,
+            ],
+            labels=[
+                "< 0%",
+                "0% - 0.10%",
+                "0.10% - 0.25%",
+                "0.25% - 0.50%",
+                "0.50% - 0.75%",
+                "0.75% - 1.00%",
+                "1.00% - 1.50%",
+                "1.50% - 2.00%",
+                "> 2.00%",
+            ],
+        )
+
+    # =========================
+    # ENTRY VS BREAKOUT
+    # =========================
+    if "entry_vs_breakout_pct" in out.columns:
+        out["entry_vs_breakout_bucket"] = pd.cut(
+            out["entry_vs_breakout_pct"],
+            bins=[
+                -np.inf,
+                -1.00,
+                -0.50,
+                -0.25,
+                -0.10,
+                0,
+                0.10,
+                0.25,
+                0.50,
+                0.75,
+                1.00,
+                1.50,
+                2.00,
+                np.inf,
+            ],
+            labels=[
+                "< -1.00%",
+                "-1.00% - -0.50%",
+                "-0.50% - -0.25%",
+                "-0.25% - -0.10%",
+                "-0.10% - 0%",
+                "0% - 0.10%",
+                "0.10% - 0.25%",
+                "0.25% - 0.50%",
+                "0.50% - 0.75%",
+                "0.75% - 1.00%",
+                "1.00% - 1.50%",
+                "1.50% - 2.00%",
+                "> 2.00%",
+            ],
+        )
+
+    # Normalize boolean for grouping
+    if "late_entry" in out.columns:
+        out["late_entry_label"] = (
+            out["late_entry"]
+            .astype(str)
+            .str.lower()
+            .map({
+                "true": "Late Entry",
+                "false": "Normal Entry",
+                "1": "Late Entry",
+                "0": "Normal Entry",
+            })
+            .fillna("Unknown")
+        )
+
+    return out
+
 
 def build_btc_direction_matrix(df: pd.DataFrame) -> pd.DataFrame:
     required_cols = [
@@ -242,6 +1749,448 @@ def build_btc_direction_pivot(matrix: pd.DataFrame) -> pd.DataFrame:
 
     return pivot
 
+# =========================================================
+# BTC CORRELATION ANALYTICS
+# =========================================================
+
+BTC_CORRELATION_TIMEFRAMES = ["15m", "1h", "4h"]
+
+
+def btc_factor_profit_factor(series: pd.Series):
+    pnl = pd.to_numeric(
+        series,
+        errors="coerce",
+    ).dropna()
+
+    gross_profit = pnl[pnl > 0].sum()
+    gross_loss = abs(pnl[pnl < 0].sum())
+
+    if gross_loss == 0:
+        return None
+
+    return round(gross_profit / gross_loss, 2)
+
+
+def add_btc_correlation_buckets(
+    data: pd.DataFrame,
+    timeframe: str,
+) -> pd.DataFrame:
+    """
+    Prepara las métricas y buckets de correlación BTC
+    para un timeframe determinado.
+
+    No modifica el dataframe original.
+    """
+
+    out = data.copy()
+
+    corr_col = f"btc_corr_{timeframe}"
+    beta_col = f"btc_beta_{timeframe}"
+    r2_col = f"btc_r2_{timeframe}"
+
+    symbol_move_col = f"symbol_move_{timeframe}_pct"
+    btc_move_col = f"btc_move_{timeframe}_pct"
+
+    expected_col = (
+        f"btc_expected_move_{timeframe}_pct"
+    )
+
+    residual_col = (
+        f"btc_residual_move_{timeframe}_pct"
+    )
+
+    numeric_columns = [
+        corr_col,
+        beta_col,
+        r2_col,
+        symbol_move_col,
+        btc_move_col,
+        expected_col,
+        residual_col,
+        "pnl",
+        "pnl_usd",
+        "max_favorable_pct",
+        "max_adverse_pct",
+    ]
+
+    for column in numeric_columns:
+        if column in out.columns:
+            out[column] = pd.to_numeric(
+                out[column],
+                errors="coerce",
+            )
+
+    # =====================================================
+    # RESIDUAL AJUSTADO AL LADO DEL TRADE
+    # =====================================================
+
+    directional_residual_col = (
+        f"btc_directional_residual_{timeframe}_pct"
+    )
+
+    if (
+        residual_col in out.columns
+        and "side" in out.columns
+    ):
+        side_multiplier = np.where(
+            out["side"]
+            .astype(str)
+            .str.upper()
+            .eq("SHORT"),
+            -1.0,
+            1.0,
+        )
+
+        out[directional_residual_col] = (
+            out[residual_col]
+            * side_multiplier
+        )
+
+    else:
+        out[directional_residual_col] = np.nan
+
+    # =====================================================
+    # CORRELATION BUCKETS
+    # =====================================================
+
+    if corr_col in out.columns:
+        out[f"btc_corr_bucket_{timeframe}"] = pd.cut(
+            out[corr_col],
+            bins=[
+                -np.inf,
+                0.0,
+                0.30,
+                0.50,
+                0.70,
+                0.85,
+                np.inf,
+            ],
+            labels=[
+                "< 0",
+                "0.00 - 0.30",
+                "0.30 - 0.50",
+                "0.50 - 0.70",
+                "0.70 - 0.85",
+                ">= 0.85",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    # =====================================================
+    # BETA BUCKETS
+    # =====================================================
+
+    if beta_col in out.columns:
+        out[f"btc_beta_bucket_{timeframe}"] = pd.cut(
+            out[beta_col],
+            bins=[
+                -np.inf,
+                0.50,
+                0.80,
+                1.00,
+                1.25,
+                1.50,
+                2.00,
+                np.inf,
+            ],
+            labels=[
+                "< 0.50",
+                "0.50 - 0.80",
+                "0.80 - 1.00",
+                "1.00 - 1.25",
+                "1.25 - 1.50",
+                "1.50 - 2.00",
+                ">= 2.00",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    # =====================================================
+    # R2 BUCKETS
+    # =====================================================
+
+    if r2_col in out.columns:
+        out[f"btc_r2_bucket_{timeframe}"] = pd.cut(
+            out[r2_col],
+            bins=[
+                -np.inf,
+                0.20,
+                0.40,
+                0.60,
+                0.80,
+                np.inf,
+            ],
+            labels=[
+                "< 0.20",
+                "0.20 - 0.40",
+                "0.40 - 0.60",
+                "0.60 - 0.80",
+                ">= 0.80",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    # =====================================================
+    # DIRECTIONAL RESIDUAL BUCKETS
+    # =====================================================
+
+    out[
+        f"btc_directional_residual_bucket_{timeframe}"
+    ] = pd.cut(
+        out[directional_residual_col],
+        bins=[
+            -np.inf,
+            -1.00,
+            -0.50,
+            -0.20,
+            0.00,
+            0.20,
+            0.50,
+            1.00,
+            np.inf,
+        ],
+        labels=[
+            "< -1.00%",
+            "-1.00% - -0.50%",
+            "-0.50% - -0.20%",
+            "-0.20% - 0.00%",
+            "0.00% - 0.20%",
+            "0.20% - 0.50%",
+            "0.50% - 1.00%",
+            ">= 1.00%",
+        ],
+        include_lowest=True,
+        right=False,
+    )
+
+    # =====================================================
+    # BTC DEPENDENCY CLASSIFICATION
+    # =====================================================
+
+    dependency_col = f"btc_dependency_{timeframe}"
+
+    def classify_dependency(row):
+        corr = row.get(corr_col)
+        r2 = row.get(r2_col)
+        directional_residual = row.get(
+            directional_residual_col
+        )
+
+        if (
+            pd.isna(corr)
+            or pd.isna(r2)
+            or pd.isna(directional_residual)
+        ):
+            return "unknown"
+
+        strongly_explained_by_btc = (
+            corr >= 0.80
+            and r2 >= 0.60
+        )
+
+        if strongly_explained_by_btc:
+            if directional_residual <= -0.20:
+                return "btc_copied_weak"
+
+            if directional_residual < 0.20:
+                return "btc_copied_neutral"
+
+            return "btc_correlated_with_strength"
+
+        if directional_residual >= 0.20:
+            return "independent_strength"
+
+        if directional_residual <= -0.20:
+            return "independent_weakness"
+
+        return "mixed"
+
+    out[dependency_col] = out.apply(
+        classify_dependency,
+        axis=1,
+    )
+
+    return out
+
+
+def build_btc_factor_report(
+    data: pd.DataFrame,
+    group_column: str,
+    factor_column: str | None = None,
+    min_trades: int = 1,
+) -> pd.DataFrame:
+    """
+    Calcula performance por bucket o clasificación BTC.
+    """
+
+    required_columns = [
+        group_column,
+        "pnl",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in data.columns
+    ]
+
+    if missing_columns:
+        return pd.DataFrame()
+
+    work = data.copy()
+
+    work["pnl"] = pd.to_numeric(
+        work["pnl"],
+        errors="coerce",
+    )
+
+    for column in [
+        factor_column,
+        "pnl_usd",
+        "max_favorable_pct",
+        "max_adverse_pct",
+    ]:
+        if column and column in work.columns:
+            work[column] = pd.to_numeric(
+                work[column],
+                errors="coerce",
+            )
+
+    work = work.dropna(
+        subset=[group_column, "pnl"]
+    )
+
+    if work.empty:
+        return pd.DataFrame()
+
+    aggregations = {
+        "trades": ("pnl", "count"),
+
+        "wins": (
+            "pnl",
+            lambda values: int(
+                (values > 0).sum()
+            ),
+        ),
+
+        "losses": (
+            "pnl",
+            lambda values: int(
+                (values <= 0).sum()
+            ),
+        ),
+
+        "winrate": (
+            "pnl",
+            lambda values: round(
+                (values > 0).mean() * 100,
+                2,
+            ),
+        ),
+
+        "avg_pnl": ("pnl", "mean"),
+        "net_pnl": ("pnl", "sum"),
+        "median_pnl": ("pnl", "median"),
+
+        "avg_win": (
+            "pnl",
+            lambda values: (
+                values[values > 0].mean()
+                if (values > 0).any()
+                else 0
+            ),
+        ),
+
+        "avg_loss": (
+            "pnl",
+            lambda values: (
+                values[values <= 0].mean()
+                if (values <= 0).any()
+                else 0
+            ),
+        ),
+
+        "profit_factor": (
+            "pnl",
+            btc_factor_profit_factor,
+        ),
+    }
+
+    if factor_column and factor_column in work.columns:
+        aggregations["factor_avg"] = (
+            factor_column,
+            "mean",
+        )
+
+    if "pnl_usd" in work.columns:
+        aggregations["net_pnl_usd"] = (
+            "pnl_usd",
+            "sum",
+        )
+
+    if "max_favorable_pct" in work.columns:
+        aggregations["avg_mfe"] = (
+            "max_favorable_pct",
+            "mean",
+        )
+
+    if "max_adverse_pct" in work.columns:
+        aggregations["avg_mae"] = (
+            "max_adverse_pct",
+            "mean",
+        )
+
+    report = (
+        work
+        .groupby(
+            group_column,
+            observed=True,
+        )
+        .agg(**aggregations)
+        .reset_index()
+    )
+
+    report = report[
+        report["trades"] >= min_trades
+    ].copy()
+
+    numeric_columns = [
+        "avg_pnl",
+        "net_pnl",
+        "median_pnl",
+        "avg_win",
+        "avg_loss",
+        "factor_avg",
+        "net_pnl_usd",
+        "avg_mfe",
+        "avg_mae",
+    ]
+
+    for column in numeric_columns:
+        if column in report.columns:
+            report[column] = report[column].round(4)
+
+    if report.empty:
+        return report
+
+    return report.sort_values(
+        by=[
+            "profit_factor",
+            "net_pnl",
+            "winrate",
+            "trades",
+        ],
+        ascending=[
+            False,
+            False,
+            False,
+            False,
+        ],
+        na_position="last",
+    )
 
 def render_status_dot(label: str, is_online: bool):
     color = "#00c853" if is_online else "#ff5252"
@@ -660,7 +2609,7 @@ def get_default_status():
         "error": None,
     }
 
-
+@st.cache_data(ttl=2)
 def load_status():
     status = get_default_status()
 
@@ -729,15 +2678,8 @@ def load_status():
 # =========================
 # LOAD DATA
 # =========================
-if TRADES_FILE.exists():
-    df = pd.read_csv(TRADES_FILE)
-else:
-    df = pd.DataFrame()
-
-if PAPER_SIGNALS_FILE.exists():
-    paper_df = pd.read_csv(PAPER_SIGNALS_FILE)
-else:
-    paper_df = pd.DataFrame()
+df = load_csv_cached(TRADES_FILE)
+paper_df = load_csv_cached(PAPER_SIGNALS_FILE)
 
 # =========================
 # CLEAN NUMERIC COLUMNS
@@ -775,20 +2717,43 @@ else:
 # =========================
 df_raw = df.copy()
 
-# =========================
-# COMPRESSION ENTRY QUALITY
-# =========================
 compression_numeric_cols = [
+    # Prices / execution
     "real_entry",
     "compression_high",
     "compression_low",
     "breakout_price",
+
+    # Breakout
     "breakout_extension_pct",
     "breakout_extension_atr",
     "breakout_volume_ratio",
+
+    # Existing scores
     "compression_score",
     "trend_score",
+
+    # Compression structure
+    "compression_height",
+    "compression_height_pct",
+    "compression_duration",
+    "upper_slope",
+    "lower_slope",
+    "slope_difference",
+    "touches_high",
+    "touches_low",
+    "inside_ratio",
+
+    # Entry location
+    "entry_distance_pct",
+    "entry_vs_compression_pct",
+    "entry_vs_breakout_pct",
+    "entry_to_compression_low_pct",
+    "sl_to_compression_low_pct",
+
+    # Trade result
     "pnl",
+    "pnl_usd",
     "max_favorable_pct",
     "max_adverse_pct",
 ]
@@ -796,6 +2761,32 @@ compression_numeric_cols = [
 for col in compression_numeric_cols:
     if col in df_raw.columns:
         df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
+        
+# =========================
+# BTC CORRELATION NUMERIC
+# =========================
+
+btc_correlation_numeric_cols = []
+
+for timeframe in BTC_CORRELATION_TIMEFRAMES:
+    btc_correlation_numeric_cols.extend([
+        f"btc_corr_{timeframe}",
+        f"btc_beta_{timeframe}",
+        f"btc_r2_{timeframe}",
+
+        f"symbol_move_{timeframe}_pct",
+        f"btc_move_{timeframe}_pct",
+
+        f"btc_expected_move_{timeframe}_pct",
+        f"btc_residual_move_{timeframe}_pct",
+    ])
+
+for col in btc_correlation_numeric_cols:
+    if col in df_raw.columns:
+        df_raw[col] = pd.to_numeric(
+            df_raw[col],
+            errors="coerce",
+        )
 
 required_compression_cols = [
     "side",
@@ -962,7 +2953,11 @@ st.sidebar.caption(f"Filtered trades: {len(df_view)}")
 # =========================
 # MFE / MAE REPORT
 # =========================
-mfe_report = build_mfe_mae_report(df_view)
+@st.cache_data(ttl=30)
+def build_mfe_mae_report_cached(df):
+    return build_mfe_mae_report(df)
+
+mfe_report = build_mfe_mae_report_cached(df_view)
 
 # =========================
 # STATUS PANEL DATA
@@ -1104,16 +3099,32 @@ if df_raw.empty:
     st.info("📭 No trades yet")
     st.stop()
     
-tab_overview, tab_mfe_mae, tab_setups, tab_swings, tab_bad_decisions, tab_execution, tab_compressions, tab_compression_quality, tab_compression_pipeline = st.tabs([
+(
+    tab_overview,
+    tab_btc_correlation,
+    tab_btc_alignment_edge,
+    tab_mfe_mae,
+    tab_setups,
+    tab_swings,
+    tab_bad_decisions,
+    tab_execution,
+    tab_compression_quality,
+    tab_compression_analytics,
+    tab_compression_pipeline,
+    tab_tp_sl_replay,
+) = st.tabs([
     "📊 Overview",
+    "₿ BTC Correlation",
+    "🧭 BTC Alignment Edge",
     "📐 MFE / MAE",
     "🧠 Setups",
     "🎯 Swings",
     "❌ Bad Decisions x",
     "⏱️ Execution Analysis",
-    "Compressions",
     "🎯 Compression Entry Quality",
-    "Compression Pipeline"
+    "🔬 Compression Analytics",
+    "Compression Pipeline",
+    "🧪 TP / SL Replay",
 ])
 
 with tab_overview:
@@ -1497,7 +3508,24 @@ with tab_overview:
     table_df = df_display.copy()
 
     if "entry_ts_dt" in table_df.columns:
-        table_df = table_df.sort_values("entry_ts_dt")
+        table_df = table_df.sort_values(
+            "entry_ts_dt",
+            ascending=False,
+        )
+
+    # ==================================================
+    # RAW ROWS ALIGNED WITH THE DISPLAYED TABLE
+    # ==================================================
+    # table_df después será formateado para visualización.
+    # inspector_source_df conserva tipos, timestamps y números reales.
+    inspector_source_df = (
+        df_view
+        .loc[table_df.index]
+        .copy()
+        .reset_index(drop=True)
+    )
+
+    table_df = table_df.reset_index(drop=True)
 
     if "entry_distance_pct" in table_df.columns:
         table_df["entry_distance_pct"] = table_df["entry_distance_pct"].map(
@@ -1579,42 +3607,2074 @@ with tab_overview:
         f"from {start_date} to {end_date}"
     )
 
-    st.dataframe(
+    closed_trades_event = st.dataframe(
         table_df,
-        use_container_width=True
+        use_container_width=True,
+        hide_index=True,
+        key="closed_trades_inspector_table",
+        on_select="rerun",
+        selection_mode="single-row",
     )
 
-    # =========================
-    # EQUITY CURVE
-    # =========================
-    st.markdown("---")
-    st.subheader("📈 Equity Curve")
+    selected_closed_rows = (
+        closed_trades_event.selection.rows
+    )
 
-    df_equity = df_raw.copy()
+    if selected_closed_rows:
+        selected_position = selected_closed_rows[0]
 
-    if "entry_ts_dt" in df_equity.columns and "pnl" in df_equity.columns:
-        df_equity = df_equity.sort_values("entry_ts_dt")
-        df_equity["equity"] = df_equity["pnl"].fillna(0).cumsum()
+        selected_trade_row = inspector_source_df.iloc[
+            selected_position
+        ]
 
-        st.line_chart(
-            df_equity.set_index("entry_ts_dt")["equity"],
-            use_container_width=True
+        closed_inspection = trade_inspector_service.inspect(
+            row=selected_trade_row,
+            status="CLOSED",
         )
 
+        selected_trade = closed_inspection.trade
+        
+        inspector_timeframe = trigger_tf
+
+        valid_inspector_timeframes = {
+            "1m",
+            "3m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "2h",
+            "4h",
+        }
+
+        if inspector_timeframe not in valid_inspector_timeframes:
+            inspector_timeframe = "30m"
+
+        inspector_interval_minutes = timeframe_to_minutes(
+            inspector_timeframe
+        )
+        
+        with st.spinner(
+            f"Loading {inspector_timeframe} candles "
+            f"for {selected_trade.symbol}..."
+        ):
+            closed_inspection.candles = (
+                trade_inspector_service.load_trade_candles(
+                    trade=selected_trade,
+                    interval=inspector_timeframe,
+                    candles_before=20,
+                    candles_after=12,
+                )
+            )
+
+        st.markdown("---")
+
+        st.subheader(
+            f"🔎 Trade Inspector — {selected_trade.symbol}"
+        )
+        
+        st.caption(
+            f"Inspection timeframe: {inspector_timeframe}"
+        )
+
+        # =========================
+        # MAIN TRADE DATA
+        # =========================
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
+            "Status",
+            selected_trade.status or "-",
+        )
+
+        c2.metric(
+            "Side",
+            selected_trade.side or "-",
+        )
+
+        c3.metric(
+            "Entry",
+            fmt_price_for_display(
+                selected_trade.entry_price
+            ),
+        )
+
+        c4.metric(
+            "Exit",
+            fmt_price_for_display(
+                selected_trade.exit_price
+            ),
+        )
+
+        # =========================
+        # COMPRESSION DATA
+        # =========================
+
+        c5, c6, c7, c8 = st.columns(4)
+
+        c5.metric(
+            "Compression High",
+            fmt_price_for_display(
+                selected_trade.compression_high
+            ),
+        )
+
+        c6.metric(
+            "Compression Low",
+            fmt_price_for_display(
+                selected_trade.compression_low
+            ),
+        )
+
+        c7.metric(
+            "Breakout",
+            fmt_price_for_display(
+                selected_trade.breakout_price
+            ),
+        )
+
+        c8.metric(
+            "Entry Ready",
+            fmt_price_for_display(
+                selected_trade.entry_ready_price
+            ),
+        )
+        
+        candles_df = closed_inspection.candles
+
+        if candles_df.empty:
+            st.warning(
+                "No se pudieron cargar las velas 30m "
+                "para el trade seleccionado."
+            )
+
+        else:
+            first_candle = candles_df.iloc[0]
+            last_candle = candles_df.iloc[-1]
+
+            st.success(
+                f"Loaded {len(candles_df)} candles — "
+                f"{first_candle['open_ts']} → "
+                f"{last_candle['close_ts']}"
+            )
+
+            inspector_fig = build_trade_inspector_chart(
+                inspection=closed_inspection,
+                interval_minutes=inspector_interval_minutes,
+                timeframe=inspector_timeframe,
+            )
+
+            st.plotly_chart(
+                inspector_fig,
+                use_container_width=True,
+                config={
+                    "displaylogo": False,
+                    "scrollZoom": True,
+                },
+            )
+
+            with st.expander(
+                f"{inspector_timeframe} candles",
+                expanded=False,
+            ):
+                st.dataframe(
+                    candles_df[
+                        [
+                            "open_ts",
+                            "open",
+                            "high",
+                            "low",
+                            "close",
+                            "volume",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # =========================
+        # NORMALIZED DEBUG DATA
+        # =========================
+
+        with st.expander(
+            "Normalized trade data",
+            expanded=False,
+        ):
+            st.json({
+                "symbol": selected_trade.symbol,
+                "status": selected_trade.status,
+                "side": selected_trade.side,
+
+                "entry_ts": (
+                    selected_trade.entry_ts.isoformat()
+                    if selected_trade.entry_ts is not None
+                    else None
+                ),
+
+                "entry_price": selected_trade.entry_price,
+
+                "exit_ts": (
+                    selected_trade.exit_ts.isoformat()
+                    if selected_trade.exit_ts is not None
+                    else None
+                ),
+
+                "exit_price": selected_trade.exit_price,
+                "exit_reason": selected_trade.exit_reason,
+
+                "compression_start_ts": (
+                    selected_trade.compression_start_ts.isoformat()
+                    if selected_trade.compression_start_ts is not None
+                    else None
+                ),
+
+                "compression_created_ts": (
+                    selected_trade.compression_created_ts.isoformat()
+                    if selected_trade.compression_created_ts is not None
+                    else None
+                ),
+
+                "compression_updated_ts": (
+                    selected_trade.compression_updated_ts.isoformat()
+                    if selected_trade.compression_updated_ts is not None
+                    else None
+                ),
+
+                "compression_high": (
+                    selected_trade.compression_high
+                ),
+
+                "compression_low": (
+                    selected_trade.compression_low
+                ),
+
+                "compression_score": (
+                    selected_trade.compression_score
+                ),
+
+                "breakout_ts": (
+                    selected_trade.breakout_ts.isoformat()
+                    if selected_trade.breakout_ts is not None
+                    else None
+                ),
+
+                "breakout_price": (
+                    selected_trade.breakout_price
+                ),
+
+                "breakout_high": (
+                    selected_trade.breakout_high
+                ),
+
+                "pullback_first_ts": (
+                    selected_trade.pullback_first_ts.isoformat()
+                    if selected_trade.pullback_first_ts is not None
+                    else None
+                ),
+
+                "pullback_valid_ts": (
+                    selected_trade.pullback_valid_ts.isoformat()
+                    if selected_trade.pullback_valid_ts is not None
+                    else None
+                ),
+
+                "pullback_price": (
+                    selected_trade.pullback_price
+                ),
+
+                "entry_ready_ts": (
+                    selected_trade.entry_ready_ts.isoformat()
+                    if selected_trade.entry_ready_ts is not None
+                    else None
+                ),
+
+                "entry_ready_price": (
+                    selected_trade.entry_ready_price
+                ),
+
+                "tp": selected_trade.tp,
+                "sl": selected_trade.sl,
+                "pnl_pct": selected_trade.pnl_pct,
+                "pnl_usd": selected_trade.pnl_usd,
+            })
+        
     # =========================
     # EQUITY CURVE USD
     # =========================
+
     if "entry_ts_dt" in df_raw.columns and "pnl_usd" in df_raw.columns:
+
         st.markdown("---")
         st.subheader("💵 Equity Curve USD")
 
-        df_equity_usd = df_raw.copy().sort_values("entry_ts_dt")
-        df_equity_usd["equity_usd"] = df_equity_usd["pnl_usd"].fillna(0).cumsum()
-
-        st.line_chart(
-            df_equity_usd.set_index("entry_ts_dt")["equity_usd"],
-            use_container_width=True
+        df_equity_usd = (
+            df_raw
+            .dropna(subset=["entry_ts_dt", "pnl_usd"])
+            .sort_values("entry_ts_dt")
+            .copy()
         )
+
+        if not df_equity_usd.empty:
+            df_equity_usd["equity_usd"] = df_equity_usd["pnl_usd"].cumsum()
+
+            st.line_chart(
+                df_equity_usd.set_index("entry_ts_dt")["equity_usd"],
+                use_container_width=True,
+            )
+        else:
+            st.info("No USD equity data.")
+            
+# =========================================================
+# BTC CORRELATION TAB
+# =========================================================
+
+with tab_btc_correlation:
+
+    st.markdown("## ₿ BTC Correlation Analytics")
+
+    st.caption(
+        "Cruza correlación, beta, R² y movimiento residual "
+        "contra el rendimiento real de los trades. "
+        "Esta tab todavía no bloquea operaciones."
+    )
+
+    # =====================================================
+    # CONTROLS
+    # =====================================================
+
+    control_col_1, control_col_2 = st.columns(2)
+
+    with control_col_1:
+        selected_btc_tf = st.selectbox(
+            "BTC correlation timeframe",
+            options=BTC_CORRELATION_TIMEFRAMES,
+            index=0,
+            key="btc_correlation_selected_tf",
+        )
+
+    with control_col_2:
+        max_bucket_trades = max(
+            1,
+            min(100, len(df_view)),
+        )
+
+        default_min_trades = min(
+            10,
+            max_bucket_trades,
+        )
+
+        min_btc_bucket_trades = st.number_input(
+            "Minimum trades per group",
+            min_value=1,
+            max_value=max_bucket_trades,
+            value=default_min_trades,
+            step=1,
+            key="btc_correlation_min_trades",
+        )
+
+    corr_col = f"btc_corr_{selected_btc_tf}"
+    beta_col = f"btc_beta_{selected_btc_tf}"
+    r2_col = f"btc_r2_{selected_btc_tf}"
+
+    symbol_move_col = (
+        f"symbol_move_{selected_btc_tf}_pct"
+    )
+
+    btc_move_col = (
+        f"btc_move_{selected_btc_tf}_pct"
+    )
+
+    expected_col = (
+        f"btc_expected_move_{selected_btc_tf}_pct"
+    )
+
+    residual_col = (
+        f"btc_residual_move_{selected_btc_tf}_pct"
+    )
+
+    directional_residual_col = (
+        f"btc_directional_residual_"
+        f"{selected_btc_tf}_pct"
+    )
+
+    corr_bucket_col = (
+        f"btc_corr_bucket_{selected_btc_tf}"
+    )
+
+    beta_bucket_col = (
+        f"btc_beta_bucket_{selected_btc_tf}"
+    )
+
+    r2_bucket_col = (
+        f"btc_r2_bucket_{selected_btc_tf}"
+    )
+
+    residual_bucket_col = (
+        f"btc_directional_residual_bucket_"
+        f"{selected_btc_tf}"
+    )
+
+    dependency_col = (
+        f"btc_dependency_{selected_btc_tf}"
+    )
+
+    required_btc_columns = [
+        corr_col,
+        beta_col,
+        r2_col,
+        residual_col,
+        "pnl",
+    ]
+
+    missing_btc_columns = [
+        column
+        for column in required_btc_columns
+        if column not in df_view.columns
+    ]
+
+    if missing_btc_columns:
+        st.info(
+            "Todavía faltan columnas de BTC correlation "
+            f"para {selected_btc_tf}: "
+            f"{', '.join(missing_btc_columns)}"
+        )
+
+    else:
+        btc_analysis_df = add_btc_correlation_buckets(
+            data=df_view,
+            timeframe=selected_btc_tf,
+        )
+
+        available_df = btc_analysis_df.dropna(
+            subset=[
+                corr_col,
+                beta_col,
+                r2_col,
+                residual_col,
+                "pnl",
+            ]
+        ).copy()
+
+        if available_df.empty:
+            st.info(
+                "Las columnas existen, pero todavía no hay "
+                "trades con métricas completas."
+            )
+
+        else:
+            # =================================================
+            # SUMMARY CARDS
+            # =================================================
+
+            st.markdown("### Summary")
+
+            summary_cols = st.columns(6)
+
+            summary_cols[0].metric(
+                "Trades analyzed",
+                len(available_df),
+            )
+
+            summary_cols[1].metric(
+                f"Avg Corr {selected_btc_tf}",
+                f"{available_df[corr_col].mean():.3f}",
+            )
+
+            summary_cols[2].metric(
+                f"Avg Beta {selected_btc_tf}",
+                f"{available_df[beta_col].mean():.3f}",
+            )
+
+            summary_cols[3].metric(
+                f"Avg R² {selected_btc_tf}",
+                f"{available_df[r2_col].mean():.3f}",
+            )
+
+            summary_cols[4].metric(
+                "Avg residual",
+                (
+                    f"{available_df[residual_col].mean():.3f}%"
+                ),
+            )
+
+            avg_directional_residual = (
+                available_df[
+                    directional_residual_col
+                ].mean()
+            )
+
+            summary_cols[5].metric(
+                "Avg directional residual",
+                f"{avg_directional_residual:.3f}%",
+            )
+
+            st.caption(
+                "Directional residual está ajustado al lado "
+                "del trade: positivo favorece la operación; "
+                "negativo muestra debilidad relativa."
+            )
+
+            # =================================================
+            # BTC DEPENDENCY CLASSIFICATION
+            # =================================================
+
+            st.markdown("---")
+            st.markdown(
+                "### BTC Dependency Classification"
+            )
+
+            dependency_report = build_btc_factor_report(
+                data=available_df,
+                group_column=dependency_col,
+                factor_column=directional_residual_col,
+                min_trades=int(
+                    min_btc_bucket_trades
+                ),
+            )
+
+            if dependency_report.empty:
+                st.info(
+                    "No hay suficientes trades por "
+                    "clasificación."
+                )
+
+            else:
+                st.dataframe(
+                    dependency_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                dependency_chart = (
+                    dependency_report[
+                        [
+                            dependency_col,
+                            "profit_factor",
+                        ]
+                    ]
+                    .dropna(subset=["profit_factor"])
+                    .set_index(dependency_col)
+                )
+
+                if not dependency_chart.empty:
+                    st.bar_chart(
+                        dependency_chart,
+                        use_container_width=True,
+                    )
+
+            st.caption(
+                "btc_copied_weak: BTC explica mucho del movimiento "
+                "y el residual es contrario al trade. "
+                "btc_correlated_with_strength: correlación alta, "
+                "pero el activo además muestra fuerza propia."
+            )
+
+            # =================================================
+            # CORRELATION BUCKETS
+            # =================================================
+
+            st.markdown("---")
+            st.markdown("### Correlation Buckets")
+
+            correlation_report = build_btc_factor_report(
+                data=available_df,
+                group_column=corr_bucket_col,
+                factor_column=corr_col,
+                min_trades=int(
+                    min_btc_bucket_trades
+                ),
+            )
+
+            if correlation_report.empty:
+                st.info(
+                    "No hay suficientes trades por bucket "
+                    "de correlación."
+                )
+
+            else:
+                st.dataframe(
+                    correlation_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # =================================================
+            # BETA BUCKETS
+            # =================================================
+
+            st.markdown("---")
+            st.markdown("### Beta Buckets")
+
+            beta_report = build_btc_factor_report(
+                data=available_df,
+                group_column=beta_bucket_col,
+                factor_column=beta_col,
+                min_trades=int(
+                    min_btc_bucket_trades
+                ),
+            )
+
+            if beta_report.empty:
+                st.info(
+                    "No hay suficientes trades por bucket "
+                    "de beta."
+                )
+
+            else:
+                st.dataframe(
+                    beta_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # =================================================
+            # R2 BUCKETS
+            # =================================================
+
+            st.markdown("---")
+            st.markdown("### R² Buckets")
+
+            r2_report = build_btc_factor_report(
+                data=available_df,
+                group_column=r2_bucket_col,
+                factor_column=r2_col,
+                min_trades=int(
+                    min_btc_bucket_trades
+                ),
+            )
+
+            if r2_report.empty:
+                st.info(
+                    "No hay suficientes trades por bucket "
+                    "de R²."
+                )
+
+            else:
+                st.dataframe(
+                    r2_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # =================================================
+            # DIRECTIONAL RESIDUAL
+            # =================================================
+
+            st.markdown("---")
+            st.markdown(
+                "### Directional Residual Buckets"
+            )
+
+            residual_report = build_btc_factor_report(
+                data=available_df,
+                group_column=residual_bucket_col,
+                factor_column=directional_residual_col,
+                min_trades=int(
+                    min_btc_bucket_trades
+                ),
+            )
+
+            if residual_report.empty:
+                st.info(
+                    "No hay suficientes trades por bucket "
+                    "de movimiento residual."
+                )
+
+            else:
+                st.dataframe(
+                    residual_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # =================================================
+            # CORRELATION + RESIDUAL MATRIX
+            # =================================================
+
+            st.markdown("---")
+            st.markdown(
+                "### Correlation × Directional Residual"
+            )
+
+            correlation_residual_report = (
+                build_btc_factor_report(
+                    data=available_df,
+                    group_column=corr_bucket_col,
+                    factor_column=corr_col,
+                    min_trades=1,
+                )
+            )
+
+            matrix_work = available_df.dropna(
+                subset=[
+                    corr_bucket_col,
+                    residual_bucket_col,
+                    "pnl",
+                ]
+            ).copy()
+
+            if matrix_work.empty:
+                st.info(
+                    "No hay datos para construir la matriz."
+                )
+
+            else:
+                matrix_rows = []
+
+                grouped_matrix = matrix_work.groupby(
+                    [
+                        corr_bucket_col,
+                        residual_bucket_col,
+                    ],
+                    observed=True,
+                )
+
+                for (
+                    corr_bucket,
+                    residual_bucket,
+                ), group in grouped_matrix:
+
+                    pnl_values = pd.to_numeric(
+                        group["pnl"],
+                        errors="coerce",
+                    ).dropna()
+
+                    if pnl_values.empty:
+                        continue
+
+                    matrix_rows.append({
+                        "correlation_bucket": str(
+                            corr_bucket
+                        ),
+
+                        "directional_residual_bucket": str(
+                            residual_bucket
+                        ),
+
+                        "trades": len(pnl_values),
+
+                        "winrate": round(
+                            (
+                                pnl_values > 0
+                            ).mean() * 100,
+                            2,
+                        ),
+
+                        "avg_pnl": round(
+                            pnl_values.mean(),
+                            4,
+                        ),
+
+                        "net_pnl": round(
+                            pnl_values.sum(),
+                            4,
+                        ),
+
+                        "profit_factor": (
+                            btc_factor_profit_factor(
+                                pnl_values
+                            )
+                        ),
+                    })
+
+                matrix_report = pd.DataFrame(
+                    matrix_rows
+                )
+
+                if not matrix_report.empty:
+                    matrix_report = matrix_report[
+                        matrix_report["trades"]
+                        >= int(min_btc_bucket_trades)
+                    ]
+
+                if matrix_report.empty:
+                    st.info(
+                        "No hay combinaciones con la muestra "
+                        "mínima seleccionada."
+                    )
+
+                else:
+                    matrix_report = (
+                        matrix_report.sort_values(
+                            by=[
+                                "profit_factor",
+                                "net_pnl",
+                                "trades",
+                            ],
+                            ascending=[
+                                False,
+                                False,
+                                False,
+                            ],
+                            na_position="last",
+                        )
+                    )
+
+                    st.dataframe(
+                        matrix_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    pf_pivot = matrix_report.pivot_table(
+                        index="correlation_bucket",
+                        columns=(
+                            "directional_residual_bucket"
+                        ),
+                        values="profit_factor",
+                        aggfunc="first",
+                    )
+
+                    if not pf_pivot.empty:
+                        st.markdown(
+                            "#### Profit Factor Matrix"
+                        )
+
+                        st.dataframe(
+                            pf_pivot,
+                            use_container_width=True,
+                        )
+
+            # =================================================
+            # RAW CORRELATION TRADES
+            # =================================================
+
+            st.markdown("---")
+            st.markdown(
+                "### Trades With BTC Correlation Data"
+            )
+
+            raw_columns = [
+                "entry_ts",
+                "symbol",
+                "side",
+                "pnl",
+                "pnl_usd",
+                corr_col,
+                beta_col,
+                r2_col,
+                symbol_move_col,
+                btc_move_col,
+                expected_col,
+                residual_col,
+                directional_residual_col,
+                dependency_col,
+                "max_favorable_pct",
+                "max_adverse_pct",
+                "exit_reason",
+            ]
+
+            existing_raw_columns = [
+                column
+                for column in raw_columns
+                if column in available_df.columns
+            ]
+
+            raw_btc_table = available_df[
+                existing_raw_columns
+            ].copy()
+
+            if (
+                "entry_ts_dt"
+                in available_df.columns
+            ):
+                raw_btc_table.insert(
+                    0,
+                    "entry_time",
+                    available_df[
+                        "entry_ts_dt"
+                    ].dt.strftime(
+                        "%d-%m-%Y %H:%M"
+                    ),
+                )
+
+            st.dataframe(
+                raw_btc_table,
+                use_container_width=True,
+                hide_index=True,
+            )
+            
+# =========================================================
+# BTC ALIGNMENT EDGE TAB
+# =========================================================
+
+with tab_btc_alignment_edge:
+
+    st.markdown("## 🧭 BTC Alignment Edge")
+
+    st.caption(
+        "Busca edge cruzando dirección, velocidad, correlación y beta "
+        "de BTC con compresión, señales, swings, volumen y calidad "
+        "de entrada. Todos los resultados respetan el filtro global "
+        "de fechas."
+    )
+
+    # =====================================================
+    # HELPERS
+    # =====================================================
+
+    def btc_edge_profit_factor(series):
+        values = pd.to_numeric(
+            series,
+            errors="coerce",
+        ).dropna()
+
+        gross_profit = values[values > 0].sum()
+        gross_loss = abs(values[values < 0].sum())
+
+        if gross_loss <= 0:
+            return None
+
+        return round(
+            gross_profit / gross_loss,
+            3,
+        )
+
+    def build_btc_edge_report(
+        data,
+        group_columns,
+        minimum_trades=1,
+    ):
+        if isinstance(group_columns, str):
+            group_columns = [group_columns]
+
+        required = group_columns + ["pnl"]
+
+        if any(
+            column not in data.columns
+            for column in required
+        ):
+            return pd.DataFrame()
+
+        work = data.copy()
+
+        work["pnl"] = pd.to_numeric(
+            work["pnl"],
+            errors="coerce",
+        )
+
+        work = work.dropna(
+            subset=required
+        )
+
+        if work.empty:
+            return pd.DataFrame()
+
+        aggregations = {
+            "trades": ("pnl", "count"),
+            "wins": (
+                "pnl",
+                lambda values: int(
+                    (values > 0).sum()
+                ),
+            ),
+            "losses": (
+                "pnl",
+                lambda values: int(
+                    (values <= 0).sum()
+                ),
+            ),
+            "winrate": (
+                "pnl",
+                lambda values: round(
+                    (values > 0).mean() * 100,
+                    2,
+                ),
+            ),
+            "avg_pnl": ("pnl", "mean"),
+            "median_pnl": ("pnl", "median"),
+            "net_pnl": ("pnl", "sum"),
+            "avg_win": (
+                "pnl",
+                lambda values: (
+                    values[values > 0].mean()
+                    if (values > 0).any()
+                    else 0
+                ),
+            ),
+            "avg_loss": (
+                "pnl",
+                lambda values: (
+                    values[values <= 0].mean()
+                    if (values <= 0).any()
+                    else 0
+                ),
+            ),
+            "profit_factor": (
+                "pnl",
+                btc_edge_profit_factor,
+            ),
+        }
+
+        if "max_favorable_pct" in work.columns:
+            aggregations["avg_mfe"] = (
+                "max_favorable_pct",
+                "mean",
+            )
+
+        if "max_adverse_pct" in work.columns:
+            aggregations["avg_mae"] = (
+                "max_adverse_pct",
+                "mean",
+            )
+
+        report = (
+            work
+            .groupby(
+                group_columns,
+                observed=True,
+            )
+            .agg(**aggregations)
+            .reset_index()
+        )
+
+        report = report[
+            report["trades"] >= minimum_trades
+        ].copy()
+
+        numeric_columns = [
+            "avg_pnl",
+            "median_pnl",
+            "net_pnl",
+            "avg_win",
+            "avg_loss",
+            "avg_mfe",
+            "avg_mae",
+        ]
+
+        for column in numeric_columns:
+            if column in report.columns:
+                report[column] = (
+                    pd.to_numeric(
+                        report[column],
+                        errors="coerce",
+                    )
+                    .round(4)
+                )
+
+        if report.empty:
+            return report
+
+        return report.sort_values(
+            by=[
+                "profit_factor",
+                "net_pnl",
+                "winrate",
+                "trades",
+            ],
+            ascending=[
+                False,
+                False,
+                False,
+                False,
+            ],
+            na_position="last",
+        )
+
+    # =====================================================
+    # PREPARE DATA
+    # =====================================================
+
+    btc_edge_df = df_view.copy()
+
+    numeric_columns = [
+        "pnl",
+        "pnl_usd",
+        "max_favorable_pct",
+        "max_adverse_pct",
+
+        "btc_corr_5m_1h",
+        "btc_beta_5m_1h",
+        "btc_r2_5m_1h",
+
+        "btc_corr_5m_4h",
+        "btc_beta_5m_4h",
+        "btc_r2_5m_4h",
+
+        "btc_corr_5m_24h",
+        "btc_beta_5m_24h",
+        "btc_r2_5m_24h",
+
+        "btc_signed_move_15m_pct",
+        "btc_signed_move_1h_pct",
+
+        "compression_score",
+        "trend_score",
+        "breakout_extension_atr",
+        "breakout_extension_pct",
+        "breakout_volume_ratio",
+        "entry_vs_compression_pct",
+        "entry_vs_breakout_pct",
+        "relative_volume_15m",
+        "relative_volume_1h",
+    ]
+
+    for column in numeric_columns:
+        if column in btc_edge_df.columns:
+            btc_edge_df[column] = pd.to_numeric(
+                btc_edge_df[column],
+                errors="coerce",
+            )
+
+    # =====================================================
+    # CORRELATION BUCKET
+    # =====================================================
+
+    if "btc_corr_5m_1h" in btc_edge_df.columns:
+        btc_edge_df["btc_corr_5m_1h_bucket"] = pd.cut(
+            btc_edge_df["btc_corr_5m_1h"],
+            bins=[
+                -np.inf,
+                0,
+                0.20,
+                0.40,
+                0.60,
+                0.80,
+                np.inf,
+            ],
+            labels=[
+                "1. Inverse (< 0)",
+                "2. Not following (0-0.20)",
+                "3. Weak (0.20-0.40)",
+                "4. Moderate (0.40-0.60)",
+                "5. Following (0.60-0.80)",
+                "6. Strong following (>= 0.80)",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    # =====================================================
+    # BETA BUCKET
+    # =====================================================
+
+    if "btc_beta_5m_1h" in btc_edge_df.columns:
+        btc_edge_df["btc_beta_5m_1h_bucket"] = pd.cut(
+            btc_edge_df["btc_beta_5m_1h"],
+            bins=[
+                -np.inf,
+                0,
+                0.50,
+                0.70,
+                1.20,
+                2.00,
+                np.inf,
+            ],
+            labels=[
+                "1. Inverse (< 0)",
+                "2. Low (0-0.50)",
+                "3. Medium (0.50-0.70)",
+                "4. Normal (0.70-1.20)",
+                "5. Amplified (1.20-2.00)",
+                "6. Extreme (>= 2.00)",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    # =====================================================
+    # SIGNED BTC MOVEMENT BUCKETS
+    # =====================================================
+
+    if "btc_signed_move_15m_pct" in btc_edge_df.columns:
+        btc_edge_df["btc_move_15m_bucket"] = pd.cut(
+            btc_edge_df["btc_signed_move_15m_pct"],
+            bins=[
+                -np.inf,
+                -0.80,
+                -0.50,
+                -0.15,
+                0.15,
+                0.50,
+                0.80,
+                np.inf,
+            ],
+            labels=[
+                "1. Strong down",
+                "2. Danger down",
+                "3. Mild down",
+                "4. Flat",
+                "5. Mild up",
+                "6. Danger up",
+                "7. Strong up",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    if "btc_signed_move_1h_pct" in btc_edge_df.columns:
+        btc_edge_df["btc_move_1h_bucket"] = pd.cut(
+            btc_edge_df["btc_signed_move_1h_pct"],
+            bins=[
+                -np.inf,
+                -1.50,
+                -1.00,
+                -0.30,
+                0.30,
+                1.00,
+                1.50,
+                np.inf,
+            ],
+            labels=[
+                "1. Strong down",
+                "2. Danger down",
+                "3. Mild down",
+                "4. Flat",
+                "5. Mild up",
+                "6. Danger up",
+                "7. Strong up",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    # =====================================================
+    # COMPRESSION / ENTRY BUCKETS
+    # =====================================================
+
+    if "compression_score" in btc_edge_df.columns:
+        btc_edge_df["btc_edge_compression_score_bucket"] = pd.cut(
+            btc_edge_df["compression_score"],
+            bins=[
+                -np.inf,
+                3,
+                4,
+                5,
+                np.inf,
+            ],
+            labels=[
+                "< 3",
+                "3",
+                "4",
+                ">= 5",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    if "trend_score" in btc_edge_df.columns:
+        btc_edge_df["btc_edge_trend_score_bucket"] = pd.cut(
+            btc_edge_df["trend_score"],
+            bins=[
+                -np.inf,
+                3,
+                4,
+                5,
+                6,
+                np.inf,
+            ],
+            labels=[
+                "< 3",
+                "3",
+                "4",
+                "5",
+                ">= 6",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    if "breakout_extension_atr" in btc_edge_df.columns:
+        btc_edge_df["btc_edge_breakout_atr_bucket"] = pd.cut(
+            btc_edge_df["breakout_extension_atr"],
+            bins=[
+                -np.inf,
+                0,
+                0.50,
+                1.00,
+                1.50,
+                2.00,
+                np.inf,
+            ],
+            labels=[
+                "< 0",
+                "0-0.50",
+                "0.50-1.00",
+                "1.00-1.50",
+                "1.50-2.00",
+                ">= 2.00",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    if "breakout_volume_ratio" in btc_edge_df.columns:
+        btc_edge_df["btc_edge_breakout_volume_bucket"] = pd.cut(
+            btc_edge_df["breakout_volume_ratio"],
+            bins=[
+                -np.inf,
+                1,
+                1.50,
+                2.00,
+                3.00,
+                np.inf,
+            ],
+            labels=[
+                "< 1.00",
+                "1.00-1.50",
+                "1.50-2.00",
+                "2.00-3.00",
+                ">= 3.00",
+            ],
+            include_lowest=True,
+            right=False,
+        )
+
+    # =====================================================
+    # DATA AVAILABILITY
+    # =====================================================
+
+    required_new_columns = [
+        "btc_corr_5m_1h",
+        "btc_beta_5m_1h",
+        "btc_r2_5m_1h",
+        "btc_signed_move_15m_pct",
+        "btc_signed_move_1h_pct",
+        "btc_direction_alignment",
+        "btc_trade_alignment",
+        "btc_trade_risk_state",
+        "btc_relationship_label",
+    ]
+
+    missing_new_columns = [
+        column
+        for column in required_new_columns
+        if column not in btc_edge_df.columns
+    ]
+
+    if missing_new_columns:
+        st.warning(
+            "Some new BTC columns are not available yet: "
+            + ", ".join(missing_new_columns)
+        )
+
+    if "btc_corr_5m_1h" not in btc_edge_df.columns:
+        st.info(
+            "No fast BTC correlation data available yet."
+        )
+
+    else:
+        available_df = btc_edge_df.dropna(
+            subset=[
+                "pnl",
+                "btc_corr_5m_1h",
+            ]
+        ).copy()
+
+        total_filtered_trades = len(btc_edge_df)
+        available_trades = len(available_df)
+
+        availability_pct = (
+            round(
+                available_trades
+                / total_filtered_trades
+                * 100,
+                2,
+            )
+            if total_filtered_trades
+            else 0
+        )
+
+        # =================================================
+        # CONTROLS
+        # =================================================
+
+        control_1, control_2 = st.columns(2)
+
+        with control_1:
+            btc_edge_min_trades = st.slider(
+                "Minimum trades per group",
+                min_value=1,
+                max_value=50,
+                value=3,
+                key="btc_alignment_edge_min_trades",
+            )
+
+        with control_2:
+            btc_edge_side = st.selectbox(
+                "Trade side",
+                options=[
+                    "ALL",
+                    "LONG",
+                    "SHORT",
+                ],
+                index=0,
+                key="btc_alignment_edge_side",
+            )
+
+        if btc_edge_side != "ALL":
+            available_df = available_df[
+                available_df["side"]
+                == btc_edge_side
+            ].copy()
+
+        # =================================================
+        # QUICK METRICS
+        # =================================================
+
+        pnl_values = pd.to_numeric(
+            available_df["pnl"],
+            errors="coerce",
+        ).dropna()
+
+        total_trades = len(pnl_values)
+        wins = int((pnl_values > 0).sum())
+        losses = int((pnl_values <= 0).sum())
+
+        winrate = (
+            round(
+                (pnl_values > 0).mean() * 100,
+                2,
+            )
+            if total_trades
+            else 0
+        )
+
+        net_pnl = (
+            round(pnl_values.sum(), 4)
+            if total_trades
+            else 0
+        )
+
+        overall_pf = btc_edge_profit_factor(
+            pnl_values
+        )
+
+        avg_corr = (
+            round(
+                available_df[
+                    "btc_corr_5m_1h"
+                ].mean(),
+                4,
+            )
+            if not available_df.empty
+            else 0
+        )
+
+        avg_beta = (
+            round(
+                available_df[
+                    "btc_beta_5m_1h"
+                ].mean(),
+                4,
+            )
+            if (
+                "btc_beta_5m_1h"
+                in available_df.columns
+                and not available_df.empty
+            )
+            else 0
+        )
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+
+        m1.metric("Available Trades", total_trades)
+        m2.metric("Winrate", f"{winrate}%")
+        m3.metric(
+            "Profit Factor",
+            (
+                overall_pf
+                if overall_pf is not None
+                else "No losses"
+            ),
+        )
+        m4.metric("Net PnL", f"{net_pnl}%")
+        m5.metric("Avg Corr 1h", avg_corr)
+        m6.metric("Avg Beta 1h", avg_beta)
+
+        st.caption(
+            f"Fast BTC data available for "
+            f"{available_trades}/{total_filtered_trades} "
+            f"filtered trades ({availability_pct}%). "
+            f"Current side selection: {btc_edge_side}."
+        )
+
+        # =================================================
+        # RELATIONSHIP LABEL
+        # =================================================
+
+        st.markdown("---")
+        st.markdown("### BTC Relationship Performance")
+
+        if "btc_relationship_label" in available_df.columns:
+            relationship_report = build_btc_edge_report(
+                available_df,
+                "btc_relationship_label",
+                btc_edge_min_trades,
+            )
+
+            if relationship_report.empty:
+                st.info(
+                    "Not enough trades by BTC relationship."
+                )
+            else:
+                st.dataframe(
+                    relationship_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        else:
+            st.info(
+                "Missing column: btc_relationship_label"
+            )
+
+        # =================================================
+        # TRADE RISK STATE
+        # =================================================
+
+        st.markdown("### BTC Risk State Performance")
+
+        if "btc_trade_risk_state" in available_df.columns:
+            risk_report = build_btc_edge_report(
+                available_df,
+                "btc_trade_risk_state",
+                btc_edge_min_trades,
+            )
+
+            if risk_report.empty:
+                st.info(
+                    "Not enough trades by BTC risk state."
+                )
+            else:
+                st.dataframe(
+                    risk_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        else:
+            st.info(
+                "Missing column: btc_trade_risk_state"
+            )
+
+        # =================================================
+        # FAST CORRELATION
+        # =================================================
+
+        st.markdown("### Fast Correlation Performance")
+
+        corr_report = build_btc_edge_report(
+            available_df,
+            "btc_corr_5m_1h_bucket",
+            btc_edge_min_trades,
+        )
+
+        if corr_report.empty:
+            st.info(
+                "Not enough fast correlation data."
+            )
+        else:
+            st.dataframe(
+                corr_report,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # =================================================
+        # FAST BETA
+        # =================================================
+
+        st.markdown("### Fast Beta Performance")
+
+        beta_report = build_btc_edge_report(
+            available_df,
+            "btc_beta_5m_1h_bucket",
+            btc_edge_min_trades,
+        )
+
+        if beta_report.empty:
+            st.info(
+                "Not enough fast beta data."
+            )
+        else:
+            st.dataframe(
+                beta_report,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # =================================================
+        # CORRELATION × DIRECTION MATRIX
+        # =================================================
+
+        st.markdown("---")
+        st.markdown(
+            "### Correlation × BTC Direction Matrix"
+        )
+
+        matrix_metric_options = {
+            "Profit Factor": "profit_factor",
+            "Winrate": "winrate",
+            "Net PnL": "net_pnl",
+            "Trades": "trades",
+        }
+
+        selected_matrix_metric_label = st.selectbox(
+            "Matrix metric",
+            options=list(
+                matrix_metric_options.keys()
+            ),
+            index=0,
+            key="btc_alignment_direction_matrix_metric",
+        )
+
+        selected_matrix_metric = (
+            matrix_metric_options[
+                selected_matrix_metric_label
+            ]
+        )
+
+        direction_matrix_report = build_btc_edge_report(
+            available_df,
+            [
+                "btc_corr_5m_1h_bucket",
+                "btc_direction_alignment",
+            ],
+            btc_edge_min_trades,
+        )
+
+        if direction_matrix_report.empty:
+            st.info(
+                "Not enough data for correlation × direction."
+            )
+        else:
+            direction_matrix = (
+                direction_matrix_report
+                .pivot_table(
+                    index="btc_corr_5m_1h_bucket",
+                    columns="btc_direction_alignment",
+                    values=selected_matrix_metric,
+                    aggfunc="first",
+                )
+            )
+
+            st.dataframe(
+                direction_matrix,
+                use_container_width=True,
+            )
+
+        # =================================================
+        # CORRELATION × BETA MATRIX
+        # =================================================
+
+        st.markdown(
+            "### Correlation × Beta Matrix"
+        )
+
+        beta_matrix_metric_label = st.selectbox(
+            "Correlation × Beta metric",
+            options=list(
+                matrix_metric_options.keys()
+            ),
+            index=0,
+            key="btc_alignment_beta_matrix_metric",
+        )
+
+        beta_matrix_metric = (
+            matrix_metric_options[
+                beta_matrix_metric_label
+            ]
+        )
+
+        corr_beta_report = build_btc_edge_report(
+            available_df,
+            [
+                "btc_corr_5m_1h_bucket",
+                "btc_beta_5m_1h_bucket",
+            ],
+            btc_edge_min_trades,
+        )
+
+        if corr_beta_report.empty:
+            st.info(
+                "Not enough data for correlation × beta."
+            )
+        else:
+            corr_beta_matrix = (
+                corr_beta_report
+                .pivot_table(
+                    index="btc_corr_5m_1h_bucket",
+                    columns="btc_beta_5m_1h_bucket",
+                    values=beta_matrix_metric,
+                    aggfunc="first",
+                )
+            )
+
+            st.dataframe(
+                corr_beta_matrix,
+                use_container_width=True,
+            )
+
+        # =================================================
+        # CONFLUENCE EXPLORER
+        # =================================================
+
+        st.markdown("---")
+        st.markdown("### 🔎 Confluence Explorer")
+
+        st.caption(
+            "Cruza BTC con compresión, señales, swings, "
+            "volumen y calidad de entrada."
+        )
+
+        confluence_dimensions = {
+            "Compression Score": "compression_score_bucket",
+            "Range Ratio": "range_ratio_bucket",
+            "ATR Ratio": "atr_ratio_bucket",
+            "Compression Volume": "volume_ratio_bucket",
+            "Average Body Ratio": "avg_body_pct_bucket",
+            "Compression Range %": "compression_range_pct_bucket",
+            
+            "BTC Relationship": "btc_relationship_label",
+            "BTC Risk State": "btc_trade_risk_state",
+            "BTC Trade Alignment": "btc_trade_alignment",
+            "BTC Direction Alignment": "btc_direction_alignment",
+            "BTC State": "btc_context_state",
+            "BTC Direction 15m": "btc_direction_15m",
+            "BTC Direction 1h": "btc_direction_1h",
+            "Fast Correlation": "btc_corr_5m_1h_bucket",
+            "Fast Beta": "btc_beta_5m_1h_bucket",
+            "BTC Move 15m": "btc_move_15m_bucket",
+            "BTC Move 1h": "btc_move_1h_bucket",
+
+            "Side": "side",
+            "Signal Trend": "signal_trend",
+            "Signal Direction": "signal_direction",
+            "Signal Momentum": "signal_momentum",
+
+            "Compression Quality": "compression_quality_label",
+            "Compression Shape": "compression_shape",
+            "Compression Score": (
+                "btc_edge_compression_score_bucket"
+            ),
+            "Trend Score": (
+                "btc_edge_trend_score_bucket"
+            ),
+            "Breakout Extension ATR": (
+                "btc_edge_breakout_atr_bucket"
+            ),
+            "Breakout Volume": (
+                "btc_edge_breakout_volume_bucket"
+            ),
+
+            "Near Swing High 15m": "near_swing_high_15m",
+            "Near Swing Low 15m": "near_swing_low_15m",
+            "Near Swing High 1h": "near_swing_high_1h",
+            "Near Swing Low 1h": "near_swing_low_1h",
+            "Near Swing High 4h": "near_swing_high_4h",
+            "Near Swing Low 4h": "near_swing_low_4h",
+
+            "Volume Tier": "volume_tier",
+            "RVOL 15m Tier": "rvol_tier_15m",
+            "RVOL 1h Tier": "rvol_tier_1h",
+        }
+
+        confluence_dimensions = {
+            label: column
+            for label, column
+            in confluence_dimensions.items()
+            if column in available_df.columns
+        }
+
+        if len(confluence_dimensions) < 2:
+            st.info(
+                "Not enough dimensions available yet."
+            )
+
+        else:
+            dimension_labels = list(
+                confluence_dimensions.keys()
+            )
+
+            selector_1, selector_2, selector_3 = (
+                st.columns(3)
+            )
+
+            with selector_1:
+                dimension_a_label = st.selectbox(
+                    "Dimension A",
+                    options=dimension_labels,
+                    index=0,
+                    key="btc_edge_dimension_a",
+                )
+
+            with selector_2:
+                default_b_index = (
+                    1
+                    if len(dimension_labels) > 1
+                    else 0
+                )
+
+                dimension_b_label = st.selectbox(
+                    "Dimension B",
+                    options=dimension_labels,
+                    index=default_b_index,
+                    key="btc_edge_dimension_b",
+                )
+
+            with selector_3:
+                dimension_c_options = [
+                    "None",
+                    *dimension_labels,
+                ]
+
+                dimension_c_label = st.selectbox(
+                    "Dimension C",
+                    options=dimension_c_options,
+                    index=0,
+                    key="btc_edge_dimension_c",
+                )
+
+            selected_labels = [
+                dimension_a_label,
+                dimension_b_label,
+            ]
+
+            if dimension_c_label != "None":
+                selected_labels.append(
+                    dimension_c_label
+                )
+
+            if len(set(selected_labels)) != len(
+                selected_labels
+            ):
+                st.warning(
+                    "Choose different dimensions."
+                )
+
+            else:
+                selected_columns = [
+                    confluence_dimensions[label]
+                    for label in selected_labels
+                ]
+
+                confluence_report = (
+                    build_btc_edge_report(
+                        available_df,
+                        selected_columns,
+                        btc_edge_min_trades,
+                    )
+                )
+
+                if confluence_report.empty:
+                    st.info(
+                        "No combinations meet the minimum "
+                        "trade requirement."
+                    )
+                else:
+                    st.dataframe(
+                        confluence_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+        # =================================================
+        # AUTOMATIC EDGE DISCOVERY
+        # =================================================
+
+        st.markdown("---")
+        st.markdown("### 🏆 Best BTC Confluences")
+
+        st.caption(
+            "Explora automáticamente combinaciones predefinidas. "
+            "Un PF alto con pocas operaciones sigue siendo provisional."
+        )
+
+        automatic_pairs = [
+            (
+                "btc_relationship_label",
+                "compression_quality_label",
+            ),
+            (
+                "btc_relationship_label",
+                "compression_shape",
+            ),
+            (
+                "btc_trade_risk_state",
+                "signal_direction",
+            ),
+            (
+                "btc_trade_risk_state",
+                "signal_momentum",
+            ),
+            (
+                "btc_corr_5m_1h_bucket",
+                "btc_beta_5m_1h_bucket",
+            ),
+            (
+                "btc_corr_5m_1h_bucket",
+                "near_swing_high_1h",
+            ),
+            (
+                "btc_corr_5m_1h_bucket",
+                "near_swing_high_4h",
+            ),
+            (
+                "btc_relationship_label",
+                "btc_edge_breakout_atr_bucket",
+            ),
+            (
+                "btc_relationship_label",
+                "btc_edge_breakout_volume_bucket",
+            ),
+            (
+                "btc_direction_alignment",
+                "compression_quality_label",
+            ),
+            (
+                "btc_direction_alignment",
+                "signal_direction",
+            ),
+            (
+                "btc_move_1h_bucket",
+                "signal_momentum",
+            ),
+        ]
+
+        automatic_reports = []
+
+        for column_a, column_b in automatic_pairs:
+            if (
+                column_a not in available_df.columns
+                or column_b not in available_df.columns
+            ):
+                continue
+
+            pair_report = build_btc_edge_report(
+                available_df,
+                [column_a, column_b],
+                btc_edge_min_trades,
+            )
+
+            if pair_report.empty:
+                continue
+
+            pair_report = pair_report.copy()
+
+            pair_report.insert(
+                0,
+                "analysis",
+                f"{column_a} × {column_b}",
+            )
+
+            pair_report["sample_strength"] = np.select(
+                [
+                    pair_report["trades"] >= 30,
+                    pair_report["trades"] >= 10,
+                ],
+                [
+                    "STRONGER_SAMPLE",
+                    "PROMISING",
+                ],
+                default="PROVISIONAL",
+            )
+
+            pair_report = pair_report.rename(
+                columns={
+                    column_a: "value_a",
+                    column_b: "value_b",
+                }
+            )
+
+            automatic_reports.append(
+                pair_report
+            )
+
+        if not automatic_reports:
+            st.info(
+                "No automatic confluences meet the "
+                "minimum trade requirement."
+            )
+
+        else:
+            best_confluences = pd.concat(
+                automatic_reports,
+                ignore_index=True,
+            )
+
+            best_confluences = (
+                best_confluences
+                .sort_values(
+                    by=[
+                        "profit_factor",
+                        "net_pnl",
+                        "trades",
+                        "winrate",
+                    ],
+                    ascending=[
+                        False,
+                        False,
+                        False,
+                        False,
+                    ],
+                    na_position="last",
+                )
+            )
+
+            st.dataframe(
+                best_confluences.head(50),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # =================================================
+        # RAW DATA
+        # =================================================
+
+        with st.expander(
+            "Raw BTC Alignment Trades"
+        ):
+            raw_columns = [
+                "entry_ts_dt",
+                "symbol",
+                "side",
+                "pnl",
+                "exit_reason",
+
+                "btc_signed_move_15m_pct",
+                "btc_signed_move_1h_pct",
+                "btc_direction_alignment",
+
+                "btc_corr_5m_1h",
+                "btc_beta_5m_1h",
+                "btc_r2_5m_1h",
+
+                "btc_trade_alignment",
+                "btc_trade_risk_state",
+                "btc_relationship_label",
+
+                "signal_direction",
+                "signal_momentum",
+
+                "compression_quality_label",
+                "compression_shape",
+                "compression_score",
+                "trend_score",
+
+                "breakout_extension_atr",
+                "breakout_volume_ratio",
+
+                "near_swing_high_15m",
+                "near_swing_high_1h",
+                "near_swing_high_4h",
+            ]
+
+            raw_columns = [
+                column
+                for column in raw_columns
+                if column in available_df.columns
+            ]
+
+            raw_alignment_table = (
+                available_df[raw_columns]
+                .copy()
+            )
+
+            st.dataframe(
+                raw_alignment_table,
+                use_container_width=True,
+                hide_index=True,
+            )
         
 with tab_mfe_mae:
     st.markdown("---")
@@ -4199,6 +8259,10 @@ def render_pipeline_card(row):
     color = state_color(state)
     qcolor = score_color(row.get("compression_score", 0))
 
+    quality = row.get("compression_quality_label", "N/A")
+    quality_col = quality_color(quality)
+    stars = shape_stars(quality)
+
     with st.container(border=True):
 
         # HEADER
@@ -4238,7 +8302,7 @@ def render_pipeline_card(row):
         st.markdown("---")
 
         # METRICS
-        m1, m2, m3 = st.columns(3)
+        m1, m2, m3, m4 = st.columns(4)
 
         with m1:
             st.markdown("##### Compression")
@@ -4255,6 +8319,28 @@ def render_pipeline_card(row):
             )
 
         with m2:
+            st.markdown("##### Shape / Quality")
+            st.markdown(
+                f"""
+                <div style="font-size:18px;font-weight:900;color:{quality_col};">
+                    {quality}
+                </div>
+                <div style="font-size:15px;color:#facc15;">
+                    {stars}
+                </div>
+                Shape: <b>{row.get("compression_shape","N/A")}</b><br>
+                Height: <b>{fmt(row.get("compression_height_pct"))}%</b><br>
+                Duration: <b>{fmt(row.get("compression_duration"))}</b><br>
+                Inside: <b>{fmt(row.get("inside_ratio"))}</b><br>
+                Touches: <b>H {fmt(row.get("touches_high"))} / L {fmt(row.get("touches_low"))}</b><br>
+                Upper: <b>{fmt(row.get("upper_slope"))}</b><br>
+                Lower: <b>{fmt(row.get("lower_slope"))}</b><br>
+                ΔSlope: <b>{fmt(row.get("slope_difference"))}</b>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with m3:
             st.markdown("##### Trend / Age")
             st.markdown(
                 f"""
@@ -4266,7 +8352,7 @@ def render_pipeline_card(row):
                 unsafe_allow_html=True,
             )
 
-        with m3:
+        with m4:
             st.markdown("##### Breakout / Pullback")
             st.markdown(
                 f"""
@@ -4275,11 +8361,12 @@ def render_pipeline_card(row):
                 Hold High: <b>{bool_icon(row.get("holds_compression_high"))}</b><br>
                 Continuation: <b>{bool_icon(row.get("continuation"))}</b><br>
                 Breakout Detected: <b>{bool_icon(row.get("breakout_detected"))}</b><br>
-                Pullback Detected: <b>{bool_icon(row.get("pullback_detected"))}</b>
+                Breakout Confirmed: <b>{bool_icon(row.get("breakout_confirmed"))}</b><br>
+                Pullback Detected: <b>{bool_icon(row.get("pullback_detected"))}</b><br>
+                Continuation Detected: <b>{bool_icon(row.get("continuation_detected"))}</b>
                 """,
                 unsafe_allow_html=True,
             )
-
         render_mini_chart(row)
         
 def event_badge(event):
@@ -4555,7 +8642,7 @@ with tab_compression_quality:
         st.info(f"Missing columns: {missing_cols}")
 
     else:
-        qdf = df_view.copy()
+        qdf = add_compression_analytics_buckets(df_view)
 
         for col in [
             "pnl",
@@ -4578,6 +8665,159 @@ with tab_compression_quality:
         c2.metric("Avg Entry Distance", f"{qdf['entry_vs_compression_pct'].mean():.3f}%")
         c3.metric("Max Entry Distance", f"{qdf['entry_vs_compression_pct'].max():.3f}%")
         c4.metric("Late Entries > 1%", int((qdf["entry_vs_compression_pct"] > 1.0).sum()))
+        
+        # =========================
+        # BREAKOUT QUALITY REPORTS
+        # =========================
+        st.markdown("---")
+        st.markdown("### 🚀 Breakout Quality")
+
+        st.caption(
+            "Analiza individualmente el volumen, la extensión porcentual "
+            "del breakout y la distancia entre breakout y entrada."
+        )
+
+        breakout_quality_reports = [
+            (
+                "Breakout Volume Ratio",
+                "breakout_volume_ratio_bucket",
+            ),
+            (
+                "Breakout Extension %",
+                "breakout_extension_pct_bucket",
+            ),
+            (
+                "Entry vs Breakout %",
+                "entry_vs_breakout_bucket",
+            ),
+        ]
+
+        available_breakout_quality_reports = [
+            item
+            for item in breakout_quality_reports
+            if item[1] in qdf.columns
+        ]
+
+        if not available_breakout_quality_reports:
+            st.info("No breakout-quality buckets are available.")
+
+        else:
+            selected_breakout_report_title = st.selectbox(
+                "Breakout analysis",
+                options=[
+                    title
+                    for title, _ in available_breakout_quality_reports
+                ],
+                key="compression_quality_breakout_analysis",
+            )
+
+            selected_breakout_report_col = next(
+                column
+                for title, column in available_breakout_quality_reports
+                if title == selected_breakout_report_title
+            )
+
+            breakout_quality_report = build_compression_analytics_report(
+                qdf,
+                [selected_breakout_report_col],
+                min_trades=1,
+            )
+
+            if breakout_quality_report.empty:
+                st.info(
+                    "There are no trades for the selected breakout analysis."
+                )
+
+            else:
+                st.dataframe(
+                    breakout_quality_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                
+        # =========================
+        # BREAKOUT EXTENSION × ENTRY VS BREAKOUT
+        # =========================
+        st.markdown("---")
+        st.markdown(
+            "### 🔬 Breakout Extension % × Entry vs Breakout %"
+        )
+
+        st.caption(
+            "Cruza el tamaño inicial del breakout con la ubicación real "
+            "de la entrada respecto del precio de ruptura."
+        )
+
+        breakout_combo_cols = [
+            "breakout_extension_pct_bucket",
+            "entry_vs_breakout_bucket",
+        ]
+
+        if not all(col in qdf.columns for col in breakout_combo_cols):
+            missing_breakout_combo_cols = [
+                col
+                for col in breakout_combo_cols
+                if col not in qdf.columns
+            ]
+
+            st.info(
+                "Missing breakout combination columns: "
+                f"{missing_breakout_combo_cols}"
+            )
+
+        else:
+            min_trades_breakout_combo = st.slider(
+                "Minimum trades per breakout combination",
+                min_value=1,
+                max_value=30,
+                value=5,
+                step=1,
+                key="breakout_extension_entry_min_trades",
+            )
+
+            breakout_entry_combo_report = (
+                build_compression_analytics_report(
+                    qdf,
+                    breakout_combo_cols,
+                    min_trades=min_trades_breakout_combo,
+                )
+            )
+
+            if breakout_entry_combo_report.empty:
+                st.info(
+                    "No Breakout Extension × Entry vs Breakout "
+                    "combinations meet the minimum trade requirement."
+                )
+
+            else:
+                st.dataframe(
+                    breakout_entry_combo_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.caption(
+                    "La tabla está ordenada por Profit Factor, PnL total, "
+                    "win rate y cantidad de trades."
+                )
+                
+                robustness_combo_report = (
+                    breakout_entry_combo_report.rename(
+                        columns={"profit_factor": "pf"}
+                    )
+                )
+
+                render_bucket_robustness_explorer(
+                    source_df=qdf,
+                    summary_df=robustness_combo_report,
+                    first_bucket_col="breakout_extension_pct_bucket",
+                    second_bucket_col="entry_vs_breakout_bucket",
+                    first_bucket_label="Breakout Extension %",
+                    second_bucket_label="Entry vs Breakout %",
+                    key_prefix="breakout_extension_entry_breakout",
+                )
+
+        st.markdown("---")
 
         st.markdown("### Entry Distance from Compression")
 
@@ -4669,6 +8909,16 @@ with tab_compression_quality:
             use_container_width=True
         )
         
+        render_bucket_robustness_explorer(
+            source_df=qdf,
+            summary_df=combo_atr_df,
+            first_bucket_col="entry_distance_simple",
+            second_bucket_col="breakout_atr_simple",
+            first_bucket_label="Entry Distance",
+            second_bucket_label="Breakout ATR",
+            key_prefix="entry_distance_breakout_atr",
+        )
+        
         st.markdown("### Entry Distance × Breakout Volume")
 
         qdf["breakout_volume_bucket"] = pd.cut(
@@ -4706,6 +8956,16 @@ with tab_compression_quality:
                 na_position="last"
             ),
             use_container_width=True
+        )
+        
+        render_bucket_robustness_explorer(
+            source_df=qdf,
+            summary_df=combo_volume_df,
+            first_bucket_col="entry_distance_simple",
+            second_bucket_col="breakout_volume_bucket",
+            first_bucket_label="Entry Distance",
+            second_bucket_label="Breakout Volume",
+            key_prefix="entry_distance_breakout_volume",
         )
 
         st.markdown("### SL Late Entry Cases")
@@ -4853,6 +9113,1017 @@ with tab_compression_quality:
             )
 
             st.plotly_chart(fig, use_container_width=True)
+            
+with tab_compression_analytics:
+
+    st.markdown("---")
+    st.subheader("🔬 Compression Analytics")
+
+    st.caption(
+        "Busca edge estadístico en la estructura de las compresiones. "
+        "Todos los resultados respetan el filtro global de fechas."
+    )
+
+    required_cols = ["pnl"]
+
+    missing_cols = [
+        col for col in required_cols
+        if col not in df_view.columns
+    ]
+
+    if missing_cols:
+        st.info(f"Missing columns: {missing_cols}")
+
+    else:
+        compression_df = add_compression_analytics_buckets(df_view)
+
+        compression_df["pnl"] = pd.to_numeric(
+            compression_df["pnl"],
+            errors="coerce",
+        )
+
+        compression_df = compression_df.dropna(subset=["pnl"]).copy()
+
+        # Keep only rows that have at least one compression field.
+        compression_identity_cols = [
+            "compression_shape",
+            "compression_quality_label",
+            "compression_height_pct",
+            "compression_duration",
+            "inside_ratio",
+            "touches_high",
+            "touches_low",
+        ]
+
+        available_identity_cols = [
+            col for col in compression_identity_cols
+            if col in compression_df.columns
+        ]
+
+        if available_identity_cols:
+            compression_df = compression_df[
+                compression_df[available_identity_cols]
+                .notna()
+                .any(axis=1)
+            ].copy()
+
+        if compression_df.empty:
+            st.info(
+                "There are no trades with compression analytics data "
+                "inside the selected date range."
+            )
+
+        else:
+            # =========================
+            # FILTERS
+            # =========================
+            c1, c2, c3 = st.columns(3)
+
+            with c1:
+                max_min_trades = max(
+                    1,
+                    min(50, len(compression_df)),
+                )
+
+                min_trades_compression = st.slider(
+                    "Minimum trades per group",
+                    min_value=1,
+                    max_value=max_min_trades,
+                    value=min(5, max_min_trades),
+                    step=1,
+                    key="compression_analytics_min_trades",
+                )
+
+            with c2:
+                if "side" in compression_df.columns:
+                    available_sides = sorted(
+                        compression_df["side"]
+                        .dropna()
+                        .astype(str)
+                        .str.upper()
+                        .unique()
+                        .tolist()
+                    )
+
+                    selected_side = st.selectbox(
+                        "Side",
+                        options=["ALL"] + available_sides,
+                        key="compression_analytics_side",
+                    )
+                else:
+                    selected_side = "ALL"
+
+            with c3:
+                if "symbol" in compression_df.columns:
+                    available_symbols = sorted(
+                        compression_df["symbol"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+
+                    selected_symbol = st.selectbox(
+                        "Symbol",
+                        options=["ALL"] + available_symbols,
+                        key="compression_analytics_symbol",
+                    )
+                else:
+                    selected_symbol = "ALL"
+
+            analytics_df = compression_df.copy()
+
+            if selected_side != "ALL":
+                analytics_df = analytics_df[
+                    analytics_df["side"]
+                    .astype(str)
+                    .str.upper()
+                    .eq(selected_side)
+                ].copy()
+
+            if selected_symbol != "ALL":
+                analytics_df = analytics_df[
+                    analytics_df["symbol"].astype(str).eq(selected_symbol)
+                ].copy()
+                
+            # =========================
+            # DATA COVERAGE
+            # =========================
+            st.markdown("---")
+            st.markdown("### 🧪 Compression Data Coverage")
+
+            st.caption(
+                "Muestra qué métricas de compresión tienen datos suficientes, "
+                "cuántos valores diferentes poseen y cuáles son constantes."
+            )
+
+            compression_analysis_cols = [
+                # =========================
+                # COMPRESSION PIPELINE
+                # =========================
+                "compression_state",
+                "compression_reason",
+                "compression_created_ts",
+                "compression_updated_ts",
+                "compression_candles_waiting",
+
+                # =========================
+                # TREND
+                # =========================
+                "trend_score",
+
+                # =========================
+                # COMPRESSION DETECTOR
+                # =========================
+                "compression_score",
+                "range_ratio",
+                "atr_ratio",
+                "volume_ratio",
+                "avg_body_pct",
+
+                # =========================
+                # COMPRESSION STRUCTURE
+                # =========================
+                "compression_high",
+                "compression_low",
+                "compression_range_pct",
+                "compression_height_pct",
+                "compression_duration",
+                "upper_slope",
+                "lower_slope",
+                "slope_difference",
+                "touches_high",
+                "touches_low",
+                "inside_ratio",
+                "compression_shape",
+                "compression_quality_label",
+
+                # =========================
+                # BREAKOUT
+                # =========================
+                "breakout_ts",
+                "breakout_price",
+                "breakout_high",
+                "breakout_volume_ratio",
+                "breakout_extension_pct",
+                "breakout_extension_atr",
+
+                # =========================
+                # ENTRY
+                # =========================
+                "entry_ready_price",
+
+                # =========================
+                # BTC VELOCITY CONTEXT
+                # =========================
+                "btc_velocity_15m",
+                "btc_velocity_1h",
+                "btc_direction_15m",
+                "btc_direction_1h",
+                "btc_context_state",
+                "btc_context_reason",
+
+                # =========================
+                # ORIGINAL BTC CORRELATION
+                # =========================
+                "btc_corr_15m",
+                "btc_beta_15m",
+                "btc_r2_15m",
+                "symbol_move_15m_pct",
+                "btc_move_15m_pct",
+                "btc_expected_move_15m_pct",
+                "btc_residual_move_15m_pct",
+
+                "btc_corr_1h",
+                "btc_beta_1h",
+                "btc_r2_1h",
+                "symbol_move_1h_pct",
+                "btc_move_1h_pct",
+                "btc_expected_move_1h_pct",
+                "btc_residual_move_1h_pct",
+
+                "btc_corr_4h",
+                "btc_beta_4h",
+                "btc_r2_4h",
+                "symbol_move_4h_pct",
+                "btc_move_4h_pct",
+                "btc_expected_move_4h_pct",
+                "btc_residual_move_4h_pct",
+
+                # =========================
+                # FAST BTC CORRELATION
+                # 5m candles / 1h window
+                # =========================
+                "btc_corr_5m_1h",
+                "btc_beta_5m_1h",
+                "btc_r2_5m_1h",
+                "btc_corr_available_5m_1h",
+                "btc_corr_reason_5m_1h",
+                "btc_corr_samples_5m_1h",
+
+                # 5m candles / 4h window
+                "btc_corr_5m_4h",
+                "btc_beta_5m_4h",
+                "btc_r2_5m_4h",
+                "btc_corr_available_5m_4h",
+                "btc_corr_reason_5m_4h",
+                "btc_corr_samples_5m_4h",
+
+                # 5m candles / 24h window
+                "btc_corr_5m_24h",
+                "btc_beta_5m_24h",
+                "btc_r2_5m_24h",
+                "btc_corr_available_5m_24h",
+                "btc_corr_reason_5m_24h",
+                "btc_corr_samples_5m_24h",
+
+                # =========================
+                # BTC ALIGNMENT
+                # =========================
+                "btc_signed_move_15m_pct",
+                "btc_signed_move_1h_pct",
+                "btc_direction_alignment",
+                "btc_trade_alignment",
+                "btc_trade_risk_state",
+                "btc_relationship_label",
+
+                # =========================
+                # OUTCOMES
+                # =========================
+                "pnl",
+                "mfe",
+                "mae",
+                "max_favorable_pct",
+                "max_adverse_pct",
+                "exit_reason",
+            ]
+
+            coverage_rows = []
+
+            total_analytics_rows = len(analytics_df)
+
+            for column in compression_analysis_cols:
+                if column not in analytics_df.columns:
+                    coverage_rows.append({
+                        "column": column,
+                        "status": "MISSING_COLUMN",
+                        "non_null": 0,
+                        "coverage_pct": 0.0,
+                        "unique_values": 0,
+                        "constant": False,
+                    })
+                    continue
+
+                series = analytics_df[column]
+                non_null_count = int(series.notna().sum())
+                unique_count = int(series.dropna().nunique())
+
+                coverage_pct = (
+                    non_null_count / total_analytics_rows * 100
+                    if total_analytics_rows > 0
+                    else 0
+                )
+
+                if non_null_count == 0:
+                    status = "EMPTY"
+                elif unique_count <= 1:
+                    status = "CONSTANT"
+                elif coverage_pct < 50:
+                    status = "LOW_COVERAGE"
+                else:
+                    status = "OK"
+
+                coverage_rows.append({
+                    "column": column,
+                    "status": status,
+                    "non_null": non_null_count,
+                    "coverage_pct": round(coverage_pct, 2),
+                    "unique_values": unique_count,
+                    "constant": unique_count == 1,
+                })
+
+            coverage_df = pd.DataFrame(coverage_rows)
+
+            coverage_summary = coverage_df["status"].value_counts()
+
+            dc1, dc2, dc3, dc4 = st.columns(4)
+
+            dc1.metric(
+                "Available",
+                int((coverage_df["status"] != "MISSING_COLUMN").sum()),
+            )
+
+            dc2.metric(
+                "Missing",
+                int((coverage_df["status"] == "MISSING_COLUMN").sum()),
+            )
+
+            dc3.metric(
+                "Empty",
+                int((coverage_df["status"] == "EMPTY").sum()),
+            )
+
+            dc4.metric(
+                "Constant",
+                int((coverage_df["status"] == "CONSTANT").sum()),
+            )
+
+            coverage_status_filter = st.multiselect(
+                "Coverage status",
+                options=[
+                    "OK",
+                    "LOW_COVERAGE",
+                    "CONSTANT",
+                    "EMPTY",
+                    "MISSING_COLUMN",
+                ],
+                default=[
+                    "LOW_COVERAGE",
+                    "CONSTANT",
+                    "EMPTY",
+                    "MISSING_COLUMN",
+                ],
+                key="compression_coverage_status_filter",
+            )
+
+            filtered_coverage_df = coverage_df[
+                coverage_df["status"].isin(coverage_status_filter)
+            ].copy()
+
+            st.dataframe(
+                filtered_coverage_df.sort_values(
+                    ["status", "coverage_pct", "column"],
+                    ascending=[True, True, True],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # =========================
+            # OVERALL METRICS
+            # =========================
+            overall_pnl = analytics_df["pnl"].dropna()
+
+            total_trades = len(overall_pnl)
+            total_wins = int((overall_pnl > 0).sum())
+            total_losses = int((overall_pnl <= 0).sum())
+
+            overall_winrate = (
+                round((overall_pnl > 0).mean() * 100, 2)
+                if total_trades
+                else 0
+            )
+
+            overall_pf = compression_profit_factor(overall_pnl)
+
+            overall_avg_pnl = (
+                round(overall_pnl.mean(), 4)
+                if total_trades
+                else 0
+            )
+
+            overall_total_pnl = (
+                round(overall_pnl.sum(), 4)
+                if total_trades
+                else 0
+            )
+
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+
+            m1.metric("Compression Trades", total_trades)
+            m2.metric("Wins", total_wins)
+            m3.metric("Losses", total_losses)
+            m4.metric("Winrate", f"{overall_winrate}%")
+            m5.metric(
+                "Profit Factor",
+                overall_pf if overall_pf is not None else "No losses",
+            )
+            m6.metric(
+                "Avg / Total PnL",
+                f"{overall_avg_pnl}% / {overall_total_pnl}%",
+            )
+            
+            # =========================
+            # DETECTOR COMPONENTS
+            # =========================
+            st.markdown("---")
+            st.markdown("### 🎛️ Detector Components")
+
+            st.caption(
+                "Analiza por separado las condiciones que forman el "
+                "compression score actual."
+            )
+
+            detector_reports = [
+                (
+                    "Compression Score",
+                    "compression_score_bucket",
+                ),
+                (
+                    "Range Ratio",
+                    "range_ratio_bucket",
+                ),
+                (
+                    "ATR Ratio",
+                    "atr_ratio_bucket",
+                ),
+                (
+                    "Volume Ratio",
+                    "volume_ratio_bucket",
+                ),
+                (
+                    "Average Body Ratio",
+                    "avg_body_pct_bucket",
+                ),
+                (
+                    "Compression Range %",
+                    "compression_range_pct_bucket",
+                ),
+            ]
+
+            available_detector_reports = [
+                item
+                for item in detector_reports
+                if item[1] in analytics_df.columns
+            ]
+
+            if not available_detector_reports:
+                st.info(
+                    "No detector-component bucket columns are available."
+                )
+
+            else:
+                selected_detector_title = st.selectbox(
+                    "Detector component",
+                    options=[
+                        title
+                        for title, _ in available_detector_reports
+                    ],
+                    key="compression_detector_component",
+                )
+
+                selected_detector_col = next(
+                    column
+                    for title, column in available_detector_reports
+                    if title == selected_detector_title
+                )
+
+                detector_report = build_compression_analytics_report(
+                    analytics_df,
+                    [selected_detector_col],
+                    min_trades=min_trades_compression,
+                )
+
+                if detector_report.empty:
+                    st.info(
+                        "Not enough trades for the selected detector component."
+                    )
+
+                else:
+                    st.dataframe(
+                        detector_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # =========================
+            # QUALITY
+            # =========================
+            st.markdown("### Compression Quality")
+
+            if "compression_quality_label" in analytics_df.columns:
+                quality_report = build_compression_analytics_report(
+                    analytics_df,
+                    ["compression_quality_label"],
+                    min_trades=min_trades_compression,
+                )
+
+                if quality_report.empty:
+                    st.info(
+                        "Not enough trades per compression quality group."
+                    )
+                else:
+                    st.dataframe(
+                        quality_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            else:
+                st.info("Missing column: compression_quality_label")
+
+            # =========================
+            # SHAPE
+            # =========================
+            st.markdown("### Compression Shape")
+
+            if "compression_shape" in analytics_df.columns:
+                shape_report = build_compression_analytics_report(
+                    analytics_df,
+                    ["compression_shape"],
+                    min_trades=min_trades_compression,
+                )
+
+                if shape_report.empty:
+                    st.info(
+                        "Not enough trades per compression shape."
+                    )
+                else:
+                    st.dataframe(
+                        shape_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            else:
+                st.info("Missing column: compression_shape")
+
+            # =========================
+            # QUALITY × SHAPE
+            # =========================
+            st.markdown("### Quality × Shape")
+
+            if all(
+                col in analytics_df.columns
+                for col in [
+                    "compression_quality_label",
+                    "compression_shape",
+                ]
+            ):
+                quality_shape_report = build_compression_analytics_report(
+                    analytics_df,
+                    [
+                        "compression_quality_label",
+                        "compression_shape",
+                    ],
+                    min_trades=min_trades_compression,
+                )
+
+                if quality_shape_report.empty:
+                    st.info(
+                        "Not enough trades for Quality × Shape combinations."
+                    )
+                else:
+                    st.dataframe(
+                        quality_shape_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # =========================
+            # STRUCTURE BUCKET REPORTS
+            # =========================
+            st.markdown("---")
+            st.markdown("### Structural Variables")
+
+            structural_reports = [
+                (
+                    "Compression Duration",
+                    "compression_duration_bucket",
+                ),
+                (
+                    "Compression Height",
+                    "compression_height_bucket",
+                ),
+                (
+                    "Inside Ratio",
+                    "inside_ratio_bucket",
+                ),
+                (
+                    "Total Touches",
+                    "total_touches_bucket",
+                ),
+                (
+                    "Touch Balance",
+                    "touch_balance_bucket",
+                ),
+                (
+                    "Upper Slope Magnitude",
+                    "upper_slope_bucket",
+                ),
+                (
+                    "Lower Slope Magnitude",
+                    "lower_slope_bucket",
+                ),
+                (
+                    "Slope Difference",
+                    "slope_difference_bucket",
+                ),
+            ]
+
+            available_structural_reports = [
+                item
+                for item in structural_reports
+                if item[1] in analytics_df.columns
+            ]
+
+            if not available_structural_reports:
+                st.info(
+                    "No structural compression bucket columns available."
+                )
+
+            else:
+                selected_structural_title = st.selectbox(
+                    "Structural analysis",
+                    options=[
+                        title
+                        for title, _ in available_structural_reports
+                    ],
+                    key="compression_structural_analysis",
+                )
+
+                selected_structural_col = next(
+                    col
+                    for title, col in available_structural_reports
+                    if title == selected_structural_title
+                )
+
+                structural_report = build_compression_analytics_report(
+                    analytics_df,
+                    [selected_structural_col],
+                    min_trades=min_trades_compression,
+                )
+
+                if structural_report.empty:
+                    st.info(
+                        "Not enough trades for the selected structural analysis."
+                    )
+                else:
+                    st.dataframe(
+                        structural_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # =========================
+            # ENTRY LOCATION REPORTS
+            # =========================
+            st.markdown("---")
+            st.markdown("### Entry Location")
+
+            entry_reports = [
+                (
+                    "Entry Distance",
+                    "entry_distance_bucket_analytics",
+                ),
+                (
+                    "Entry vs Compression",
+                    "entry_vs_compression_bucket",
+                ),
+                (
+                    "Entry vs Breakout",
+                    "entry_vs_breakout_bucket",
+                ),
+                (
+                    "Late Entry",
+                    "late_entry_label",
+                ),
+            ]
+
+            available_entry_reports = [
+                item
+                for item in entry_reports
+                if item[1] in analytics_df.columns
+            ]
+
+            if not available_entry_reports:
+                st.info("No entry-location columns available.")
+
+            else:
+                selected_entry_title = st.selectbox(
+                    "Entry analysis",
+                    options=[
+                        title
+                        for title, _ in available_entry_reports
+                    ],
+                    key="compression_entry_analysis",
+                )
+
+                selected_entry_col = next(
+                    col
+                    for title, col in available_entry_reports
+                    if title == selected_entry_title
+                )
+
+                entry_report = build_compression_analytics_report(
+                    analytics_df,
+                    [selected_entry_col],
+                    min_trades=min_trades_compression,
+                )
+
+                if entry_report.empty:
+                    st.info(
+                        "Not enough trades for the selected entry analysis."
+                    )
+                else:
+                    st.dataframe(
+                        entry_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # =========================
+            # SIDE COMPARISON
+            # =========================
+            if (
+                selected_side == "ALL"
+                and "side" in analytics_df.columns
+            ):
+                st.markdown("---")
+                st.markdown("### Long vs Short")
+
+                side_report = build_compression_analytics_report(
+                    analytics_df,
+                    ["side"],
+                    min_trades=min_trades_compression,
+                )
+
+                st.dataframe(
+                    side_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # =========================
+            # DYNAMIC CONFLUENCE EXPLORER
+            # =========================
+            st.markdown("---")
+            st.markdown("### 🔎 Confluence Explorer")
+
+            st.caption(
+                "Seleccioná dos variables para buscar combinaciones "
+                "con mejor Profit Factor y suficiente cantidad de trades."
+            )
+
+            confluence_dimensions = {
+                # Detector
+                "Compression Score": "compression_score_bucket",
+                "Range Ratio": "range_ratio_bucket",
+                "ATR Ratio": "atr_ratio_bucket",
+                "Volume Ratio": "volume_ratio_bucket",
+                "Compression Volume": "volume_ratio_bucket",
+                "Average Body Ratio": "avg_body_pct_bucket",
+                "Compression Range %": "compression_range_pct_bucket",
+
+                # Structure
+                "Compression Quality": "compression_quality_label",
+                "Compression Shape": "compression_shape",
+                "Duration": "compression_duration_bucket",
+                "Height": "compression_height_bucket",
+                "Inside Ratio": "inside_ratio_bucket",
+                "Total Touches": "total_touches_bucket",
+                "Touch Balance": "touch_balance_bucket",
+                "Touch Direction": "touch_imbalance_direction",
+                "Upper Slope": "upper_slope_bucket",
+                "Lower Slope": "lower_slope_bucket",
+                "Slope Difference": "slope_difference_bucket",
+
+                # Entry
+                "Entry Distance": "entry_distance_bucket_analytics",
+                "Entry vs Compression": "entry_vs_compression_bucket",
+                "Entry vs Breakout": "entry_vs_breakout_bucket",
+                "Late Entry": "late_entry_label",
+
+                # Trade
+                "Side": "side",
+            }
+
+            confluence_dimensions = {
+                label: col
+                for label, col in confluence_dimensions.items()
+                if col in analytics_df.columns
+            }
+
+            if len(confluence_dimensions) < 2:
+                st.info(
+                    "At least two compression dimensions are required."
+                )
+
+            else:
+                confluence_labels = list(
+                    confluence_dimensions.keys()
+                )
+
+                cc1, cc2 = st.columns(2)
+
+                with cc1:
+                    first_dimension_label = st.selectbox(
+                        "First dimension",
+                        options=confluence_labels,
+                        index=0,
+                        key="compression_confluence_dimension_1",
+                    )
+
+                with cc2:
+                    default_second_index = (
+                        1 if len(confluence_labels) > 1 else 0
+                    )
+
+                    second_dimension_label = st.selectbox(
+                        "Second dimension",
+                        options=confluence_labels,
+                        index=default_second_index,
+                        key="compression_confluence_dimension_2",
+                    )
+
+                first_dimension = confluence_dimensions[
+                    first_dimension_label
+                ]
+
+                second_dimension = confluence_dimensions[
+                    second_dimension_label
+                ]
+
+                if first_dimension == second_dimension:
+                    st.warning(
+                        "Select two different dimensions."
+                    )
+
+                else:
+                    confluence_report = build_compression_analytics_report(
+                        analytics_df,
+                        [
+                            first_dimension,
+                            second_dimension,
+                        ],
+                        min_trades=min_trades_compression,
+                    )
+
+                    if confluence_report.empty:
+                        st.info(
+                            "No combinations meet the minimum trade requirement."
+                        )
+
+                    else:
+                        st.dataframe(
+                            confluence_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.caption(
+                            "Ordenado por Profit Factor, PnL total, "
+                            "Winrate y cantidad de trades."
+                        )
+
+            # =========================
+            # THREE-WAY DISCOVERY
+            # =========================
+            st.markdown("---")
+            st.markdown("### 🧬 Quality × Shape × Entry Timing")
+
+            three_way_cols = [
+                "compression_quality_label",
+                "compression_shape",
+                "late_entry_label",
+            ]
+
+            if all(
+                col in analytics_df.columns
+                for col in three_way_cols
+            ):
+                three_way_report = build_compression_analytics_report(
+                    analytics_df,
+                    three_way_cols,
+                    min_trades=min_trades_compression,
+                )
+
+                if three_way_report.empty:
+                    st.info(
+                        "Not enough data for the three-variable analysis."
+                    )
+                else:
+                    st.dataframe(
+                        three_way_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # =========================
+            # BEST GROUPS
+            # =========================
+            st.markdown("---")
+            st.markdown("### 🏆 Best Compression Groups")
+
+            best_group_candidates = []
+
+            best_group_dimensions = [
+                # Detector
+                "compression_score_bucket",
+                "range_ratio_bucket",
+                "atr_ratio_bucket",
+                "volume_ratio_bucket",
+                "avg_body_pct_bucket",
+                "compression_range_pct_bucket",
+
+                # Structure
+                "compression_quality_label",
+                "compression_shape",
+                "compression_duration_bucket",
+                "compression_height_bucket",
+                "inside_ratio_bucket",
+                "total_touches_bucket",
+                "slope_difference_bucket",
+
+                # Entry
+                "late_entry_label",
+            ]
+
+            for dimension in best_group_dimensions:
+                if dimension not in analytics_df.columns:
+                    continue
+
+                report = build_compression_analytics_report(
+                    analytics_df,
+                    [dimension],
+                    min_trades=min_trades_compression,
+                )
+
+                if report.empty:
+                    continue
+
+                report = report.copy()
+                report["dimension"] = dimension
+                report["group_value"] = report[dimension].astype(str)
+
+                best_group_candidates.append(
+                    report[
+                        [
+                            "dimension",
+                            "group_value",
+                            "trades",
+                            "winrate",
+                            "avg_pnl",
+                            "total_pnl",
+                            "profit_factor",
+                        ]
+                    ]
+                )
+
+            if not best_group_candidates:
+                st.info(
+                    "No compression groups meet the minimum trade requirement."
+                )
+
+            else:
+                best_groups_df = pd.concat(
+                    best_group_candidates,
+                    ignore_index=True,
+                )
+
+                best_groups_df = best_groups_df.sort_values(
+                    [
+                        "profit_factor",
+                        "total_pnl",
+                        "trades",
+                    ],
+                    ascending=[False, False, False],
+                    na_position="last",
+                )
+
+                st.dataframe(
+                    best_groups_df.head(30),
+                    use_container_width=True,
+                    hide_index=True,
+                )
     
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
@@ -4956,11 +10227,30 @@ with tab_compression_pipeline:
                 "WATCHING_COMPRESSION": "#a78bfa",
                 "EXPIRED": "#ef4444",
             }.get(state, "#6b7280")
+            
+        def quality_color(label):
+            return {
+                "GOOD_SHAPE": "#22c55e",
+                "OK_SHAPE": "#eab308",
+                "BAD_SHAPE": "#ef4444",
+            }.get(label, "#6b7280")
+
+
+        def shape_stars(label):
+            return {
+                "GOOD_SHAPE": "⭐⭐⭐⭐☆",
+                "OK_SHAPE": "⭐⭐⭐☆☆",
+                "BAD_SHAPE": "⭐☆☆☆☆",
+            }.get(label, "N/A")
 
         def card_html(row):
             state = row.get("state", "N/A")
             color = state_color(state)
             qcolor = score_color(row.get("compression_score", 0))
+            
+            quality = row.get("compression_quality_label", "N/A")
+            quality_col = quality_color(quality)
+            stars = shape_stars(quality)
 
             return f"""
             <div
@@ -5004,7 +10294,7 @@ with tab_compression_pipeline:
 
                 <hr style="border-color:#1e293b; margin:14px 0;" />
 
-                <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:14px;">
+                <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:14px;">
                     <div>
                         <div style="color:#94a3b8; font-size:12px;">Compression</div>
                         <div style="font-size:18px; font-weight:800; color:{qcolor};">
@@ -5013,6 +10303,50 @@ with tab_compression_pipeline:
                         <div style="color:#cbd5e1;">Range: <b>{fmt(row.get("range_ratio"))}</b></div>
                         <div style="color:#cbd5e1;">ATR: <b>{fmt(row.get("atr_ratio"))}</b></div>
                         <div style="color:#cbd5e1;">Vol: <b>{fmt(row.get("volume_ratio"))}</b></div>
+                    </div>
+                    
+                    <div>
+                        <div style="color:#94a3b8; font-size:12px;">Shape / Quality</div>
+
+                        <div style="font-size:16px; font-weight:900; color:{quality_col};">
+                            {quality}
+                        </div>
+
+                        <div style="color:#facc15; font-size:15px; margin-bottom:4px;">
+                            {stars}
+                        </div>
+
+                        <div style="color:#cbd5e1;">
+                            Shape: <b>{row.get("compression_shape", "N/A")}</b>
+                        </div>
+
+                        <div style="color:#cbd5e1;">
+                            Height: <b>{fmt(row.get("compression_height_pct"))}%</b>
+                        </div>
+
+                        <div style="color:#cbd5e1;">
+                            Duration: <b>{fmt(row.get("compression_duration"))}</b>
+                        </div>
+
+                        <div style="color:#cbd5e1;">
+                            Inside: <b>{fmt(row.get("inside_ratio"))}</b>
+                        </div>
+
+                        <div style="color:#cbd5e1;">
+                            Touches: <b>H {fmt(row.get("touches_high"))} / L {fmt(row.get("touches_low"))}</b>
+                        </div>
+
+                        <div style="color:#cbd5e1;">
+                            Upper Slope: <b>{fmt(row.get("upper_slope"))}</b>
+                        </div>
+
+                        <div style="color:#cbd5e1;">
+                            Lower Slope: <b>{fmt(row.get("lower_slope"))}</b>
+                        </div>
+
+                        <div style="color:#cbd5e1;">
+                            Δ Slope: <b>{fmt(row.get("slope_difference"))}</b>
+                        </div>
                     </div>
 
                     <div>
@@ -5144,6 +10478,16 @@ with tab_compression_pipeline:
                 "candles_waiting",
                 "compression_score",
                 "trend_score",
+                "compression_quality_label",
+                "compression_shape",
+                "compression_height_pct",
+                "compression_duration",
+                "inside_ratio",
+                "touches_high",
+                "touches_low",
+                "upper_slope",
+                "lower_slope",
+                "slope_difference",
                 "range_ratio",
                 "atr_ratio",
                 "volume_ratio",
@@ -5171,3 +10515,297 @@ with tab_compression_pipeline:
                 use_container_width=True,
                 hide_index=True,
             )
+            
+# ==========================================================
+# TP / SL POST-TRADE REPLAY
+# ==========================================================
+with tab_tp_sl_replay:
+    st.subheader("🧪 TP / SL Post-Trade Replay")
+
+    replay_df = load_csv_cached(
+        POST_TRADE_REPLAY_FILE
+    )
+
+    scenario_df = load_csv_cached(
+        TP_SL_SCENARIOS_FILE
+    )
+
+    partial_df = load_csv_cached(
+        PARTIAL_TP_SCENARIOS_FILE
+    )
+
+    missing_reports = []
+
+    if replay_df.empty:
+        missing_reports.append(
+            "post_trade_replay.csv"
+        )
+
+    if scenario_df.empty:
+        missing_reports.append(
+            "tp_sl_scenarios.csv"
+        )
+
+    if partial_df.empty:
+        missing_reports.append(
+            "partial_tp_scenarios.csv"
+        )
+
+    if missing_reports:
+        st.warning(
+            "Missing or empty replay reports: "
+            + ", ".join(missing_reports)
+        )
+
+        st.code(
+            "python -m tools.analyze_post_trade_replay "
+            "--hours 72",
+            language="bash",
+        )
+
+    else:
+        st.caption(
+            "Replay basado en velas de 1 minuto: "
+            "Trade Price para TP y Mark Price para SL."
+        )
+
+        replay = replay_df.copy()
+        scenarios = scenario_df.copy()
+        partials = partial_df.copy()
+
+        # ==========================================
+        # NORMALIZE TIMESTAMPS
+        # ==========================================
+        for frame in [replay, scenarios, partials]:
+            for column in ["entry_ts", "exit_ts"]:
+                if column in frame.columns:
+                    frame[column] = pd.to_datetime(
+                        frame[column],
+                        utc=True,
+                        errors="coerce",
+                    )
+
+        # ==========================================
+        # NORMALIZE NUMERIC COLUMNS
+        # ==========================================
+        replay_numeric = [
+            "pnl",
+            "original_tp_pct",
+            "structural_sl_risk_pct",
+            "post_max_favorable_pct",
+            "after_exit_max_favorable_pct",
+            "extra_move_after_exit_pct",
+        ]
+
+        for column in replay_numeric:
+            if column in replay.columns:
+                replay[column] = pd.to_numeric(
+                    replay[column],
+                    errors="coerce",
+                )
+
+        scenario_numeric = [
+            "sl_buffer_pct",
+            "tp_target_pct",
+            "structural_risk_pct",
+            "simulated_pnl_pct",
+        ]
+
+        for column in scenario_numeric:
+            if column in scenarios.columns:
+                scenarios[column] = pd.to_numeric(
+                    scenarios[column],
+                    errors="coerce",
+                )
+
+        partial_numeric = [
+            "original_pnl",
+            "structural_risk_pct",
+            "targets_hit",
+            "gross_pnl_pct",
+            "net_pnl_pct",
+            "minutes_in_trade",
+        ]
+
+        for column in partial_numeric:
+            if column in partials.columns:
+                partials[column] = pd.to_numeric(
+                    partials[column],
+                    errors="coerce",
+                )
+
+        # ==========================================
+        # OBSERVATION WINDOW
+        # ==========================================
+        observation_hours = st.selectbox(
+            "Minimum completed observation window",
+            options=[24, 48, 72],
+            index=2,
+            format_func=lambda value: f"{value} hours",
+            key="tp_sl_replay_observation_hours",
+        )
+
+        cutoff = (
+            pd.Timestamp.now(tz="UTC")
+            - pd.Timedelta(
+                hours=observation_hours
+            )
+        )
+
+        mature_replay = replay[
+            replay["exit_ts"] <= cutoff
+        ].copy()
+
+        mature_scenarios = scenarios[
+            scenarios["exit_ts"] <= cutoff
+        ].copy()
+
+        mature_partials = partials[
+            partials["exit_ts"] <= cutoff
+        ].copy()
+
+        # ==========================================
+        # REPLAY COVERAGE
+        # ==========================================
+        if "saved_by_compression_level" in mature_replay.columns:
+            saved_mask = normalize_replay_bool(
+                mature_replay[
+                    "saved_by_compression_level"
+                ]
+            )
+        else:
+            saved_mask = pd.Series(
+                False,
+                index=mature_replay.index,
+            )
+
+        if "structural_result" in mature_replay.columns:
+            structural_result = (
+                mature_replay["structural_result"]
+                .astype(str)
+                .str.upper()
+            )
+
+            valid_structural_mask = ~structural_result.isin([
+                "NO_COMPRESSION_LEVEL",
+                "NAN",
+                "NONE",
+            ])
+
+            unresolved_mask = structural_result.eq(
+                "UNRESOLVED"
+            )
+        else:
+            valid_structural_mask = pd.Series(
+                False,
+                index=mature_replay.index,
+            )
+
+            unresolved_mask = pd.Series(
+                False,
+                index=mature_replay.index,
+            )
+
+        total_trades = len(mature_replay)
+        valid_structural_count = int(
+            valid_structural_mask.sum()
+        )
+        saved_sl_count = int(saved_mask.sum())
+        unresolved_count = int(
+            unresolved_mask.sum()
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
+            "Mature trades",
+            total_trades,
+        )
+
+        c2.metric(
+            "With structural level",
+            valid_structural_count,
+        )
+
+        c3.metric(
+            "Original SL saved",
+            saved_sl_count,
+        )
+
+        c4.metric(
+            "Unresolved",
+            unresolved_count,
+        )
+
+        st.caption(
+            f"Only trades exited before "
+            f"{cutoff.strftime('%Y-%m-%d %H:%M UTC')} "
+            f"are included."
+        )
+
+        # ==========================================
+        # STRUCTURAL RESULT SUMMARY
+        # ==========================================
+        st.markdown("### Structural Replay Results")
+
+        if "structural_result" in mature_replay.columns:
+            structural_summary = (
+                mature_replay[
+                    "structural_result"
+                ]
+                .fillna("UNKNOWN")
+                .value_counts(dropna=False)
+                .rename_axis("result")
+                .reset_index(name="trades")
+            )
+
+            if total_trades > 0:
+                structural_summary["pct"] = (
+                    structural_summary["trades"]
+                    / total_trades
+                    * 100
+                ).round(2)
+            else:
+                structural_summary["pct"] = 0.0
+
+            st.dataframe(
+                structural_summary,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ==========================================
+        # RAW REPORT DIAGNOSTICS
+        # ==========================================
+        with st.expander("Replay report diagnostics"):
+            d1, d2, d3 = st.columns(3)
+
+            d1.metric(
+                "Replay rows",
+                len(replay),
+            )
+
+            d2.metric(
+                "TP/SL scenario rows",
+                len(scenarios),
+            )
+
+            d3.metric(
+                "Partial scenario rows",
+                len(partials),
+            )
+
+            if "analysis_status" in replay.columns:
+                status_summary = (
+                    replay["analysis_status"]
+                    .fillna("UNKNOWN")
+                    .value_counts()
+                    .rename_axis("status")
+                    .reset_index(name="trades")
+                )
+
+                st.dataframe(
+                    status_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                )

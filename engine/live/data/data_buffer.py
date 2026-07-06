@@ -4,7 +4,7 @@ import threading
 
 
 class DataBuffer:
-    def __init__(self, timeframes, symbols=None, maxlen=300):
+    def __init__(self, timeframes, symbols=None, maxlen=400):
         self.timeframes = set(timeframes)
         self.symbols = set(symbols or [])
 

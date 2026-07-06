@@ -71,6 +71,12 @@ class CompressionWatch:
     pullback_from_breakout_pct: Optional[float] = None
     distance_above_compression_high_pct: Optional[float] = None
     
+    pullback_first_ts: Optional[int] = None
+    pullback_valid_ts: Optional[int] = None
+    pullback_price: Optional[float] = None
+
+    entry_ready_ts: Optional[int] = None
+    
     valid_pullback: Optional[bool] = None
     holds_compression_high: Optional[bool] = None
     continuation: Optional[bool] = None
@@ -120,6 +126,7 @@ class CompressionStateMachine:
         self,
         watch: CompressionWatch,
         symbol: str,
+        ts: int,
         close: float,
         low: float,
         high: float,
@@ -163,6 +170,23 @@ class CompressionStateMachine:
 
         watch.pullback_detected = valid_pullback
         watch.continuation_detected = continuation
+        
+        # ============================================
+        # PULLBACK EVENT INSTRUMENTATION
+        # ============================================
+        # No cambia la lógica actual.
+        # Registra la primera vez que el sistema
+        # considera válido el pullback.
+
+        if valid_pullback:
+            if watch.pullback_first_ts is None:
+                watch.pullback_first_ts = ts
+
+            if watch.pullback_valid_ts is None:
+                watch.pullback_valid_ts = ts
+
+            if watch.pullback_price is None:
+                watch.pullback_price = low
         
         breakout_ext_pct_text = (
             f"{watch.breakout_extension_pct:.3f}%"
@@ -241,6 +265,10 @@ class CompressionStateMachine:
                 f"Current High     : {high:.8f}\n"
                 f"Current Low      : {low:.8f}\n"
                 f"Pullback %       : {pullback_pct:.3f}%\n"
+                f"Pullback First TS: {watch.pullback_first_ts}\n"
+                f"Pullback Valid TS: {watch.pullback_valid_ts}\n"
+                f"Pullback Price   : {watch.pullback_price}\n"
+                f"Entry Ready TS  : {watch.entry_ready_ts}\n"
                 f"Compression High : {watch.compression_high:.8f}\n"
                 f"Breakout Price   : {watch.breakout_price:.8f}\n"
                 f"Breakout Ext %  : {breakout_ext_pct_text}\n"
@@ -250,6 +278,10 @@ class CompressionStateMachine:
 
             watch.state = CompressionState.ENTRY_READY
             watch.entry_ready = True
+
+            if watch.entry_ready_ts is None:
+                watch.entry_ready_ts = ts
+
             watch.entry_price = close
             watch.reason = "pullback_hold_and_continuation"
 
@@ -423,6 +455,7 @@ class CompressionStateMachine:
                 return self._evaluate_pullback_entry(
                     watch=watch,
                     symbol=symbol,
+                    ts=ts,
                     close=close,
                     low=low,
                     high=high
@@ -438,6 +471,7 @@ class CompressionStateMachine:
             return self._evaluate_pullback_entry(
                 watch=watch,
                 symbol=symbol,
+                ts=ts,
                 close=close,
                 low=low,
                 high=high
@@ -455,6 +489,7 @@ class CompressionStateMachine:
             return self._evaluate_pullback_entry(
                 watch=watch,
                 symbol=symbol,
+                ts=ts,
                 close=close,
                 low=low,
                 high=high

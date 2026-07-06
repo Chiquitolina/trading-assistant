@@ -14,6 +14,10 @@ from signals.indicators.direction import trade_direction
 
 from signals.utils.logger import BotLogger
 
+from services.market_context.btc_correlation_analyzer import (
+    BTCCorrelationAnalyzer,
+)
+
 from signals.snapshots.signal_compression_snapshot_builder import SignalCompressionSnapshotBuilder
 from engine.live.snapshots.compression_snapshot_manager import CompressionSnapshotManager
 
@@ -26,6 +30,14 @@ from engine.live.data.data_buffer import DataBuffer
 from engine.live.journal.signal_journal import SignalJournal
 
 from signals.signals_engine import SignalEngine
+
+from engine.live.selection.candidate_scorer import (
+    NoOpCandidateScorer,
+)
+
+from engine.live.selection.plan_selection_manager import (
+    PlanSelectionManager,
+)
 
 from engine.live.strategy.entry_engine import EntryEngine
 from engine.live.strategy.router import StrategyRouter
@@ -130,6 +142,7 @@ DAYS_BY_TF = {
 
 STATUS_INTERVAL = 3
 MAX_COMPRESSION_ENTRIES_PER_BATCH = 2
+MAX_SELECTED_PLANS_PER_WINDOW = len(SYMBOLS)
 
 # =========================================================
 # INIT BUFFER
@@ -263,11 +276,23 @@ entry_engine = EntryEngine(
     symbol=SYMBOL,
 )
 
+candidate_scorer = NoOpCandidateScorer()
+
+plan_selection_manager = PlanSelectionManager(
+    scorer=candidate_scorer,
+    max_selected_per_window=MAX_SELECTED_PLANS_PER_WINDOW,
+    minimum_score=None,
+)
+
 trade_manager = TradeManager(
     buffer,
     debug=True
 )
 
+btc_correlation_analyzer = BTCCorrelationAnalyzer(
+    buffer=buffer,
+    btc_symbol="BTCUSDT",
+)
 position_manager = PositionManager(exchange)
 
 if STRATEGY_MODE == "compression":
@@ -667,8 +692,11 @@ try:
                     f"reason={btc_context.reason} | "
                     f"v15={btc_context.velocity_15m} | "
                     f"v1h={btc_context.velocity_1h} | "
+                    f"move15={btc_context.signed_move_15m_pct} | "
+                    f"move1h={btc_context.signed_move_1h_pct} | "
                     f"d15={btc_context.direction_15m} | "
-                    f"d1h={btc_context.direction_1h}"
+                    f"d1h={btc_context.direction_1h} | "
+                    f"alignment={btc_context.direction_alignment}"
                 )
                 
                 # ================================
@@ -728,20 +756,6 @@ try:
                         f"action={trade_action.action.value} "
                         f"reason={trade_action.reason}"
                     )
-                    
-                if (
-                    STRATEGY_MODE == "compression"
-                    and trade_action.action != Action.HOLD
-                    and compression_entries_opened_in_batch >= MAX_COMPRESSION_ENTRIES_PER_BATCH
-                ):
-                    print(
-                        f"\033[93m[COMPRESSION BATCH LIMIT]\033[0m "
-                        f"symbol={symbol} "
-                        f"blocked=max_entries_per_batch "
-                        f"opened={compression_entries_opened_in_batch}/"
-                        f"{MAX_COMPRESSION_ENTRIES_PER_BATCH}"
-                    )
-                    continue
 
                 logger.debug(
                     f"\033[93m[LIVE MAIN]\033[0m "
@@ -800,12 +814,12 @@ try:
                 # GLOBAL POSITION LOCK
                 # =================================================
 
-                if not execution.can_open_position(symbol) or opening_position:
-                    print(
-                        f"\033[93m[LIVE MAIN]\033[0m "
-                        f"⛔ global lock active"
-                    )
-                    continue
+                #if not execution.can_open_position(symbol) or opening_position:
+                #    print(
+                #        f"\033[93m[LIVE MAIN]\033[0m "
+                #        f"⛔ global lock active"
+                #    )
+                #    continue
 
                 # =================================================
                 # 6. ENTRY PLAN
@@ -814,16 +828,114 @@ try:
                 plan = entry_engine.generate_entry(trade_action)
 
                 if not plan:
-                    print("\033[94m[ENTRY PLANNER]\033[0m ❌ PLAN DESCARTADO\n")
+                    print(
+                        "\033[94m[ENTRY PLANNER]\033[0m "
+                        "❌ PLAN DESCARTADO\n"
+                    )
                     continue
-                
+
                 if STRATEGY_MODE == "compression":
                     plan.signal_context = {
                         **(plan.signal_context or {}),
                         **compression_signal_context,
-
                     }
+                    
+                try:
+                    btc_correlation_context = (
+                        btc_correlation_analyzer.analyze(
+                            symbol=plan.symbol
+                        )
+                    )
+
+                except Exception as exc:
+                    print(
+                        f"[BTC CORRELATION] "
+                        f"symbol={plan.symbol} "
+                        f"error={exc}"
+                    )
+
+                    btc_correlation_context = {
+                        "btc_correlation_error": str(exc),
+                    }
+
+                btc_velocity_context = {
+                    "btc_velocity_15m": (
+                        btc_context.velocity_15m
+                    ),
+                    "btc_velocity_1h": (
+                        btc_context.velocity_1h
+                    ),
+                    "btc_signed_move_15m_pct": (
+                        btc_context.signed_move_15m_pct
+                    ),
+                    "btc_signed_move_1h_pct": (
+                        btc_context.signed_move_1h_pct
+                    ),
+                    "btc_direction_15m": (
+                        btc_context.direction_15m
+                    ),
+                    "btc_direction_1h": (
+                        btc_context.direction_1h
+                    ),
+                    "btc_direction_alignment": (
+                        btc_context.direction_alignment
+                    ),
+                    "btc_context_state": (
+                        btc_context.state
+                    ),
+                    "btc_context_reason": (
+                        btc_context.reason
+                    ),
+                }
+
+                plan.signal_context = {
+                    **(plan.signal_context or {}),
+                    **btc_velocity_context,
+                    **btc_correlation_context,
+                }
                 
+                btc_trade_relationship = (
+                    btc_context_service
+                    .evaluate_trade_relationship(
+                        context=btc_context,
+                        side=plan.side,
+                        correlation=(
+                            btc_correlation_context.get(
+                                "btc_corr_5m_1h"
+                            )
+                        ),
+                        beta=(
+                            btc_correlation_context.get(
+                                "btc_beta_5m_1h"
+                            )
+                        ),
+                    )
+                )
+                
+                plan.signal_context = {
+                    **(plan.signal_context or {}),
+                    **btc_trade_relationship,
+                }
+                
+                logger.debug(
+                    f"[BTC TRADE RELATIONSHIP] "
+                    f"symbol={plan.symbol} | "
+                    f"side={plan.side} | "
+                    f"btc_state={btc_context.state} | "
+                    f"btc_direction_alignment="
+                    f"{btc_context.direction_alignment} | "
+                    f"corr_1h="
+                    f"{btc_correlation_context.get('btc_corr_5m_1h')} | "
+                    f"beta_1h="
+                    f"{btc_correlation_context.get('btc_beta_5m_1h')} | "
+                    f"trade_alignment="
+                    f"{btc_trade_relationship.get('btc_trade_alignment')} | "
+                    f"risk_state="
+                    f"{btc_trade_relationship.get('btc_trade_risk_state')} | "
+                    f"relationship="
+                    f"{btc_trade_relationship.get('btc_relationship_label')}"
+                )
+
                 logger.debug(
                     f"[DEBUG PLAN] "
                     f"signal_price={signal.signal_price} "
@@ -832,45 +944,117 @@ try:
                 )
 
                 # =================================================
-                # 7. EXECUTION STRATEGY (ULTIMO PASO)
+                # 7. SEND PLAN TO SELECTION LAYER
                 # =================================================
 
-                try:
-                    opening_position = True
+                window_id = int(closed_candle_ts)
 
-                    exec_started = time.perf_counter()
+                if window_id < 10_000_000_000:
+                    window_id *= 1000
 
-                    executed = execution_strategy.on_signal(
-                        execution_engine=execution,
-                        trade_action=trade_action,
-                        plan=plan
-                    )
-                    
-                    if (
-                        STRATEGY_MODE == "compression"
-                        and executed
-                    ):
-                        compression_entries_opened_in_batch += 1
+                plan_selection_manager.add_plan(
+                    plan=plan,
+                    trade_action=trade_action,
+                    window_id=window_id,
+                )
+                
+            # =========================================================
+            # RESOLVE SELECTION WINDOWS
+            # =========================================================
 
-                    exec_elapsed = time.perf_counter() - exec_started
+            pending_window_ids = (
+                plan_selection_manager.pending_window_ids()
+            )
 
-                    print(
-                        f"\033[91m[EXECUTION TIME]\033[0m "
-                        f"symbol={symbol} elapsed={exec_elapsed:.2f}s"
-                    )
+            for window_id in sorted(pending_window_ids):
 
-                    update_status(
-                        status_writer,
-                        last_executed_strategy=execution_strategy.__class__.__name__
-                    )
+                selected_candidates, rejected_candidates = (
+                    plan_selection_manager.resolve_window(window_id)
+                )
 
-                    logger.debug(f"[LIVE MAIN] execution result: {executed}")
+                for candidate in selected_candidates:
 
-                except Exception as e:
-                    print(f"[LIVE MAIN] ❌ execution error but loop continues: {e}")
+                    plan = candidate.plan
+                    trade_action = candidate.trade_action
+                    symbol = candidate.symbol
 
-                finally:
-                    opening_position = False
+                    # =================================================
+                    # FINAL EXECUTION LOCK
+                    # =================================================
+
+                    if opening_position:
+                        candidate.reject("opening_position_lock")
+
+                        print(
+                            f"[SELECTION BLOCKED] "
+                            f"symbol={symbol} "
+                            f"reason=opening_position_lock"
+                        )
+                        continue
+
+                    if not execution.can_open_position(symbol):
+                        candidate.reject("cannot_open_position")
+
+                        print(
+                            f"[SELECTION BLOCKED] "
+                            f"symbol={symbol} "
+                            f"reason=cannot_open_position"
+                        )
+                        continue
+
+                    # =================================================
+                    # EXECUTION OF SELECTED CANDIDATE
+                    # =================================================
+
+                    try:
+                        opening_position = True
+
+                        exec_started = time.perf_counter()
+
+                        executed = execution_strategy.on_signal(
+                            execution_engine=execution,
+                            trade_action=trade_action,
+                            plan=plan,
+                        )
+
+                        if (
+                            STRATEGY_MODE == "compression"
+                            and executed
+                        ):
+                            compression_entries_opened_in_batch += 1
+
+                        exec_elapsed = (
+                            time.perf_counter() - exec_started
+                        )
+
+                        print(
+                            f"\033[91m[EXECUTION TIME]\033[0m "
+                            f"symbol={symbol} "
+                            f"rank={candidate.rank} "
+                            f"score={candidate.score:.4f} "
+                            f"elapsed={exec_elapsed:.2f}s"
+                        )
+
+                        update_status(
+                            status_writer,
+                            last_executed_strategy=(
+                                execution_strategy.__class__.__name__
+                            ),
+                        )
+
+                        logger.debug(
+                            f"[LIVE MAIN] "
+                            f"execution result: {executed}"
+                        )
+
+                    except Exception as e:
+                        print(
+                            f"[LIVE MAIN] "
+                            f"❌ execution error but loop continues: {e}"
+                        )
+
+                    finally:
+                        opening_position = False
                     
             batch_elapsed = time.perf_counter() - batch_started
 

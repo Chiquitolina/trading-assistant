@@ -1,3 +1,10 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+MAIN_TF = os.getenv("MAIN_TF", "30m")
+
 # =========================
 # MODE CONFIG
 # =========================
@@ -41,22 +48,20 @@ MODE_CONFIG = {
     
     "compression": {
         "timeframes": ["1m", "5m", "15m", "30m", "1h", "4h"],
-        "trigger_tf": "30m",
+        "trigger_tf": MAIN_TF,
         "min_atr_pct": 0.20,
         "min_atr": 120,
-        "entry_tf": "30m",
-        "atr_tf": "30m",
+        "entry_tf": MAIN_TF,
+        "atr_tf": MAIN_TF,
         "entry_rules": "standard",
-
         "allow_longs": True,
         "allow_shorts": False,
-
         "use_fixed_levels": False,
         "fixed_tp_pct": 0.30,
         "fixed_sl_pct": 0.40,
 
         "compression_enabled": True,
-        "compression_tf": "30m",
+        "compression_tf": MAIN_TF,
     }
 }
 

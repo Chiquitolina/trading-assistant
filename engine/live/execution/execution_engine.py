@@ -306,6 +306,131 @@ class ExecutionEngine:
             btc_context_reason=ctx.get("btc_context_reason"),
             
             # ==========================
+            # BTC CORRELATION - 15m
+            # ==========================
+            btc_corr_15m=ctx.get("btc_corr_15m"),
+            btc_beta_15m=ctx.get("btc_beta_15m"),
+            btc_r2_15m=ctx.get("btc_r2_15m"),
+
+            symbol_move_15m_pct=ctx.get("symbol_move_15m_pct"),
+            btc_move_15m_pct=ctx.get("btc_move_15m_pct"),
+            btc_expected_move_15m_pct=ctx.get(
+                "btc_expected_move_15m_pct"
+            ),
+            btc_residual_move_15m_pct=ctx.get(
+                "btc_residual_move_15m_pct"
+            ),
+
+            # ==========================
+            # BTC CORRELATION - 1h
+            # ==========================
+            btc_corr_1h=ctx.get("btc_corr_1h"),
+            btc_beta_1h=ctx.get("btc_beta_1h"),
+            btc_r2_1h=ctx.get("btc_r2_1h"),
+
+            symbol_move_1h_pct=ctx.get("symbol_move_1h_pct"),
+            btc_move_1h_pct=ctx.get("btc_move_1h_pct"),
+            btc_expected_move_1h_pct=ctx.get(
+                "btc_expected_move_1h_pct"
+            ),
+            btc_residual_move_1h_pct=ctx.get(
+                "btc_residual_move_1h_pct"
+            ),
+
+            # ==========================
+            # BTC CORRELATION - 4h
+            # ==========================
+            btc_corr_4h=ctx.get("btc_corr_4h"),
+            btc_beta_4h=ctx.get("btc_beta_4h"),
+            btc_r2_4h=ctx.get("btc_r2_4h"),
+
+            symbol_move_4h_pct=ctx.get("symbol_move_4h_pct"),
+            btc_move_4h_pct=ctx.get("btc_move_4h_pct"),
+            btc_expected_move_4h_pct=ctx.get(
+                "btc_expected_move_4h_pct"
+            ),
+            btc_residual_move_4h_pct=ctx.get(
+                "btc_residual_move_4h_pct"
+            ),
+            
+            # ==========================
+            # BTC RECENT CORRELATION
+            # Velas 5m - ventana 1h
+            # ==========================
+            btc_corr_5m_1h=ctx.get("btc_corr_5m_1h"),
+            btc_beta_5m_1h=ctx.get("btc_beta_5m_1h"),
+            btc_r2_5m_1h=ctx.get("btc_r2_5m_1h"),
+            btc_corr_available_5m_1h=ctx.get(
+                "btc_corr_available_5m_1h"
+            ),
+            btc_corr_reason_5m_1h=ctx.get(
+                "btc_corr_reason_5m_1h"
+            ),
+            btc_corr_samples_5m_1h=ctx.get(
+                "btc_corr_samples_5m_1h"
+            ),
+
+            # ==========================
+            # BTC RECENT CORRELATION
+            # Velas 5m - ventana 4h
+            # ==========================
+            btc_corr_5m_4h=ctx.get("btc_corr_5m_4h"),
+            btc_beta_5m_4h=ctx.get("btc_beta_5m_4h"),
+            btc_r2_5m_4h=ctx.get("btc_r2_5m_4h"),
+            btc_corr_available_5m_4h=ctx.get(
+                "btc_corr_available_5m_4h"
+            ),
+            btc_corr_reason_5m_4h=ctx.get(
+                "btc_corr_reason_5m_4h"
+            ),
+            btc_corr_samples_5m_4h=ctx.get(
+                "btc_corr_samples_5m_4h"
+            ),
+
+            # ==========================
+            # BTC RECENT CORRELATION
+            # Velas 5m - ventana 24h
+            # ==========================
+            btc_corr_5m_24h=ctx.get("btc_corr_5m_24h"),
+            btc_beta_5m_24h=ctx.get("btc_beta_5m_24h"),
+            btc_r2_5m_24h=ctx.get("btc_r2_5m_24h"),
+            btc_corr_available_5m_24h=ctx.get(
+                "btc_corr_available_5m_24h"
+            ),
+            btc_corr_reason_5m_24h=ctx.get(
+                "btc_corr_reason_5m_24h"
+            ),
+            btc_corr_samples_5m_24h=ctx.get(
+                "btc_corr_samples_5m_24h"
+            ),
+            
+            # ==========================
+            # BTC VELOCITY V2
+            # ==========================
+            btc_signed_move_15m_pct=ctx.get(
+                "btc_signed_move_15m_pct"
+            ),
+            btc_signed_move_1h_pct=ctx.get(
+                "btc_signed_move_1h_pct"
+            ),
+            btc_direction_alignment=ctx.get(
+                "btc_direction_alignment"
+            ),
+
+            # ==========================
+            # BTC-TRADE RELATIONSHIP
+            # ==========================
+            btc_trade_alignment=ctx.get(
+                "btc_trade_alignment"
+            ),
+            btc_trade_risk_state=ctx.get(
+                "btc_trade_risk_state"
+            ),
+            btc_relationship_label=ctx.get(
+                "btc_relationship_label"
+            ),
+            
+            # ==========================
             # BTC SWING CONTEXT
             # ==========================
             btc_dist_swing_low_1h_pct=ctx.get("btc_dist_swing_low_1h_pct"),
@@ -482,6 +607,25 @@ class ExecutionEngine:
             self.position = None
 
         self.snapshot_manager.clear(pos.symbol)
+     
+    def wait_for_exchange_position(self, symbol, retries=10, delay=0.5):
+        for attempt in range(retries):
+            exchange_pos = self.position_manager.sync(symbol)
+
+            if exchange_pos == "INVALID_SYMBOL":
+                return "INVALID_SYMBOL"
+
+            if exchange_pos is not None:
+                return exchange_pos
+
+            print(
+                f"⏳ Waiting exchange position | "
+                f"symbol={symbol} attempt={attempt + 1}/{retries}"
+            )
+
+            time.sleep(delay)
+
+        return None        
         
     def _place_tp_sl(self, symbol, quantity, side, tp_side, tp_price, sl_side, sl_price, real_entry):
         try:
@@ -491,7 +635,7 @@ class ExecutionEngine:
             mark_price = float(self.exchange.get_mark_price(symbol))
             tick_size = float(self.exchange.get_price_tick_size(symbol))
 
-            min_distance = tick_size * 10
+            min_distance = tick_size
 
             tp_float = float(tp_price)
             sl_float = float(sl_price)
@@ -801,6 +945,13 @@ class ExecutionEngine:
             # 🚀 ORDER
             # ==========================
             try:
+                
+                try:
+                    self.order_executor.cancel_all(plan.symbol)
+                    print(f"🧹 Pre-open cleanup | symbol={plan.symbol}")
+                except Exception as e:
+                    print(f"⚠️ Pre-open cleanup failed | symbol={plan.symbol} | error={e}")
+                    
                 order = self.order_executor.market_order(
                     symbol=plan.symbol,
                     side=side,
@@ -847,15 +998,23 @@ class ExecutionEngine:
                 print("❌ Order failed")
                 return False
 
-            exchange_pos = self.position_manager.sync(plan.symbol)
-            t = self._timer("position_manager.sync after order", t)
+            exchange_pos = self.wait_for_exchange_position(
+                symbol=plan.symbol,
+                retries=10,
+                delay=0.5
+            )
+            t = self._timer("wait_for_exchange_position after order", t)
 
             if exchange_pos == "INVALID_SYMBOL":
                 print(f"⚠️ Invalid symbol skipped after order | {plan.symbol}")
                 return False
 
             if exchange_pos is None:
-                print("❌ No hay posición después del order, abortando")
+                print("❌ No position confirmed after market order. Cleaning up.")
+                try:
+                    self.order_executor.cancel_all(plan.symbol)
+                except Exception as e:
+                    print(f"⚠️ Failed cleanup after missing position | {plan.symbol} | {e}")
                 return False
 
             time.sleep(1.0)
@@ -937,6 +1096,8 @@ class ExecutionEngine:
                 close_side = "SELL" if plan.side == "LONG" else "BUY"
 
                 try:
+                    self.order_executor.cancel_all(plan.symbol)
+
                     self.exchange.close_position(
                         symbol=plan.symbol,
                         side=close_side,
@@ -1075,6 +1236,176 @@ class ExecutionEngine:
                     "btc_dist_swing_high_1d_pct": plan.signal_context.get("btc_dist_swing_high_1d_pct"),
                     "btc_near_swing_low_1d": plan.signal_context.get("btc_near_swing_low_1d"),
                     "btc_near_swing_high_1d": plan.signal_context.get("btc_near_swing_high_1d"),
+                    
+                    # ==========================
+                    # BTC CORRELATION - 15m
+                    # ==========================
+                    "btc_corr_15m": plan.signal_context.get(
+                        "btc_corr_15m"
+                    ),
+                    "btc_beta_15m": plan.signal_context.get(
+                        "btc_beta_15m"
+                    ),
+                    "btc_r2_15m": plan.signal_context.get(
+                        "btc_r2_15m"
+                    ),
+
+                    "symbol_move_15m_pct": plan.signal_context.get(
+                        "symbol_move_15m_pct"
+                    ),
+                    "btc_move_15m_pct": plan.signal_context.get(
+                        "btc_move_15m_pct"
+                    ),
+                    "btc_expected_move_15m_pct": plan.signal_context.get(
+                        "btc_expected_move_15m_pct"
+                    ),
+                    "btc_residual_move_15m_pct": plan.signal_context.get(
+                        "btc_residual_move_15m_pct"
+                    ),
+
+                    # ==========================
+                    # BTC CORRELATION - 1h
+                    # ==========================
+                    "btc_corr_1h": plan.signal_context.get(
+                        "btc_corr_1h"
+                    ),
+                    "btc_beta_1h": plan.signal_context.get(
+                        "btc_beta_1h"
+                    ),
+                    "btc_r2_1h": plan.signal_context.get(
+                        "btc_r2_1h"
+                    ),
+
+                    "symbol_move_1h_pct": plan.signal_context.get(
+                        "symbol_move_1h_pct"
+                    ),
+                    "btc_move_1h_pct": plan.signal_context.get(
+                        "btc_move_1h_pct"
+                    ),
+                    "btc_expected_move_1h_pct": plan.signal_context.get(
+                        "btc_expected_move_1h_pct"
+                    ),
+                    "btc_residual_move_1h_pct": plan.signal_context.get(
+                        "btc_residual_move_1h_pct"
+                    ),
+
+                    # ==========================
+                    # BTC CORRELATION - 4h
+                    # ==========================
+                    "btc_corr_4h": plan.signal_context.get(
+                        "btc_corr_4h"
+                    ),
+                    "btc_beta_4h": plan.signal_context.get(
+                        "btc_beta_4h"
+                    ),
+                    "btc_r2_4h": plan.signal_context.get(
+                        "btc_r2_4h"
+                    ),
+
+                    "symbol_move_4h_pct": plan.signal_context.get(
+                        "symbol_move_4h_pct"
+                    ),
+                    "btc_move_4h_pct": plan.signal_context.get(
+                        "btc_move_4h_pct"
+                    ),
+                    "btc_expected_move_4h_pct": plan.signal_context.get(
+                        "btc_expected_move_4h_pct"
+                    ),
+                    "btc_residual_move_4h_pct": plan.signal_context.get(
+                        "btc_residual_move_4h_pct"
+                    ),
+                    
+                    # ==========================
+                    # BTC RECENT CORRELATION - 1h
+                    # ==========================
+                    "btc_corr_5m_1h": plan.signal_context.get(
+                        "btc_corr_5m_1h"
+                    ),
+                    "btc_beta_5m_1h": plan.signal_context.get(
+                        "btc_beta_5m_1h"
+                    ),
+                    "btc_r2_5m_1h": plan.signal_context.get(
+                        "btc_r2_5m_1h"
+                    ),
+                    "btc_corr_available_5m_1h": plan.signal_context.get(
+                        "btc_corr_available_5m_1h"
+                    ),
+                    "btc_corr_reason_5m_1h": plan.signal_context.get(
+                        "btc_corr_reason_5m_1h"
+                    ),
+                    "btc_corr_samples_5m_1h": plan.signal_context.get(
+                        "btc_corr_samples_5m_1h"
+                    ),
+                    
+                    # ==========================
+                    # BTC RECENT CORRELATION - 4h
+                    # ==========================
+                    "btc_corr_5m_4h": plan.signal_context.get(
+                        "btc_corr_5m_4h"
+                    ),
+                    "btc_beta_5m_4h": plan.signal_context.get(
+                        "btc_beta_5m_4h"
+                    ),
+                    "btc_r2_5m_4h": plan.signal_context.get(
+                        "btc_r2_5m_4h"
+                    ),
+                    "btc_corr_available_5m_4h": plan.signal_context.get(
+                        "btc_corr_available_5m_4h"
+                    ),
+                    "btc_corr_reason_5m_4h": plan.signal_context.get(
+                        "btc_corr_reason_5m_4h"
+                    ),
+                    "btc_corr_samples_5m_4h": plan.signal_context.get(
+                        "btc_corr_samples_5m_4h"
+                    ),
+                    
+                    # ==========================
+                    # BTC RECENT CORRELATION - 24h
+                    # ==========================
+                    "btc_corr_5m_24h": plan.signal_context.get(
+                        "btc_corr_5m_24h"
+                    ),
+                    "btc_beta_5m_24h": plan.signal_context.get(
+                        "btc_beta_5m_24h"
+                    ),
+                    "btc_r2_5m_24h": plan.signal_context.get(
+                        "btc_r2_5m_24h"
+                    ),
+                    "btc_corr_available_5m_24h": plan.signal_context.get(
+                        "btc_corr_available_5m_24h"
+                    ),
+                    "btc_corr_reason_5m_24h": plan.signal_context.get(
+                        "btc_corr_reason_5m_24h"
+                    ),
+                    "btc_corr_samples_5m_24h": plan.signal_context.get(
+                        "btc_corr_samples_5m_24h"
+                    ),
+                    
+                    # ==========================
+                    # BTC VELOCITY V2
+                    # ==========================
+                    "btc_signed_move_15m_pct": plan.signal_context.get(
+                        "btc_signed_move_15m_pct"
+                    ),
+                    "btc_signed_move_1h_pct": plan.signal_context.get(
+                        "btc_signed_move_1h_pct"
+                    ),
+                    "btc_direction_alignment": plan.signal_context.get(
+                        "btc_direction_alignment"
+                    ),
+                    
+                    # ==========================
+                    # BTC-TRADE RELATIONSHIP
+                    # ==========================
+                    "btc_trade_alignment": plan.signal_context.get(
+                        "btc_trade_alignment"
+                    ),
+                    "btc_trade_risk_state": plan.signal_context.get(
+                        "btc_trade_risk_state"
+                    ),
+                    "btc_relationship_label": plan.signal_context.get(
+                        "btc_relationship_label"
+                    ),
                     
                     "dist_ema50_15m_pct": plan.signal_context.get("dist_ema50_15m_pct"),
                     "dist_ema99_15m_pct": plan.signal_context.get("dist_ema99_15m_pct"),
@@ -1382,6 +1713,131 @@ class ExecutionEngine:
             btc_direction_1h=ctx.get("btc_direction_1h"),
             btc_context_state=ctx.get("btc_context_state"),
             btc_context_reason=ctx.get("btc_context_reason"),
+            
+            # ==========================
+            # BTC CORRELATION - 15m
+            # ==========================
+            btc_corr_15m=ctx.get("btc_corr_15m"),
+            btc_beta_15m=ctx.get("btc_beta_15m"),
+            btc_r2_15m=ctx.get("btc_r2_15m"),
+
+            symbol_move_15m_pct=ctx.get("symbol_move_15m_pct"),
+            btc_move_15m_pct=ctx.get("btc_move_15m_pct"),
+            btc_expected_move_15m_pct=ctx.get(
+                "btc_expected_move_15m_pct"
+            ),
+            btc_residual_move_15m_pct=ctx.get(
+                "btc_residual_move_15m_pct"
+            ),
+
+            # ==========================
+            # BTC CORRELATION - 1h
+            # ==========================
+            btc_corr_1h=ctx.get("btc_corr_1h"),
+            btc_beta_1h=ctx.get("btc_beta_1h"),
+            btc_r2_1h=ctx.get("btc_r2_1h"),
+
+            symbol_move_1h_pct=ctx.get("symbol_move_1h_pct"),
+            btc_move_1h_pct=ctx.get("btc_move_1h_pct"),
+            btc_expected_move_1h_pct=ctx.get(
+                "btc_expected_move_1h_pct"
+            ),
+            btc_residual_move_1h_pct=ctx.get(
+                "btc_residual_move_1h_pct"
+            ),
+
+            # ==========================
+            # BTC CORRELATION - 4h
+            # ==========================
+            btc_corr_4h=ctx.get("btc_corr_4h"),
+            btc_beta_4h=ctx.get("btc_beta_4h"),
+            btc_r2_4h=ctx.get("btc_r2_4h"),
+
+            symbol_move_4h_pct=ctx.get("symbol_move_4h_pct"),
+            btc_move_4h_pct=ctx.get("btc_move_4h_pct"),
+            btc_expected_move_4h_pct=ctx.get(
+                "btc_expected_move_4h_pct"
+            ),
+            btc_residual_move_4h_pct=ctx.get(
+                "btc_residual_move_4h_pct"
+            ),
+            
+            # ==========================
+            # BTC RECENT CORRELATION
+            # Velas 5m - ventana 1h
+            # ==========================
+            btc_corr_5m_1h=ctx.get("btc_corr_5m_1h"),
+            btc_beta_5m_1h=ctx.get("btc_beta_5m_1h"),
+            btc_r2_5m_1h=ctx.get("btc_r2_5m_1h"),
+            btc_corr_available_5m_1h=ctx.get(
+                "btc_corr_available_5m_1h"
+            ),
+            btc_corr_reason_5m_1h=ctx.get(
+                "btc_corr_reason_5m_1h"
+            ),
+            btc_corr_samples_5m_1h=ctx.get(
+                "btc_corr_samples_5m_1h"
+            ),
+
+            # ==========================
+            # BTC RECENT CORRELATION
+            # Velas 5m - ventana 4h
+            # ==========================
+            btc_corr_5m_4h=ctx.get("btc_corr_5m_4h"),
+            btc_beta_5m_4h=ctx.get("btc_beta_5m_4h"),
+            btc_r2_5m_4h=ctx.get("btc_r2_5m_4h"),
+            btc_corr_available_5m_4h=ctx.get(
+                "btc_corr_available_5m_4h"
+            ),
+            btc_corr_reason_5m_4h=ctx.get(
+                "btc_corr_reason_5m_4h"
+            ),
+            btc_corr_samples_5m_4h=ctx.get(
+                "btc_corr_samples_5m_4h"
+            ),
+
+            # ==========================
+            # BTC RECENT CORRELATION
+            # Velas 5m - ventana 24h
+            # ==========================
+            btc_corr_5m_24h=ctx.get("btc_corr_5m_24h"),
+            btc_beta_5m_24h=ctx.get("btc_beta_5m_24h"),
+            btc_r2_5m_24h=ctx.get("btc_r2_5m_24h"),
+            btc_corr_available_5m_24h=ctx.get(
+                "btc_corr_available_5m_24h"
+            ),
+            btc_corr_reason_5m_24h=ctx.get(
+                "btc_corr_reason_5m_24h"
+            ),
+            btc_corr_samples_5m_24h=ctx.get(
+                "btc_corr_samples_5m_24h"
+            ),
+            
+            # ==========================
+            # BTC VELOCITY V2
+            # ==========================
+            btc_signed_move_15m_pct=ctx.get(
+                "btc_signed_move_15m_pct"
+            ),
+            btc_signed_move_1h_pct=ctx.get(
+                "btc_signed_move_1h_pct"
+            ),
+            btc_direction_alignment=ctx.get(
+                "btc_direction_alignment"
+            ),
+
+            # ==========================
+            # BTC-TRADE RELATIONSHIP
+            # ==========================
+            btc_trade_alignment=ctx.get(
+                "btc_trade_alignment"
+            ),
+            btc_trade_risk_state=ctx.get(
+                "btc_trade_risk_state"
+            ),
+            btc_relationship_label=ctx.get(
+                "btc_relationship_label"
+            ),
             
             # ==========================
             # BTC SWING CONTEXT
@@ -1712,6 +2168,55 @@ class ExecutionEngine:
 
             "green_candles_last_10": context.get("green_candles_last_10"),
             "red_candles_last_10": context.get("red_candles_last_10"),
+                        
+            # ==========================
+            # COMPRESSION CONTEXT
+            # ==========================
+
+            "compression_state": context.get("compression_state"),
+            "compression_reason": context.get("compression_reason"),
+
+            "compression_high": context.get("compression_high"),
+            "compression_low": context.get("compression_low"),
+
+            "compression_score": context.get("compression_score"),
+            "trend_score": context.get("trend_score"),
+
+            "breakout_ts": context.get("breakout_ts"),
+            "breakout_price": context.get("breakout_price"),
+            "breakout_high": context.get("breakout_high"),
+            "breakout_volume_ratio": context.get("breakout_volume_ratio"),
+
+            "entry_ready_price": context.get("entry_ready_price"),
+
+            "breakout_extension_pct": context.get("breakout_extension_pct"),
+            "breakout_extension_atr": context.get("breakout_extension_atr"),
+
+            "compression_range_pct": context.get("compression_range_pct"),
+            "range_ratio": context.get("range_ratio"),
+            "atr_ratio": context.get("atr_ratio"),
+            "volume_ratio": context.get("volume_ratio"),
+            "avg_body_pct": context.get("avg_body_pct"),
+
+            "compression_created_ts": context.get("compression_created_ts"),
+            "compression_updated_ts": context.get("compression_updated_ts"),
+            "compression_candles_waiting": context.get("compression_candles_waiting"),
+
+            "compression_height_pct": context.get("compression_height_pct"),
+            "compression_duration": context.get("compression_duration"),
+
+            "upper_slope": context.get("upper_slope"),
+            "lower_slope": context.get("lower_slope"),
+            "slope_difference": context.get("slope_difference"),
+
+            "touches_high": context.get("touches_high"),
+            "touches_low": context.get("touches_low"),
+
+            "inside_ratio": context.get("inside_ratio"),
+
+            "compression_shape": context.get("compression_shape"),
+            "compression_quality_label": context.get("compression_quality_label"),
+            
         }
         post_analysis = snapshot.get("post_entry_analysis", {})
 

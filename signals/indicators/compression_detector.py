@@ -1,30 +1,70 @@
 import pandas as pd
 import numpy as np
 
-def classify_compression_shape(upper_slope, lower_slope, flat_threshold=0.03):
+def classify_compression_shape(
+    upper_slope,
+    lower_slope,
+    flat_threshold=0.08,
+    channel_threshold=0.15,
+    triangle_min_opposite_slope=0.04,
+    parallel_threshold=0.05,
+):
     upper_flat = abs(upper_slope) <= flat_threshold
     lower_flat = abs(lower_slope) <= flat_threshold
 
+    same_direction = (
+        upper_slope > flat_threshold and lower_slope > flat_threshold
+    ) or (
+        upper_slope < -flat_threshold and lower_slope < -flat_threshold
+    )
+
+    opposite_converging = (
+        upper_slope < -triangle_min_opposite_slope
+        and lower_slope > triangle_min_opposite_slope
+    )
+
+    parallel = abs(upper_slope - lower_slope) <= parallel_threshold
+
+    # Rango horizontal / casi horizontal
     if upper_flat and lower_flat:
         return "horizontal_range"
 
-    if upper_slope < -flat_threshold and lower_slope > flat_threshold:
+    # Triángulo simétrico: techo baja, piso sube
+    if opposite_converging:
         return "symmetrical_triangle"
 
-    if upper_flat and lower_slope > flat_threshold:
+    # Triángulo ascendente: techo plano, piso sube
+    if upper_flat and lower_slope > triangle_min_opposite_slope:
         return "ascending_triangle"
 
-    if upper_slope < -flat_threshold and lower_flat:
+    # Triángulo descendente: techo baja, piso plano
+    if upper_slope < -triangle_min_opposite_slope and lower_flat:
         return "descending_triangle"
 
-    if upper_slope > flat_threshold and lower_slope > flat_threshold:
+    # Canal alcista: ambas pendientes suben, son paralelas y la pendiente es relevante
+    if (
+        upper_slope > channel_threshold
+        and lower_slope > channel_threshold
+        and parallel
+    ):
         return "ascending_channel"
 
-    if upper_slope < -flat_threshold and lower_slope < -flat_threshold:
+    # Canal bajista: ambas pendientes bajan, son paralelas y la pendiente es relevante
+    if (
+        upper_slope < -channel_threshold
+        and lower_slope < -channel_threshold
+        and parallel
+    ):
         return "descending_channel"
 
-    return "irregular"
+    # Ambas suben o bajan pero muy débil → rango inclinado débil
+    if same_direction:
+        if upper_slope > 0 and lower_slope > 0:
+            return "weak_ascending_range"
+        if upper_slope < 0 and lower_slope < 0:
+            return "weak_descending_range"
 
+    return "irregular"
 
 def compute_compression_features(recent, compression_high, compression_low):
     duration = len(recent)
@@ -35,11 +75,18 @@ def compute_compression_features(recent, compression_high, compression_low):
         return {
             "compression_height_pct": 0,
             "compression_duration": int(duration),
+
             "upper_slope": 0,
             "lower_slope": 0,
             "slope_difference": 0,
+
             "touches_high": 0,
             "touches_low": 0,
+            "touches_high_ratio": 0,
+            "touches_low_ratio": 0,
+            "touch_imbalance": 0,
+            "touch_imbalance_ratio": 0,
+
             "inside_ratio": 0,
             "compression_shape": "invalid_range",
             "compression_quality_label": "BAD_SHAPE",
@@ -74,6 +121,31 @@ def compute_compression_features(recent, compression_high, compression_low):
         (recent["low"] <= compression_low + tolerance_price)
         & (recent["low"] >= compression_low - tolerance_price)
     ).sum()
+    
+    # Diferencia direccional:
+    # positivo = más toques al techo
+    # negativo = más toques al piso
+    touch_imbalance = touches_high - touches_low
+
+    # Ratios normalizados por duración para poder comparar
+    # compresiones de 10, 15 y 20 velas.
+    touches_high_ratio = (
+        touches_high / duration
+        if duration > 0
+        else 0
+    )
+
+    touches_low_ratio = (
+        touches_low / duration
+        if duration > 0
+        else 0
+    )
+
+    touch_imbalance_ratio = (
+        touch_imbalance / duration
+        if duration > 0
+        else 0
+    )
 
     inside_ratio = (
         (recent["high"] <= compression_high)
@@ -85,10 +157,28 @@ def compute_compression_features(recent, compression_high, compression_low):
         lower_slope,
     )
 
-    if inside_ratio >= 0.80 and touches_high >= 2 and touches_low >= 2:
+    good_shapes = {
+        "horizontal_range",
+        "symmetrical_triangle",
+        "ascending_triangle",
+    }
+
+    ok_shapes = {
+        "descending_triangle",
+        "weak_ascending_range",
+        "weak_descending_range",
+    }
+
+    if (
+        compression_shape in good_shapes
+        and touches_high >= 2
+        and touches_low >= 2
+    ):
         compression_quality_label = "GOOD_SHAPE"
-    elif inside_ratio >= 0.60:
+
+    elif compression_shape in good_shapes.union(ok_shapes):
         compression_quality_label = "OK_SHAPE"
+
     else:
         compression_quality_label = "BAD_SHAPE"
 
@@ -100,6 +190,22 @@ def compute_compression_features(recent, compression_high, compression_low):
         "slope_difference": round(float(slope_difference), 6),
         "touches_high": int(touches_high),
         "touches_low": int(touches_low),
+
+        "touches_high_ratio": round(
+            float(touches_high_ratio),
+            4,
+        ),
+        "touches_low_ratio": round(
+            float(touches_low_ratio),
+            4,
+        ),
+
+        "touch_imbalance": int(touch_imbalance),
+        "touch_imbalance_ratio": round(
+            float(touch_imbalance_ratio),
+            4,
+        ),
+
         "inside_ratio": round(float(inside_ratio), 4),
         "compression_shape": compression_shape,
         "compression_quality_label": compression_quality_label,
@@ -202,9 +308,9 @@ def detect_compression(
     )
     
     features = compute_compression_features(
-    recent=recent,
-    compression_high=compression_high,
-    compression_low=compression_low,
+        recent=recent,
+        compression_high=compression_high,
+        compression_low=compression_low,
     )
 
     score = 0
