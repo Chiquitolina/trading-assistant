@@ -83,6 +83,12 @@ class CompressionStrategy:
             "touches_high": compression_state.get("touches_high"),
             "touches_low": compression_state.get("touches_low"),
 
+            "touches_high_ratio": compression_state.get("touches_high_ratio"),
+            "touches_low_ratio": compression_state.get("touches_low_ratio"),
+
+            "touch_imbalance": compression_state.get("touch_imbalance"),
+            "touch_imbalance_ratio": compression_state.get("touch_imbalance_ratio"),
+
             "inside_ratio": compression_state.get("inside_ratio"),
 
             "compression_shape": compression_state.get("compression_shape"),
@@ -312,6 +318,12 @@ class CompressionStrategy:
 
                 "touches_high": compression_state.get("touches_high"),
                 "touches_low": compression_state.get("touches_low"),
+
+                "touches_high_ratio": compression_state.get("touches_high_ratio"),
+                "touches_low_ratio": compression_state.get("touches_low_ratio"),
+
+                "touch_imbalance": compression_state.get("touch_imbalance"),
+                "touch_imbalance_ratio": compression_state.get("touch_imbalance_ratio"),
 
                 "inside_ratio": compression_state.get("inside_ratio"),
 

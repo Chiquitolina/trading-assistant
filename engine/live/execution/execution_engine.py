@@ -589,6 +589,12 @@ class ExecutionEngine:
             touches_high=ctx.get("touches_high"),
             touches_low=ctx.get("touches_low"),
 
+            touches_high_ratio=ctx.get("touches_high_ratio"),
+            touches_low_ratio=ctx.get("touches_low_ratio"),
+
+            touch_imbalance=ctx.get("touch_imbalance"),
+            touch_imbalance_ratio=ctx.get("touch_imbalance_ratio"),
+
             inside_ratio=ctx.get("inside_ratio"),
 
             compression_shape=ctx.get("compression_shape"),
@@ -2010,6 +2016,12 @@ class ExecutionEngine:
             touches_high=ctx.get("touches_high"),
             touches_low=ctx.get("touches_low"),
 
+            touches_high_ratio=ctx.get("touches_high_ratio"),
+            touches_low_ratio=ctx.get("touches_low_ratio"),
+
+            touch_imbalance=ctx.get("touch_imbalance"),
+            touch_imbalance_ratio=ctx.get("touch_imbalance_ratio"),
+
             inside_ratio=ctx.get("inside_ratio"),
 
             compression_shape=ctx.get("compression_shape"),
@@ -2223,6 +2235,12 @@ class ExecutionEngine:
 
             "touches_high": context.get("touches_high"),
             "touches_low": context.get("touches_low"),
+
+            "touches_high_ratio": context.get("touches_high_ratio"),
+            "touches_low_ratio": context.get("touches_low_ratio"),
+
+            "touch_imbalance": context.get("touch_imbalance"),
+            "touch_imbalance_ratio": context.get("touch_imbalance_ratio"),
 
             "inside_ratio": context.get("inside_ratio"),
 
