@@ -4,9 +4,13 @@ from enums.actions import Action
 from models.trade_action import TradeAction
 from models.compression_result import CompressionResult
 
+import json
+
 from signals.indicators.atr import add_atr
 from signals.indicators.trend_detector import detect_trend_up
-from signals.indicators.compression_detector import detect_compression
+from signals.indicators.compression_detector import (
+    detect_compression_mult_window,
+)
 from signals.indicators.compression_breakout_detector import (
     detect_compression_breakout,
     detect_breakout_from_watch,
@@ -71,10 +75,39 @@ class CompressionStrategy:
 
             "compression_high": compression_state.get("compression_high"),
             "compression_low": compression_state.get("compression_low"),
-            "compression_range_pct": compression.get("compression_range_pct"),
+            "compression_range_pct": compression_state.get(
+                "compression_range_pct"
+            ),
             
             "compression_height_pct": compression_state.get("compression_height_pct"),
             "compression_duration": compression_state.get("compression_duration"),
+            
+            "compression_selected_lookback": compression_state.get(
+                "selected_lookback"
+            ),
+            "compression_selection_score": compression_state.get(
+                "selection_score"
+            ),
+            "compression_selection_reason": compression_state.get(
+                "selection_reason"
+            ),
+            
+            "compression_base_mode": compression_state.get(
+                "base_mode"
+            ),
+            "compression_base_lookback": compression_state.get(
+                "base_lookback"
+            ),
+
+            "compression_candidate_count": compression_state.get(
+                "candidate_count"
+            ),
+            "compression_valid_candidate_count": compression_state.get(
+                "valid_candidate_count"
+            ),
+            "compression_candidates_json": compression_state.get(
+                "compression_candidates_json"
+            ),
 
             "upper_slope": compression_state.get("upper_slope"),
             "lower_slope": compression_state.get("lower_slope"),
@@ -83,15 +116,29 @@ class CompressionStrategy:
             "touches_high": compression_state.get("touches_high"),
             "touches_low": compression_state.get("touches_low"),
 
+            "touches_high_ratio": compression_state.get("touches_high_ratio"),
+            "touches_low_ratio": compression_state.get("touches_low_ratio"),
+
+            "touch_imbalance": compression_state.get("touch_imbalance"),
+            "touch_imbalance_ratio": compression_state.get("touch_imbalance_ratio"),
+
             "inside_ratio": compression_state.get("inside_ratio"),
 
             "compression_shape": compression_state.get("compression_shape"),
             "compression_quality_label": compression_state.get("compression_quality_label"),
 
-            "range_ratio": compression.get("range_ratio"),
-            "atr_ratio": compression.get("atr_ratio"),
-            "volume_ratio": compression.get("volume_ratio"),
-            "avg_body_pct": compression.get("avg_body_pct"),
+            "range_ratio": compression_state.get(
+                "range_ratio"
+            ),
+            "atr_ratio": compression_state.get(
+                "atr_ratio"
+            ),
+            "volume_ratio": compression_state.get(
+                "volume_ratio"
+            ),
+            "avg_body_pct": compression_state.get(
+                "avg_body_pct"
+            ),
 
             "breakout_detected": breakout.get("breakout"),
             "breakout_ts": compression_state.get("breakout_ts"),
@@ -165,9 +212,9 @@ class CompressionStrategy:
             min_score=4,
         )
 
-        compression = detect_compression(
-            prev_df,
-            lookback=10,
+        compression_mult_window = detect_compression_mult_window(
+            df=prev_df,
+            lookbacks=(10, 15, 20, 25, 30),
             base_lookback=40,
             max_range_ratio=0.65,
             max_atr_ratio=0.75,
@@ -175,6 +222,47 @@ class CompressionStrategy:
             max_body_pct=0.50,
             min_score=3,
         )
+
+        compression = compression_mult_window["selected"]
+        compression_candidates = compression_mult_window["candidates"]
+        
+        compression_candidates_summary = [
+            {
+                "lookback": candidate.get("candidate_lookback"),
+                "is_compression": candidate.get("is_compression"),
+                "compression_score": candidate.get("score"),
+                "selection_score": candidate.get("selection_score"),
+                "range_ratio": candidate.get("range_ratio"),
+                "atr_ratio": candidate.get("atr_ratio"),
+                "volume_ratio": candidate.get("volume_ratio"),
+                "compression_range_pct": candidate.get(
+                    "compression_range_pct"
+                ),
+                "compression_shape": candidate.get(
+                    "compression_shape"
+                ),
+                "compression_quality_label": candidate.get(
+                    "compression_quality_label"
+                ),
+                "touches_high_ratio": candidate.get(
+                    "touches_high_ratio"
+                ),
+                "touches_low_ratio": candidate.get(
+                    "touches_low_ratio"
+                ),
+                "touch_imbalance_ratio": candidate.get(
+                    "touch_imbalance_ratio"
+                ),
+            }
+            for candidate in compression_candidates
+        ]
+
+        compression["candidates_json"] = json.dumps(
+            compression_candidates_summary,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        
 
         watch = self.machine.get(symbol)
 
@@ -305,6 +393,26 @@ class CompressionStrategy:
 
                 "compression_height_pct": compression_state.get("compression_height_pct"),
                 "compression_duration": compression_state.get("compression_duration"),
+                
+                "compression_selected_lookback": compression_state.get(
+                    "selected_lookback"
+                ),
+                "compression_selection_score": compression_state.get(
+                    "selection_score"
+                ),
+                "compression_selection_reason": compression_state.get(
+                    "selection_reason"
+                ),
+
+                "compression_candidate_count": compression_state.get(
+                    "candidate_count"
+                ),
+                "compression_valid_candidate_count": compression_state.get(
+                    "valid_candidate_count"
+                ),
+                "compression_candidates_json": compression_state.get(
+                    "compression_candidates_json"
+                ),
 
                 "upper_slope": compression_state.get("upper_slope"),
                 "lower_slope": compression_state.get("lower_slope"),
@@ -313,15 +421,40 @@ class CompressionStrategy:
                 "touches_high": compression_state.get("touches_high"),
                 "touches_low": compression_state.get("touches_low"),
 
+                "touches_high_ratio": compression_state.get("touches_high_ratio"),
+                "touches_low_ratio": compression_state.get("touches_low_ratio"),
+
+                "touch_imbalance": compression_state.get("touch_imbalance"),
+                "touch_imbalance_ratio": compression_state.get("touch_imbalance_ratio"),
+
                 "inside_ratio": compression_state.get("inside_ratio"),
 
                 "compression_shape": compression_state.get("compression_shape"),
                 "compression_quality_label": compression_state.get("compression_quality_label"),
 
-                "range_ratio": compression.get("range_ratio"),
-                "atr_ratio": compression.get("atr_ratio"),
-                "volume_ratio": compression.get("volume_ratio"),
-                "avg_body_pct": compression.get("avg_body_pct"),
+                "compression_range_pct": compression_state.get(
+                    "compression_range_pct"
+                ),
+                "range_ratio": compression_state.get(
+                    "range_ratio"
+                ),
+                "atr_ratio": compression_state.get(
+                    "atr_ratio"
+                ),
+                "volume_ratio": compression_state.get(
+                    "volume_ratio"
+                ),
+                "avg_body_pct": compression_state.get(
+                    "avg_body_pct"
+                ),
+
+                "compression_base_mode": compression_state.get(
+                    "base_mode"
+                ),
+                "compression_base_lookback": compression_state.get(
+                    "base_lookback"
+                ),
+                
                 "compression_reasons": compression.get("reasons"),
 
                 "breakout_detected": breakout.get("breakout"),

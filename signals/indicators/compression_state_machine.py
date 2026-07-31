@@ -35,6 +35,14 @@ class CompressionWatch:
     
     compression_height_pct: Optional[float] = None
     compression_duration: Optional[int] = None
+    
+    selected_lookback: Optional[int] = None
+    selection_score: Optional[float] = None
+    selection_reason: Optional[str] = None
+
+    candidate_count: Optional[int] = None
+    valid_candidate_count: Optional[int] = None
+    compression_candidates_json: Optional[str] = None
 
     upper_slope: Optional[float] = None
     lower_slope: Optional[float] = None
@@ -42,6 +50,15 @@ class CompressionWatch:
 
     touches_high: Optional[int] = None
     touches_low: Optional[int] = None
+
+    # Touch metrics normalized by compression duration
+    touches_high_ratio: Optional[float] = None
+    touches_low_ratio: Optional[float] = None
+
+    # Positive means more high touches.
+    # Negative means more low touches.
+    touch_imbalance: Optional[int] = None
+    touch_imbalance_ratio: Optional[float] = None
 
     inside_ratio: Optional[float] = None
 
@@ -64,6 +81,12 @@ class CompressionWatch:
     range_ratio: Optional[float] = None
     atr_ratio: Optional[float] = None
     volume_ratio: Optional[float] = None
+    
+    compression_range_pct: Optional[float] = None
+    avg_body_pct: Optional[float] = None
+
+    base_mode: Optional[str] = None
+    base_lookback: Optional[int] = None
 
     watch_age: int = 0
 
@@ -310,6 +333,69 @@ class CompressionStateMachine:
 
         watch.reason = "waiting_valid_pullback"
         return watch.to_dict()
+    
+    def _update_live_touch_metrics(
+        self,
+        watch: CompressionWatch,
+        candle_high: float,
+        candle_low: float,
+    ):
+        compression_height = (
+            watch.compression_high
+            - watch.compression_low
+        )
+
+        if compression_height <= 0:
+            return
+
+        tolerance_price = compression_height * 0.15
+
+        touches_high = (
+            watch.compression_high - tolerance_price
+            <= candle_high
+            <= watch.compression_high + tolerance_price
+        )
+
+        touches_low = (
+            watch.compression_low - tolerance_price
+            <= candle_low
+            <= watch.compression_low + tolerance_price
+        )
+
+        if touches_high:
+            watch.touches_high = (
+                int(watch.touches_high or 0) + 1
+            )
+
+        if touches_low:
+            watch.touches_low = (
+                int(watch.touches_low or 0) + 1
+            )
+
+        watch.compression_duration = (
+            int(watch.compression_duration or 0) + 1
+        )
+
+        duration = watch.compression_duration
+        high_count = int(watch.touches_high or 0)
+        low_count = int(watch.touches_low or 0)
+
+        watch.touches_high_ratio = round(
+            high_count / duration,
+            4,
+        )
+        watch.touches_low_ratio = round(
+            low_count / duration,
+            4,
+        )
+
+        watch.touch_imbalance = (
+            high_count - low_count
+        )
+        watch.touch_imbalance_ratio = round(
+            watch.touch_imbalance / duration,
+            4,
+        )
 
     def update(
         self,
@@ -345,9 +431,37 @@ class CompressionStateMachine:
                     range_ratio=compression.get("range_ratio"),
                     atr_ratio=compression.get("atr_ratio"),
                     volume_ratio=compression.get("volume_ratio"),
+                    compression_range_pct=compression.get(
+                        "compression_range_pct"
+                    ),
+                    avg_body_pct=compression.get(
+                        "avg_body_pct"
+                    ),
+
+                    base_mode=compression.get("base_mode"),
+                    base_lookback=compression.get("base_lookback"),
                     watch_age=0,
                     compression_height_pct=compression.get("compression_height_pct"),
                     compression_duration=compression.get("compression_duration"),
+                    selected_lookback=compression.get(
+                        "selected_lookback"
+                    ),
+                    selection_score=compression.get(
+                        "selection_score"
+                    ),
+                    selection_reason=compression.get(
+                        "selection_reason"
+                    ),
+
+                    candidate_count=compression.get(
+                        "candidate_count"
+                    ),
+                    valid_candidate_count=compression.get(
+                        "valid_candidate_count"
+                    ),
+                    compression_candidates_json=compression.get(
+                        "candidates_json"
+                    ),
 
                     upper_slope=compression.get("upper_slope"),
                     lower_slope=compression.get("lower_slope"),
@@ -355,6 +469,20 @@ class CompressionStateMachine:
 
                     touches_high=compression.get("touches_high"),
                     touches_low=compression.get("touches_low"),
+
+                    touches_high_ratio=compression.get(
+                        "touches_high_ratio"
+                    ),
+                    touches_low_ratio=compression.get(
+                        "touches_low_ratio"
+                    ),
+
+                    touch_imbalance=compression.get(
+                        "touch_imbalance"
+                    ),
+                    touch_imbalance_ratio=compression.get(
+                        "touch_imbalance_ratio"
+                    ),
 
                     inside_ratio=compression.get("inside_ratio"),
 
@@ -382,7 +510,6 @@ class CompressionStateMachine:
         if watch.state == CompressionState.WATCH_CREATED:
             watch.state = CompressionState.WATCHING_COMPRESSION
             watch.reason = "watch_created_now_watching"
-            return watch.to_dict()
 
         if (
             watch.state == CompressionState.WATCHING_COMPRESSION
@@ -395,42 +522,35 @@ class CompressionStateMachine:
             return result
 
         if watch.state == CompressionState.WATCHING_COMPRESSION:
-            if compression.get("is_compression"):
-                watch.range_ratio = compression.get("range_ratio", watch.range_ratio)
-                watch.atr_ratio = compression.get("atr_ratio", watch.atr_ratio)
-                watch.volume_ratio = compression.get("volume_ratio", watch.volume_ratio)
-                
-                old_high = watch.compression_high
-                old_low = watch.compression_low
+            current_selected_lookback = compression.get(
+                "selected_lookback"
+            )
 
-                new_high = float(compression["compression_high"])
-                new_low = float(compression["compression_low"])
+            if (
+                current_selected_lookback
+                != watch.selected_lookback
+            ):
+                print(
+                    f"[WATCH WINDOW FROZEN] {symbol} "
+                    f"frozen_window={watch.selected_lookback} "
+                    f"current_window={current_selected_lookback}"
+                )
 
-                if new_high != old_high or new_low != old_low:
-                    print(
-                        f"[WATCH LEVEL WOULD_UPDATE_BUT_FROZEN] {symbol} "
-                        f"frozen_high={old_high:.8f} detected_high={new_high:.8f} "
-                        f"frozen_low={old_low:.8f} detected_low={new_low:.8f}"
-                    )
-                    
-                # ============================================
-                # Freeze compression levels after watch creation
-                # ============================================
+            # La vela de breakout no cuenta como toque.
+            if not breakout.get("breakout"):
+                self._update_live_touch_metrics(
+                    watch=watch,
+                    candle_high=high,
+                    candle_low=low,
+                )
 
-
-                #watch.compression_high = max(
-                #    watch.compression_high,
-                #    float(compression["compression_high"]),
-                #)
-                #watch.compression_low = min(
-                #    watch.compression_low,
-                #    float(compression["compression_low"]),
-                #)
-                
-                watch.compression_score = int(compression.get("score", 0))
-                watch.trend_score = int(trend.get("score", watch.trend_score))
+            # La tendencia sí puede evolucionar.
+            watch.trend_score = int(
+                trend.get("score", watch.trend_score)
+            )
 
             if breakout.get("breakout"):
+                # Mantener exactamente la lógica actual.
                 watch.breakout_detected = True
                 watch.breakout_confirmed = True
 

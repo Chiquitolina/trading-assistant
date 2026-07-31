@@ -361,3 +361,162 @@ def detect_compression(
         "recent_volume_avg": float(recent_volume_avg),
         "base_volume_avg": float(base_volume_avg),
     }
+    
+def compute_candidate_selection_score(candidate: dict) -> float:
+    """
+    Score utilizado solamente para comparar distintas ventanas.
+
+    No reemplaza a compression_score.
+    """
+
+    detector_score = float(candidate.get("score", 0) or 0)
+
+    quality = candidate.get("compression_quality_label")
+
+    quality_bonus = {
+        "GOOD_SHAPE": 0.75,
+        "OK_SHAPE": 0.35,
+        "BAD_SHAPE": 0.0,
+    }.get(quality, 0.0)
+
+    range_ratio = float(candidate.get("range_ratio", 999) or 999)
+    atr_ratio = float(candidate.get("atr_ratio", 999) or 999)
+    compression_range_pct = float(
+        candidate.get("compression_range_pct", 999) or 999
+    )
+
+    touches_high_ratio = float(
+        candidate.get("touches_high_ratio", 0) or 0
+    )
+    touches_low_ratio = float(
+        candidate.get("touches_low_ratio", 0) or 0
+    )
+
+    # Favorece presencia de toques en ambos extremos.
+    balanced_touch_ratio = min(
+        touches_high_ratio,
+        touches_low_ratio,
+    )
+
+    touch_bonus = min(
+        balanced_touch_ratio * 2,
+        0.50,
+    )
+
+    # Zonas iniciales basadas en los resultados observados.
+    if 0.50 < range_ratio <= 0.75:
+        range_bonus = 0.75
+    elif 0.75 < range_ratio <= 0.85:
+        range_bonus = 0.35
+    else:
+        range_bonus = 0.0
+
+    if 0.65 < atr_ratio <= 0.85:
+        atr_bonus = 0.50
+    elif atr_ratio <= 0.65:
+        atr_bonus = 0.20
+    else:
+        atr_bonus = 0.0
+
+    if 0.50 <= compression_range_pct <= 2.00:
+        compression_range_bonus = 0.50
+    elif 2.00 < compression_range_pct <= 3.00:
+        compression_range_bonus = 0.20
+    else:
+        compression_range_bonus = 0.0
+
+    selection_score = (
+        detector_score
+        + quality_bonus
+        + touch_bonus
+        + range_bonus
+        + atr_bonus
+        + compression_range_bonus
+    )
+
+    return round(float(selection_score), 4)
+
+def detect_compression_mult_window(
+    df: pd.DataFrame,
+    lookbacks=(10, 15, 20, 25, 30),
+    base_lookback: int = 40,
+    max_range_ratio: float = 0.75,
+    max_atr_ratio: float = 0.85,
+    max_volume_ratio: float = 1.10,
+    max_body_pct: float = 0.55,
+    min_score: int = 3,
+):
+    candidates = []
+
+    for lookback in lookbacks:
+        candidate = detect_compression(
+            df=df,
+            lookback=lookback,
+            base_lookback=base_lookback,
+            max_range_ratio=max_range_ratio,
+            max_atr_ratio=max_atr_ratio,
+            max_volume_ratio=max_volume_ratio,
+            max_body_pct=max_body_pct,
+            min_score=min_score,
+        )
+
+        candidate = {
+            **candidate,
+            "candidate_lookback": int(lookback),
+        }
+
+        candidate["selection_score"] = (
+            compute_candidate_selection_score(candidate)
+        )
+
+        candidates.append(candidate)
+
+    valid_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("is_compression") is True
+    ]
+
+    if valid_candidates:
+        selected = max(
+            valid_candidates,
+            key=lambda candidate: (
+                candidate.get("selection_score", 0),
+                candidate.get("score", 0),
+                -candidate.get("candidate_lookback", 10),
+            ),
+        )
+
+        selection_reason = "best_valid_candidate"
+
+    else:
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate["candidate_lookback"] == 10
+            ),
+            candidates[0],
+        )
+
+        selection_reason = "fallback_lookback_10"
+
+    selected = selected.copy()
+
+    selected["selected_lookback"] = selected[
+        "candidate_lookback"
+    ]
+    selected["selection_reason"] = selection_reason
+    selected["valid_candidate_count"] = len(valid_candidates)
+    selected["candidate_count"] = len(candidates)
+    
+    selected["base_mode"] = "overlapping"
+    selected["base_lookback"] = int(base_lookback)
+
+    return {
+        "selected": selected,
+        "candidates": candidates,
+        "selection_reason": selection_reason,
+        "valid_candidate_count": len(valid_candidates),
+        "candidate_count": len(candidates),
+    }

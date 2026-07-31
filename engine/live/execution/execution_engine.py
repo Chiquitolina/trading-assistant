@@ -581,6 +581,33 @@ class ExecutionEngine:
 
             compression_height_pct=ctx.get("compression_height_pct"),
             compression_duration=ctx.get("compression_duration"),
+            
+            compression_selected_lookback=ctx.get(
+                "compression_selected_lookback"
+            ),
+            compression_selection_score=ctx.get(
+                "compression_selection_score"
+            ),
+            compression_selection_reason=ctx.get(
+                "compression_selection_reason"
+            ),
+
+            compression_candidate_count=ctx.get(
+                "compression_candidate_count"
+            ),
+            compression_valid_candidate_count=ctx.get(
+                "compression_valid_candidate_count"
+            ),
+            compression_candidates_json=ctx.get(
+                "compression_candidates_json"
+            ),
+
+            compression_base_mode=ctx.get(
+                "compression_base_mode"
+            ),
+            compression_base_lookback=ctx.get(
+                "compression_base_lookback"
+            ),
 
             upper_slope=ctx.get("upper_slope"),
             lower_slope=ctx.get("lower_slope"),
@@ -588,6 +615,12 @@ class ExecutionEngine:
 
             touches_high=ctx.get("touches_high"),
             touches_low=ctx.get("touches_low"),
+
+            touches_high_ratio=ctx.get("touches_high_ratio"),
+            touches_low_ratio=ctx.get("touches_low_ratio"),
+
+            touch_imbalance=ctx.get("touch_imbalance"),
+            touch_imbalance_ratio=ctx.get("touch_imbalance_ratio"),
 
             inside_ratio=ctx.get("inside_ratio"),
 
@@ -2002,6 +2035,33 @@ class ExecutionEngine:
 
             compression_height_pct=ctx.get("compression_height_pct"),
             compression_duration=ctx.get("compression_duration"),
+            
+            compression_selected_lookback=ctx.get(
+                "compression_selected_lookback"
+            ),
+            compression_selection_score=ctx.get(
+                "compression_selection_score"
+            ),
+            compression_selection_reason=ctx.get(
+                "compression_selection_reason"
+            ),
+
+            compression_candidate_count=ctx.get(
+                "compression_candidate_count"
+            ),
+            compression_valid_candidate_count=ctx.get(
+                "compression_valid_candidate_count"
+            ),
+            compression_candidates_json=ctx.get(
+                "compression_candidates_json"
+            ),
+
+            compression_base_mode=ctx.get(
+                "compression_base_mode"
+            ),
+            compression_base_lookback=ctx.get(
+                "compression_base_lookback"
+            ),
 
             upper_slope=ctx.get("upper_slope"),
             lower_slope=ctx.get("lower_slope"),
@@ -2009,6 +2069,12 @@ class ExecutionEngine:
 
             touches_high=ctx.get("touches_high"),
             touches_low=ctx.get("touches_low"),
+
+            touches_high_ratio=ctx.get("touches_high_ratio"),
+            touches_low_ratio=ctx.get("touches_low_ratio"),
+
+            touch_imbalance=ctx.get("touch_imbalance"),
+            touch_imbalance_ratio=ctx.get("touch_imbalance_ratio"),
 
             inside_ratio=ctx.get("inside_ratio"),
 
@@ -2216,6 +2282,33 @@ class ExecutionEngine:
 
             "compression_height_pct": context.get("compression_height_pct"),
             "compression_duration": context.get("compression_duration"),
+            
+            "compression_selected_lookback": context.get(
+                "compression_selected_lookback"
+            ),
+            "compression_selection_score": context.get(
+                "compression_selection_score"
+            ),
+            "compression_selection_reason": context.get(
+                "compression_selection_reason"
+            ),
+
+            "compression_candidate_count": context.get(
+                "compression_candidate_count"
+            ),
+            "compression_valid_candidate_count": context.get(
+                "compression_valid_candidate_count"
+            ),
+            "compression_candidates_json": context.get(
+                "compression_candidates_json"
+            ),
+
+            "compression_base_mode": context.get(
+                "compression_base_mode"
+            ),
+            "compression_base_lookback": context.get(
+                "compression_base_lookback"
+            ),
 
             "upper_slope": context.get("upper_slope"),
             "lower_slope": context.get("lower_slope"),
@@ -2223,6 +2316,12 @@ class ExecutionEngine:
 
             "touches_high": context.get("touches_high"),
             "touches_low": context.get("touches_low"),
+
+            "touches_high_ratio": context.get("touches_high_ratio"),
+            "touches_low_ratio": context.get("touches_low_ratio"),
+
+            "touch_imbalance": context.get("touch_imbalance"),
+            "touch_imbalance_ratio": context.get("touch_imbalance_ratio"),
 
             "inside_ratio": context.get("inside_ratio"),
 
