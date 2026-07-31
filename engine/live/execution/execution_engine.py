@@ -1047,9 +1047,19 @@ class ExecutionEngine:
                 },
 
                 "context": {
-                    **plan.signal_context,
-                    "strategy_mode": plan.signal_context.get("strategy_name"),
-                    "router_reason": plan.signal_context.get("router_reason"),
+                    **(plan.signal_context or {}),
+
+                    "strategy_mode": (
+                        (plan.signal_context or {}).get(
+                            "strategy_name"
+                        )
+                    ),
+
+                    "router_reason": (
+                        (plan.signal_context or {}).get(
+                            "router_reason"
+                        )
+                    ),
                 },
 
                 "post_entry_analysis": {},
@@ -1188,6 +1198,8 @@ class ExecutionEngine:
                 },
 
                 "context": {
+                    **(plan.signal_context or {}),
+                    
                     "signal_trend": plan.signal_context.get("trend"),
                     "signal_direction": plan.signal_context.get("direction"),
                     "signal_momentum": plan.signal_context.get("momentum"),
