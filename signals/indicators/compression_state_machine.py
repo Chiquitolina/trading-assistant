@@ -43,6 +43,15 @@ class CompressionWatch:
     touches_high: Optional[int] = None
     touches_low: Optional[int] = None
 
+    # Touch metrics normalized by compression duration
+    touches_high_ratio: Optional[float] = None
+    touches_low_ratio: Optional[float] = None
+
+    # Positive means more high touches.
+    # Negative means more low touches.
+    touch_imbalance: Optional[int] = None
+    touch_imbalance_ratio: Optional[float] = None
+
     inside_ratio: Optional[float] = None
 
     compression_shape: Optional[str] = None
@@ -355,6 +364,20 @@ class CompressionStateMachine:
 
                     touches_high=compression.get("touches_high"),
                     touches_low=compression.get("touches_low"),
+
+                    touches_high_ratio=compression.get(
+                        "touches_high_ratio"
+                    ),
+                    touches_low_ratio=compression.get(
+                        "touches_low_ratio"
+                    ),
+
+                    touch_imbalance=compression.get(
+                        "touch_imbalance"
+                    ),
+                    touch_imbalance_ratio=compression.get(
+                        "touch_imbalance_ratio"
+                    ),
 
                     inside_ratio=compression.get("inside_ratio"),
 
