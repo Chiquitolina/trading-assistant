@@ -265,8 +265,24 @@ def detect_compression(
     d["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     d["atr"] = d["tr"].rolling(14).mean()
 
-    recent = d.tail(lookback)
-    base = d.tail(base_lookback)
+    # Compresión candidata
+    recent = d.tail(lookback).copy()
+
+    # Referencia anterior independiente
+    base = d.iloc[
+        -(base_lookback + lookback):-lookback
+    ].copy()
+
+    if len(recent) != lookback or len(base) != base_lookback:
+        return {
+            "is_compression": False,
+            "score": 0,
+            "reason": "invalid_compression_windows",
+            "lookback": lookback,
+            "base_lookback": base_lookback,
+            "recent_candles": len(recent),
+            "base_candles": len(base),
+        }
 
     recent_range_avg = recent["range"].mean()
     base_range_avg = base["range"].mean()
