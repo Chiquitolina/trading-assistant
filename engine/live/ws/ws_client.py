@@ -1,7 +1,8 @@
+import asyncio
+
 import time
 import threading
 from binance import ThreadedWebsocketManager
-
 
 class WSClient:
     def __init__(self, on_message, timeframes, symbols, stale_after=60, chunk_size=25):
@@ -84,7 +85,12 @@ class WSClient:
             self._stop_ws()
 
         try:
-            self.twm = ThreadedWebsocketManager()
+            ws_loop = asyncio.new_event_loop()
+
+            self.twm = ThreadedWebsocketManager(
+                loop=ws_loop
+            )
+
             self.twm.start()
 
             time.sleep(3)
@@ -165,8 +171,12 @@ class WSClient:
 
             now = time.time()
 
-            if now - self._last_reconnect < self.min_reconnect_interval:
-                print("\033[94m[WS CLIENT]\033[0m ⏳ Reconnect cooldown active")
+            remaining = self.min_reconnect_interval - (
+                now - self._last_reconnect
+            )
+
+            if remaining > 0:
+                time.sleep(min(remaining, 1.0))
                 return
 
             self._last_reconnect = now
@@ -212,16 +222,33 @@ class WSClient:
         twm = self.twm
         self.twm = None
 
-        if not twm:
+        if twm is None:
             return
 
         try:
-            print("\033[94m[WS CLIENT]\033[0m 🛑 Stopping WS manager...")
+            print(
+                "\033[94m[WS CLIENT]\033[0m "
+                "🛑 Stopping WS manager..."
+            )
 
             twm.stop()
-            time.sleep(5)
 
-            print("\033[94m[WS CLIENT]\033[0m ✅ WS manager stopped")
+            if twm.is_alive():
+                twm.join(timeout=15)
+
+            if twm.is_alive():
+                print(
+                    "\033[94m[WS CLIENT]\033[0m "
+                    "⚠️ WS manager did not stop within 15s"
+                )
+            else:
+                print(
+                    "\033[94m[WS CLIENT]\033[0m "
+                    "✅ WS manager stopped"
+                )
 
         except Exception as e:
-            print(f"\033[94m[WS CLIENT]\033[0m ⚠️ Stop error: {e}")
+            print(
+                f"\033[94m[WS CLIENT]\033[0m "
+                f"⚠️ Stop error: {e}"
+            )
