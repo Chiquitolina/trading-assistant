@@ -1,7 +1,8 @@
+import asyncio
+
 import time
 import threading
 from binance import ThreadedWebsocketManager
-
 
 class WSClient:
     def __init__(self, on_message, timeframes, symbols, stale_after=60, chunk_size=25):
@@ -25,6 +26,10 @@ class WSClient:
         self.min_reconnect_interval = 60
 
         self.handshake_failures = 0
+        
+        self.connect_started_at = 0.0
+        self.handshake_timeout = 45
+        self._first_message_logged = False
         
     def _chunk_list(self, items, size):
         for i in range(0, len(items), size):
@@ -51,6 +56,20 @@ class WSClient:
                 if self._is_reconnecting:
                     self._reconnect()
                     continue
+                
+                if (
+                    not self.is_connected
+                    and self.connect_started_at > 0
+                    and now - self.connect_started_at > self.handshake_timeout
+                ):
+                    print(
+                        f"\033[94m[WS CLIENT]\033[0m "
+                        f"⚠️ WS handshake timeout: "
+                        f"no messages for {now - self.connect_started_at:.1f}s"
+                    )
+
+                    self._is_reconnecting = True
+                    continue
 
                 if self.is_connected and self.last_message_at > 0:
                     if now - self.last_message_at > self.stale_after:
@@ -74,17 +93,29 @@ class WSClient:
         self._is_reconnecting = False
         self.is_connected = False
         self.last_message_at = 0.0
+        self.connect_started_at = 0.0
         self._stop_ws()
 
     def _connect(self):
         print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...")
+        
+        self.is_connected = False
+        self.last_message_at = 0.0
+        self.connect_started_at = time.time()
+        self._first_message_logged = False
 
         if self.twm is not None:
             print("\033[94m[WS CLIENT]\033[0m ⚠️ Existing TWM found, stopping before reconnect")
             self._stop_ws()
 
         try:
-            self.twm = ThreadedWebsocketManager()
+            ws_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(ws_loop)
+
+            self.twm = ThreadedWebsocketManager(
+                loop=ws_loop
+            )
+
             self.twm.start()
 
             time.sleep(3)
@@ -117,9 +148,6 @@ class WSClient:
 
             self.retries = 0
             self._is_reconnecting = False
-            self.handshake_failures = 0
-            self.is_connected = False
-            self.last_message_at = 0.0
 
             print(
                 f"\n\033[94m[WS CLIENT]\033[0m "
@@ -146,6 +174,16 @@ class WSClient:
 
             self.last_message_at = time.time()
             self.is_connected = True
+            self.connect_started_at = 0.0
+            self.handshake_failures = 0
+
+            if not self._first_message_logged:
+                self._first_message_logged = True
+
+                print(
+                    "\033[94m[WS CLIENT]\033[0m "
+                    "✅ First WebSocket message received"
+                )
 
             self.on_message(msg)
 
@@ -165,8 +203,12 @@ class WSClient:
 
             now = time.time()
 
-            if now - self._last_reconnect < self.min_reconnect_interval:
-                print("\033[94m[WS CLIENT]\033[0m ⏳ Reconnect cooldown active")
+            remaining = self.min_reconnect_interval - (
+                now - self._last_reconnect
+            )
+
+            if remaining > 0:
+                time.sleep(min(remaining, 1.0))
                 return
 
             self._last_reconnect = now
@@ -212,16 +254,33 @@ class WSClient:
         twm = self.twm
         self.twm = None
 
-        if not twm:
+        if twm is None:
             return
 
         try:
-            print("\033[94m[WS CLIENT]\033[0m 🛑 Stopping WS manager...")
+            print(
+                "\033[94m[WS CLIENT]\033[0m "
+                "🛑 Stopping WS manager..."
+            )
 
             twm.stop()
-            time.sleep(5)
 
-            print("\033[94m[WS CLIENT]\033[0m ✅ WS manager stopped")
+            if twm.is_alive():
+                twm.join(timeout=15)
+
+            if twm.is_alive():
+                print(
+                    "\033[94m[WS CLIENT]\033[0m "
+                    "⚠️ WS manager did not stop within 15s"
+                )
+            else:
+                print(
+                    "\033[94m[WS CLIENT]\033[0m "
+                    "✅ WS manager stopped"
+                )
 
         except Exception as e:
-            print(f"\033[94m[WS CLIENT]\033[0m ⚠️ Stop error: {e}")
+            print(
+                f"\033[94m[WS CLIENT]\033[0m "
+                f"⚠️ Stop error: {e}"
+            )
