@@ -27,6 +27,10 @@ class WSClient:
 
         self.handshake_failures = 0
         
+        self.connect_started_at = 0.0
+        self.handshake_timeout = 45
+        self._first_message_logged = False
+        
     def _chunk_list(self, items, size):
         for i in range(0, len(items), size):
             yield items[i:i + size]
@@ -52,6 +56,20 @@ class WSClient:
                 if self._is_reconnecting:
                     self._reconnect()
                     continue
+                
+                if (
+                    not self.is_connected
+                    and self.connect_started_at > 0
+                    and now - self.connect_started_at > self.handshake_timeout
+                ):
+                    print(
+                        f"\033[94m[WS CLIENT]\033[0m "
+                        f"⚠️ WS handshake timeout: "
+                        f"no messages for {now - self.connect_started_at:.1f}s"
+                    )
+
+                    self._is_reconnecting = True
+                    continue
 
                 if self.is_connected and self.last_message_at > 0:
                     if now - self.last_message_at > self.stale_after:
@@ -75,10 +93,16 @@ class WSClient:
         self._is_reconnecting = False
         self.is_connected = False
         self.last_message_at = 0.0
+        self.connect_started_at = 0.0
         self._stop_ws()
 
     def _connect(self):
         print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...")
+        
+        self.is_connected = False
+        self.last_message_at = 0.0
+        self.connect_started_at = time.time()
+        self._first_message_logged = False
 
         if self.twm is not None:
             print("\033[94m[WS CLIENT]\033[0m ⚠️ Existing TWM found, stopping before reconnect")
@@ -86,6 +110,7 @@ class WSClient:
 
         try:
             ws_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(ws_loop)
 
             self.twm = ThreadedWebsocketManager(
                 loop=ws_loop
@@ -123,9 +148,6 @@ class WSClient:
 
             self.retries = 0
             self._is_reconnecting = False
-            self.handshake_failures = 0
-            self.is_connected = False
-            self.last_message_at = 0.0
 
             print(
                 f"\n\033[94m[WS CLIENT]\033[0m "
@@ -152,6 +174,16 @@ class WSClient:
 
             self.last_message_at = time.time()
             self.is_connected = True
+            self.connect_started_at = 0.0
+            self.handshake_failures = 0
+
+            if not self._first_message_logged:
+                self._first_message_logged = True
+
+                print(
+                    "\033[94m[WS CLIENT]\033[0m "
+                    "✅ First WebSocket message received"
+                )
 
             self.on_message(msg)
 
