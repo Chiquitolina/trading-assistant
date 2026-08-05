@@ -9386,6 +9386,40 @@ with tab_compression_quality:
             "desplazamiento en ATR e incorpora resultados "
             "normalizados por riesgo."
         )
+        
+        entry_bucket_order = [
+            "<0.5%",
+            "0.5-1%",
+            "1-1.5%",
+            "1.5-2%",
+            ">2%",
+        ]
+
+        available_entry_bucket_values = set(
+            qdf["entry_vs_compression_simple"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
+
+        available_entry_buckets = [
+            bucket
+            for bucket in entry_bucket_order
+            if bucket in available_entry_bucket_values
+        ]
+
+        default_entry_buckets = (
+            [">2%"]
+            if ">2%" in available_entry_buckets
+            else []
+        )
+
+        selected_entry_buckets = st.multiselect(
+            "Filter by Entry vs Compression High",
+            options=available_entry_buckets,
+            default=default_entry_buckets,
+            key="volume_atr_entry_compression_filter",
+        )
 
         qdf["breakout_atr_validation_bucket"] = pd.cut(
             qdf["breakout_extension_atr"],
@@ -9405,13 +9439,28 @@ with tab_compression_quality:
             include_lowest=True,
         )
 
-        volume_atr_source = qdf.dropna(
+        volume_atr_base = qdf.copy()
+
+        if selected_entry_buckets:
+            volume_atr_base = volume_atr_base[
+                volume_atr_base[
+                    "entry_vs_compression_simple"
+                ]
+                .astype(str)
+                .isin(selected_entry_buckets)
+            ].copy()
+
+        volume_atr_source = volume_atr_base.dropna(
             subset=[
                 "breakout_volume_bucket",
                 "breakout_atr_validation_bucket",
                 "pnl",
             ]
         ).copy()
+        
+        st.caption(
+            f"Filtered trades: {len(volume_atr_source)}"
+        )
 
         volume_atr_agg = {
             "trades": (
@@ -9528,7 +9577,7 @@ with tab_compression_quality:
         )
         
         render_bucket_robustness_explorer(
-            source_df=qdf,
+            source_df=volume_atr_source,
             summary_df=volume_atr_report,
             first_bucket_col="breakout_volume_bucket",
             second_bucket_col="breakout_atr_validation_bucket",
