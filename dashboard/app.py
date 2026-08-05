@@ -565,6 +565,8 @@ def render_bucket_robustness_explorer(
             "pnl",
             "exit_reason",
             "leverage",
+            "pnl_unleveraged_pct",
+            "realized_r",
 
             # Buckets seleccionados
             first_bucket_col,
@@ -581,13 +583,18 @@ def render_bucket_robustness_explorer(
             "tp",
             "sl",
 
-            # Distancias
+            # Distancias y riesgo
             "entry_vs_compression_pct",
             "real_entry_vs_compression_pct",
             "entry_vs_breakout_pct",
             "real_entry_vs_breakout_pct",
             "real_entry_vs_ready_pct",
             "signal_to_real_entry_pct",
+
+            "structural_risk_pct",
+            "structural_risk_bucket",
+            "planned_reward_pct",
+            "planned_rr",
 
             # Breakout
             "breakout_extension_atr",
@@ -8691,21 +8698,29 @@ with tab_compression_quality:
         qdf = add_compression_analytics_buckets(df_view)
         
         audit_numeric_cols = [
+            "pnl",
+            "leverage",
+
             "signal_price",
             "entry",
             "real_entry",
+            "tp",
+            "sl",
+
             "compression_high",
             "compression_low",
             "breakout_price",
             "entry_ready_price",
+
             "entry_vs_compression_pct",
             "entry_vs_breakout_pct",
+
             "breakout_extension_atr",
             "breakout_extension_pct",
             "breakout_volume_ratio",
+
             "max_favorable_pct",
             "max_adverse_pct",
-            "leverage",
         ]
 
         for col in audit_numeric_cols:
@@ -8766,6 +8781,135 @@ with tab_compression_quality:
                 / qdf["signal_price"]
                 * 100
             ).round(5)
+
+        # ==========================================
+        # RISK-NORMALIZED METRICS
+        # ==========================================
+
+        if {
+            "real_entry",
+            "sl",
+        }.issubset(qdf.columns):
+            valid_entry = qdf["real_entry"].gt(0)
+
+            qdf["structural_risk_pct"] = np.nan
+
+            qdf.loc[
+                valid_entry,
+                "structural_risk_pct",
+            ] = (
+                (
+                    qdf.loc[valid_entry, "real_entry"]
+                    - qdf.loc[valid_entry, "sl"]
+                ).abs()
+                / qdf.loc[valid_entry, "real_entry"]
+                * 100
+            ).round(5)
+
+
+        if {
+            "real_entry",
+            "tp",
+        }.issubset(qdf.columns):
+            valid_entry = qdf["real_entry"].gt(0)
+
+            qdf["planned_reward_pct"] = np.nan
+
+            qdf.loc[
+                valid_entry,
+                "planned_reward_pct",
+            ] = (
+                (
+                    qdf.loc[valid_entry, "tp"]
+                    - qdf.loc[valid_entry, "real_entry"]
+                ).abs()
+                / qdf.loc[valid_entry, "real_entry"]
+                * 100
+            ).round(5)
+
+
+        if {
+            "planned_reward_pct",
+            "structural_risk_pct",
+        }.issubset(qdf.columns):
+            valid_risk = qdf["structural_risk_pct"].gt(0)
+
+            qdf["planned_rr"] = np.nan
+
+            qdf.loc[
+                valid_risk,
+                "planned_rr",
+            ] = (
+                qdf.loc[
+                    valid_risk,
+                    "planned_reward_pct",
+                ]
+                / qdf.loc[
+                    valid_risk,
+                    "structural_risk_pct",
+                ]
+            ).round(4)
+
+
+        if {
+            "pnl",
+            "leverage",
+        }.issubset(qdf.columns):
+            safe_leverage = (
+                qdf["leverage"]
+                .replace(0, np.nan)
+                .fillna(1.0)
+            )
+
+            qdf["pnl_unleveraged_pct"] = (
+                qdf["pnl"]
+                / safe_leverage
+            ).round(5)
+
+
+        if {
+            "pnl_unleveraged_pct",
+            "structural_risk_pct",
+        }.issubset(qdf.columns):
+            valid_risk = qdf["structural_risk_pct"].gt(0)
+
+            qdf["realized_r"] = np.nan
+
+            qdf.loc[
+                valid_risk,
+                "realized_r",
+            ] = (
+                qdf.loc[
+                    valid_risk,
+                    "pnl_unleveraged_pct",
+                ]
+                / qdf.loc[
+                    valid_risk,
+                    "structural_risk_pct",
+                ]
+            ).round(4)
+
+
+        if "structural_risk_pct" in qdf.columns:
+            qdf["structural_risk_bucket"] = pd.cut(
+                qdf["structural_risk_pct"],
+                bins=[
+                    -float("inf"),
+                    2.0,
+                    3.0,
+                    5.0,
+                    10.0,
+                    float("inf"),
+                ],
+                labels=[
+                    "<=2%",
+                    "2-3%",
+                    "3-5%",
+                    "5-10%",
+                    ">10%",
+                ],
+                include_lowest=True,
+            )
             
         timestamp_cols = [
             "compression_created_ts",
@@ -9226,6 +9370,171 @@ with tab_compression_quality:
             first_bucket_label="Entry vs Compression High",
             second_bucket_label="Breakout Volume",
             key_prefix="entry_vs_compression_breakout_volume",
+        )
+        
+        # ==========================================
+        # BREAKOUT VOLUME × BREAKOUT EXTENSION ATR
+        # ==========================================
+
+        st.markdown("---")
+        st.markdown(
+            "### Breakout Volume × Breakout Extension ATR"
+        )
+
+        st.caption(
+            "Cruza el volumen relativo del breakout con su "
+            "desplazamiento en ATR e incorpora resultados "
+            "normalizados por riesgo."
+        )
+
+        qdf["breakout_atr_validation_bucket"] = pd.cut(
+            qdf["breakout_extension_atr"],
+            bins=[
+                -float("inf"),
+                1.0,
+                2.0,
+                3.0,
+                float("inf"),
+            ],
+            labels=[
+                "<1 ATR",
+                "1-2 ATR",
+                "2-3 ATR",
+                ">3 ATR",
+            ],
+            include_lowest=True,
+        )
+
+        volume_atr_source = qdf.dropna(
+            subset=[
+                "breakout_volume_bucket",
+                "breakout_atr_validation_bucket",
+                "pnl",
+            ]
+        ).copy()
+
+        volume_atr_agg = {
+            "trades": (
+                "pnl",
+                "count",
+            ),
+            "wins": (
+                "pnl",
+                lambda x: int((x > 0).sum()),
+            ),
+            "losses": (
+                "pnl",
+                lambda x: int((x <= 0).sum()),
+            ),
+            "winrate": (
+                "pnl",
+                lambda x: round(
+                    (x > 0).mean() * 100,
+                    2,
+                ),
+            ),
+            "avg_pnl": (
+                "pnl",
+                "mean",
+            ),
+            "median_pnl": (
+                "pnl",
+                "median",
+            ),
+            "total_pnl": (
+                "pnl",
+                "sum",
+            ),
+            "pf": (
+                "pnl",
+                profit_factor,
+            ),
+        }
+
+        if "realized_r" in volume_atr_source.columns:
+            volume_atr_agg.update({
+                "net_r": (
+                    "realized_r",
+                    "sum",
+                ),
+                "avg_r": (
+                    "realized_r",
+                    "mean",
+                ),
+                "median_r": (
+                    "realized_r",
+                    "median",
+                ),
+                "pf_r": (
+                    "realized_r",
+                    profit_factor,
+                ),
+            })
+
+        volume_atr_report = (
+            volume_atr_source
+            .groupby(
+                [
+                    "breakout_volume_bucket",
+                    "breakout_atr_validation_bucket",
+                ],
+                observed=False,
+            )
+            .agg(**volume_atr_agg)
+            .reset_index()
+        )
+
+        volume_atr_report = volume_atr_report[
+            volume_atr_report["trades"] > 0
+        ].copy()
+
+        round_cols = [
+            "avg_pnl",
+            "median_pnl",
+            "total_pnl",
+            "pf",
+            "net_r",
+            "avg_r",
+            "median_r",
+            "pf_r",
+        ]
+
+        for col in round_cols:
+            if col in volume_atr_report.columns:
+                volume_atr_report[col] = (
+                    volume_atr_report[col].round(4)
+                )
+
+        sort_metric = (
+            "pf_r"
+            if "pf_r" in volume_atr_report.columns
+            else "pf"
+        )
+
+        st.dataframe(
+            volume_atr_report.sort_values(
+                [
+                    sort_metric,
+                    "trades",
+                ],
+                ascending=[
+                    False,
+                    False,
+                ],
+                na_position="last",
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        
+        render_bucket_robustness_explorer(
+            source_df=qdf,
+            summary_df=volume_atr_report,
+            first_bucket_col="breakout_volume_bucket",
+            second_bucket_col="breakout_atr_validation_bucket",
+            first_bucket_label="Breakout Volume",
+            second_bucket_label="Breakout Extension ATR",
+            key_prefix="breakout_volume_extension_atr",
         )
 
         st.markdown("### SL Late Entry Cases")
