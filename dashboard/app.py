@@ -548,23 +548,58 @@ def render_bucket_robustness_explorer(
     # ==========================================
     with trades_tab:
         preferred_cols = [
+            # Identidad
             "trade_key",
             "symbol",
             "side",
+
+            # Timestamps
+            "compression_created_ts_dt",
+            "signal_ts_dt",
+            "breakout_ts_dt",
+            "entry_ready_ts_dt",
             "entry_ts_dt",
             "exit_ts_dt",
+
+            # Resultado
             "pnl",
             "exit_reason",
+            "leverage",
+
+            # Buckets seleccionados
             first_bucket_col,
             second_bucket_col,
+
+            # Precios
+            "signal_price",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_ready_price",
+            "entry",
             "real_entry",
             "tp",
             "sl",
+
+            # Distancias
             "entry_vs_compression_pct",
+            "real_entry_vs_compression_pct",
             "entry_vs_breakout_pct",
+            "real_entry_vs_breakout_pct",
+            "real_entry_vs_ready_pct",
+            "signal_to_real_entry_pct",
+
+            # Breakout
             "breakout_extension_atr",
             "breakout_extension_pct",
             "breakout_volume_ratio",
+
+            # Duraciones
+            "watch_to_breakout_minutes",
+            "breakout_to_ready_minutes",
+            "ready_to_entry_seconds",
+
+            # Compresión
             "compression_shape",
             "compression_quality_label",
             "compression_score",
@@ -572,11 +607,22 @@ def render_bucket_robustness_explorer(
             "range_ratio",
             "atr_ratio",
             "volume_ratio",
+
+            # MFE / MAE
             "max_favorable_pct",
             "max_adverse_pct",
+
+            # BTC
             "btc_corr_5m_1h",
             "btc_beta_5m_1h",
             "btc_r2_5m_1h",
+
+            # Configuración
+            "trigger_tf",
+            "strategy_mode",
+            "base_mode",
+            "selected_lookback",
+            "compression_base_lookback",
         ]
 
         available_cols = [
@@ -8643,6 +8689,188 @@ with tab_compression_quality:
 
     else:
         qdf = add_compression_analytics_buckets(df_view)
+        
+        audit_numeric_cols = [
+            "signal_price",
+            "entry",
+            "real_entry",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_ready_price",
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+            "max_favorable_pct",
+            "max_adverse_pct",
+            "leverage",
+        ]
+
+        for col in audit_numeric_cols:
+            if col in qdf.columns:
+                qdf[col] = pd.to_numeric(
+                    qdf[col],
+                    errors="coerce",
+                )
+                
+        if {
+            "real_entry",
+            "compression_high",
+        }.issubset(qdf.columns):
+            qdf["real_entry_vs_compression_pct"] = (
+                (
+                    qdf["real_entry"]
+                    - qdf["compression_high"]
+                )
+                / qdf["compression_high"]
+                * 100
+            ).round(5)
+            
+        if {
+            "real_entry",
+            "breakout_price",
+        }.issubset(qdf.columns):
+            qdf["real_entry_vs_breakout_pct"] = (
+                (
+                    qdf["real_entry"]
+                    - qdf["breakout_price"]
+                )
+                / qdf["breakout_price"]
+                * 100
+            ).round(5)
+            
+        if {
+            "real_entry",
+            "entry_ready_price",
+        }.issubset(qdf.columns):
+            qdf["real_entry_vs_ready_pct"] = (
+                (
+                    qdf["real_entry"]
+                    - qdf["entry_ready_price"]
+                )
+                / qdf["entry_ready_price"]
+                * 100
+            ).round(5)
+            
+        if {
+            "signal_price",
+            "real_entry",
+        }.issubset(qdf.columns):
+            qdf["signal_to_real_entry_pct"] = (
+                (
+                    qdf["real_entry"]
+                    - qdf["signal_price"]
+                )
+                / qdf["signal_price"]
+                * 100
+            ).round(5)
+            
+        timestamp_cols = [
+            "compression_created_ts",
+            "signal_ts",
+            "breakout_ts",
+            "entry_ready_ts",
+            "entry_ts",
+            "exit_ts",
+        ]
+        
+        def normalize_mixed_timestamp(series):
+            numeric = pd.to_numeric(
+                series,
+                errors="coerce",
+            )
+
+            result = pd.Series(
+                pd.NaT,
+                index=series.index,
+                dtype="datetime64[ns, UTC]",
+            )
+
+            milliseconds_mask = (
+                numeric.notna()
+                & numeric.abs().ge(100_000_000_000)
+            )
+
+            seconds_mask = (
+                numeric.notna()
+                & ~milliseconds_mask
+            )
+
+            text_mask = numeric.isna()
+
+            if milliseconds_mask.any():
+                result.loc[milliseconds_mask] = pd.to_datetime(
+                    numeric.loc[milliseconds_mask],
+                    unit="ms",
+                    errors="coerce",
+                    utc=True,
+                )
+
+            if seconds_mask.any():
+                result.loc[seconds_mask] = pd.to_datetime(
+                    numeric.loc[seconds_mask],
+                    unit="s",
+                    errors="coerce",
+                    utc=True,
+                )
+
+            if text_mask.any():
+                result.loc[text_mask] = pd.to_datetime(
+                    series.loc[text_mask],
+                    errors="coerce",
+                    utc=True,
+                )
+
+            return result
+
+        for col in timestamp_cols:
+            if col in qdf.columns:
+                qdf[f"{col}_dt"] = normalize_mixed_timestamp(
+                    qdf[col]
+                )
+                
+        if {
+            "compression_created_ts_dt",
+            "breakout_ts_dt",
+        }.issubset(qdf.columns):
+            qdf["watch_to_breakout_minutes"] = (
+                (
+                    qdf["breakout_ts_dt"]
+                    - qdf["compression_created_ts_dt"]
+                )
+                .dt.total_seconds()
+                .div(60)
+                .round(2)
+            )
+            
+        if {
+            "breakout_ts_dt",
+            "entry_ready_ts_dt",
+        }.issubset(qdf.columns):
+            qdf["breakout_to_ready_minutes"] = (
+                (
+                    qdf["entry_ready_ts_dt"]
+                    - qdf["breakout_ts_dt"]
+                )
+                .dt.total_seconds()
+                .div(60)
+                .round(2)
+            )
+            
+        if {
+            "entry_ready_ts_dt",
+            "entry_ts_dt",
+        }.issubset(qdf.columns):
+            qdf["ready_to_entry_seconds"] = (
+                (
+                    qdf["entry_ts_dt"]
+                    - qdf["entry_ready_ts_dt"]
+                )
+                .dt.total_seconds()
+                .round(2)
+            )
 
         for col in [
             "pnl",
@@ -8863,11 +9091,13 @@ with tab_compression_quality:
 
         st.dataframe(entry_distance_summary, use_container_width=True)
         
-        st.markdown("### Entry Distance × Breakout ATR")
+        st.markdown(
+            "### Entry vs Compression High × Breakout ATR"
+        )
 
-        qdf["entry_distance_simple"] = pd.cut(
+        qdf["entry_vs_compression_simple"] = pd.cut(
             qdf["entry_vs_compression_pct"],
-            bins=[-999, 0.5, 1.0, 1.5, 2.0, 999],
+            bins=[-float("inf"), 0.5, 1.0, 1.5, 2.0, float("inf")],
             labels=["<0.5%", "0.5-1%", "1-1.5%", "1.5-2%", ">2%"],
             include_lowest=True,
         )
@@ -8881,8 +9111,19 @@ with tab_compression_quality:
 
         combo_atr_df = (
             qdf
-            .dropna(subset=["entry_distance_simple", "breakout_atr_simple"])
-            .groupby(["entry_distance_simple", "breakout_atr_simple"], observed=False)
+            .dropna(
+                subset=[
+                    "entry_vs_compression_simple",
+                    "breakout_atr_simple",
+                ]
+            )
+            .groupby(
+                [
+                    "entry_vs_compression_simple",
+                    "breakout_atr_simple",
+                ],
+                observed=False,
+            )
             .agg(
                 trades=("pnl", "count"),
                 wins=("pnl", lambda x: int((x > 0).sum())),
@@ -8912,14 +9153,16 @@ with tab_compression_quality:
         render_bucket_robustness_explorer(
             source_df=qdf,
             summary_df=combo_atr_df,
-            first_bucket_col="entry_distance_simple",
+            first_bucket_col="entry_vs_compression_simple",
             second_bucket_col="breakout_atr_simple",
-            first_bucket_label="Entry Distance",
+            first_bucket_label="Entry vs Compression High",
             second_bucket_label="Breakout ATR",
-            key_prefix="entry_distance_breakout_atr",
+            key_prefix="entry_vs_compression_breakout_atr",
         )
         
-        st.markdown("### Entry Distance × Breakout Volume")
+        st.markdown(
+            "### Entry vs Compression High × Breakout Volume"
+        )
 
         qdf["breakout_volume_bucket"] = pd.cut(
             qdf["breakout_volume_ratio"],
@@ -8930,13 +9173,30 @@ with tab_compression_quality:
 
         combo_volume_df = (
             qdf
-            .dropna(subset=["entry_distance_simple", "breakout_volume_bucket"])
-            .groupby(["entry_distance_simple", "breakout_volume_bucket"], observed=False)
+            .dropna(
+                subset=[
+                    "entry_vs_compression_simple",
+                    "breakout_volume_bucket",
+                ]
+            )
+            .groupby(
+                [
+                    "entry_vs_compression_simple",
+                    "breakout_volume_bucket",
+                ],
+                observed=False,
+            )
             .agg(
                 trades=("pnl", "count"),
                 wins=("pnl", lambda x: int((x > 0).sum())),
                 losses=("pnl", lambda x: int((x <= 0).sum())),
-                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                winrate=(
+                    "pnl",
+                    lambda x: round(
+                        (x > 0).mean() * 100,
+                        2,
+                    ),
+                ),
                 avg_pnl=("pnl", "mean"),
                 total_pnl=("pnl", "sum"),
                 pf=("pnl", profit_factor),
@@ -8961,11 +9221,11 @@ with tab_compression_quality:
         render_bucket_robustness_explorer(
             source_df=qdf,
             summary_df=combo_volume_df,
-            first_bucket_col="entry_distance_simple",
+            first_bucket_col="entry_vs_compression_simple",
             second_bucket_col="breakout_volume_bucket",
-            first_bucket_label="Entry Distance",
+            first_bucket_label="Entry vs Compression High",
             second_bucket_label="Breakout Volume",
-            key_prefix="entry_distance_breakout_volume",
+            key_prefix="entry_vs_compression_breakout_volume",
         )
 
         st.markdown("### SL Late Entry Cases")
