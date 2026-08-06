@@ -154,6 +154,169 @@ def safe_metric(metrics_dict, key, is_percent=False):
 
     return round(value, 2)
 
+def render_trade_inspector_for_row(
+    row,
+    status="CLOSED",
+    key_prefix="trade_inspector",
+):
+    inspection = trade_inspector_service.inspect(
+        row=row,
+        status=status,
+    )
+
+    selected_trade = inspection.trade
+
+    inspector_timeframe = str(
+        row.get("trigger_tf", "30m") or "30m"
+    )
+
+    valid_timeframes = {
+        "1m",
+        "3m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "4h",
+    }
+
+    if inspector_timeframe not in valid_timeframes:
+        inspector_timeframe = "30m"
+
+    interval_minutes = timeframe_to_minutes(
+        inspector_timeframe
+    )
+
+    with st.spinner(
+        f"Loading {inspector_timeframe} candles "
+        f"for {selected_trade.symbol}..."
+    ):
+        inspection.candles = (
+            trade_inspector_service.load_trade_candles(
+                trade=selected_trade,
+                interval=inspector_timeframe,
+                candles_before=20,
+                candles_after=12,
+            )
+        )
+
+    st.markdown("---")
+
+    st.subheader(
+        f"🔎 Trade Inspector — {selected_trade.symbol}"
+    )
+
+    st.caption(
+        f"Inspection timeframe: {inspector_timeframe}"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Status",
+        selected_trade.status or "-",
+    )
+
+    c2.metric(
+        "Side",
+        selected_trade.side or "-",
+    )
+
+    c3.metric(
+        "Entry",
+        fmt_price_for_display(
+            selected_trade.entry_price
+        ),
+    )
+
+    c4.metric(
+        "Exit",
+        fmt_price_for_display(
+            selected_trade.exit_price
+        ),
+    )
+
+    c5, c6, c7, c8 = st.columns(4)
+
+    c5.metric(
+        "Compression High",
+        fmt_price_for_display(
+            selected_trade.compression_high
+        ),
+    )
+
+    c6.metric(
+        "Compression Low",
+        fmt_price_for_display(
+            selected_trade.compression_low
+        ),
+    )
+
+    c7.metric(
+        "Breakout",
+        fmt_price_for_display(
+            selected_trade.breakout_price
+        ),
+    )
+
+    c8.metric(
+        "Entry Ready",
+        fmt_price_for_display(
+            selected_trade.entry_ready_price
+        ),
+    )
+
+    candles_df = inspection.candles
+
+    if candles_df.empty:
+        st.warning(
+            f"No se pudieron cargar las velas "
+            f"{inspector_timeframe} para este trade."
+        )
+        return
+
+    inspector_fig = build_trade_inspector_chart(
+        inspection=inspection,
+        interval_minutes=interval_minutes,
+        timeframe=inspector_timeframe,
+    )
+
+    st.plotly_chart(
+        inspector_fig,
+        use_container_width=True,
+        key=f"{key_prefix}_chart",
+        config={
+            "displaylogo": False,
+            "scrollZoom": True,
+        },
+    )
+
+    with st.expander(
+        f"{inspector_timeframe} candles",
+        expanded=False,
+    ):
+        candle_columns = [
+            "open_ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+        available_candle_columns = [
+            col
+            for col in candle_columns
+            if col in candles_df.columns
+        ]
+
+        st.dataframe(
+            candles_df[available_candle_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
+
 def render_bucket_robustness_explorer(
     source_df,
     summary_df,
@@ -644,11 +807,50 @@ def render_bucket_robustness_explorer(
             ascending=False,
         )
 
-        st.dataframe(
-            trade_detail_df[available_cols],
+        inspector_source_df = (
+            trade_detail_df
+            .reset_index(drop=True)
+        )
+
+        trade_display_df = inspector_source_df[
+            available_cols
+        ].copy()
+
+        st.caption(
+            "Seleccioná un trade para inspeccionar "
+            "gráficamente su compresión."
+        )
+
+        bucket_trades_event = st.dataframe(
+            trade_display_df,
             use_container_width=True,
             hide_index=True,
+            key=f"{key_prefix}_trade_selector",
+            on_select="rerun",
+            selection_mode="single-row",
         )
+
+        selected_trade_rows = (
+            bucket_trades_event.selection.rows
+        )
+
+        if selected_trade_rows:
+            selected_position = selected_trade_rows[0]
+
+            selected_trade_row = (
+                inspector_source_df.iloc[
+                    selected_position
+                ]
+            )
+
+            render_trade_inspector_for_row(
+                row=selected_trade_row,
+                status="CLOSED",
+                key_prefix=(
+                    f"{key_prefix}_"
+                    f"{selected_trade_row['trade_key']}"
+                ),
+            )
 
     # ==========================================
     # BY DAY
