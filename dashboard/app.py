@@ -1424,6 +1424,512 @@ def build_compression_analytics_report(
 
     return report
 
+def prepare_compression_outcome_df(
+    data: pd.DataFrame,
+) -> pd.DataFrame:
+
+    if data.empty or "pnl" not in data.columns:
+        return pd.DataFrame()
+
+    out = data.copy()
+
+    out["pnl"] = pd.to_numeric(
+        out["pnl"],
+        errors="coerce",
+    )
+
+    out = out.dropna(subset=["pnl"]).copy()
+
+    # =========================
+    # UNIQUE TRADE KEY
+    # =========================
+
+    if (
+        "trade_id" in out.columns
+        and out["trade_id"].notna().all()
+        and out["trade_id"].astype(str).nunique()
+        == len(out)
+    ):
+        out["trade_key"] = (
+            out["trade_id"].astype(str)
+        )
+
+    elif all(
+        col in out.columns
+        for col in ["symbol", "entry_ts"]
+    ):
+        out["trade_key"] = (
+            out["symbol"].astype(str)
+            + "_"
+            + out["entry_ts"].astype(str)
+        )
+
+    elif all(
+        col in out.columns
+        for col in ["symbol", "entry_ts_dt"]
+    ):
+        out["trade_key"] = (
+            out["symbol"].astype(str)
+            + "_"
+            + out["entry_ts_dt"].astype(str)
+        )
+
+    else:
+        out["trade_key"] = (
+            "row_" + out.index.astype(str)
+        )
+
+    elif all(
+        col in out.columns
+        for col in ["symbol", "entry_ts"]
+    ):
+        out["trade_key"] = (
+            out["symbol"].astype(str)
+            + "_"
+            + out["entry_ts"].astype(str)
+        )
+
+    elif all(
+        col in out.columns
+        for col in ["symbol", "entry_ts_dt"]
+    ):
+        out["trade_key"] = (
+            out["symbol"].astype(str)
+            + "_"
+            + out["entry_ts_dt"].astype(str)
+        )
+
+    else:
+        out["trade_key"] = (
+            "row_" + out.index.astype(str)
+        )
+
+    # Evitar que un trade duplicado altere las estadísticas.
+    out = out.drop_duplicates(
+        subset=["trade_key"],
+        keep="first",
+    ).copy()
+
+    # =========================
+    # TP / SL OUTCOME
+    # =========================
+
+    if "exit_reason" not in out.columns:
+        out["compression_outcome"] = "OTHER"
+        return out
+
+    exit_reason = (
+        out["exit_reason"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    is_tp = (
+        exit_reason.eq("TP")
+        | exit_reason.str.contains(
+            r"TAKE[_ ]?PROFIT",
+            regex=True,
+            na=False,
+        )
+    )
+
+    is_sl = (
+        exit_reason.eq("SL")
+        | exit_reason.str.contains(
+            r"STOP[_ ]?LOSS",
+            regex=True,
+            na=False,
+        )
+    )
+
+    out["compression_outcome"] = np.select(
+        [
+            is_tp,
+            is_sl,
+        ],
+        [
+            "TP",
+            "SL",
+        ],
+        default="OTHER",
+    )
+
+    # =========================
+    # ENTRY DATETIME
+    # =========================
+
+    if "entry_ts_dt" in out.columns:
+        out["outcome_entry_datetime"] = pd.to_datetime(
+            out["entry_ts_dt"],
+            errors="coerce",
+            utc=True,
+        )
+
+    elif "entry_ts" in out.columns:
+        numeric_entry_ts = pd.to_numeric(
+            out["entry_ts"],
+            errors="coerce",
+        )
+
+        out["outcome_entry_datetime"] = pd.to_datetime(
+            numeric_entry_ts,
+            unit="ms",
+            errors="coerce",
+            utc=True,
+        )
+
+        missing_datetime = (
+            out["outcome_entry_datetime"].isna()
+        )
+
+        if missing_datetime.any():
+            out.loc[
+                missing_datetime,
+                "outcome_entry_datetime",
+            ] = pd.to_datetime(
+                out.loc[
+                    missing_datetime,
+                    "entry_ts",
+                ],
+                errors="coerce",
+                utc=True,
+            )
+
+    else:
+        out["outcome_entry_datetime"] = pd.NaT
+
+    out["outcome_entry_date"] = (
+        out["outcome_entry_datetime"].dt.date
+    )
+
+    out["outcome_entry_30m"] = (
+        out["outcome_entry_datetime"]
+        .dt.floor("30min")
+    )
+
+    return out
+
+def build_outcome_numeric_comparison(
+    data: pd.DataFrame,
+    feature_cols: list[str],
+) -> pd.DataFrame:
+
+    rows = []
+
+    for feature in feature_cols:
+        if feature not in data.columns:
+            continue
+
+        work = data[
+            [
+                "compression_outcome",
+                feature,
+            ]
+        ].copy()
+
+        work[feature] = pd.to_numeric(
+            work[feature],
+            errors="coerce",
+        )
+
+        work = work.dropna(subset=[feature])
+
+        tp_values = work.loc[
+            work["compression_outcome"] == "TP",
+            feature,
+        ]
+
+        sl_values = work.loc[
+            work["compression_outcome"] == "SL",
+            feature,
+        ]
+
+        if tp_values.empty or sl_values.empty:
+            continue
+
+        all_values = pd.concat(
+            [
+                tp_values,
+                sl_values,
+            ]
+        )
+
+        pooled_std = all_values.std(ddof=0)
+
+        mean_difference = (
+            tp_values.mean()
+            - sl_values.mean()
+        )
+
+        standardized_difference = (
+            mean_difference / pooled_std
+            if pd.notna(pooled_std) and pooled_std > 0
+            else np.nan
+        )
+
+        rows.append({
+            "feature": feature,
+
+            "tp_trades": len(tp_values),
+            "sl_trades": len(sl_values),
+
+            "coverage_pct": (
+                len(work) / len(data) * 100
+                if len(data) > 0
+                else 0
+            ),
+
+            "tp_mean": tp_values.mean(),
+            "sl_mean": sl_values.mean(),
+            "mean_difference_tp_minus_sl": (
+                mean_difference
+            ),
+
+            "tp_median": tp_values.median(),
+            "sl_median": sl_values.median(),
+            "median_difference_tp_minus_sl": (
+                tp_values.median()
+                - sl_values.median()
+            ),
+
+            "standardized_difference": (
+                standardized_difference
+            ),
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    report = pd.DataFrame(rows)
+
+    report["abs_standardized_difference"] = (
+        report["standardized_difference"].abs()
+    )
+
+    numeric_cols = [
+        "coverage_pct",
+        "tp_mean",
+        "sl_mean",
+        "mean_difference_tp_minus_sl",
+        "tp_median",
+        "sl_median",
+        "median_difference_tp_minus_sl",
+        "standardized_difference",
+        "abs_standardized_difference",
+    ]
+
+    report[numeric_cols] = (
+        report[numeric_cols].round(4)
+    )
+
+    return report.sort_values(
+        [
+            "abs_standardized_difference",
+            "coverage_pct",
+        ],
+        ascending=[
+            False,
+            False,
+        ],
+        na_position="last",
+    )
+    
+def build_compression_outcome_bucket_report(
+    data: pd.DataFrame,
+    group_cols: list[str],
+    min_trades: int = 1,
+) -> pd.DataFrame:
+
+    required_cols = (
+        group_cols
+        + [
+            "trade_key",
+            "compression_outcome",
+            "pnl",
+        ]
+    )
+
+    missing_cols = [
+        col
+        for col in required_cols
+        if col not in data.columns
+    ]
+
+    if missing_cols:
+        return pd.DataFrame()
+
+    work = data.copy()
+
+    work = work[
+        work["compression_outcome"]
+        .isin(["TP", "SL"])
+    ].copy()
+
+    work["pnl"] = pd.to_numeric(
+        work["pnl"],
+        errors="coerce",
+    )
+
+    work = work.dropna(
+        subset=group_cols + ["pnl"]
+    )
+
+    if work.empty:
+        return pd.DataFrame()
+
+    aggregations = {
+        "trades": (
+            "trade_key",
+            "nunique",
+        ),
+        "tp": (
+            "compression_outcome",
+            lambda x: int((x == "TP").sum()),
+        ),
+        "sl": (
+            "compression_outcome",
+            lambda x: int((x == "SL").sum()),
+        ),
+        "avg_pnl": (
+            "pnl",
+            "mean",
+        ),
+        "median_pnl": (
+            "pnl",
+            "median",
+        ),
+        "total_pnl": (
+            "pnl",
+            "sum",
+        ),
+        "profit_factor": (
+            "pnl",
+            compression_profit_factor,
+        ),
+    }
+
+    if "symbol" in work.columns:
+        aggregations["unique_symbols"] = (
+            "symbol",
+            "nunique",
+        )
+
+    if "outcome_entry_date" in work.columns:
+        aggregations["unique_days"] = (
+            "outcome_entry_date",
+            "nunique",
+        )
+
+    if "outcome_entry_30m" in work.columns:
+        aggregations["unique_batches"] = (
+            "outcome_entry_30m",
+            "nunique",
+        )
+
+    report = (
+        work
+        .groupby(
+            group_cols,
+            observed=False,
+        )
+        .agg(**aggregations)
+        .reset_index()
+    )
+
+    report = report[
+        report["trades"] >= min_trades
+    ].copy()
+
+    if report.empty:
+        return report
+
+    report["tp_rate"] = (
+        report["tp"]
+        / report["trades"]
+        * 100
+    ).round(2)
+
+    report["sl_rate"] = (
+        report["sl"]
+        / report["trades"]
+        * 100
+    ).round(2)
+
+    for col in [
+        "avg_pnl",
+        "median_pnl",
+        "total_pnl",
+    ]:
+        report[col] = report[col].round(4)
+
+    return report.sort_values(
+        [
+            "profit_factor",
+            "total_pnl",
+            "trades",
+        ],
+        ascending=[
+            False,
+            False,
+            False,
+        ],
+        na_position="last",
+    )
+    
+def summarize_compression_outcome(
+    data: pd.DataFrame,
+) -> dict:
+
+    pnl = pd.to_numeric(
+        data["pnl"],
+        errors="coerce",
+    ).dropna()
+
+    tp = int(
+        (
+            data["compression_outcome"]
+            == "TP"
+        ).sum()
+    )
+
+    sl = int(
+        (
+            data["compression_outcome"]
+            == "SL"
+        ).sum()
+    )
+
+    decided_trades = tp + sl
+
+    return {
+        "trades": len(pnl),
+        "tp": tp,
+        "sl": sl,
+
+        "tp_rate": (
+            tp / decided_trades * 100
+            if decided_trades > 0
+            else 0
+        ),
+
+        "avg_pnl": (
+            pnl.mean()
+            if not pnl.empty
+            else 0
+        ),
+
+        "total_pnl": (
+            pnl.sum()
+            if not pnl.empty
+            else 0
+        ),
+
+        "profit_factor": (
+            compression_profit_factor(pnl)
+        ),
+    }
 
 def add_compression_analytics_buckets(data: pd.DataFrame) -> pd.DataFrame:
     """
@@ -3365,6 +3871,7 @@ if df_raw.empty:
     tab_execution,
     tab_compression_quality,
     tab_compression_analytics,
+    tab_compression_outcomes,
     tab_compression_pipeline,
     tab_tp_sl_replay,
 ) = st.tabs([
@@ -3378,6 +3885,7 @@ if df_raw.empty:
     "⏱️ Execution Analysis",
     "🎯 Compression Entry Quality",
     "🔬 Compression Analytics",
+    "🧬 Compression Outcomes",
     "Compression Pipeline",
     "🧪 TP / SL Replay",
 ])
@@ -11398,6 +11906,1120 @@ with tab_compression_pipeline:
                 use_container_width=True,
                 hide_index=True,
             )
+            
+with tab_compression_outcomes:
+
+    st.markdown("---")
+    st.subheader("🧬 Compression Outcome Analysis")
+
+    st.caption(
+        "Compara TP vs SL para detectar similitudes y diferencias "
+        "en la estructura de las compresiones. Los resultados son "
+        "hipótesis analíticas: no modifican filtros ni scoring."
+    )
+
+    # ======================================================
+    # PREPARE DATA
+    # ======================================================
+
+    outcome_source_df = add_compression_analytics_buckets(
+        df_view
+    )
+
+    # Evita incluir trades de estrategias que no sean compresión.
+    compression_identity_cols = [
+        "compression_shape",
+        "compression_quality_label",
+        "compression_height_pct",
+        "compression_duration",
+        "compression_score",
+        "compression_high",
+        "compression_low",
+    ]
+
+    available_identity_cols = [
+        col
+        for col in compression_identity_cols
+        if col in outcome_source_df.columns
+    ]
+
+    if available_identity_cols:
+        outcome_source_df = outcome_source_df[
+            outcome_source_df[
+                available_identity_cols
+            ]
+            .notna()
+            .any(axis=1)
+        ].copy()
+
+    outcome_df = prepare_compression_outcome_df(
+        outcome_source_df
+    )
+
+    if outcome_df.empty:
+        st.info(
+            "No closed compression trades available."
+        )
+
+    else:
+        decided_outcome_df = outcome_df[
+            outcome_df["compression_outcome"]
+            .isin(["TP", "SL"])
+        ].copy()
+
+        other_outcomes = int(
+            (
+                outcome_df["compression_outcome"]
+                == "OTHER"
+            ).sum()
+        )
+
+        if decided_outcome_df.empty:
+            st.info(
+                "No TP or SL outcomes could be identified "
+                "from exit_reason."
+            )
+
+        else:
+            # ==================================================
+            # FILTERS
+            # ==================================================
+
+            f1, f2, f3 = st.columns(3)
+
+            with f1:
+                if "side" in decided_outcome_df.columns:
+                    outcome_sides = sorted(
+                        decided_outcome_df["side"]
+                        .dropna()
+                        .astype(str)
+                        .str.upper()
+                        .unique()
+                        .tolist()
+                    )
+                else:
+                    outcome_sides = []
+
+                selected_outcome_side = st.selectbox(
+                    "Side",
+                    options=[
+                        "ALL",
+                        *outcome_sides,
+                    ],
+                    key="compression_outcome_side",
+                )
+
+            with f2:
+                if "symbol" in decided_outcome_df.columns:
+                    outcome_symbols = sorted(
+                        decided_outcome_df["symbol"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+                else:
+                    outcome_symbols = []
+
+                selected_outcome_symbol = st.selectbox(
+                    "Symbol",
+                    options=[
+                        "ALL",
+                        *outcome_symbols,
+                    ],
+                    key="compression_outcome_symbol",
+                )
+
+            with f3:
+                max_outcome_min_trades = max(
+                    1,
+                    min(
+                        50,
+                        len(decided_outcome_df),
+                    ),
+                )
+
+                outcome_min_trades = st.slider(
+                    "Minimum trades per bucket",
+                    min_value=1,
+                    max_value=max_outcome_min_trades,
+                    value=min(
+                        10,
+                        max_outcome_min_trades,
+                    ),
+                    step=1,
+                    key="compression_outcome_min_trades",
+                )
+
+            filtered_outcome_df = (
+                decided_outcome_df.copy()
+            )
+
+            if selected_outcome_side != "ALL":
+                filtered_outcome_df = filtered_outcome_df[
+                    filtered_outcome_df["side"]
+                    .astype(str)
+                    .str.upper()
+                    .eq(selected_outcome_side)
+                ].copy()
+
+            if selected_outcome_symbol != "ALL":
+                filtered_outcome_df = filtered_outcome_df[
+                    filtered_outcome_df["symbol"]
+                    .astype(str)
+                    .eq(selected_outcome_symbol)
+                ].copy()
+
+            # ==================================================
+            # SUBTABS
+            # ==================================================
+
+            (
+                outcomes_overview_tab,
+                outcomes_features_tab,
+                outcomes_buckets_tab,
+                outcomes_robustness_tab,
+                outcomes_trades_tab,
+            ) = st.tabs([
+                "Overview TP vs SL",
+                "Feature Comparison",
+                "Bucket Ranking",
+                "Robustness",
+                "Trades",
+            ])
+
+            # ==================================================
+            # OVERVIEW TP VS SL
+            # ==================================================
+
+            with outcomes_overview_tab:
+
+                summary = summarize_compression_outcome(
+                    filtered_outcome_df
+                )
+
+                m1, m2, m3, m4, m5, m6 = st.columns(6)
+
+                m1.metric(
+                    "TP + SL Trades",
+                    summary["trades"],
+                )
+
+                m2.metric(
+                    "TP",
+                    summary["tp"],
+                )
+
+                m3.metric(
+                    "SL",
+                    summary["sl"],
+                )
+
+                m4.metric(
+                    "TP Rate",
+                    f'{summary["tp_rate"]:.2f}%',
+                )
+
+                m5.metric(
+                    "Profit Factor",
+                    (
+                        f'{summary["profit_factor"]:.2f}'
+                        if summary["profit_factor"] is not None
+                        else "∞"
+                    ),
+                )
+
+                m6.metric(
+                    "Avg / Total PnL",
+                    (
+                        f'{summary["avg_pnl"]:.4f}% / '
+                        f'{summary["total_pnl"]:.4f}%'
+                    ),
+                )
+
+                if other_outcomes > 0:
+                    st.caption(
+                        f"{other_outcomes} trades with other "
+                        "exit reasons were excluded."
+                    )
+
+                outcome_rows = []
+
+                descriptive_cols = [
+                    "max_favorable_pct",
+                    "max_adverse_pct",
+                    "realized_r",
+                    "compression_duration",
+                    "compression_height_pct",
+                    "range_ratio",
+                    "atr_ratio",
+                    "volume_ratio",
+                    "breakout_extension_atr",
+                    "breakout_volume_ratio",
+                    "entry_vs_compression_pct",
+                    "entry_vs_breakout_pct",
+                ]
+
+                for outcome_name in ["TP", "SL"]:
+                    subset = filtered_outcome_df[
+                        filtered_outcome_df[
+                            "compression_outcome"
+                        ].eq(outcome_name)
+                    ]
+
+                    row = {
+                        "outcome": outcome_name,
+                        "trades": len(subset),
+                        "avg_pnl": pd.to_numeric(
+                            subset["pnl"],
+                            errors="coerce",
+                        ).mean(),
+                        "median_pnl": pd.to_numeric(
+                            subset["pnl"],
+                            errors="coerce",
+                        ).median(),
+                    }
+
+                    for col in descriptive_cols:
+                        if col not in subset.columns:
+                            continue
+
+                        values = pd.to_numeric(
+                            subset[col],
+                            errors="coerce",
+                        )
+
+                        row[f"avg_{col}"] = values.mean()
+                        row[f"median_{col}"] = values.median()
+
+                    outcome_rows.append(row)
+
+                outcome_overview_df = pd.DataFrame(
+                    outcome_rows
+                )
+
+                numeric_overview_cols = (
+                    outcome_overview_df
+                    .select_dtypes(
+                        include=[np.number]
+                    )
+                    .columns
+                )
+
+                outcome_overview_df[
+                    numeric_overview_cols
+                ] = outcome_overview_df[
+                    numeric_overview_cols
+                ].round(4)
+
+                st.dataframe(
+                    outcome_overview_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.caption(
+                    "MFE, MAE y realized R describen lo ocurrido "
+                    "después de la entrada. No deben utilizarse "
+                    "como filtros previos a la operación."
+                )
+
+            # ==================================================
+            # FEATURE COMPARISON
+            # ==================================================
+
+            with outcomes_features_tab:
+
+                st.markdown(
+                    "### Compression features: TP vs SL"
+                )
+
+                st.caption(
+                    "Compara promedios, medianas y distribuciones "
+                    "de variables conocidas al momento de entrar."
+                )
+
+                entry_feature_cols = [
+                    # Detector
+                    "compression_score",
+                    "trend_score",
+                    "range_ratio",
+                    "atr_ratio",
+                    "volume_ratio",
+                    "avg_body_pct",
+                    "compression_range_pct",
+
+                    # Structure
+                    "compression_height_pct",
+                    "compression_duration",
+                    "upper_slope",
+                    "lower_slope",
+                    "slope_difference",
+                    "touches_high",
+                    "touches_low",
+                    "touches_high_ratio",
+                    "touches_low_ratio",
+                    "touch_imbalance",
+                    "touch_imbalance_ratio",
+                    "inside_ratio",
+
+                    # Breakout
+                    "breakout_volume_ratio",
+                    "breakout_extension_pct",
+                    "breakout_extension_atr",
+
+                    # Entry
+                    "entry_vs_compression_pct",
+                    "entry_vs_breakout_pct",
+                    "structural_risk_pct",
+                    "planned_rr",
+
+                    # Candidate selection
+                    "selected_lookback",
+                    "selection_score",
+                ]
+
+                numeric_comparison = (
+                    build_outcome_numeric_comparison(
+                        filtered_outcome_df,
+                        entry_feature_cols,
+                    )
+                )
+
+                if numeric_comparison.empty:
+                    st.info(
+                        "No comparable numeric TP/SL "
+                        "features available."
+                    )
+
+                else:
+                    st.dataframe(
+                        numeric_comparison,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.caption(
+                        "Ordenado por diferencia estandarizada "
+                        "absoluta. Una diferencia grande es una "
+                        "hipótesis para estudiar, no un filtro."
+                    )
+
+                    selected_feature = st.selectbox(
+                        "Inspect feature distribution",
+                        options=numeric_comparison[
+                            "feature"
+                        ].tolist(),
+                        key="compression_outcome_feature",
+                    )
+
+                    feature_fig = go.Figure()
+
+                    outcome_colors = {
+                        "TP": "#22c55e",
+                        "SL": "#ef4444",
+                    }
+
+                    for outcome_name in ["TP", "SL"]:
+                        feature_values = pd.to_numeric(
+                            filtered_outcome_df.loc[
+                                filtered_outcome_df[
+                                    "compression_outcome"
+                                ].eq(outcome_name),
+                                selected_feature,
+                            ],
+                            errors="coerce",
+                        ).dropna()
+
+                        feature_fig.add_trace(
+                            go.Box(
+                                y=feature_values,
+                                name=outcome_name,
+                                marker_color=outcome_colors[
+                                    outcome_name
+                                ],
+                                boxmean=True,
+                            )
+                        )
+
+                    feature_fig.update_layout(
+                        title=(
+                            f"{selected_feature}: TP vs SL"
+                        ),
+                        yaxis_title=selected_feature,
+                        height=430,
+                        showlegend=False,
+                    )
+
+                    st.plotly_chart(
+                        feature_fig,
+                        use_container_width=True,
+                        key=(
+                            "compression_outcome_"
+                            "feature_boxplot"
+                        ),
+                    )
+
+                # ==============================================
+                # CATEGORICAL FEATURES
+                # ==============================================
+
+                st.markdown(
+                    "### Categorical similarities"
+                )
+
+                categorical_features = [
+                    "compression_shape",
+                    "compression_quality_label",
+                    "selected_lookback",
+                    "base_mode",
+                    "trigger_tf",
+                    "side",
+                ]
+
+                available_categorical_features = [
+                    col
+                    for col in categorical_features
+                    if (
+                        col in filtered_outcome_df.columns
+                        and filtered_outcome_df[col]
+                        .nunique(dropna=True) > 1
+                    )
+                ]
+
+                if not available_categorical_features:
+                    st.info(
+                        "No categorical compression features "
+                        "available."
+                    )
+
+                else:
+                    selected_categorical_feature = (
+                        st.selectbox(
+                            "Categorical feature",
+                            options=(
+                                available_categorical_features
+                            ),
+                            key=(
+                                "compression_outcome_"
+                                "categorical_feature"
+                            ),
+                        )
+                    )
+
+                    categorical_report = (
+                        build_compression_outcome_bucket_report(
+                            filtered_outcome_df,
+                            [selected_categorical_feature],
+                            min_trades=outcome_min_trades,
+                        )
+                    )
+
+                    if categorical_report.empty:
+                        st.info(
+                            "No categorical groups meet the "
+                            "minimum trade requirement."
+                        )
+
+                    else:
+                        st.dataframe(
+                            categorical_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+            # ==================================================
+            # BUCKET RANKING
+            # ==================================================
+
+            with outcomes_buckets_tab:
+
+                st.markdown(
+                    "### TP and SL rate by compression bucket"
+                )
+
+                outcome_dimensions = {
+                    "Compression Score":
+                        "compression_score_bucket",
+
+                    "Range Ratio":
+                        "range_ratio_bucket",
+
+                    "ATR Ratio":
+                        "atr_ratio_bucket",
+
+                    "Compression Volume":
+                        "volume_ratio_bucket",
+
+                    "Compression Range %":
+                        "compression_range_pct_bucket",
+
+                    "Compression Duration":
+                        "compression_duration_bucket",
+
+                    "Compression Height":
+                        "compression_height_bucket",
+
+                    "Total Touches":
+                        "total_touches_bucket",
+
+                    "Touch Balance":
+                        "touch_balance_bucket",
+
+                    "Upper Slope":
+                        "upper_slope_bucket",
+
+                    "Lower Slope":
+                        "lower_slope_bucket",
+
+                    "Slope Difference":
+                        "slope_difference_bucket",
+
+                    "Breakout Volume":
+                        "breakout_volume_ratio_bucket",
+
+                    "Breakout Extension %":
+                        "breakout_extension_pct_bucket",
+
+                    "Breakout Extension ATR":
+                        "breakout_extension_atr_bucket",
+
+                    "Entry vs Compression":
+                        "entry_vs_compression_bucket",
+
+                    "Entry vs Breakout":
+                        "entry_vs_breakout_bucket",
+
+                    "Compression Shape":
+                        "compression_shape",
+
+                    "Compression Quality":
+                        "compression_quality_label",
+
+                    "Selected Lookback":
+                        "selected_lookback",
+                }
+
+                outcome_dimensions = {
+                    label: col
+                    for label, col
+                    in outcome_dimensions.items()
+                    if col in filtered_outcome_df.columns
+                }
+
+                if not outcome_dimensions:
+                    st.info(
+                        "No compression bucket columns "
+                        "available."
+                    )
+
+                else:
+                    selected_dimension_label = (
+                        st.selectbox(
+                            "Compression dimension",
+                            options=list(
+                                outcome_dimensions.keys()
+                            ),
+                            key=(
+                                "compression_outcome_"
+                                "bucket_dimension"
+                            ),
+                        )
+                    )
+
+                    selected_dimension = (
+                        outcome_dimensions[
+                            selected_dimension_label
+                        ]
+                    )
+
+                    outcome_bucket_report = (
+                        build_compression_outcome_bucket_report(
+                            filtered_outcome_df,
+                            [selected_dimension],
+                            min_trades=(
+                                outcome_min_trades
+                            ),
+                        )
+                    )
+
+                    if outcome_bucket_report.empty:
+                        st.info(
+                            "No buckets meet the minimum "
+                            "trade requirement."
+                        )
+
+                    else:
+                        st.dataframe(
+                            outcome_bucket_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        bucket_fig = go.Figure()
+
+                        bucket_fig.add_trace(
+                            go.Bar(
+                                x=(
+                                    outcome_bucket_report[
+                                        selected_dimension
+                                    ].astype(str)
+                                ),
+                                y=(
+                                    outcome_bucket_report[
+                                        "tp_rate"
+                                    ]
+                                ),
+                                name="TP Rate",
+                                marker_color="#22c55e",
+                            )
+                        )
+
+                        bucket_fig.add_trace(
+                            go.Bar(
+                                x=(
+                                    outcome_bucket_report[
+                                        selected_dimension
+                                    ].astype(str)
+                                ),
+                                y=(
+                                    outcome_bucket_report[
+                                        "sl_rate"
+                                    ]
+                                ),
+                                name="SL Rate",
+                                marker_color="#ef4444",
+                            )
+                        )
+
+                        bucket_fig.update_layout(
+                            barmode="stack",
+                            xaxis_title=(
+                                selected_dimension_label
+                            ),
+                            yaxis_title=(
+                                "Outcome rate (%)"
+                            ),
+                            height=460,
+                        )
+
+                        st.plotly_chart(
+                            bucket_fig,
+                            use_container_width=True,
+                            key=(
+                                "compression_outcome_"
+                                "bucket_chart"
+                            ),
+                        )
+
+            # ==================================================
+            # ROBUSTNESS
+            # ==================================================
+
+            with outcomes_robustness_tab:
+
+                st.markdown(
+                    "### Bucket robustness"
+                )
+
+                st.caption(
+                    "Comprueba si el resultado depende del mejor "
+                    "símbolo, día, batch o mitad del período."
+                )
+
+                robustness_dimensions = {
+                    "Range Ratio":
+                        "range_ratio_bucket",
+
+                    "ATR Ratio":
+                        "atr_ratio_bucket",
+
+                    "Compression Volume":
+                        "volume_ratio_bucket",
+
+                    "Compression Range %":
+                        "compression_range_pct_bucket",
+
+                    "Compression Duration":
+                        "compression_duration_bucket",
+
+                    "Compression Height":
+                        "compression_height_bucket",
+
+                    "Breakout Volume":
+                        "breakout_volume_ratio_bucket",
+
+                    "Breakout Extension ATR":
+                        "breakout_extension_atr_bucket",
+
+                    "Entry vs Compression":
+                        "entry_vs_compression_bucket",
+
+                    "Entry vs Breakout":
+                        "entry_vs_breakout_bucket",
+
+                    "Compression Shape":
+                        "compression_shape",
+
+                    "Compression Quality":
+                        "compression_quality_label",
+                }
+
+                robustness_dimensions = {
+                    label: col
+                    for label, col
+                    in robustness_dimensions.items()
+                    if (
+                        col in filtered_outcome_df.columns
+                        and filtered_outcome_df[col]
+                        .notna()
+                        .any()
+                    )
+                }
+
+                if not robustness_dimensions:
+                    st.info(
+                        "No dimensions available "
+                        "for robustness."
+                    )
+
+                else:
+                    r1, r2 = st.columns(2)
+
+                    with r1:
+                        robustness_label = st.selectbox(
+                            "Robustness dimension",
+                            options=list(
+                                robustness_dimensions.keys()
+                            ),
+                            key=(
+                                "compression_outcome_"
+                                "robustness_dimension"
+                            ),
+                        )
+
+                    robustness_col = (
+                        robustness_dimensions[
+                            robustness_label
+                        ]
+                    )
+
+                    robustness_values = sorted(
+                        filtered_outcome_df[
+                            robustness_col
+                        ]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+
+                    with r2:
+                        selected_robustness_value = (
+                            st.selectbox(
+                                "Bucket value",
+                                options=robustness_values,
+                                key=(
+                                    "compression_outcome_"
+                                    "robustness_value"
+                                ),
+                            )
+                        )
+
+                    robust_df = filtered_outcome_df[
+                        filtered_outcome_df[
+                            robustness_col
+                        ]
+                        .astype(str)
+                        .eq(
+                            selected_robustness_value
+                        )
+                    ].copy()
+
+                    robustness_rows = []
+
+                    def append_robustness_scenario(
+                        scenario_name,
+                        scenario_df,
+                    ):
+                        result = (
+                            summarize_compression_outcome(
+                                scenario_df
+                            )
+                        )
+
+                        robustness_rows.append({
+                            "scenario": scenario_name,
+                            **result,
+                        })
+
+                    append_robustness_scenario(
+                        "Full bucket",
+                        robust_df,
+                    )
+
+                    # ==========================================
+                    # WITHOUT BEST SYMBOL
+                    # ==========================================
+
+                    if (
+                        "symbol" in robust_df.columns
+                        and not robust_df.empty
+                    ):
+                        pnl_by_symbol = (
+                            robust_df
+                            .groupby("symbol")["pnl"]
+                            .sum()
+                        )
+
+                        if not pnl_by_symbol.empty:
+                            best_symbol = (
+                                pnl_by_symbol.idxmax()
+                            )
+
+                            append_robustness_scenario(
+                                (
+                                    "Without best symbol: "
+                                    f"{best_symbol}"
+                                ),
+                                robust_df[
+                                    robust_df["symbol"]
+                                    != best_symbol
+                                ],
+                            )
+
+                    # ==========================================
+                    # WITHOUT BEST DAY
+                    # ==========================================
+
+                    valid_days = robust_df.dropna(
+                        subset=["outcome_entry_date"]
+                    )
+
+                    if not valid_days.empty:
+                        pnl_by_day = (
+                            valid_days
+                            .groupby(
+                                "outcome_entry_date"
+                            )["pnl"]
+                            .sum()
+                        )
+
+                        best_day = pnl_by_day.idxmax()
+
+                        append_robustness_scenario(
+                            (
+                                "Without best day: "
+                                f"{best_day}"
+                            ),
+                            robust_df[
+                                robust_df[
+                                    "outcome_entry_date"
+                                ] != best_day
+                            ],
+                        )
+
+                    # ==========================================
+                    # WITHOUT BEST 30M BATCH
+                    # ==========================================
+
+                    valid_batches = robust_df.dropna(
+                        subset=["outcome_entry_30m"]
+                    )
+
+                    if not valid_batches.empty:
+                        pnl_by_batch = (
+                            valid_batches
+                            .groupby(
+                                "outcome_entry_30m"
+                            )["pnl"]
+                            .sum()
+                        )
+
+                        best_batch = (
+                            pnl_by_batch.idxmax()
+                        )
+
+                        append_robustness_scenario(
+                            (
+                                "Without best batch: "
+                                f"{best_batch}"
+                            ),
+                            robust_df[
+                                robust_df[
+                                    "outcome_entry_30m"
+                                ] != best_batch
+                            ],
+                        )
+
+                    # ==========================================
+                    # FIRST HALF VS SECOND HALF
+                    # ==========================================
+
+                    ordered_robust_df = (
+                        robust_df
+                        .sort_values(
+                            "outcome_entry_datetime"
+                        )
+                    )
+
+                    if len(ordered_robust_df) >= 2:
+                        midpoint = (
+                            len(ordered_robust_df) // 2
+                        )
+
+                        append_robustness_scenario(
+                            "First half",
+                            ordered_robust_df.iloc[
+                                :midpoint
+                            ],
+                        )
+
+                        append_robustness_scenario(
+                            "Second half",
+                            ordered_robust_df.iloc[
+                                midpoint:
+                            ],
+                        )
+
+                    robustness_report = pd.DataFrame(
+                        robustness_rows
+                    )
+
+                    for col in [
+                        "tp_rate",
+                        "avg_pnl",
+                        "total_pnl",
+                        "profit_factor",
+                    ]:
+                        if col in robustness_report.columns:
+                            robustness_report[col] = (
+                                pd.to_numeric(
+                                    robustness_report[col],
+                                    errors="coerce",
+                                ).round(4)
+                            )
+
+                    st.dataframe(
+                        robustness_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # ==================================================
+            # TRADES / TRADE INSPECTOR
+            # ==================================================
+
+            with outcomes_trades_tab:
+
+                st.markdown(
+                    "### TP and SL trade inspection"
+                )
+
+                preferred_trade_cols = [
+                    "trade_key",
+                    "symbol",
+                    "side",
+                    "entry_ts_dt",
+                    "exit_ts_dt",
+                    "compression_outcome",
+                    "exit_reason",
+                    "pnl",
+
+                    "compression_shape",
+                    "compression_quality_label",
+                    "compression_score",
+                    "compression_duration",
+                    "compression_height_pct",
+
+                    "range_ratio",
+                    "atr_ratio",
+                    "volume_ratio",
+
+                    "touches_high",
+                    "touches_low",
+                    "touches_high_ratio",
+                    "touches_low_ratio",
+                    "touch_imbalance_ratio",
+
+                    "breakout_volume_ratio",
+                    "breakout_extension_pct",
+                    "breakout_extension_atr",
+
+                    "entry_vs_compression_pct",
+                    "entry_vs_breakout_pct",
+
+                    "structural_risk_pct",
+                    "planned_rr",
+                    "selected_lookback",
+
+                    "max_favorable_pct",
+                    "max_adverse_pct",
+                ]
+
+                available_trade_cols = [
+                    col
+                    for col in preferred_trade_cols
+                    if col in filtered_outcome_df.columns
+                ]
+
+                outcome_trade_source = (
+                    filtered_outcome_df
+                    .sort_values(
+                        "outcome_entry_datetime",
+                        ascending=False,
+                    )
+                    .reset_index(drop=True)
+                )
+
+                st.caption(
+                    "Seleccioná un trade para inspeccionar "
+                    "gráficamente su compresión."
+                )
+
+                outcome_trade_event = st.dataframe(
+                    outcome_trade_source[
+                        available_trade_cols
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "compression_outcome_"
+                        "trade_selector"
+                    ),
+                    on_select="rerun",
+                    selection_mode="single-row",
+                )
+
+                selected_trade_rows = (
+                    outcome_trade_event
+                    .selection
+                    .rows
+                )
+
+                if selected_trade_rows:
+                    selected_position = (
+                        selected_trade_rows[0]
+                    )
+
+                    selected_trade_row = (
+                        outcome_trade_source.iloc[
+                            selected_position
+                        ]
+                    )
+
+                    render_trade_inspector_for_row(
+                        row=selected_trade_row,
+                        status="CLOSED",
+                        key_prefix=(
+                            "compression_outcome_"
+                            + str(
+                                selected_trade_row[
+                                    "trade_key"
+                                ]
+                            )
+                        ),
+                    )
             
 # ==========================================================
 # TP / SL POST-TRADE REPLAY
