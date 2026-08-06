@@ -9498,6 +9498,35 @@ with tab_compression_quality:
                 "pnl",
                 profit_factor,
             ),
+            # Valor real dentro del bucket de volumen
+            "avg_breakout_volume": (
+                "breakout_volume_ratio",
+                "mean",
+            ),
+            "median_breakout_volume": (
+                "breakout_volume_ratio",
+                "median",
+            ),
+
+            # Valor real dentro del bucket de extensión ATR
+            "avg_breakout_extension_atr": (
+                "breakout_extension_atr",
+                "mean",
+            ),
+            "median_breakout_extension_atr": (
+                "breakout_extension_atr",
+                "median",
+            ),
+
+            # Distancia real desde compression high hasta entry
+            "avg_entry_vs_compression_pct": (
+                "entry_vs_compression_pct",
+                "mean",
+            ),
+            "median_entry_vs_compression_pct": (
+                "entry_vs_compression_pct",
+                "median",
+            ),
         }
 
         if "realized_r" in volume_atr_source.columns:
@@ -9546,6 +9575,14 @@ with tab_compression_quality:
             "avg_r",
             "median_r",
             "pf_r",
+
+            # Valores reales de los filtros
+            "avg_breakout_volume",
+            "median_breakout_volume",
+            "avg_breakout_extension_atr",
+            "median_breakout_extension_atr",
+            "avg_entry_vs_compression_pct",
+            "median_entry_vs_compression_pct",
         ]
 
         for col in round_cols:
@@ -9574,6 +9611,32 @@ with tab_compression_quality:
             ),
             use_container_width=True,
             hide_index=True,
+                        column_config={
+                "avg_breakout_volume": st.column_config.NumberColumn(
+                    "Avg Volume",
+                    format="%.2fx",
+                ),
+                "median_breakout_volume": st.column_config.NumberColumn(
+                    "Median Volume",
+                    format="%.2fx",
+                ),
+                "avg_breakout_extension_atr": st.column_config.NumberColumn(
+                    "Avg Extension ATR",
+                    format="%.2f ATR",
+                ),
+                "median_breakout_extension_atr": st.column_config.NumberColumn(
+                    "Median Extension ATR",
+                    format="%.2f ATR",
+                ),
+                "avg_entry_vs_compression_pct": st.column_config.NumberColumn(
+                    "Avg Entry vs High",
+                    format="%.2f%%",
+                ),
+                "median_entry_vs_compression_pct": st.column_config.NumberColumn(
+                    "Median Entry vs High",
+                    format="%.2f%%",
+                ),
+            },
         )
         
         render_bucket_robustness_explorer(
