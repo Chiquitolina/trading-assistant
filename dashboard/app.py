@@ -36,6 +36,11 @@ TRADES_FILE = BASE_DIR / "trades.csv"
 PAPER_SIGNALS_FILE = BASE_DIR / "paper_signals.csv"
 STATUS_FILE = BASE_DIR / "status.json"
 
+POSITION_SNAPSHOTS_DIR = (
+    BASE_DIR
+    / "snapshots"
+)
+
 POST_TRADE_REPLAY_FILE = (
     BASE_DIR
     / "reports"
@@ -115,6 +120,126 @@ def fmt_price_for_display(x, decimals=10):
         return f"{float(x):.{decimals}f}".rstrip("0").rstrip(".")
     except Exception:
         return str(x)
+    
+@st.cache_data(ttl=2)
+def build_open_position_inspector_df(
+    open_positions,
+    snapshots_dir,
+    default_trigger_tf="30m",
+):
+    if not open_positions:
+        return pd.DataFrame()
+
+    snapshots_dir = Path(snapshots_dir)
+    rows = []
+
+    for exchange_position in open_positions:
+        exchange_position = dict(
+            exchange_position
+        )
+
+        symbol = str(
+            exchange_position.get("symbol", "")
+        ).upper()
+
+        position_data = {}
+        context_data = {}
+        snapshot_available = False
+
+        if symbol:
+            snapshot_path = (
+                snapshots_dir
+                / f"{symbol}.json"
+            )
+
+            if snapshot_path.exists():
+                try:
+                    with open(
+                        snapshot_path,
+                        "r",
+                        encoding="utf-8",
+                    ) as file:
+                        snapshot = json.load(file)
+
+                    position_data = (
+                        snapshot.get("position")
+                        or {}
+                    )
+
+                    context_data = (
+                        snapshot.get("context")
+                        or position_data.get(
+                            "signal_context"
+                        )
+                        or {}
+                    )
+
+                    snapshot_available = True
+
+                except Exception:
+                    position_data = {}
+                    context_data = {}
+
+        # El exchange prevalece para mark price,
+        # quantity y PnL actuales.
+        row = {
+            **context_data,
+            **position_data,
+            **exchange_position,
+        }
+
+        row["symbol"] = symbol
+
+        row["status"] = "OPEN"
+
+        row["entry_price"] = (
+            exchange_position.get("entry_price")
+            or position_data.get("real_entry")
+            or position_data.get("entry_price")
+            or position_data.get("entry")
+        )
+
+        row["real_entry"] = (
+            position_data.get("real_entry")
+            or row["entry_price"]
+        )
+
+        row["entry"] = (
+            position_data.get("entry")
+            or row["entry_price"]
+        )
+
+        row["entry_ts"] = (
+            position_data.get("entry_ts")
+            or position_data.get("opened_ts")
+            or context_data.get("entry_ts")
+        )
+
+        row["tp"] = (
+            position_data.get("tp")
+            or exchange_position.get("tp")
+        )
+
+        row["sl"] = (
+            position_data.get("sl")
+            or exchange_position.get("sl")
+        )
+
+        row["trigger_tf"] = (
+            context_data.get("trigger_tf")
+            or default_trigger_tf
+        )
+
+        row["_snapshot_available"] = (
+            snapshot_available
+        )
+
+        rows.append(row)
+
+    return (
+        pd.DataFrame(rows)
+        .reset_index(drop=True)
+    )
     
 def load_watch_history(symbol, base_dir="compression_watch_journal", limit=50):
     path = Path(base_dir) / f"{symbol}.jsonl"
@@ -4159,32 +4284,170 @@ with st.container(border=True):
     if open_positions:
 
         st.success(
-            f"🟢 {len(open_positions)} open position(s) on exchange"
+            f"🟢 {len(open_positions)} "
+            "open position(s) on exchange"
         )
 
-        positions_df = pd.DataFrame(open_positions)
+        open_inspector_source_df = (
+            build_open_position_inspector_df(
+                open_positions=open_positions,
+                snapshots_dir=(
+                    POSITION_SNAPSHOTS_DIR
+                ),
+                default_trigger_tf=(
+                    trigger_tf
+                    if trigger_tf not in (
+                        None,
+                        "",
+                        "N/A",
+                    )
+                    else "30m"
+                ),
+            )
+        )
 
-        numeric_cols = [
+        open_display_cols = [
+            "symbol",
+            "side",
             "quantity",
             "entry_price",
             "mark_price",
             "unrealized_pnl",
+            "tp",
+            "sl",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_ready_price",
+            "compression_score",
+            "compression_shape",
+            "compression_quality_label",
+            "trigger_tf",
         ]
 
-        for col in numeric_cols:
-            if col in positions_df.columns:
-                positions_df[col] = pd.to_numeric(
-                    positions_df[col],
-                    errors="coerce"
-                ).round(4)
+        available_open_cols = [
+            col
+            for col in open_display_cols
+            if col in open_inspector_source_df.columns
+        ]
 
-        st.dataframe(
-            positions_df,
-            use_container_width=True
+        open_positions_display_df = (
+            open_inspector_source_df[
+                available_open_cols
+            ]
+            .copy()
         )
 
+        open_numeric_cols = [
+            "quantity",
+            "entry_price",
+            "mark_price",
+            "unrealized_pnl",
+            "tp",
+            "sl",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_ready_price",
+            "compression_score",
+        ]
+
+        for col in open_numeric_cols:
+            if col in open_positions_display_df.columns:
+                open_positions_display_df[col] = (
+                    pd.to_numeric(
+                        open_positions_display_df[col],
+                        errors="coerce",
+                    ).round(8)
+                )
+
+        st.caption(
+            "Seleccioná una posición abierta para "
+            "inspeccionar su compresión."
+        )
+
+        open_positions_event = st.dataframe(
+            open_positions_display_df,
+            use_container_width=True,
+            hide_index=True,
+            key="open_positions_inspector_table",
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+
+        selected_open_rows = (
+            open_positions_event
+            .selection
+            .rows
+        )
+
+        if selected_open_rows:
+            selected_open_position = (
+                selected_open_rows[0]
+            )
+
+            selected_open_row = (
+                open_inspector_source_df.iloc[
+                    selected_open_position
+                ]
+            )
+
+            snapshot_available = bool(
+                selected_open_row.get(
+                    "_snapshot_available",
+                    False,
+                )
+            )
+
+            required_compression_values = [
+                selected_open_row.get(
+                    "compression_high"
+                ),
+                selected_open_row.get(
+                    "compression_low"
+                ),
+                selected_open_row.get(
+                    "compression_created_ts"
+                ),
+            ]
+
+            has_compression_context = any(
+                pd.notna(value)
+                for value in required_compression_values
+            )
+
+            if not snapshot_available:
+                st.warning(
+                    "No position snapshot was found for "
+                    f"{selected_open_row.get('symbol')}. "
+                    "Only exchange data is available."
+                )
+
+            elif not has_compression_context:
+                st.info(
+                    "The selected position has a snapshot, "
+                    "but no compression context."
+                )
+
+            else:
+                render_trade_inspector_for_row(
+                    row=selected_open_row,
+                    status="OPEN",
+                    key_prefix=(
+                        "open_trade_inspector_"
+                        + str(
+                            selected_open_row.get(
+                                "symbol",
+                                selected_open_position,
+                            )
+                        )
+                    ),
+                )
+
     else:
-        st.info("⚪ No open positions on exchange")
+        st.info(
+            "⚪ No open positions on exchange"
+        )
 
 # =========================
 # NO TRADES YET
