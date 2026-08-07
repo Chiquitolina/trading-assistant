@@ -21,7 +21,10 @@ TP_TARGETS_PCT = [
     0.30,
     0.50,
     0.75,
+    0.90,
     1.00,
+    1.10,
+    1.25,
     1.50,
     2.00,
     2.50,
@@ -385,11 +388,23 @@ def classify_exit_reason(value):
 
     return reason
 
-def price_from_target_pct(entry, target_pct, side):
-    if side == "LONG":
-        return entry * (1 + target_pct / 100)
+def price_from_target_pct(
+    entry,
+    target_pct,
+    side,
+):
+    side = str(side).upper()
 
-    return entry * (1 - target_pct / 100)
+    if side == "LONG":
+        return (
+            entry
+            * (1 + target_pct / 100)
+        )
+
+    return (
+        entry
+        * (1 - target_pct / 100)
+    )
 
 def replay_partial_strategy(
     candles,
@@ -800,9 +815,182 @@ def analyze_trade(
         and base_result["structural_result"] == "TP"
     )
 
+    # ==========================================
+    # TP SCENARIOS
+    # ==========================================
+
     scenario_rows = []
 
-    for buffer_pct in STRUCTURAL_SL_BUFFERS_PCT:
+    if not pd.isna(original_sl):
+        original_sl_risk_pct = (
+            adverse_move_pct(
+                original_sl,
+                entry,
+                side,
+            )
+        )
+    else:
+        original_sl_risk_pct = np.nan
+
+    def append_tp_scenarios_for_sl(
+        sl_mode,
+        scenario_sl,
+        scenario_risk_pct,
+        sl_buffer_pct=np.nan,
+    ):
+        """
+        Genera todos los TP objetivos contra un SL dado.
+
+        sl_mode:
+            ORIGINAL   -> conserva el SL original
+            STRUCTURAL -> usa compression_low/high
+        """
+
+        if (
+            pd.isna(scenario_sl)
+            or pd.isna(scenario_risk_pct)
+            or scenario_risk_pct <= 0
+        ):
+            return
+
+        for target_pct in TP_TARGETS_PCT:
+            scenario_tp = price_from_target_pct(
+                entry=entry,
+                target_pct=target_pct,
+                side=side,
+            )
+
+            replay = replay_scenario(
+                candles=candles,
+                tp_price=scenario_tp,
+                sl_price=scenario_sl,
+                side=side,
+            )
+
+            if replay["result"] == "TP":
+                simulated_pnl_pct = (
+                    target_pct
+                )
+
+            elif replay["result"] == "SL":
+                simulated_pnl_pct = (
+                    -scenario_risk_pct
+                )
+
+            else:
+                simulated_pnl_pct = np.nan
+
+            scenario_rows.append({
+                "symbol":
+                    trade.get("symbol"),
+
+                "side":
+                    side,
+
+                "entry_ts":
+                    entry_ts,
+
+                "exit_ts":
+                    exit_ts,
+
+                "original_exit_reason":
+                    trade.get("exit_reason"),
+
+                "original_pnl":
+                    trade.get("pnl"),
+
+                "entry":
+                    entry,
+
+                "original_tp":
+                    tp,
+
+                "original_sl":
+                    original_sl,
+
+                "compression_low":
+                    compression_low,
+
+                "compression_high":
+                    compression_high,
+
+                # ==============================
+                # SCENARIO IDENTITY
+                # ==============================
+
+                "sl_mode":
+                    sl_mode,
+
+                "sl_buffer_pct":
+                    sl_buffer_pct,
+
+                "scenario_sl":
+                    scenario_sl,
+
+                "scenario_risk_pct":
+                    scenario_risk_pct,
+
+                # Solamente tiene valor para
+                # escenarios STRUCTURAL.
+                "structural_risk_pct": (
+                    scenario_risk_pct
+                    if sl_mode == "STRUCTURAL"
+                    else np.nan
+                ),
+
+                # Disponible en ambas variantes
+                # para poder comparar con el SL real.
+                "original_sl_risk_pct":
+                    original_sl_risk_pct,
+
+                "tp_target_pct":
+                    target_pct,
+
+                "scenario_tp":
+                    scenario_tp,
+
+                # ==============================
+                # REPLAY RESULT
+                # ==============================
+
+                "result":
+                    replay["result"],
+
+                "first_touch":
+                    replay["first_touch"],
+
+                "touch_ts":
+                    replay["touch_ts"],
+
+                "minutes_to_result":
+                    minutes_between(
+                        entry_ts,
+                        replay["touch_ts"],
+                    ),
+
+                "simulated_pnl_pct":
+                    simulated_pnl_pct,
+            })
+
+    # ==========================================
+    # TP-ONLY: FIXED TP + ORIGINAL SL
+    # ==========================================
+
+    append_tp_scenarios_for_sl(
+        sl_mode="ORIGINAL",
+        scenario_sl=original_sl,
+        scenario_risk_pct=(
+            original_sl_risk_pct
+        ),
+    )
+
+    # ==========================================
+    # COMBINED: FIXED TP + STRUCTURAL SL
+    # ==========================================
+
+    for buffer_pct in (
+        STRUCTURAL_SL_BUFFERS_PCT
+    ):
         scenario_sl = build_structural_sl(
             side=side,
             compression_low=compression_low,
@@ -813,56 +1001,22 @@ def analyze_trade(
         if pd.isna(scenario_sl):
             continue
 
-        for target_pct in TP_TARGETS_PCT:
-            if side == "LONG":
-                scenario_tp = entry * (1 + target_pct / 100)
-            else:
-                scenario_tp = entry * (1 - target_pct / 100)
-
-            replay = replay_scenario(
-                candles=candles,
-                tp_price=scenario_tp,
-                sl_price=scenario_sl,
-                side=side,
-            )
-
-            risk_pct = adverse_move_pct(
+        scenario_risk_pct = (
+            adverse_move_pct(
                 scenario_sl,
                 entry,
                 side,
             )
+        )
 
-            if replay["result"] == "TP":
-                simulated_pnl_pct = target_pct
-            elif replay["result"] == "SL":
-                simulated_pnl_pct = -risk_pct
-            else:
-                simulated_pnl_pct = np.nan
-
-            scenario_rows.append({
-                "symbol": trade.get("symbol"),
-                "side": side,
-                "entry_ts": entry_ts,
-                "exit_ts": exit_ts,
-                "original_exit_reason": trade.get("exit_reason"),
-                "original_pnl": trade.get("pnl"),
-                "entry": entry,
-                "compression_low": compression_low,
-                "compression_high": compression_high,
-                "sl_buffer_pct": buffer_pct,
-                "scenario_sl": scenario_sl,
-                "structural_risk_pct": risk_pct,
-                "tp_target_pct": target_pct,
-                "scenario_tp": scenario_tp,
-                "result": replay["result"],
-                "first_touch": replay["first_touch"],
-                "touch_ts": replay["touch_ts"],
-                "minutes_to_result": minutes_between(
-                    entry_ts,
-                    replay["touch_ts"],
-                ),
-                "simulated_pnl_pct": simulated_pnl_pct,
-            })
+        append_tp_scenarios_for_sl(
+            sl_mode="STRUCTURAL",
+            scenario_sl=scenario_sl,
+            scenario_risk_pct=(
+                scenario_risk_pct
+            ),
+            sl_buffer_pct=buffer_pct,
+        )
             
     partial_rows = []
 

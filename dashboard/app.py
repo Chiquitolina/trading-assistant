@@ -154,6 +154,169 @@ def safe_metric(metrics_dict, key, is_percent=False):
 
     return round(value, 2)
 
+def render_trade_inspector_for_row(
+    row,
+    status="CLOSED",
+    key_prefix="trade_inspector",
+):
+    inspection = trade_inspector_service.inspect(
+        row=row,
+        status=status,
+    )
+
+    selected_trade = inspection.trade
+
+    inspector_timeframe = str(
+        row.get("trigger_tf", "30m") or "30m"
+    )
+
+    valid_timeframes = {
+        "1m",
+        "3m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "4h",
+    }
+
+    if inspector_timeframe not in valid_timeframes:
+        inspector_timeframe = "30m"
+
+    interval_minutes = timeframe_to_minutes(
+        inspector_timeframe
+    )
+
+    with st.spinner(
+        f"Loading {inspector_timeframe} candles "
+        f"for {selected_trade.symbol}..."
+    ):
+        inspection.candles = (
+            trade_inspector_service.load_trade_candles(
+                trade=selected_trade,
+                interval=inspector_timeframe,
+                candles_before=20,
+                candles_after=12,
+            )
+        )
+
+    st.markdown("---")
+
+    st.subheader(
+        f"🔎 Trade Inspector — {selected_trade.symbol}"
+    )
+
+    st.caption(
+        f"Inspection timeframe: {inspector_timeframe}"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Status",
+        selected_trade.status or "-",
+    )
+
+    c2.metric(
+        "Side",
+        selected_trade.side or "-",
+    )
+
+    c3.metric(
+        "Entry",
+        fmt_price_for_display(
+            selected_trade.entry_price
+        ),
+    )
+
+    c4.metric(
+        "Exit",
+        fmt_price_for_display(
+            selected_trade.exit_price
+        ),
+    )
+
+    c5, c6, c7, c8 = st.columns(4)
+
+    c5.metric(
+        "Compression High",
+        fmt_price_for_display(
+            selected_trade.compression_high
+        ),
+    )
+
+    c6.metric(
+        "Compression Low",
+        fmt_price_for_display(
+            selected_trade.compression_low
+        ),
+    )
+
+    c7.metric(
+        "Breakout",
+        fmt_price_for_display(
+            selected_trade.breakout_price
+        ),
+    )
+
+    c8.metric(
+        "Entry Ready",
+        fmt_price_for_display(
+            selected_trade.entry_ready_price
+        ),
+    )
+
+    candles_df = inspection.candles
+
+    if candles_df.empty:
+        st.warning(
+            f"No se pudieron cargar las velas "
+            f"{inspector_timeframe} para este trade."
+        )
+        return
+
+    inspector_fig = build_trade_inspector_chart(
+        inspection=inspection,
+        interval_minutes=interval_minutes,
+        timeframe=inspector_timeframe,
+    )
+
+    st.plotly_chart(
+        inspector_fig,
+        use_container_width=True,
+        key=f"{key_prefix}_chart",
+        config={
+            "displaylogo": False,
+            "scrollZoom": True,
+        },
+    )
+
+    with st.expander(
+        f"{inspector_timeframe} candles",
+        expanded=False,
+    ):
+        candle_columns = [
+            "open_ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+        available_candle_columns = [
+            col
+            for col in candle_columns
+            if col in candles_df.columns
+        ]
+
+        st.dataframe(
+            candles_df[available_candle_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
+
 def render_bucket_robustness_explorer(
     source_df,
     summary_df,
@@ -548,23 +711,65 @@ def render_bucket_robustness_explorer(
     # ==========================================
     with trades_tab:
         preferred_cols = [
+            # Identidad
             "trade_key",
             "symbol",
             "side",
+
+            # Timestamps
+            "compression_created_ts_dt",
+            "signal_ts_dt",
+            "breakout_ts_dt",
+            "entry_ready_ts_dt",
             "entry_ts_dt",
             "exit_ts_dt",
+
+            # Resultado
             "pnl",
             "exit_reason",
+            "leverage",
+            "pnl_unleveraged_pct",
+            "realized_r",
+
+            # Buckets seleccionados
             first_bucket_col,
             second_bucket_col,
+
+            # Precios
+            "signal_price",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_ready_price",
+            "entry",
             "real_entry",
             "tp",
             "sl",
+
+            # Distancias y riesgo
             "entry_vs_compression_pct",
+            "real_entry_vs_compression_pct",
             "entry_vs_breakout_pct",
+            "real_entry_vs_breakout_pct",
+            "real_entry_vs_ready_pct",
+            "signal_to_real_entry_pct",
+
+            "structural_risk_pct",
+            "structural_risk_bucket",
+            "planned_reward_pct",
+            "planned_rr",
+
+            # Breakout
             "breakout_extension_atr",
             "breakout_extension_pct",
             "breakout_volume_ratio",
+
+            # Duraciones
+            "watch_to_breakout_minutes",
+            "breakout_to_ready_minutes",
+            "ready_to_entry_seconds",
+
+            # Compresión
             "compression_shape",
             "compression_quality_label",
             "compression_score",
@@ -572,11 +777,22 @@ def render_bucket_robustness_explorer(
             "range_ratio",
             "atr_ratio",
             "volume_ratio",
+
+            # MFE / MAE
             "max_favorable_pct",
             "max_adverse_pct",
+
+            # BTC
             "btc_corr_5m_1h",
             "btc_beta_5m_1h",
             "btc_r2_5m_1h",
+
+            # Configuración
+            "trigger_tf",
+            "strategy_mode",
+            "base_mode",
+            "selected_lookback",
+            "compression_base_lookback",
         ]
 
         available_cols = [
@@ -591,11 +807,50 @@ def render_bucket_robustness_explorer(
             ascending=False,
         )
 
-        st.dataframe(
-            trade_detail_df[available_cols],
+        inspector_source_df = (
+            trade_detail_df
+            .reset_index(drop=True)
+        )
+
+        trade_display_df = inspector_source_df[
+            available_cols
+        ].copy()
+
+        st.caption(
+            "Seleccioná un trade para inspeccionar "
+            "gráficamente su compresión."
+        )
+
+        bucket_trades_event = st.dataframe(
+            trade_display_df,
             use_container_width=True,
             hide_index=True,
+            key=f"{key_prefix}_trade_selector",
+            on_select="rerun",
+            selection_mode="single-row",
         )
+
+        selected_trade_rows = (
+            bucket_trades_event.selection.rows
+        )
+
+        if selected_trade_rows:
+            selected_position = selected_trade_rows[0]
+
+            selected_trade_row = (
+                inspector_source_df.iloc[
+                    selected_position
+                ]
+            )
+
+            render_trade_inspector_for_row(
+                row=selected_trade_row,
+                status="CLOSED",
+                key_prefix=(
+                    f"{key_prefix}_"
+                    f"{selected_trade_row['trade_key']}"
+                ),
+            )
 
     # ==========================================
     # BY DAY
@@ -993,6 +1248,143 @@ def replay_profit_factor(values):
 
     return gross_profit / gross_loss
 
+def summarize_replay_strategy(
+    strategy_name,
+    pnl_values,
+):
+    """
+    Resume económicamente una serie de resultados porcentuales.
+    """
+
+    pnl = pd.to_numeric(
+        pd.Series(pnl_values),
+        errors="coerce",
+    )
+
+    pnl = pnl.replace(
+        [
+            np.inf,
+            -np.inf,
+        ],
+        np.nan,
+    ).dropna()
+
+    if pnl.empty:
+        return {
+            "strategy": strategy_name,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "breakeven": 0,
+            "winrate": 0.0,
+            "avg_win": np.nan,
+            "avg_loss": np.nan,
+            "payoff_ratio": np.nan,
+            "breakeven_winrate": np.nan,
+            "avg_pnl": np.nan,
+            "total_pnl": 0.0,
+            "profit_factor": np.nan,
+            "max_drawdown": np.nan,
+        }
+
+    wins = pnl[pnl > 0]
+    losses = pnl[pnl < 0]
+    breakeven = pnl[pnl == 0]
+
+    gross_profit = wins.sum()
+    gross_loss = abs(
+        losses.sum()
+    )
+
+    avg_win = (
+        wins.mean()
+        if not wins.empty
+        else np.nan
+    )
+
+    avg_loss = (
+        losses.mean()
+        if not losses.empty
+        else np.nan
+    )
+
+    if (
+        pd.notna(avg_win)
+        and pd.notna(avg_loss)
+        and abs(avg_loss) > 0
+    ):
+        payoff_ratio = (
+            avg_win / abs(avg_loss)
+        )
+
+        breakeven_winrate = (
+            abs(avg_loss)
+            / (
+                avg_win
+                + abs(avg_loss)
+            )
+            * 100
+        )
+
+    else:
+        payoff_ratio = np.nan
+        breakeven_winrate = np.nan
+
+    if gross_loss > 0:
+        profit_factor = (
+            gross_profit / gross_loss
+        )
+
+    elif gross_profit > 0:
+        profit_factor = np.inf
+
+    else:
+        profit_factor = np.nan
+
+    # Incluye equity inicial en cero para calcular
+    # correctamente un drawdown desde el primer trade.
+    equity = pd.Series(
+        np.concatenate([
+            [0.0],
+            pnl.to_numpy(),
+        ])
+    ).cumsum()
+
+    running_max = equity.cummax()
+
+    drawdown = (
+        equity - running_max
+    )
+
+    max_drawdown = abs(
+        drawdown.min()
+    )
+
+    return {
+        "strategy": strategy_name,
+        "trades": len(pnl),
+        "wins": len(wins),
+        "losses": len(losses),
+        "breakeven": len(breakeven),
+
+        "winrate": (
+            len(wins)
+            / len(pnl)
+            * 100
+        ),
+
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": payoff_ratio,
+        "breakeven_winrate": (
+            breakeven_winrate
+        ),
+
+        "avg_pnl": pnl.mean(),
+        "total_pnl": pnl.sum(),
+        "profit_factor": profit_factor,
+        "max_drawdown": max_drawdown,
+    }
 
 def replay_max_drawdown(
     data,
@@ -1169,6 +1561,709 @@ def build_compression_analytics_report(
 
     return report
 
+def prepare_compression_outcome_df(
+    data: pd.DataFrame,
+) -> pd.DataFrame:
+
+    if data.empty or "pnl" not in data.columns:
+        return pd.DataFrame()
+
+    out = data.copy()
+
+    out["pnl"] = pd.to_numeric(
+        out["pnl"],
+        errors="coerce",
+    )
+
+    out = out.dropna(subset=["pnl"]).copy()
+
+    # =========================
+    # UNIQUE TRADE KEY
+    # =========================
+
+    if (
+        "trade_id" in out.columns
+        and out["trade_id"].notna().all()
+        and out["trade_id"].astype(str).nunique() == len(out)
+    ):
+        out["trade_key"] = (
+            out["trade_id"].astype(str)
+        )
+
+    elif all(
+        col in out.columns
+        for col in ["symbol", "entry_ts"]
+    ):
+        out["trade_key"] = (
+            out["symbol"].astype(str)
+            + "_"
+            + out["entry_ts"].astype(str)
+        )
+
+    elif all(
+        col in out.columns
+        for col in ["symbol", "entry_ts_dt"]
+    ):
+        out["trade_key"] = (
+            out["symbol"].astype(str)
+            + "_"
+            + out["entry_ts_dt"].astype(str)
+        )
+
+    else:
+        out["trade_key"] = (
+            "row_" + out.index.astype(str)
+        )
+
+    # Evitar que un trade duplicado altere las estadísticas.
+    out = out.drop_duplicates(
+        subset=["trade_key"],
+        keep="first",
+    ).copy()
+
+    # =========================
+    # TP / SL OUTCOME
+    # =========================
+
+    if "exit_reason" not in out.columns:
+        out["compression_outcome"] = "OTHER"
+        return out
+
+    exit_reason = (
+        out["exit_reason"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    # =========================
+    # TP / SL OUTCOME
+    # =========================
+
+    if "exit_reason" not in out.columns:
+        out["compression_outcome"] = "OTHER"
+        return out
+
+    exit_reason = (
+        out["exit_reason"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    is_tp = (
+        exit_reason.eq("TP")
+        | exit_reason.str.contains(
+            r"TAKE[_ ]?PROFIT",
+            regex=True,
+            na=False,
+        )
+    )
+
+    is_sl = (
+        exit_reason.eq("SL")
+        | exit_reason.str.contains(
+            r"STOP[_ ]?LOSS",
+            regex=True,
+            na=False,
+        )
+    )
+
+    out["compression_outcome"] = np.select(
+        [
+            is_tp,
+            is_sl,
+        ],
+        [
+            "TP",
+            "SL",
+        ],
+        default="OTHER",
+    )
+
+    # =========================
+    # ENTRY DATETIME
+    # =========================
+
+    if "entry_ts_dt" in out.columns:
+        out["outcome_entry_datetime"] = pd.to_datetime(
+            out["entry_ts_dt"],
+            errors="coerce",
+            utc=True,
+        )
+
+    elif "entry_ts" in out.columns:
+        numeric_entry_ts = pd.to_numeric(
+            out["entry_ts"],
+            errors="coerce",
+        )
+
+        out["outcome_entry_datetime"] = pd.to_datetime(
+            numeric_entry_ts,
+            unit="ms",
+            errors="coerce",
+            utc=True,
+        )
+
+        missing_datetime = (
+            out["outcome_entry_datetime"].isna()
+        )
+
+        if missing_datetime.any():
+            out.loc[
+                missing_datetime,
+                "outcome_entry_datetime",
+            ] = pd.to_datetime(
+                out.loc[
+                    missing_datetime,
+                    "entry_ts",
+                ],
+                errors="coerce",
+                utc=True,
+            )
+
+    else:
+        out["outcome_entry_datetime"] = pd.NaT
+
+    out["outcome_entry_date"] = (
+        out["outcome_entry_datetime"].dt.date
+    )
+
+    out["outcome_entry_30m"] = (
+        out["outcome_entry_datetime"]
+        .dt.floor("30min")
+    )
+
+    return out
+
+def build_outcome_numeric_comparison(
+    data: pd.DataFrame,
+    feature_cols: list[str],
+) -> pd.DataFrame:
+
+    rows = []
+
+    for feature in feature_cols:
+        if feature not in data.columns:
+            continue
+
+        work = data[
+            [
+                "compression_outcome",
+                feature,
+            ]
+        ].copy()
+
+        work[feature] = pd.to_numeric(
+            work[feature],
+            errors="coerce",
+        )
+
+        work = work.dropna(subset=[feature])
+
+        tp_values = work.loc[
+            work["compression_outcome"] == "TP",
+            feature,
+        ]
+
+        sl_values = work.loc[
+            work["compression_outcome"] == "SL",
+            feature,
+        ]
+
+        if tp_values.empty or sl_values.empty:
+            continue
+
+        all_values = pd.concat(
+            [
+                tp_values,
+                sl_values,
+            ]
+        )
+
+        pooled_std = all_values.std(ddof=0)
+
+        mean_difference = (
+            tp_values.mean()
+            - sl_values.mean()
+        )
+
+        standardized_difference = (
+            mean_difference / pooled_std
+            if pd.notna(pooled_std) and pooled_std > 0
+            else np.nan
+        )
+
+        rows.append({
+            "feature": feature,
+
+            "tp_trades": len(tp_values),
+            "sl_trades": len(sl_values),
+
+            "coverage_pct": (
+                len(work) / len(data) * 100
+                if len(data) > 0
+                else 0
+            ),
+
+            "tp_mean": tp_values.mean(),
+            "sl_mean": sl_values.mean(),
+            "mean_difference_tp_minus_sl": (
+                mean_difference
+            ),
+
+            "tp_median": tp_values.median(),
+            "sl_median": sl_values.median(),
+            "median_difference_tp_minus_sl": (
+                tp_values.median()
+                - sl_values.median()
+            ),
+
+            "standardized_difference": (
+                standardized_difference
+            ),
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    report = pd.DataFrame(rows)
+
+    report["abs_standardized_difference"] = (
+        report["standardized_difference"].abs()
+    )
+
+    numeric_cols = [
+        "coverage_pct",
+        "tp_mean",
+        "sl_mean",
+        "mean_difference_tp_minus_sl",
+        "tp_median",
+        "sl_median",
+        "median_difference_tp_minus_sl",
+        "standardized_difference",
+        "abs_standardized_difference",
+    ]
+
+    report[numeric_cols] = (
+        report[numeric_cols].round(4)
+    )
+
+    return report.sort_values(
+        [
+            "abs_standardized_difference",
+            "coverage_pct",
+        ],
+        ascending=[
+            False,
+            False,
+        ],
+        na_position="last",
+    )
+    
+def build_compression_outcome_bucket_report(
+    data: pd.DataFrame,
+    group_cols: list[str],
+    min_trades: int = 1,
+) -> pd.DataFrame:
+
+    required_cols = (
+        group_cols
+        + [
+            "trade_key",
+            "compression_outcome",
+            "pnl",
+        ]
+    )
+
+    missing_cols = [
+        col
+        for col in required_cols
+        if col not in data.columns
+    ]
+
+    if missing_cols:
+        return pd.DataFrame()
+
+    work = data.copy()
+
+    work = work[
+        work["compression_outcome"]
+        .isin(["TP", "SL"])
+    ].copy()
+
+    work["pnl"] = pd.to_numeric(
+        work["pnl"],
+        errors="coerce",
+    )
+
+    work = work.dropna(
+        subset=group_cols + ["pnl"]
+    )
+
+    if work.empty:
+        return pd.DataFrame()
+
+    aggregations = {
+        "trades": (
+            "trade_key",
+            "nunique",
+        ),
+        "tp": (
+            "compression_outcome",
+            lambda x: int((x == "TP").sum()),
+        ),
+        "sl": (
+            "compression_outcome",
+            lambda x: int((x == "SL").sum()),
+        ),
+        "avg_pnl": (
+            "pnl",
+            "mean",
+        ),
+        "median_pnl": (
+            "pnl",
+            "median",
+        ),
+        "total_pnl": (
+            "pnl",
+            "sum",
+        ),
+        "profit_factor": (
+            "pnl",
+            compression_profit_factor,
+        ),
+    }
+
+    if "symbol" in work.columns:
+        aggregations["unique_symbols"] = (
+            "symbol",
+            "nunique",
+        )
+
+    if "outcome_entry_date" in work.columns:
+        aggregations["unique_days"] = (
+            "outcome_entry_date",
+            "nunique",
+        )
+
+    if "outcome_entry_30m" in work.columns:
+        aggregations["unique_batches"] = (
+            "outcome_entry_30m",
+            "nunique",
+        )
+
+    report = (
+        work
+        .groupby(
+            group_cols,
+            observed=False,
+        )
+        .agg(**aggregations)
+        .reset_index()
+    )
+
+    report = report[
+        report["trades"] >= min_trades
+    ].copy()
+
+    if report.empty:
+        return report
+
+    report["tp_rate"] = (
+        report["tp"]
+        / report["trades"]
+        * 100
+    ).round(2)
+
+    report["sl_rate"] = (
+        report["sl"]
+        / report["trades"]
+        * 100
+    ).round(2)
+
+    for col in [
+        "avg_pnl",
+        "median_pnl",
+        "total_pnl",
+    ]:
+        report[col] = report[col].round(4)
+
+    return report.sort_values(
+        [
+            "profit_factor",
+            "total_pnl",
+            "trades",
+        ],
+        ascending=[
+            False,
+            False,
+            False,
+        ],
+        na_position="last",
+    )
+    
+def build_compression_confluence_report(
+    df,
+    row_dimension,
+    column_dimension,
+    min_trades=10,
+):
+    """
+    Compara resultados TP/SL cruzando dos dimensiones.
+
+    Ejemplo:
+        compression_height_bucket
+        x breakout_extension_atr_bucket
+    """
+
+    required_cols = [
+        row_dimension,
+        column_dimension,
+        "compression_outcome",
+        "pnl",
+    ]
+
+    if (
+        df is None
+        or df.empty
+        or any(
+            col not in df.columns
+            for col in required_cols
+        )
+    ):
+        return pd.DataFrame()
+
+    work = df[
+        required_cols
+    ].copy()
+
+    work["pnl"] = pd.to_numeric(
+        work["pnl"],
+        errors="coerce",
+    )
+
+    work = work[
+        work["compression_outcome"]
+        .isin(["TP", "SL"])
+    ].copy()
+
+    work = work.dropna(
+        subset=[
+            row_dimension,
+            column_dimension,
+            "pnl",
+        ]
+    )
+
+    if work.empty:
+        return pd.DataFrame()
+
+    total_available_trades = len(work)
+    report_rows = []
+
+    grouped = work.groupby(
+        [
+            row_dimension,
+            column_dimension,
+        ],
+        observed=True,
+        dropna=False,
+    )
+
+    for (
+        row_value,
+        column_value,
+    ), group_df in grouped:
+
+        trades = len(group_df)
+
+        if trades < min_trades:
+            continue
+
+        tp_mask = (
+            group_df["compression_outcome"]
+            .eq("TP")
+        )
+
+        sl_mask = (
+            group_df["compression_outcome"]
+            .eq("SL")
+        )
+
+        tp_count = int(tp_mask.sum())
+        sl_count = int(sl_mask.sum())
+
+        wins = group_df.loc[
+            tp_mask,
+            "pnl",
+        ]
+
+        losses = group_df.loc[
+            sl_mask,
+            "pnl",
+        ]
+
+        gross_profit = wins[
+            wins > 0
+        ].sum()
+
+        gross_loss = abs(
+            losses[
+                losses < 0
+            ].sum()
+        )
+
+        if gross_loss > 0:
+            profit_factor = (
+                gross_profit / gross_loss
+            )
+        elif gross_profit > 0:
+            profit_factor = float("inf")
+        else:
+            profit_factor = None
+
+        avg_win = (
+            wins.mean()
+            if not wins.empty
+            else None
+        )
+
+        avg_loss = (
+            losses.mean()
+            if not losses.empty
+            else None
+        )
+
+        report_rows.append({
+            row_dimension: row_value,
+            column_dimension: column_value,
+
+            "trades": trades,
+            "tp": tp_count,
+            "sl": sl_count,
+
+            "tp_rate": (
+                tp_count / trades * 100
+                if trades
+                else 0.0
+            ),
+
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+
+            "avg_pnl": (
+                group_df["pnl"].mean()
+            ),
+
+            "median_pnl": (
+                group_df["pnl"].median()
+            ),
+
+            "total_pnl": (
+                group_df["pnl"].sum()
+            ),
+
+            "profit_factor": profit_factor,
+
+            "coverage_pct": (
+                trades
+                / total_available_trades
+                * 100
+            ),
+        })
+
+    if not report_rows:
+        return pd.DataFrame()
+
+    report = pd.DataFrame(
+        report_rows
+    )
+
+    numeric_cols = [
+        "tp_rate",
+        "avg_win",
+        "avg_loss",
+        "avg_pnl",
+        "median_pnl",
+        "total_pnl",
+        "profit_factor",
+        "coverage_pct",
+    ]
+
+    for col in numeric_cols:
+        report[col] = pd.to_numeric(
+            report[col],
+            errors="coerce",
+        ).round(4)
+
+    report = report.sort_values(
+        by=[
+            "profit_factor",
+            "trades",
+        ],
+        ascending=[
+            False,
+            False,
+        ],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    return report
+    
+def summarize_compression_outcome(
+    data: pd.DataFrame,
+) -> dict:
+
+    pnl = pd.to_numeric(
+        data["pnl"],
+        errors="coerce",
+    ).dropna()
+
+    tp = int(
+        (
+            data["compression_outcome"]
+            == "TP"
+        ).sum()
+    )
+
+    sl = int(
+        (
+            data["compression_outcome"]
+            == "SL"
+        ).sum()
+    )
+
+    decided_trades = tp + sl
+
+    return {
+        "trades": len(pnl),
+        "tp": tp,
+        "sl": sl,
+
+        "tp_rate": (
+            tp / decided_trades * 100
+            if decided_trades > 0
+            else 0
+        ),
+
+        "avg_pnl": (
+            pnl.mean()
+            if not pnl.empty
+            else 0
+        ),
+
+        "total_pnl": (
+            pnl.sum()
+            if not pnl.empty
+            else 0
+        ),
+
+        "profit_factor": (
+            compression_profit_factor(pnl)
+        ),
+    }
 
 def add_compression_analytics_buckets(data: pd.DataFrame) -> pd.DataFrame:
     """
@@ -3110,6 +4205,7 @@ if df_raw.empty:
     tab_execution,
     tab_compression_quality,
     tab_compression_analytics,
+    tab_compression_outcomes,
     tab_compression_pipeline,
     tab_tp_sl_replay,
 ) = st.tabs([
@@ -3123,6 +4219,7 @@ if df_raw.empty:
     "⏱️ Execution Analysis",
     "🎯 Compression Entry Quality",
     "🔬 Compression Analytics",
+    "🧬 Compression Outcomes",
     "Compression Pipeline",
     "🧪 TP / SL Replay",
 ])
@@ -8643,6 +9740,325 @@ with tab_compression_quality:
 
     else:
         qdf = add_compression_analytics_buckets(df_view)
+        
+        audit_numeric_cols = [
+            "pnl",
+            "leverage",
+
+            "signal_price",
+            "entry",
+            "real_entry",
+            "tp",
+            "sl",
+
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_ready_price",
+
+            "entry_vs_compression_pct",
+            "entry_vs_breakout_pct",
+
+            "breakout_extension_atr",
+            "breakout_extension_pct",
+            "breakout_volume_ratio",
+
+            "max_favorable_pct",
+            "max_adverse_pct",
+        ]
+
+        for col in audit_numeric_cols:
+            if col in qdf.columns:
+                qdf[col] = pd.to_numeric(
+                    qdf[col],
+                    errors="coerce",
+                )
+                
+        if {
+            "real_entry",
+            "compression_high",
+        }.issubset(qdf.columns):
+            qdf["real_entry_vs_compression_pct"] = (
+                (
+                    qdf["real_entry"]
+                    - qdf["compression_high"]
+                )
+                / qdf["compression_high"]
+                * 100
+            ).round(5)
+            
+        if {
+            "real_entry",
+            "breakout_price",
+        }.issubset(qdf.columns):
+            qdf["real_entry_vs_breakout_pct"] = (
+                (
+                    qdf["real_entry"]
+                    - qdf["breakout_price"]
+                )
+                / qdf["breakout_price"]
+                * 100
+            ).round(5)
+            
+        if {
+            "real_entry",
+            "entry_ready_price",
+        }.issubset(qdf.columns):
+            qdf["real_entry_vs_ready_pct"] = (
+                (
+                    qdf["real_entry"]
+                    - qdf["entry_ready_price"]
+                )
+                / qdf["entry_ready_price"]
+                * 100
+            ).round(5)
+            
+        if {
+            "signal_price",
+            "real_entry",
+        }.issubset(qdf.columns):
+            qdf["signal_to_real_entry_pct"] = (
+                (
+                    qdf["real_entry"]
+                    - qdf["signal_price"]
+                )
+                / qdf["signal_price"]
+                * 100
+            ).round(5)
+
+        # ==========================================
+        # RISK-NORMALIZED METRICS
+        # ==========================================
+
+        if {
+            "real_entry",
+            "sl",
+        }.issubset(qdf.columns):
+            valid_entry = qdf["real_entry"].gt(0)
+
+            qdf["structural_risk_pct"] = np.nan
+
+            qdf.loc[
+                valid_entry,
+                "structural_risk_pct",
+            ] = (
+                (
+                    qdf.loc[valid_entry, "real_entry"]
+                    - qdf.loc[valid_entry, "sl"]
+                ).abs()
+                / qdf.loc[valid_entry, "real_entry"]
+                * 100
+            ).round(5)
+
+
+        if {
+            "real_entry",
+            "tp",
+        }.issubset(qdf.columns):
+            valid_entry = qdf["real_entry"].gt(0)
+
+            qdf["planned_reward_pct"] = np.nan
+
+            qdf.loc[
+                valid_entry,
+                "planned_reward_pct",
+            ] = (
+                (
+                    qdf.loc[valid_entry, "tp"]
+                    - qdf.loc[valid_entry, "real_entry"]
+                ).abs()
+                / qdf.loc[valid_entry, "real_entry"]
+                * 100
+            ).round(5)
+
+
+        if {
+            "planned_reward_pct",
+            "structural_risk_pct",
+        }.issubset(qdf.columns):
+            valid_risk = qdf["structural_risk_pct"].gt(0)
+
+            qdf["planned_rr"] = np.nan
+
+            qdf.loc[
+                valid_risk,
+                "planned_rr",
+            ] = (
+                qdf.loc[
+                    valid_risk,
+                    "planned_reward_pct",
+                ]
+                / qdf.loc[
+                    valid_risk,
+                    "structural_risk_pct",
+                ]
+            ).round(4)
+
+
+        if {
+            "pnl",
+            "leverage",
+        }.issubset(qdf.columns):
+            safe_leverage = (
+                qdf["leverage"]
+                .replace(0, np.nan)
+                .fillna(1.0)
+            )
+
+            qdf["pnl_unleveraged_pct"] = (
+                qdf["pnl"]
+                / safe_leverage
+            ).round(5)
+
+
+        if {
+            "pnl_unleveraged_pct",
+            "structural_risk_pct",
+        }.issubset(qdf.columns):
+            valid_risk = qdf["structural_risk_pct"].gt(0)
+
+            qdf["realized_r"] = np.nan
+
+            qdf.loc[
+                valid_risk,
+                "realized_r",
+            ] = (
+                qdf.loc[
+                    valid_risk,
+                    "pnl_unleveraged_pct",
+                ]
+                / qdf.loc[
+                    valid_risk,
+                    "structural_risk_pct",
+                ]
+            ).round(4)
+
+
+        if "structural_risk_pct" in qdf.columns:
+            qdf["structural_risk_bucket"] = pd.cut(
+                qdf["structural_risk_pct"],
+                bins=[
+                    -float("inf"),
+                    2.0,
+                    3.0,
+                    5.0,
+                    10.0,
+                    float("inf"),
+                ],
+                labels=[
+                    "<=2%",
+                    "2-3%",
+                    "3-5%",
+                    "5-10%",
+                    ">10%",
+                ],
+                include_lowest=True,
+            )
+            
+        timestamp_cols = [
+            "compression_created_ts",
+            "signal_ts",
+            "breakout_ts",
+            "entry_ready_ts",
+            "entry_ts",
+            "exit_ts",
+        ]
+        
+        def normalize_mixed_timestamp(series):
+            numeric = pd.to_numeric(
+                series,
+                errors="coerce",
+            )
+
+            result = pd.Series(
+                pd.NaT,
+                index=series.index,
+                dtype="datetime64[ns, UTC]",
+            )
+
+            milliseconds_mask = (
+                numeric.notna()
+                & numeric.abs().ge(100_000_000_000)
+            )
+
+            seconds_mask = (
+                numeric.notna()
+                & ~milliseconds_mask
+            )
+
+            text_mask = numeric.isna()
+
+            if milliseconds_mask.any():
+                result.loc[milliseconds_mask] = pd.to_datetime(
+                    numeric.loc[milliseconds_mask],
+                    unit="ms",
+                    errors="coerce",
+                    utc=True,
+                )
+
+            if seconds_mask.any():
+                result.loc[seconds_mask] = pd.to_datetime(
+                    numeric.loc[seconds_mask],
+                    unit="s",
+                    errors="coerce",
+                    utc=True,
+                )
+
+            if text_mask.any():
+                result.loc[text_mask] = pd.to_datetime(
+                    series.loc[text_mask],
+                    errors="coerce",
+                    utc=True,
+                )
+
+            return result
+
+        for col in timestamp_cols:
+            if col in qdf.columns:
+                qdf[f"{col}_dt"] = normalize_mixed_timestamp(
+                    qdf[col]
+                )
+                
+        if {
+            "compression_created_ts_dt",
+            "breakout_ts_dt",
+        }.issubset(qdf.columns):
+            qdf["watch_to_breakout_minutes"] = (
+                (
+                    qdf["breakout_ts_dt"]
+                    - qdf["compression_created_ts_dt"]
+                )
+                .dt.total_seconds()
+                .div(60)
+                .round(2)
+            )
+            
+        if {
+            "breakout_ts_dt",
+            "entry_ready_ts_dt",
+        }.issubset(qdf.columns):
+            qdf["breakout_to_ready_minutes"] = (
+                (
+                    qdf["entry_ready_ts_dt"]
+                    - qdf["breakout_ts_dt"]
+                )
+                .dt.total_seconds()
+                .div(60)
+                .round(2)
+            )
+            
+        if {
+            "entry_ready_ts_dt",
+            "entry_ts_dt",
+        }.issubset(qdf.columns):
+            qdf["ready_to_entry_seconds"] = (
+                (
+                    qdf["entry_ts_dt"]
+                    - qdf["entry_ready_ts_dt"]
+                )
+                .dt.total_seconds()
+                .round(2)
+            )
 
         for col in [
             "pnl",
@@ -8863,11 +10279,13 @@ with tab_compression_quality:
 
         st.dataframe(entry_distance_summary, use_container_width=True)
         
-        st.markdown("### Entry Distance × Breakout ATR")
+        st.markdown(
+            "### Entry vs Compression High × Breakout ATR"
+        )
 
-        qdf["entry_distance_simple"] = pd.cut(
+        qdf["entry_vs_compression_simple"] = pd.cut(
             qdf["entry_vs_compression_pct"],
-            bins=[-999, 0.5, 1.0, 1.5, 2.0, 999],
+            bins=[-float("inf"), 0.5, 1.0, 1.5, 2.0, float("inf")],
             labels=["<0.5%", "0.5-1%", "1-1.5%", "1.5-2%", ">2%"],
             include_lowest=True,
         )
@@ -8881,8 +10299,19 @@ with tab_compression_quality:
 
         combo_atr_df = (
             qdf
-            .dropna(subset=["entry_distance_simple", "breakout_atr_simple"])
-            .groupby(["entry_distance_simple", "breakout_atr_simple"], observed=False)
+            .dropna(
+                subset=[
+                    "entry_vs_compression_simple",
+                    "breakout_atr_simple",
+                ]
+            )
+            .groupby(
+                [
+                    "entry_vs_compression_simple",
+                    "breakout_atr_simple",
+                ],
+                observed=False,
+            )
             .agg(
                 trades=("pnl", "count"),
                 wins=("pnl", lambda x: int((x > 0).sum())),
@@ -8912,14 +10341,16 @@ with tab_compression_quality:
         render_bucket_robustness_explorer(
             source_df=qdf,
             summary_df=combo_atr_df,
-            first_bucket_col="entry_distance_simple",
+            first_bucket_col="entry_vs_compression_simple",
             second_bucket_col="breakout_atr_simple",
-            first_bucket_label="Entry Distance",
+            first_bucket_label="Entry vs Compression High",
             second_bucket_label="Breakout ATR",
-            key_prefix="entry_distance_breakout_atr",
+            key_prefix="entry_vs_compression_breakout_atr",
         )
         
-        st.markdown("### Entry Distance × Breakout Volume")
+        st.markdown(
+            "### Entry vs Compression High × Breakout Volume"
+        )
 
         qdf["breakout_volume_bucket"] = pd.cut(
             qdf["breakout_volume_ratio"],
@@ -8930,13 +10361,30 @@ with tab_compression_quality:
 
         combo_volume_df = (
             qdf
-            .dropna(subset=["entry_distance_simple", "breakout_volume_bucket"])
-            .groupby(["entry_distance_simple", "breakout_volume_bucket"], observed=False)
+            .dropna(
+                subset=[
+                    "entry_vs_compression_simple",
+                    "breakout_volume_bucket",
+                ]
+            )
+            .groupby(
+                [
+                    "entry_vs_compression_simple",
+                    "breakout_volume_bucket",
+                ],
+                observed=False,
+            )
             .agg(
                 trades=("pnl", "count"),
                 wins=("pnl", lambda x: int((x > 0).sum())),
                 losses=("pnl", lambda x: int((x <= 0).sum())),
-                winrate=("pnl", lambda x: round((x > 0).mean() * 100, 2)),
+                winrate=(
+                    "pnl",
+                    lambda x: round(
+                        (x > 0).mean() * 100,
+                        2,
+                    ),
+                ),
                 avg_pnl=("pnl", "mean"),
                 total_pnl=("pnl", "sum"),
                 pf=("pnl", profit_factor),
@@ -8961,11 +10409,288 @@ with tab_compression_quality:
         render_bucket_robustness_explorer(
             source_df=qdf,
             summary_df=combo_volume_df,
-            first_bucket_col="entry_distance_simple",
+            first_bucket_col="entry_vs_compression_simple",
             second_bucket_col="breakout_volume_bucket",
-            first_bucket_label="Entry Distance",
+            first_bucket_label="Entry vs Compression High",
             second_bucket_label="Breakout Volume",
-            key_prefix="entry_distance_breakout_volume",
+            key_prefix="entry_vs_compression_breakout_volume",
+        )
+        
+        # ==========================================
+        # BREAKOUT VOLUME × BREAKOUT EXTENSION ATR
+        # ==========================================
+
+        st.markdown("---")
+        st.markdown(
+            "### Breakout Volume × Breakout Extension ATR"
+        )
+
+        st.caption(
+            "Cruza el volumen relativo del breakout con su "
+            "desplazamiento en ATR e incorpora resultados "
+            "normalizados por riesgo."
+        )
+        
+        entry_bucket_order = [
+            "<0.5%",
+            "0.5-1%",
+            "1-1.5%",
+            "1.5-2%",
+            ">2%",
+        ]
+
+        available_entry_bucket_values = set(
+            qdf["entry_vs_compression_simple"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
+
+        available_entry_buckets = [
+            bucket
+            for bucket in entry_bucket_order
+            if bucket in available_entry_bucket_values
+        ]
+
+        default_entry_buckets = (
+            [">2%"]
+            if ">2%" in available_entry_buckets
+            else []
+        )
+
+        selected_entry_buckets = st.multiselect(
+            "Filter by Entry vs Compression High",
+            options=available_entry_buckets,
+            default=default_entry_buckets,
+            key="volume_atr_entry_compression_filter",
+        )
+
+        qdf["breakout_atr_validation_bucket"] = pd.cut(
+            qdf["breakout_extension_atr"],
+            bins=[
+                -float("inf"),
+                1.0,
+                2.0,
+                3.0,
+                float("inf"),
+            ],
+            labels=[
+                "<1 ATR",
+                "1-2 ATR",
+                "2-3 ATR",
+                ">3 ATR",
+            ],
+            include_lowest=True,
+        )
+
+        volume_atr_base = qdf.copy()
+
+        if selected_entry_buckets:
+            volume_atr_base = volume_atr_base[
+                volume_atr_base[
+                    "entry_vs_compression_simple"
+                ]
+                .astype(str)
+                .isin(selected_entry_buckets)
+            ].copy()
+
+        volume_atr_source = volume_atr_base.dropna(
+            subset=[
+                "breakout_volume_bucket",
+                "breakout_atr_validation_bucket",
+                "pnl",
+            ]
+        ).copy()
+        
+        st.caption(
+            f"Filtered trades: {len(volume_atr_source)}"
+        )
+
+        volume_atr_agg = {
+            "trades": (
+                "pnl",
+                "count",
+            ),
+            "wins": (
+                "pnl",
+                lambda x: int((x > 0).sum()),
+            ),
+            "losses": (
+                "pnl",
+                lambda x: int((x <= 0).sum()),
+            ),
+            "winrate": (
+                "pnl",
+                lambda x: round(
+                    (x > 0).mean() * 100,
+                    2,
+                ),
+            ),
+            "avg_pnl": (
+                "pnl",
+                "mean",
+            ),
+            "median_pnl": (
+                "pnl",
+                "median",
+            ),
+            "total_pnl": (
+                "pnl",
+                "sum",
+            ),
+            "pf": (
+                "pnl",
+                profit_factor,
+            ),
+            # Valor real dentro del bucket de volumen
+            "avg_breakout_volume": (
+                "breakout_volume_ratio",
+                "mean",
+            ),
+            "median_breakout_volume": (
+                "breakout_volume_ratio",
+                "median",
+            ),
+
+            # Valor real dentro del bucket de extensión ATR
+            "avg_breakout_extension_atr": (
+                "breakout_extension_atr",
+                "mean",
+            ),
+            "median_breakout_extension_atr": (
+                "breakout_extension_atr",
+                "median",
+            ),
+
+            # Distancia real desde compression high hasta entry
+            "avg_entry_vs_compression_pct": (
+                "entry_vs_compression_pct",
+                "mean",
+            ),
+            "median_entry_vs_compression_pct": (
+                "entry_vs_compression_pct",
+                "median",
+            ),
+        }
+
+        if "realized_r" in volume_atr_source.columns:
+            volume_atr_agg.update({
+                "net_r": (
+                    "realized_r",
+                    "sum",
+                ),
+                "avg_r": (
+                    "realized_r",
+                    "mean",
+                ),
+                "median_r": (
+                    "realized_r",
+                    "median",
+                ),
+                "pf_r": (
+                    "realized_r",
+                    profit_factor,
+                ),
+            })
+
+        volume_atr_report = (
+            volume_atr_source
+            .groupby(
+                [
+                    "breakout_volume_bucket",
+                    "breakout_atr_validation_bucket",
+                ],
+                observed=False,
+            )
+            .agg(**volume_atr_agg)
+            .reset_index()
+        )
+
+        volume_atr_report = volume_atr_report[
+            volume_atr_report["trades"] > 0
+        ].copy()
+
+        round_cols = [
+            "avg_pnl",
+            "median_pnl",
+            "total_pnl",
+            "pf",
+            "net_r",
+            "avg_r",
+            "median_r",
+            "pf_r",
+
+            # Valores reales de los filtros
+            "avg_breakout_volume",
+            "median_breakout_volume",
+            "avg_breakout_extension_atr",
+            "median_breakout_extension_atr",
+            "avg_entry_vs_compression_pct",
+            "median_entry_vs_compression_pct",
+        ]
+
+        for col in round_cols:
+            if col in volume_atr_report.columns:
+                volume_atr_report[col] = (
+                    volume_atr_report[col].round(4)
+                )
+
+        sort_metric = (
+            "pf_r"
+            if "pf_r" in volume_atr_report.columns
+            else "pf"
+        )
+
+        st.dataframe(
+            volume_atr_report.sort_values(
+                [
+                    sort_metric,
+                    "trades",
+                ],
+                ascending=[
+                    False,
+                    False,
+                ],
+                na_position="last",
+            ),
+            use_container_width=True,
+            hide_index=True,
+                        column_config={
+                "avg_breakout_volume": st.column_config.NumberColumn(
+                    "Avg Volume",
+                    format="%.2fx",
+                ),
+                "median_breakout_volume": st.column_config.NumberColumn(
+                    "Median Volume",
+                    format="%.2fx",
+                ),
+                "avg_breakout_extension_atr": st.column_config.NumberColumn(
+                    "Avg Extension ATR",
+                    format="%.2f ATR",
+                ),
+                "median_breakout_extension_atr": st.column_config.NumberColumn(
+                    "Median Extension ATR",
+                    format="%.2f ATR",
+                ),
+                "avg_entry_vs_compression_pct": st.column_config.NumberColumn(
+                    "Avg Entry vs High",
+                    format="%.2f%%",
+                ),
+                "median_entry_vs_compression_pct": st.column_config.NumberColumn(
+                    "Median Entry vs High",
+                    format="%.2f%%",
+                ),
+            },
+        )
+        
+        render_bucket_robustness_explorer(
+            source_df=volume_atr_source,
+            summary_df=volume_atr_report,
+            first_bucket_col="breakout_volume_bucket",
+            second_bucket_col="breakout_atr_validation_bucket",
+            first_bucket_label="Breakout Volume",
+            second_bucket_label="Breakout Extension ATR",
+            key_prefix="breakout_volume_extension_atr",
         )
 
         st.markdown("### SL Late Entry Cases")
@@ -10516,6 +12241,1769 @@ with tab_compression_pipeline:
                 hide_index=True,
             )
             
+with tab_compression_outcomes:
+
+    st.markdown("---")
+    st.subheader("🧬 Compression Outcome Analysis")
+
+    st.caption(
+        "Compara TP vs SL para detectar similitudes y diferencias "
+        "en la estructura de las compresiones. Los resultados son "
+        "hipótesis analíticas: no modifican filtros ni scoring."
+    )
+
+    # ======================================================
+    # PREPARE DATA
+    # ======================================================
+
+    outcome_source_df = add_compression_analytics_buckets(
+        df_view
+    )
+
+    # Evita incluir trades de estrategias que no sean compresión.
+    compression_identity_cols = [
+        "compression_shape",
+        "compression_quality_label",
+        "compression_height_pct",
+        "compression_duration",
+        "compression_score",
+        "compression_high",
+        "compression_low",
+    ]
+
+    available_identity_cols = [
+        col
+        for col in compression_identity_cols
+        if col in outcome_source_df.columns
+    ]
+
+    if available_identity_cols:
+        outcome_source_df = outcome_source_df[
+            outcome_source_df[
+                available_identity_cols
+            ]
+            .notna()
+            .any(axis=1)
+        ].copy()
+
+    outcome_df = prepare_compression_outcome_df(
+        outcome_source_df
+    )
+
+    if outcome_df.empty:
+        st.info(
+            "No closed compression trades available."
+        )
+
+    else:
+        decided_outcome_df = outcome_df[
+            outcome_df["compression_outcome"]
+            .isin(["TP", "SL"])
+        ].copy()
+
+        other_outcomes = int(
+            (
+                outcome_df["compression_outcome"]
+                == "OTHER"
+            ).sum()
+        )
+
+        if decided_outcome_df.empty:
+            st.info(
+                "No TP or SL outcomes could be identified "
+                "from exit_reason."
+            )
+
+        else:
+            # ==================================================
+            # FILTERS
+            # ==================================================
+
+            f1, f2, f3 = st.columns(3)
+
+            with f1:
+                if "side" in decided_outcome_df.columns:
+                    outcome_sides = sorted(
+                        decided_outcome_df["side"]
+                        .dropna()
+                        .astype(str)
+                        .str.upper()
+                        .unique()
+                        .tolist()
+                    )
+                else:
+                    outcome_sides = []
+
+                selected_outcome_side = st.selectbox(
+                    "Side",
+                    options=[
+                        "ALL",
+                        *outcome_sides,
+                    ],
+                    key="compression_outcome_side",
+                )
+
+            with f2:
+                if "symbol" in decided_outcome_df.columns:
+                    outcome_symbols = sorted(
+                        decided_outcome_df["symbol"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+                else:
+                    outcome_symbols = []
+
+                selected_outcome_symbol = st.selectbox(
+                    "Symbol",
+                    options=[
+                        "ALL",
+                        *outcome_symbols,
+                    ],
+                    key="compression_outcome_symbol",
+                )
+
+            with f3:
+                max_outcome_min_trades = max(
+                    1,
+                    min(
+                        50,
+                        len(decided_outcome_df),
+                    ),
+                )
+
+                outcome_min_trades = st.slider(
+                    "Minimum trades per bucket",
+                    min_value=1,
+                    max_value=max_outcome_min_trades,
+                    value=min(
+                        10,
+                        max_outcome_min_trades,
+                    ),
+                    step=1,
+                    key="compression_outcome_min_trades",
+                )
+
+            filtered_outcome_df = (
+                decided_outcome_df.copy()
+            )
+
+            if selected_outcome_side != "ALL":
+                filtered_outcome_df = filtered_outcome_df[
+                    filtered_outcome_df["side"]
+                    .astype(str)
+                    .str.upper()
+                    .eq(selected_outcome_side)
+                ].copy()
+
+            if selected_outcome_symbol != "ALL":
+                filtered_outcome_df = filtered_outcome_df[
+                    filtered_outcome_df["symbol"]
+                    .astype(str)
+                    .eq(selected_outcome_symbol)
+                ].copy()
+
+            # ==================================================
+            # SUBTABS
+            # ==================================================
+
+            (
+                outcomes_overview_tab,
+                outcomes_features_tab,
+                outcomes_buckets_tab,
+                outcomes_confluence_tab,
+                outcomes_robustness_tab,
+                outcomes_trades_tab,
+            ) = st.tabs([
+                "Overview TP vs SL",
+                "Feature Comparison",
+                "Bucket Ranking",
+                "Confluence 2D",
+                "Robustness",
+                "Trades",
+            ])
+
+            # ==================================================
+            # OVERVIEW TP VS SL
+            # ==================================================
+
+            with outcomes_overview_tab:
+
+                summary = summarize_compression_outcome(
+                    filtered_outcome_df
+                )
+
+                m1, m2, m3, m4, m5, m6 = st.columns(6)
+
+                m1.metric(
+                    "TP + SL Trades",
+                    summary["trades"],
+                )
+
+                m2.metric(
+                    "TP",
+                    summary["tp"],
+                )
+
+                m3.metric(
+                    "SL",
+                    summary["sl"],
+                )
+
+                m4.metric(
+                    "TP Rate",
+                    f'{summary["tp_rate"]:.2f}%',
+                )
+
+                m5.metric(
+                    "Profit Factor",
+                    (
+                        f'{summary["profit_factor"]:.2f}'
+                        if summary["profit_factor"] is not None
+                        else "∞"
+                    ),
+                )
+
+                m6.metric(
+                    "Avg / Total PnL",
+                    (
+                        f'{summary["avg_pnl"]:.4f}% / '
+                        f'{summary["total_pnl"]:.4f}%'
+                    ),
+                )
+
+                if other_outcomes > 0:
+                    st.caption(
+                        f"{other_outcomes} trades with other "
+                        "exit reasons were excluded."
+                    )
+
+                outcome_rows = []
+
+                descriptive_cols = [
+                    "max_favorable_pct",
+                    "max_adverse_pct",
+                    "realized_r",
+                    "compression_duration",
+                    "compression_height_pct",
+                    "range_ratio",
+                    "atr_ratio",
+                    "volume_ratio",
+                    "breakout_extension_atr",
+                    "breakout_volume_ratio",
+                    "entry_vs_compression_pct",
+                    "entry_vs_breakout_pct",
+                ]
+
+                for outcome_name in ["TP", "SL"]:
+                    subset = filtered_outcome_df[
+                        filtered_outcome_df[
+                            "compression_outcome"
+                        ].eq(outcome_name)
+                    ]
+
+                    row = {
+                        "outcome": outcome_name,
+                        "trades": len(subset),
+                        "avg_pnl": pd.to_numeric(
+                            subset["pnl"],
+                            errors="coerce",
+                        ).mean(),
+                        "median_pnl": pd.to_numeric(
+                            subset["pnl"],
+                            errors="coerce",
+                        ).median(),
+                    }
+
+                    for col in descriptive_cols:
+                        if col not in subset.columns:
+                            continue
+
+                        values = pd.to_numeric(
+                            subset[col],
+                            errors="coerce",
+                        )
+
+                        row[f"avg_{col}"] = values.mean()
+                        row[f"median_{col}"] = values.median()
+
+                    outcome_rows.append(row)
+
+                outcome_overview_df = pd.DataFrame(
+                    outcome_rows
+                )
+
+                numeric_overview_cols = (
+                    outcome_overview_df
+                    .select_dtypes(
+                        include=[np.number]
+                    )
+                    .columns
+                )
+
+                outcome_overview_df[
+                    numeric_overview_cols
+                ] = outcome_overview_df[
+                    numeric_overview_cols
+                ].round(4)
+
+                st.dataframe(
+                    outcome_overview_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.caption(
+                    "MFE, MAE y realized R describen lo ocurrido "
+                    "después de la entrada. No deben utilizarse "
+                    "como filtros previos a la operación."
+                )
+
+            # ==================================================
+            # FEATURE COMPARISON
+            # ==================================================
+
+            with outcomes_features_tab:
+
+                st.markdown(
+                    "### Compression features: TP vs SL"
+                )
+
+                st.caption(
+                    "Compara promedios, medianas y distribuciones "
+                    "de variables conocidas al momento de entrar."
+                )
+
+                entry_feature_cols = [
+                    # Detector
+                    "compression_score",
+                    "trend_score",
+                    "range_ratio",
+                    "atr_ratio",
+                    "volume_ratio",
+                    "avg_body_pct",
+                    "compression_range_pct",
+
+                    # Structure
+                    "compression_height_pct",
+                    "compression_duration",
+                    "upper_slope",
+                    "lower_slope",
+                    "slope_difference",
+                    "touches_high",
+                    "touches_low",
+                    "touches_high_ratio",
+                    "touches_low_ratio",
+                    "touch_imbalance",
+                    "touch_imbalance_ratio",
+                    "inside_ratio",
+
+                    # Breakout
+                    "breakout_volume_ratio",
+                    "breakout_extension_pct",
+                    "breakout_extension_atr",
+
+                    # Entry
+                    "entry_vs_compression_pct",
+                    "entry_vs_breakout_pct",
+                    "structural_risk_pct",
+                    "planned_rr",
+
+                    # Candidate selection
+                    "selected_lookback",
+                    "selection_score",
+                ]
+
+                numeric_comparison = (
+                    build_outcome_numeric_comparison(
+                        filtered_outcome_df,
+                        entry_feature_cols,
+                    )
+                )
+
+                if numeric_comparison.empty:
+                    st.info(
+                        "No comparable numeric TP/SL "
+                        "features available."
+                    )
+
+                else:
+                    st.dataframe(
+                        numeric_comparison,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.caption(
+                        "Ordenado por diferencia estandarizada "
+                        "absoluta. Una diferencia grande es una "
+                        "hipótesis para estudiar, no un filtro."
+                    )
+
+                    selected_feature = st.selectbox(
+                        "Inspect feature distribution",
+                        options=numeric_comparison[
+                            "feature"
+                        ].tolist(),
+                        key="compression_outcome_feature",
+                    )
+
+                    feature_fig = go.Figure()
+
+                    outcome_colors = {
+                        "TP": "#22c55e",
+                        "SL": "#ef4444",
+                    }
+
+                    for outcome_name in ["TP", "SL"]:
+                        feature_values = pd.to_numeric(
+                            filtered_outcome_df.loc[
+                                filtered_outcome_df[
+                                    "compression_outcome"
+                                ].eq(outcome_name),
+                                selected_feature,
+                            ],
+                            errors="coerce",
+                        ).dropna()
+
+                        feature_fig.add_trace(
+                            go.Box(
+                                y=feature_values,
+                                name=outcome_name,
+                                marker_color=outcome_colors[
+                                    outcome_name
+                                ],
+                                boxmean=True,
+                            )
+                        )
+
+                    feature_fig.update_layout(
+                        title=(
+                            f"{selected_feature}: TP vs SL"
+                        ),
+                        yaxis_title=selected_feature,
+                        height=430,
+                        showlegend=False,
+                    )
+
+                    st.plotly_chart(
+                        feature_fig,
+                        use_container_width=True,
+                        key=(
+                            "compression_outcome_"
+                            "feature_boxplot"
+                        ),
+                    )
+
+                # ==============================================
+                # CATEGORICAL FEATURES
+                # ==============================================
+
+                st.markdown(
+                    "### Categorical similarities"
+                )
+
+                categorical_features = [
+                    "compression_shape",
+                    "compression_quality_label",
+                    "selected_lookback",
+                    "base_mode",
+                    "trigger_tf",
+                    "side",
+                ]
+
+                available_categorical_features = [
+                    col
+                    for col in categorical_features
+                    if (
+                        col in filtered_outcome_df.columns
+                        and filtered_outcome_df[col]
+                        .nunique(dropna=True) > 1
+                    )
+                ]
+
+                if not available_categorical_features:
+                    st.info(
+                        "No categorical compression features "
+                        "available."
+                    )
+
+                else:
+                    selected_categorical_feature = (
+                        st.selectbox(
+                            "Categorical feature",
+                            options=(
+                                available_categorical_features
+                            ),
+                            key=(
+                                "compression_outcome_"
+                                "categorical_feature"
+                            ),
+                        )
+                    )
+
+                    categorical_report = (
+                        build_compression_outcome_bucket_report(
+                            filtered_outcome_df,
+                            [selected_categorical_feature],
+                            min_trades=outcome_min_trades,
+                        )
+                    )
+
+                    if categorical_report.empty:
+                        st.info(
+                            "No categorical groups meet the "
+                            "minimum trade requirement."
+                        )
+
+                    else:
+                        st.dataframe(
+                            categorical_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+            # ==================================================
+            # BUCKET RANKING
+            # ==================================================
+
+            with outcomes_buckets_tab:
+
+                st.markdown(
+                    "### TP and SL rate by compression bucket"
+                )
+
+                outcome_dimensions = {
+                    "Compression Score":
+                        "compression_score_bucket",
+
+                    "Range Ratio":
+                        "range_ratio_bucket",
+
+                    "ATR Ratio":
+                        "atr_ratio_bucket",
+
+                    "Compression Volume":
+                        "volume_ratio_bucket",
+
+                    "Compression Range %":
+                        "compression_range_pct_bucket",
+
+                    "Compression Duration":
+                        "compression_duration_bucket",
+
+                    "Compression Height":
+                        "compression_height_bucket",
+
+                    "Total Touches":
+                        "total_touches_bucket",
+
+                    "Touch Balance":
+                        "touch_balance_bucket",
+
+                    "Upper Slope":
+                        "upper_slope_bucket",
+
+                    "Lower Slope":
+                        "lower_slope_bucket",
+
+                    "Slope Difference":
+                        "slope_difference_bucket",
+
+                    "Breakout Volume":
+                        "breakout_volume_ratio_bucket",
+
+                    "Breakout Extension %":
+                        "breakout_extension_pct_bucket",
+
+                    "Breakout Extension ATR":
+                        "breakout_extension_atr_bucket",
+
+                    "Entry vs Compression":
+                        "entry_vs_compression_bucket",
+
+                    "Entry vs Breakout":
+                        "entry_vs_breakout_bucket",
+
+                    "Compression Shape":
+                        "compression_shape",
+
+                    "Compression Quality":
+                        "compression_quality_label",
+
+                    "Selected Lookback":
+                        "selected_lookback",
+                }
+
+                outcome_dimensions = {
+                    label: col
+                    for label, col
+                    in outcome_dimensions.items()
+                    if col in filtered_outcome_df.columns
+                }
+
+                if not outcome_dimensions:
+                    st.info(
+                        "No compression bucket columns "
+                        "available."
+                    )
+
+                else:
+                    selected_dimension_label = (
+                        st.selectbox(
+                            "Compression dimension",
+                            options=list(
+                                outcome_dimensions.keys()
+                            ),
+                            key=(
+                                "compression_outcome_"
+                                "bucket_dimension"
+                            ),
+                        )
+                    )
+
+                    selected_dimension = (
+                        outcome_dimensions[
+                            selected_dimension_label
+                        ]
+                    )
+
+                    outcome_bucket_report = (
+                        build_compression_outcome_bucket_report(
+                            filtered_outcome_df,
+                            [selected_dimension],
+                            min_trades=(
+                                outcome_min_trades
+                            ),
+                        )
+                    )
+
+                    if outcome_bucket_report.empty:
+                        st.info(
+                            "No buckets meet the minimum "
+                            "trade requirement."
+                        )
+
+                    else:
+                        st.dataframe(
+                            outcome_bucket_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        bucket_fig = go.Figure()
+
+                        bucket_fig.add_trace(
+                            go.Bar(
+                                x=(
+                                    outcome_bucket_report[
+                                        selected_dimension
+                                    ].astype(str)
+                                ),
+                                y=(
+                                    outcome_bucket_report[
+                                        "tp_rate"
+                                    ]
+                                ),
+                                name="TP Rate",
+                                marker_color="#22c55e",
+                            )
+                        )
+
+                        bucket_fig.add_trace(
+                            go.Bar(
+                                x=(
+                                    outcome_bucket_report[
+                                        selected_dimension
+                                    ].astype(str)
+                                ),
+                                y=(
+                                    outcome_bucket_report[
+                                        "sl_rate"
+                                    ]
+                                ),
+                                name="SL Rate",
+                                marker_color="#ef4444",
+                            )
+                        )
+
+                        bucket_fig.update_layout(
+                            barmode="stack",
+                            xaxis_title=(
+                                selected_dimension_label
+                            ),
+                            yaxis_title=(
+                                "Outcome rate (%)"
+                            ),
+                            height=460,
+                        )
+
+                        st.plotly_chart(
+                            bucket_fig,
+                            use_container_width=True,
+                            key=(
+                                "compression_outcome_"
+                                "bucket_chart"
+                            ),
+                        )
+                        
+            # ==================================================
+            # CONFLUENCE EXPLORER 2D
+            # ==================================================
+
+            with outcomes_confluence_tab:
+
+                st.markdown(
+                    "### Compression Confluence Explorer"
+                )
+
+                st.caption(
+                    "Cruza dos variables conocidas al momento "
+                    "de entrar para encontrar combinaciones que "
+                    "separen mejor TP y SL."
+                )
+
+                confluence_dimensions = {
+                    "Compression Height":
+                        "compression_height_bucket",
+
+                    "Compression Duration":
+                        "compression_duration_bucket",
+
+                    "Compression Score":
+                        "compression_score_bucket",
+
+                    "Range Ratio":
+                        "range_ratio_bucket",
+
+                    "ATR Ratio":
+                        "atr_ratio_bucket",
+
+                    "Compression Volume":
+                        "volume_ratio_bucket",
+
+                    "Compression Range %":
+                        "compression_range_pct_bucket",
+
+                    "Total Touches":
+                        "total_touches_bucket",
+
+                    "Touch Balance":
+                        "touch_balance_bucket",
+
+                    "Upper Slope":
+                        "upper_slope_bucket",
+
+                    "Lower Slope":
+                        "lower_slope_bucket",
+
+                    "Slope Difference":
+                        "slope_difference_bucket",
+
+                    "Breakout Volume":
+                        "breakout_volume_ratio_bucket",
+
+                    "Breakout Extension %":
+                        "breakout_extension_pct_bucket",
+
+                    "Breakout Extension ATR":
+                        "breakout_extension_atr_bucket",
+
+                    "Entry vs Compression":
+                        "entry_vs_compression_bucket",
+
+                    "Entry vs Breakout":
+                        "entry_vs_breakout_bucket",
+
+                    "Compression Shape":
+                        "compression_shape",
+
+                    "Compression Quality":
+                        "compression_quality_label",
+
+                    "Selected Lookback":
+                        "selected_lookback",
+                }
+
+                confluence_dimensions = {
+                    label: col
+                    for label, col
+                    in confluence_dimensions.items()
+                    if (
+                        col in filtered_outcome_df.columns
+                        and filtered_outcome_df[col]
+                        .notna()
+                        .any()
+                    )
+                }
+
+                if len(confluence_dimensions) < 2:
+                    st.info(
+                        "At least two compression dimensions "
+                        "are required."
+                    )
+
+                else:
+                    c1, c2, c3 = st.columns(3)
+
+                    dimension_labels = list(
+                        confluence_dimensions.keys()
+                    )
+
+                    default_row_label = (
+                        "Compression Height"
+                        if "Compression Height"
+                        in dimension_labels
+                        else dimension_labels[0]
+                    )
+
+                    default_column_label = (
+                        "Breakout Extension ATR"
+                        if "Breakout Extension ATR"
+                        in dimension_labels
+                        else dimension_labels[1]
+                    )
+
+                    with c1:
+                        selected_row_label = st.selectbox(
+                            "Row dimension",
+                            options=dimension_labels,
+                            index=dimension_labels.index(
+                                default_row_label
+                            ),
+                            key=(
+                                "compression_outcome_"
+                                "confluence_row"
+                            ),
+                        )
+
+                    available_column_labels = [
+                        label
+                        for label in dimension_labels
+                        if label != selected_row_label
+                    ]
+
+                    if (
+                        default_column_label
+                        not in available_column_labels
+                    ):
+                        default_column_label = (
+                            available_column_labels[0]
+                        )
+
+                    with c2:
+                        selected_column_label = st.selectbox(
+                            "Column dimension",
+                            options=available_column_labels,
+                            index=(
+                                available_column_labels.index(
+                                    default_column_label
+                                )
+                            ),
+                            key=(
+                                "compression_outcome_"
+                                "confluence_column"
+                            ),
+                        )
+
+                    with c3:
+                        confluence_metric_label = st.selectbox(
+                            "Heatmap metric",
+                            options=[
+                                "Profit Factor",
+                                "TP Rate",
+                                "Average PnL",
+                                "Total PnL",
+                                "Trades",
+                            ],
+                            key=(
+                                "compression_outcome_"
+                                "confluence_metric"
+                            ),
+                        )
+
+                    selected_row_dimension = (
+                        confluence_dimensions[
+                            selected_row_label
+                        ]
+                    )
+
+                    selected_column_dimension = (
+                        confluence_dimensions[
+                            selected_column_label
+                        ]
+                    )
+
+                    confluence_report = (
+                        build_compression_confluence_report(
+                            filtered_outcome_df,
+                            selected_row_dimension,
+                            selected_column_dimension,
+                            min_trades=outcome_min_trades,
+                        )
+                    )
+
+                    if confluence_report.empty:
+                        st.info(
+                            "No combinations meet the minimum "
+                            "trade requirement."
+                        )
+
+                    else:
+                        metric_map = {
+                            "Profit Factor":
+                                "profit_factor",
+
+                            "TP Rate":
+                                "tp_rate",
+
+                            "Average PnL":
+                                "avg_pnl",
+
+                            "Total PnL":
+                                "total_pnl",
+
+                            "Trades":
+                                "trades",
+                        }
+
+                        selected_confluence_metric = (
+                            metric_map[
+                                confluence_metric_label
+                            ]
+                        )
+
+                        confluence_bucket_event = (
+                            st.dataframe(
+                                confluence_report,
+                                use_container_width=True,
+                                hide_index=True,
+                                key=(
+                                    "compression_outcome_"
+                                    "confluence_bucket_selector"
+                                ),
+                                on_select="rerun",
+                                selection_mode="multi-row",
+                            )
+                        )
+
+                        selected_confluence_rows = (
+                            confluence_bucket_event
+                            .selection
+                            .rows
+                        )
+
+                        st.caption(
+                            "Coverage indica qué porcentaje de "
+                            "los trades utilizables pertenece "
+                            "a cada combinación."
+                        )
+
+                        heatmap_source = (
+                            confluence_report.copy()
+                        )
+
+                        # Un Profit Factor infinito no puede
+                        # representarse correctamente en el mapa.
+                        if (
+                            selected_confluence_metric
+                            == "profit_factor"
+                        ):
+                            heatmap_source[
+                                "profit_factor"
+                            ] = (
+                                heatmap_source[
+                                    "profit_factor"
+                                ]
+                                .replace(
+                                    [
+                                        np.inf,
+                                        -np.inf,
+                                    ],
+                                    np.nan,
+                                )
+                            )
+
+                        heatmap_pivot = (
+                            heatmap_source.pivot(
+                                index=(
+                                    selected_row_dimension
+                                ),
+                                columns=(
+                                    selected_column_dimension
+                                ),
+                                values=(
+                                    selected_confluence_metric
+                                ),
+                            )
+                        )
+
+                        if heatmap_pivot.empty:
+                            st.info(
+                                "No finite values are available "
+                                "for the selected heatmap metric."
+                            )
+
+                        else:
+                            heatmap_fig = go.Figure(
+                                data=go.Heatmap(
+                                    z=(
+                                        heatmap_pivot
+                                        .to_numpy()
+                                    ),
+                                    x=[
+                                        str(value)
+                                        for value
+                                        in heatmap_pivot.columns
+                                    ],
+                                    y=[
+                                        str(value)
+                                        for value
+                                        in heatmap_pivot.index
+                                    ],
+                                    colorscale="RdYlGn",
+                                    colorbar={
+                                        "title":
+                                            confluence_metric_label
+                                    },
+                                    hovertemplate=(
+                                        f"{selected_row_label}: "
+                                        "%{y}<br>"
+                                        f"{selected_column_label}: "
+                                        "%{x}<br>"
+                                        f"{confluence_metric_label}: "
+                                        "%{z:.4f}"
+                                        "<extra></extra>"
+                                    ),
+                                )
+                            )
+
+                            heatmap_fig.update_layout(
+                                title=(
+                                    f"{selected_row_label} × "
+                                    f"{selected_column_label}"
+                                ),
+                                xaxis_title=(
+                                    selected_column_label
+                                ),
+                                yaxis_title=(
+                                    selected_row_label
+                                ),
+                                height=520,
+                            )
+
+                            st.plotly_chart(
+                                heatmap_fig,
+                                use_container_width=True,
+                                key=(
+                                    "compression_outcome_"
+                                    "confluence_heatmap"
+                                ),
+                            )
+                            
+                        # ======================================
+                        # SELECTED BUCKET TRADES
+                        # ======================================
+
+                        if selected_confluence_rows:
+
+                            selected_bucket_rows = (
+                                confluence_report.iloc[
+                                    selected_confluence_rows
+                                ].copy()
+                            )
+
+                            st.markdown(
+                                "### Selected bucket combinations"
+                            )
+
+                            selected_bucket_summary_cols = [
+                                selected_row_dimension,
+                                selected_column_dimension,
+                                "trades",
+                                "tp",
+                                "sl",
+                                "tp_rate",
+                                "profit_factor",
+                                "avg_pnl",
+                                "total_pnl",
+                                "coverage_pct",
+                            ]
+
+                            selected_bucket_summary_cols = [
+                                col
+                                for col
+                                in selected_bucket_summary_cols
+                                if col
+                                in selected_bucket_rows.columns
+                            ]
+
+                            st.dataframe(
+                                selected_bucket_rows[
+                                    selected_bucket_summary_cols
+                                ],
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                            # Cada combinación seleccionada usa:
+                            #
+                            # row bucket AND column bucket
+                            #
+                            # Si se seleccionan varias filas:
+                            #
+                            # combination 1 OR combination 2
+
+                            selected_bucket_mask = pd.Series(
+                                False,
+                                index=(
+                                    filtered_outcome_df.index
+                                ),
+                            )
+
+                            for _, bucket_row in (
+                                selected_bucket_rows.iterrows()
+                            ):
+                                row_bucket_value = str(
+                                    bucket_row[
+                                        selected_row_dimension
+                                    ]
+                                )
+
+                                column_bucket_value = str(
+                                    bucket_row[
+                                        selected_column_dimension
+                                    ]
+                                )
+
+                                combination_mask = (
+                                    filtered_outcome_df[
+                                        selected_row_dimension
+                                    ]
+                                    .astype(str)
+                                    .eq(row_bucket_value)
+                                    &
+                                    filtered_outcome_df[
+                                        selected_column_dimension
+                                    ]
+                                    .astype(str)
+                                    .eq(column_bucket_value)
+                                )
+
+                                selected_bucket_mask = (
+                                    selected_bucket_mask
+                                    | combination_mask
+                                )
+
+                            selected_bucket_trades = (
+                                filtered_outcome_df[
+                                    selected_bucket_mask
+                                ]
+                                .copy()
+                            )
+
+                            st.markdown(
+                                "### Trades from selected buckets"
+                            )
+
+                            selected_summary = (
+                                summarize_compression_outcome(
+                                    selected_bucket_trades
+                                )
+                            )
+
+                            sb1, sb2, sb3, sb4, sb5 = (
+                                st.columns(5)
+                            )
+
+                            sb1.metric(
+                                "Trades",
+                                selected_summary["trades"],
+                            )
+
+                            sb2.metric(
+                                "TP",
+                                selected_summary["tp"],
+                            )
+
+                            sb3.metric(
+                                "SL",
+                                selected_summary["sl"],
+                            )
+
+                            sb4.metric(
+                                "TP Rate",
+                                (
+                                    f'{selected_summary["tp_rate"]:.2f}%'
+                                ),
+                            )
+
+                            selected_bucket_pf = (
+                                selected_summary[
+                                    "profit_factor"
+                                ]
+                            )
+
+                            sb5.metric(
+                                "Profit Factor",
+                                (
+                                    f"{selected_bucket_pf:.2f}"
+                                    if selected_bucket_pf
+                                    is not None
+                                    else "∞"
+                                ),
+                            )
+
+                            st.caption(
+                                "Los resultados combinan todos "
+                                "los buckets seleccionados sin "
+                                "duplicar trades."
+                            )
+
+                            selected_bucket_trade_cols = [
+                                "trade_key",
+                                "symbol",
+                                "side",
+                                "entry_ts_dt",
+                                "exit_ts_dt",
+                                "compression_outcome",
+                                "exit_reason",
+                                "pnl",
+
+                                selected_row_dimension,
+                                selected_column_dimension,
+
+                                "compression_shape",
+                                "compression_quality_label",
+                                "compression_score",
+                                "compression_duration",
+                                "compression_height_pct",
+
+                                "range_ratio",
+                                "atr_ratio",
+                                "volume_ratio",
+
+                                "touches_high",
+                                "touches_low",
+                                "touches_high_ratio",
+                                "touches_low_ratio",
+                                "touch_imbalance_ratio",
+
+                                "breakout_volume_ratio",
+                                "breakout_extension_pct",
+                                "breakout_extension_atr",
+
+                                "entry_vs_compression_pct",
+                                "entry_vs_breakout_pct",
+
+                                "structural_risk_pct",
+                                "planned_rr",
+                                "selected_lookback",
+
+                                "max_favorable_pct",
+                                "max_adverse_pct",
+                            ]
+
+                            # Evitar columnas repetidas cuando
+                            # las dimensiones también aparecen
+                            # en la lista fija.
+                            selected_bucket_trade_cols = list(
+                                dict.fromkeys(
+                                    selected_bucket_trade_cols
+                                )
+                            )
+
+                            available_selected_trade_cols = [
+                                col
+                                for col
+                                in selected_bucket_trade_cols
+                                if col
+                                in selected_bucket_trades.columns
+                            ]
+
+                            if (
+                                "outcome_entry_datetime"
+                                in selected_bucket_trades.columns
+                            ):
+                                selected_bucket_trade_source = (
+                                    selected_bucket_trades
+                                    .sort_values(
+                                        "outcome_entry_datetime",
+                                        ascending=False,
+                                    )
+                                    .reset_index(drop=True)
+                                )
+
+                            else:
+                                selected_bucket_trade_source = (
+                                    selected_bucket_trades
+                                    .reset_index(drop=True)
+                                )
+
+                            selected_bucket_trade_event = (
+                                st.dataframe(
+                                    selected_bucket_trade_source[
+                                        available_selected_trade_cols
+                                    ],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key=(
+                                        "compression_outcome_"
+                                        "selected_bucket_trades"
+                                    ),
+                                    on_select="rerun",
+                                    selection_mode="single-row",
+                                )
+                            )
+
+                            selected_bucket_trade_rows = (
+                                selected_bucket_trade_event
+                                .selection
+                                .rows
+                            )
+
+                            if selected_bucket_trade_rows:
+                                selected_trade_position = (
+                                    selected_bucket_trade_rows[0]
+                                )
+
+                                selected_trade_row = (
+                                    selected_bucket_trade_source
+                                    .iloc[
+                                        selected_trade_position
+                                    ]
+                                )
+
+                                st.markdown(
+                                    "### Trade Inspector"
+                                )
+
+                                render_trade_inspector_for_row(
+                                    row=selected_trade_row,
+                                    status="CLOSED",
+                                    key_prefix=(
+                                        "compression_confluence_"
+                                        + str(
+                                            selected_trade_row[
+                                                "trade_key"
+                                            ]
+                                        )
+                                    ),
+                                )
+
+                        else:
+                            st.info(
+                                "Seleccioná uno o más buckets "
+                                "en la tabla superior para ver "
+                                "sus trades y abrir el "
+                                "Trade Inspector."
+                            )
+
+            # ==================================================
+            # ROBUSTNESS
+            # ==================================================
+
+            with outcomes_robustness_tab:
+
+                st.markdown(
+                    "### Bucket robustness"
+                )
+
+                st.caption(
+                    "Comprueba si el resultado depende del mejor "
+                    "símbolo, día, batch o mitad del período."
+                )
+
+                robustness_dimensions = {
+                    "Range Ratio":
+                        "range_ratio_bucket",
+
+                    "ATR Ratio":
+                        "atr_ratio_bucket",
+
+                    "Compression Volume":
+                        "volume_ratio_bucket",
+
+                    "Compression Range %":
+                        "compression_range_pct_bucket",
+
+                    "Compression Duration":
+                        "compression_duration_bucket",
+
+                    "Compression Height":
+                        "compression_height_bucket",
+
+                    "Breakout Volume":
+                        "breakout_volume_ratio_bucket",
+
+                    "Breakout Extension ATR":
+                        "breakout_extension_atr_bucket",
+
+                    "Entry vs Compression":
+                        "entry_vs_compression_bucket",
+
+                    "Entry vs Breakout":
+                        "entry_vs_breakout_bucket",
+
+                    "Compression Shape":
+                        "compression_shape",
+
+                    "Compression Quality":
+                        "compression_quality_label",
+                }
+
+                robustness_dimensions = {
+                    label: col
+                    for label, col
+                    in robustness_dimensions.items()
+                    if col in filtered_outcome_df.columns
+                }
+
+                if not robustness_dimensions:
+                    st.info(
+                        "No dimensions available "
+                        "for robustness."
+                    )
+
+                else:
+                    r1, r2 = st.columns(2)
+
+                    with r1:
+                        robustness_label = st.selectbox(
+                            "Robustness dimension",
+                            options=list(
+                                robustness_dimensions.keys()
+                            ),
+                            key=(
+                                "compression_outcome_"
+                                "robustness_dimension"
+                            ),
+                        )
+
+                    robustness_col = (
+                        robustness_dimensions[
+                            robustness_label
+                        ]
+                    )
+
+                    robustness_values = sorted(
+                        filtered_outcome_df[
+                            robustness_col
+                        ]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+
+                    with r2:
+                        selected_robustness_value = (
+                            st.selectbox(
+                                "Bucket value",
+                                options=robustness_values,
+                                key=(
+                                    "compression_outcome_"
+                                    "robustness_value"
+                                ),
+                            )
+                        )
+
+                    robust_df = filtered_outcome_df[
+                        filtered_outcome_df[
+                            robustness_col
+                        ]
+                        .astype(str)
+                        .eq(
+                            selected_robustness_value
+                        )
+                    ].copy()
+
+                    robustness_rows = []
+
+                    def append_robustness_scenario(
+                        scenario_name,
+                        scenario_df,
+                    ):
+                        result = (
+                            summarize_compression_outcome(
+                                scenario_df
+                            )
+                        )
+
+                        robustness_rows.append({
+                            "scenario": scenario_name,
+                            **result,
+                        })
+
+                    append_robustness_scenario(
+                        "Full bucket",
+                        robust_df,
+                    )
+
+                    # ==========================================
+                    # WITHOUT BEST SYMBOL
+                    # ==========================================
+
+                    if (
+                        "symbol" in robust_df.columns
+                        and not robust_df.empty
+                    ):
+                        pnl_by_symbol = (
+                            robust_df
+                            .groupby("symbol")["pnl"]
+                            .sum()
+                        )
+
+                        if not pnl_by_symbol.empty:
+                            best_symbol = (
+                                pnl_by_symbol.idxmax()
+                            )
+
+                            append_robustness_scenario(
+                                (
+                                    "Without best symbol: "
+                                    f"{best_symbol}"
+                                ),
+                                robust_df[
+                                    robust_df["symbol"]
+                                    != best_symbol
+                                ],
+                            )
+
+                    # ==========================================
+                    # WITHOUT BEST DAY
+                    # ==========================================
+
+                    valid_days = robust_df.dropna(
+                        subset=["outcome_entry_date"]
+                    )
+
+                    if not valid_days.empty:
+                        pnl_by_day = (
+                            valid_days
+                            .groupby(
+                                "outcome_entry_date"
+                            )["pnl"]
+                            .sum()
+                        )
+
+                        best_day = pnl_by_day.idxmax()
+
+                        append_robustness_scenario(
+                            (
+                                "Without best day: "
+                                f"{best_day}"
+                            ),
+                            robust_df[
+                                robust_df[
+                                    "outcome_entry_date"
+                                ] != best_day
+                            ],
+                        )
+
+                    # ==========================================
+                    # WITHOUT BEST 30M BATCH
+                    # ==========================================
+
+                    valid_batches = robust_df.dropna(
+                        subset=["outcome_entry_30m"]
+                    )
+
+                    if not valid_batches.empty:
+                        pnl_by_batch = (
+                            valid_batches
+                            .groupby(
+                                "outcome_entry_30m"
+                            )["pnl"]
+                            .sum()
+                        )
+
+                        best_batch = (
+                            pnl_by_batch.idxmax()
+                        )
+
+                        append_robustness_scenario(
+                            (
+                                "Without best batch: "
+                                f"{best_batch}"
+                            ),
+                            robust_df[
+                                robust_df[
+                                    "outcome_entry_30m"
+                                ] != best_batch
+                            ],
+                        )
+
+                    # ==========================================
+                    # FIRST HALF VS SECOND HALF
+                    # ==========================================
+
+                    ordered_robust_df = (
+                        robust_df
+                        .sort_values(
+                            "outcome_entry_datetime"
+                        )
+                    )
+
+                    if len(ordered_robust_df) >= 2:
+                        midpoint = (
+                            len(ordered_robust_df) // 2
+                        )
+
+                        append_robustness_scenario(
+                            "First half",
+                            ordered_robust_df.iloc[
+                                :midpoint
+                            ],
+                        )
+
+                        append_robustness_scenario(
+                            "Second half",
+                            ordered_robust_df.iloc[
+                                midpoint:
+                            ],
+                        )
+
+                    robustness_report = pd.DataFrame(
+                        robustness_rows
+                    )
+
+                    for col in [
+                        "tp_rate",
+                        "avg_pnl",
+                        "total_pnl",
+                        "profit_factor",
+                    ]:
+                        if col in robustness_report.columns:
+                            robustness_report[col] = (
+                                pd.to_numeric(
+                                    robustness_report[col],
+                                    errors="coerce",
+                                ).round(4)
+                            )
+
+                    st.dataframe(
+                        robustness_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # ==================================================
+            # TRADES / TRADE INSPECTOR
+            # ==================================================
+
+            with outcomes_trades_tab:
+
+                st.markdown(
+                    "### TP and SL trade inspection"
+                )
+
+                preferred_trade_cols = [
+                    "trade_key",
+                    "symbol",
+                    "side",
+                    "entry_ts_dt",
+                    "exit_ts_dt",
+                    "compression_outcome",
+                    "exit_reason",
+                    "pnl",
+
+                    "compression_shape",
+                    "compression_quality_label",
+                    "compression_score",
+                    "compression_duration",
+                    "compression_height_pct",
+
+                    "range_ratio",
+                    "atr_ratio",
+                    "volume_ratio",
+
+                    "touches_high",
+                    "touches_low",
+                    "touches_high_ratio",
+                    "touches_low_ratio",
+                    "touch_imbalance_ratio",
+
+                    "breakout_volume_ratio",
+                    "breakout_extension_pct",
+                    "breakout_extension_atr",
+
+                    "entry_vs_compression_pct",
+                    "entry_vs_breakout_pct",
+
+                    "structural_risk_pct",
+                    "planned_rr",
+                    "selected_lookback",
+
+                    "max_favorable_pct",
+                    "max_adverse_pct",
+                ]
+
+                available_trade_cols = [
+                    col
+                    for col in preferred_trade_cols
+                    if col in filtered_outcome_df.columns
+                ]
+
+                outcome_trade_source = (
+                    filtered_outcome_df
+                    .sort_values(
+                        "outcome_entry_datetime",
+                        ascending=False,
+                    )
+                    .reset_index(drop=True)
+                )
+
+                st.caption(
+                    "Seleccioná un trade para inspeccionar "
+                    "gráficamente su compresión."
+                )
+
+                outcome_trade_event = st.dataframe(
+                    outcome_trade_source[
+                        available_trade_cols
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "compression_outcome_"
+                        "trade_selector"
+                    ),
+                    on_select="rerun",
+                    selection_mode="single-row",
+                )
+
+                selected_trade_rows = (
+                    outcome_trade_event
+                    .selection
+                    .rows
+                )
+
+                if selected_trade_rows:
+                    selected_position = (
+                        selected_trade_rows[0]
+                    )
+
+                    selected_trade_row = (
+                        outcome_trade_source.iloc[
+                            selected_position
+                        ]
+                    )
+
+                    render_trade_inspector_for_row(
+                        row=selected_trade_row,
+                        status="CLOSED",
+                        key_prefix=(
+                            "compression_outcome_"
+                            + str(
+                                selected_trade_row[
+                                    "trade_key"
+                                ]
+                            )
+                        ),
+                    )
+            
 # ==========================================================
 # TP / SL POST-TRADE REPLAY
 # ==========================================================
@@ -10605,9 +14093,12 @@ with tab_tp_sl_replay:
                 )
 
         scenario_numeric = [
+            "original_pnl",
             "sl_buffer_pct",
             "tp_target_pct",
+            "scenario_risk_pct",
             "structural_risk_pct",
+            "original_sl_risk_pct",
             "simulated_pnl_pct",
         ]
 
@@ -10743,69 +14234,3027 @@ with tab_tp_sl_replay:
             f"are included."
         )
 
-        # ==========================================
-        # STRUCTURAL RESULT SUMMARY
-        # ==========================================
-        st.markdown("### Structural Replay Results")
+        st.markdown("---")
 
-        if "structural_result" in mature_replay.columns:
-            structural_summary = (
-                mature_replay[
-                    "structural_result"
-                ]
-                .fillna("UNKNOWN")
-                .value_counts(dropna=False)
-                .rename_axis("result")
-                .reset_index(name="trades")
+        replay_analysis_mode = st.radio(
+            "Replay analysis",
+            options=[
+                "Overview",
+                "Combined + Robustness",
+                "SL Only",
+                "TP Only",
+                "Factorial",
+                "Diagnostics",
+            ],
+            horizontal=True,
+            key="tp_sl_replay_analysis_mode",
+        )
+        
+        scenario_cost_pct = 0.10
+        scenario_min_trades = 50
+
+        if replay_analysis_mode in [
+            "Combined + Robustness",
+            "SL Only",
+            "TP Only",
+            "Factorial",
+        ]:
+            replay_control_1, replay_control_2 = (
+                st.columns(2)
             )
 
-            if total_trades > 0:
-                structural_summary["pct"] = (
-                    structural_summary["trades"]
-                    / total_trades
-                    * 100
-                ).round(2)
-            else:
-                structural_summary["pct"] = 0.0
+            with replay_control_1:
+                scenario_cost_pct = st.selectbox(
+                    "Estimated round-trip cost per trade",
+                    options=[
+                        0.00,
+                        0.05,
+                        0.075,
+                        0.10,
+                    ],
+                    index=3,
+                    format_func=(
+                        lambda value:
+                            f"{value:.3f}%"
+                    ),
+                    key="shared_replay_cost",
+                )
 
-            st.dataframe(
-                structural_summary,
-                use_container_width=True,
-                hide_index=True,
-            )
+            with replay_control_2:
+                scenario_min_trades = st.slider(
+                    "Minimum accepted trades",
+                    min_value=10,
+                    max_value=150,
+                    value=50,
+                    step=10,
+                    key="shared_replay_min_trades",
+                )
+        
 
-        # ==========================================
-        # RAW REPORT DIAGNOSTICS
-        # ==========================================
-        with st.expander("Replay report diagnostics"):
-            d1, d2, d3 = st.columns(3)
+        if replay_analysis_mode == "Overview":
 
-            d1.metric(
-                "Replay rows",
-                len(replay),
-            )
+            # ==========================================
+            # STRUCTURAL RESULT SUMMARY
+            # ==========================================
+            st.markdown("### Structural Replay Results")
 
-            d2.metric(
-                "TP/SL scenario rows",
-                len(scenarios),
-            )
-
-            d3.metric(
-                "Partial scenario rows",
-                len(partials),
-            )
-
-            if "analysis_status" in replay.columns:
-                status_summary = (
-                    replay["analysis_status"]
+            if "structural_result" in mature_replay.columns:
+                structural_summary = (
+                    mature_replay[
+                        "structural_result"
+                    ]
                     .fillna("UNKNOWN")
-                    .value_counts()
-                    .rename_axis("status")
+                    .value_counts(dropna=False)
+                    .rename_axis("result")
                     .reset_index(name="trades")
                 )
 
+                if total_trades > 0:
+                    structural_summary["pct"] = (
+                        structural_summary["trades"]
+                        / total_trades
+                        * 100
+                    ).round(2)
+                else:
+                    structural_summary["pct"] = 0.0
+
                 st.dataframe(
-                    status_summary,
+                    structural_summary,
                     use_container_width=True,
                     hide_index=True,
                 )
+            
+            # ==========================================
+            # ACTUAL VS STRUCTURAL ECONOMICS
+            # ==========================================
+
+            st.markdown(
+                "### Actual vs Structural Risk"
+            )
+
+            st.caption(
+                "Compara la gestión real contra el mismo TP original "
+                "con el SL ubicado en compression_low/high. "
+                "Utiliza exactamente el mismo conjunto de trades."
+            )
+
+            structural_comparison = (
+                mature_replay.copy()
+            )
+
+            structural_comparison["pnl"] = (
+                pd.to_numeric(
+                    structural_comparison["pnl"],
+                    errors="coerce",
+                )
+            )
+
+            structural_comparison[
+                "original_tp_pct"
+            ] = pd.to_numeric(
+                structural_comparison[
+                    "original_tp_pct"
+                ],
+                errors="coerce",
+            )
+
+            structural_comparison[
+                "structural_sl_risk_pct"
+            ] = pd.to_numeric(
+                structural_comparison[
+                    "structural_sl_risk_pct"
+                ],
+                errors="coerce",
+            )
+
+            structural_comparison[
+                "structural_result"
+            ] = (
+                structural_comparison[
+                    "structural_result"
+                ]
+                .fillna("")
+                .astype(str)
+                .str.upper()
+            )
+
+            # Solamente trades resueltos en ambos escenarios.
+            structural_comparison = (
+                structural_comparison[
+                    structural_comparison[
+                        "structural_result"
+                    ].isin(["TP", "SL"])
+                    &
+                    structural_comparison[
+                        "pnl"
+                    ].notna()
+                    &
+                    structural_comparison[
+                        "original_tp_pct"
+                    ].notna()
+                    &
+                    structural_comparison[
+                        "structural_sl_risk_pct"
+                    ].notna()
+                ]
+                .copy()
+            )
+
+            if structural_comparison.empty:
+                st.info(
+                    "No resolved structural trades "
+                    "available for comparison."
+                )
+
+            else:
+                structural_comparison[
+                    "structural_simulated_pnl"
+                ] = np.where(
+                    structural_comparison[
+                        "structural_result"
+                    ].eq("TP"),
+
+                    structural_comparison[
+                        "original_tp_pct"
+                    ],
+
+                    -structural_comparison[
+                        "structural_sl_risk_pct"
+                    ],
+                )
+
+                comparison_rows = [
+                    summarize_replay_strategy(
+                        "Actual management",
+                        structural_comparison[
+                            "pnl"
+                        ],
+                    ),
+
+                    summarize_replay_strategy(
+                        (
+                            "Original TP + "
+                            "structural SL"
+                        ),
+                        structural_comparison[
+                            "structural_simulated_pnl"
+                        ],
+                    ),
+                ]
+
+                structural_economics_df = (
+                    pd.DataFrame(
+                        comparison_rows
+                    )
+                )
+
+                structural_numeric_cols = [
+                    "winrate",
+                    "avg_win",
+                    "avg_loss",
+                    "payoff_ratio",
+                    "breakeven_winrate",
+                    "avg_pnl",
+                    "total_pnl",
+                    "profit_factor",
+                    "max_drawdown",
+                ]
+
+                for col in structural_numeric_cols:
+                    structural_economics_df[col] = (
+                        pd.to_numeric(
+                            structural_economics_df[col],
+                            errors="coerce",
+                        ).round(4)
+                    )
+
+                st.dataframe(
+                    structural_economics_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.caption(
+                    "Comparación bruta antes de agregar costos "
+                    "específicos al escenario estructural. "
+                    "Un win rate superior no alcanza si aumenta "
+                    "demasiado la pérdida media o el drawdown."
+                )
+
+        if (
+            replay_analysis_mode
+            == "Combined + Robustness"
+        ):
+               
+            # ==========================================
+            # RISK-CAPPED TP / SL SCENARIO SCANNER
+            # ==========================================
+
+            st.markdown(
+                "### Structural Risk-Capped Scenario Scanner"
+            )
+
+            st.caption(
+                "Prueba diferentes TP, buffers estructurales "
+                "y límites máximos de riesgo. Los trades cuyo "
+                "SL estructural supera el límite son rechazados."
+            )
+
+            scanner_df = mature_scenarios.copy()
+            
+            # Este scanner analiza únicamente:
+            #
+            # TP objetivo + SL estructural.
+            #
+            # Los escenarios con SL original se
+            # analizan en el TP-only scanner.
+            if "sl_mode" in scanner_df.columns:
+                scanner_df = scanner_df[
+                    scanner_df["sl_mode"]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                    .eq("STRUCTURAL")
+                ].copy()
+
+            else:
+                st.warning(
+                    "Scenario report has no sl_mode column. "
+                    "Regenerate the replay reports."
+                )
+
+                scanner_df = scanner_df.iloc[
+                    0:0
+                ].copy()
+
+            scanner_required_cols = [
+                "entry_ts",
+                "result",
+                "original_pnl",
+                "sl_buffer_pct",
+                "tp_target_pct",
+                "structural_risk_pct",
+                "simulated_pnl_pct",
+            ]
+
+            scanner_missing_cols = [
+                col
+                for col in scanner_required_cols
+                if col not in scanner_df.columns
+            ]
+
+            if scanner_missing_cols:
+                st.info(
+                    "Missing scenario columns: "
+                    + ", ".join(scanner_missing_cols)
+                )
+
+            else:
+                for col in [
+                    "sl_buffer_pct",
+                    "tp_target_pct",
+                    "structural_risk_pct",
+                    "simulated_pnl_pct",
+                    "original_pnl",
+                ]:
+                    if col in scanner_df.columns:
+                        scanner_df[col] = pd.to_numeric(
+                            scanner_df[col],
+                            errors="coerce",
+                        )
+
+                scanner_df["result"] = (
+                    scanner_df["result"]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                )
+
+                scanner_df["entry_ts"] = pd.to_datetime(
+                    scanner_df["entry_ts"],
+                    utc=True,
+                    errors="coerce",
+                )
+
+                # Solamente resultados cuyo TP o SL fue
+                # resuelto dentro de la ventana temporal.
+                scanner_df = scanner_df[
+                    scanner_df["result"].isin([
+                        "TP",
+                        "SL",
+                    ])
+                    &
+                    scanner_df[
+                        "structural_risk_pct"
+                    ].gt(0)
+                    &
+                    scanner_df[
+                        "simulated_pnl_pct"
+                    ].notna()
+                ].copy()
+
+                risk_caps = [
+                    0.50,
+                    0.75,
+                    1.00,
+                    1.25,
+                    1.50,
+                    1.75,
+                    2.00,
+                    3.00,
+                    5.00,
+                ]
+
+                scenario_report_rows = []
+
+                scenario_groups = scanner_df.groupby(
+                    [
+                        "sl_buffer_pct",
+                        "tp_target_pct",
+                    ],
+                    observed=True,
+                )
+
+                for (
+                    sl_buffer_pct,
+                    tp_target_pct,
+                ), scenario_group in scenario_groups:
+
+                    scenario_group = (
+                        scenario_group
+                        .sort_values("entry_ts")
+                        .copy()
+                    )
+
+                    available_trades = len(
+                        scenario_group
+                    )
+
+                    if available_trades == 0:
+                        continue
+
+                    for risk_cap_pct in risk_caps:
+
+                        accepted = scenario_group[
+                            scenario_group[
+                                "structural_risk_pct"
+                            ].le(risk_cap_pct)
+                        ].copy()
+
+                        # Ambas estrategias deben compararse sobre
+                        # exactamente los mismos trades.
+                        accepted = accepted.dropna(
+                            subset=[
+                                "original_pnl",
+                                "simulated_pnl_pct",
+                            ]
+                        ).copy()
+
+                        if (
+                            len(accepted)
+                            < scenario_min_trades
+                        ):
+                            continue
+
+                        # Si pnl ya incluye costos en trades.csv,
+                        # eliminá "- scenario_cost_pct" de
+                        # actual_net_pnl para no descontarlos dos veces.
+                        accepted[
+                            "actual_net_pnl"
+                        ] = (
+                            accepted["original_pnl"]
+                            - scenario_cost_pct
+                        )
+
+                        accepted[
+                            "structural_net_pnl"
+                        ] = (
+                            accepted[
+                                "simulated_pnl_pct"
+                            ]
+                            - scenario_cost_pct
+                        )
+
+                        actual_metrics = (
+                            summarize_replay_strategy(
+                                strategy_name=(
+                                    "Actual management"
+                                ),
+                                pnl_values=accepted[
+                                    "actual_net_pnl"
+                                ],
+                            )
+                        )
+
+                        structural_metrics = (
+                            summarize_replay_strategy(
+                                strategy_name=(
+                                    "Structural scenario"
+                                ),
+                                pnl_values=accepted[
+                                    "structural_net_pnl"
+                                ],
+                            )
+                        )
+
+                        accepted_tp = int(
+                            accepted["result"]
+                            .eq("TP")
+                            .sum()
+                        )
+
+                        accepted_sl = int(
+                            accepted["result"]
+                            .eq("SL")
+                            .sum()
+                        )
+
+                        rejected = (
+                            available_trades
+                            - len(accepted)
+                        )
+
+                        scenario_report_rows.append({
+                            "tp_target_pct":
+                                tp_target_pct,
+
+                            "sl_buffer_pct":
+                                sl_buffer_pct,
+
+                            "max_structural_risk_pct":
+                                risk_cap_pct,
+
+                            "cost_pct":
+                                scenario_cost_pct,
+
+                            "available_trades":
+                                available_trades,
+
+                            "accepted_trades":
+                                len(accepted),
+
+                            "rejected_trades":
+                                rejected,
+
+                            "coverage_pct": (
+                                len(accepted)
+                                / available_trades
+                                * 100
+                            ),
+
+                            "tp":
+                                accepted_tp,
+
+                            "sl":
+                                accepted_sl,
+
+                            # ==================================
+                            # ACTUAL MANAGEMENT
+                            # ==================================
+
+                            "actual_winrate":
+                                actual_metrics["winrate"],
+
+                            "actual_avg_win":
+                                actual_metrics["avg_win"],
+
+                            "actual_avg_loss":
+                                actual_metrics["avg_loss"],
+
+                            "actual_payoff_ratio":
+                                actual_metrics[
+                                    "payoff_ratio"
+                                ],
+
+                            "actual_avg_pnl":
+                                actual_metrics["avg_pnl"],
+
+                            "actual_total_pnl":
+                                actual_metrics["total_pnl"],
+
+                            "actual_profit_factor":
+                                actual_metrics[
+                                    "profit_factor"
+                                ],
+
+                            "actual_max_drawdown":
+                                actual_metrics[
+                                    "max_drawdown"
+                                ],
+
+                            # ==================================
+                            # STRUCTURAL MANAGEMENT
+                            # ==================================
+
+                            "structural_winrate":
+                                structural_metrics["winrate"],
+
+                            "structural_avg_win":
+                                structural_metrics["avg_win"],
+
+                            "structural_avg_loss":
+                                structural_metrics["avg_loss"],
+
+                            "structural_payoff_ratio":
+                                structural_metrics[
+                                    "payoff_ratio"
+                                ],
+
+                            "structural_breakeven_winrate":
+                                structural_metrics[
+                                    "breakeven_winrate"
+                                ],
+
+                            "structural_avg_pnl":
+                                structural_metrics["avg_pnl"],
+
+                            "structural_total_pnl":
+                                structural_metrics[
+                                    "total_pnl"
+                                ],
+
+                            "structural_profit_factor":
+                                structural_metrics[
+                                    "profit_factor"
+                                ],
+
+                            "structural_max_drawdown":
+                                structural_metrics[
+                                    "max_drawdown"
+                                ],
+
+                            # ==================================
+                            # IMPROVEMENT DELTAS
+                            # ==================================
+
+                            "delta_winrate": (
+                                structural_metrics[
+                                    "winrate"
+                                ]
+                                - actual_metrics[
+                                    "winrate"
+                                ]
+                            ),
+
+                            "delta_avg_pnl": (
+                                structural_metrics[
+                                    "avg_pnl"
+                                ]
+                                - actual_metrics[
+                                    "avg_pnl"
+                                ]
+                            ),
+
+                            "delta_total_pnl": (
+                                structural_metrics[
+                                    "total_pnl"
+                                ]
+                                - actual_metrics[
+                                    "total_pnl"
+                                ]
+                            ),
+
+                            "delta_profit_factor": (
+                                structural_metrics[
+                                    "profit_factor"
+                                ]
+                                - actual_metrics[
+                                    "profit_factor"
+                                ]
+                                if (
+                                    pd.notna(
+                                        structural_metrics[
+                                            "profit_factor"
+                                        ]
+                                    )
+                                    and pd.notna(
+                                        actual_metrics[
+                                            "profit_factor"
+                                        ]
+                                    )
+                                    and np.isfinite(
+                                        structural_metrics[
+                                            "profit_factor"
+                                        ]
+                                    )
+                                    and np.isfinite(
+                                        actual_metrics[
+                                            "profit_factor"
+                                        ]
+                                    )
+                                )
+                                else np.nan
+                            ),
+
+                            # Positivo significa que el escenario
+                            # estructural redujo el drawdown.
+                            "drawdown_reduction": (
+                                actual_metrics[
+                                    "max_drawdown"
+                                ]
+                                - structural_metrics[
+                                    "max_drawdown"
+                                ]
+                            ),
+                        })
+
+                scenario_ranking = pd.DataFrame(
+                    scenario_report_rows
+                )
+
+                if scenario_ranking.empty:
+                    st.info(
+                        "No scenarios meet the minimum "
+                        "accepted trade requirement."
+                    )
+
+                else:
+                    scanner_numeric_cols = [
+                        "coverage_pct",
+
+                        "actual_winrate",
+                        "actual_avg_win",
+                        "actual_avg_loss",
+                        "actual_payoff_ratio",
+                        "actual_avg_pnl",
+                        "actual_total_pnl",
+                        "actual_profit_factor",
+                        "actual_max_drawdown",
+
+                        "structural_winrate",
+                        "structural_avg_win",
+                        "structural_avg_loss",
+                        "structural_payoff_ratio",
+                        "structural_breakeven_winrate",
+                        "structural_avg_pnl",
+                        "structural_total_pnl",
+                        "structural_profit_factor",
+                        "structural_max_drawdown",
+
+                        "delta_winrate",
+                        "delta_avg_pnl",
+                        "delta_total_pnl",
+                        "delta_profit_factor",
+                        "drawdown_reduction",
+                    ]
+
+                    for col in scanner_numeric_cols:
+                        scenario_ranking[col] = (
+                            pd.to_numeric(
+                                scenario_ranking[col],
+                                errors="coerce",
+                            ).round(4)
+                        )
+
+                    scenario_ranking = (
+                        scenario_ranking
+                        .sort_values(
+                            by=[
+                                "structural_profit_factor",
+                                "structural_total_pnl",
+                                "accepted_trades",
+                            ],
+                            ascending=[
+                                False,
+                                False,
+                                False,
+                            ],
+                            na_position="last",
+                        )
+                        .reset_index(drop=True)
+                    )
+
+                    st.dataframe(
+                        scenario_ranking,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.caption(
+                        "Coverage indica qué porcentaje de los "
+                        "trades con escenario disponible habría "
+                        "sido aceptado por el límite de riesgo."
+                    )
+                
+        
+
+        if replay_analysis_mode == "SL Only":
+
+            # ======================================
+            # SL-ONLY RISK SCANNER
+            # ======================================
+
+            st.markdown(
+                "### SL-Only Structural Risk Scanner"
+            )
+
+            st.caption(
+                "Mantiene el TP original de cada trade "
+                "y cambia únicamente el SL por el nivel "
+                "estructural. Así se aísla el aporte del SL."
+            )
+
+            sl_only_df = mature_replay.copy()
+
+            sl_only_required_cols = [
+                "entry_ts",
+                "pnl",
+                "original_tp_pct",
+                "structural_sl_risk_pct",
+                "structural_result",
+            ]
+
+            sl_only_missing_cols = [
+                col
+                for col in sl_only_required_cols
+                if col not in sl_only_df.columns
+            ]
+
+            if sl_only_missing_cols:
+                st.info(
+                    "Missing SL-only columns: "
+                    + ", ".join(
+                        sl_only_missing_cols
+                    )
+                )
+
+            else:
+                sl_only_df["entry_ts"] = (
+                    pd.to_datetime(
+                        sl_only_df["entry_ts"],
+                        utc=True,
+                        errors="coerce",
+                    )
+                )
+
+                for col in [
+                    "pnl",
+                    "original_tp_pct",
+                    "structural_sl_risk_pct",
+                ]:
+                    sl_only_df[col] = pd.to_numeric(
+                        sl_only_df[col],
+                        errors="coerce",
+                    )
+
+                sl_only_df[
+                    "structural_result"
+                ] = (
+                    sl_only_df[
+                        "structural_result"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                )
+
+                sl_only_df = sl_only_df[
+                    sl_only_df[
+                        "structural_result"
+                    ].isin([
+                        "TP",
+                        "SL",
+                    ])
+                    &
+                    sl_only_df[
+                        "entry_ts"
+                    ].notna()
+                    &
+                    sl_only_df[
+                        "pnl"
+                    ].notna()
+                    &
+                    sl_only_df[
+                        "original_tp_pct"
+                    ].gt(0)
+                    &
+                    sl_only_df[
+                        "structural_sl_risk_pct"
+                    ].gt(0)
+                ].copy()
+
+                sl_only_df = (
+                    sl_only_df
+                    .sort_values("entry_ts")
+                    .reset_index(drop=True)
+                )
+
+                sl_only_risk_caps = [
+                    0.75,
+                    1.00,
+                    1.25,
+                    1.50,
+                    1.75,
+                    2.00,
+                    2.50,
+                    3.00,
+                    5.00,
+                ]
+
+                sl_only_available_trades = len(
+                    sl_only_df
+                )
+
+                sl_only_rows = []
+
+                for risk_cap_pct in (
+                    sl_only_risk_caps
+                ):
+                    sl_only_accepted = (
+                        sl_only_df[
+                            sl_only_df[
+                                "structural_sl_risk_pct"
+                            ].le(risk_cap_pct)
+                        ]
+                        .copy()
+                    )
+
+                    if (
+                        len(sl_only_accepted)
+                        < scenario_min_trades
+                    ):
+                        continue
+
+                    # Si pnl ya contiene costos reales,
+                    # quitá "- scenario_cost_pct" para
+                    # evitar descontarlos dos veces.
+                    sl_only_accepted[
+                        "actual_net_pnl"
+                    ] = (
+                        sl_only_accepted["pnl"]
+                        - scenario_cost_pct
+                    )
+
+                    sl_only_accepted[
+                        "structural_net_pnl"
+                    ] = np.where(
+                        sl_only_accepted[
+                            "structural_result"
+                        ].eq("TP"),
+
+                        sl_only_accepted[
+                            "original_tp_pct"
+                        ],
+
+                        -sl_only_accepted[
+                            "structural_sl_risk_pct"
+                        ],
+                    )
+
+                    sl_only_accepted[
+                        "structural_net_pnl"
+                    ] = (
+                        sl_only_accepted[
+                            "structural_net_pnl"
+                        ]
+                        - scenario_cost_pct
+                    )
+
+                    actual_summary = (
+                        summarize_replay_strategy(
+                            strategy_name=(
+                                "Actual management"
+                            ),
+                            pnl_values=(
+                                sl_only_accepted[
+                                    "actual_net_pnl"
+                                ]
+                            ),
+                        )
+                    )
+
+                    sl_summary = (
+                        summarize_replay_strategy(
+                            strategy_name=(
+                                "Original TP + "
+                                "structural SL"
+                            ),
+                            pnl_values=(
+                                sl_only_accepted[
+                                    "structural_net_pnl"
+                                ]
+                            ),
+                        )
+                    )
+
+                    actual_pf = actual_summary[
+                        "profit_factor"
+                    ]
+
+                    sl_only_pf = sl_summary[
+                        "profit_factor"
+                    ]
+
+                    if (
+                        pd.notna(actual_pf)
+                        and pd.notna(sl_only_pf)
+                        and np.isfinite(actual_pf)
+                        and np.isfinite(sl_only_pf)
+                    ):
+                        delta_pf = (
+                            sl_only_pf
+                            - actual_pf
+                        )
+                    else:
+                        delta_pf = np.nan
+
+                    structural_tp_count = int(
+                        sl_only_accepted[
+                            "structural_result"
+                        ]
+                        .eq("TP")
+                        .sum()
+                    )
+
+                    structural_sl_count = int(
+                        sl_only_accepted[
+                            "structural_result"
+                        ]
+                        .eq("SL")
+                        .sum()
+                    )
+
+                    sl_only_rows.append({
+                        "max_structural_risk_pct":
+                            risk_cap_pct,
+
+                        "cost_pct":
+                            scenario_cost_pct,
+
+                        "available_trades":
+                            sl_only_available_trades,
+
+                        "accepted_trades":
+                            len(sl_only_accepted),
+
+                        "rejected_trades": (
+                            sl_only_available_trades
+                            - len(sl_only_accepted)
+                        ),
+
+                        "coverage_pct": (
+                            len(sl_only_accepted)
+                            / sl_only_available_trades
+                            * 100
+                            if sl_only_available_trades
+                            else 0.0
+                        ),
+
+                        "structural_tp":
+                            structural_tp_count,
+
+                        "structural_sl":
+                            structural_sl_count,
+
+                        # ==========================
+                        # ACTUAL
+                        # ==========================
+
+                        "actual_winrate":
+                            actual_summary[
+                                "winrate"
+                            ],
+
+                        "actual_avg_win":
+                            actual_summary[
+                                "avg_win"
+                            ],
+
+                        "actual_avg_loss":
+                            actual_summary[
+                                "avg_loss"
+                            ],
+
+                        "actual_avg_pnl":
+                            actual_summary[
+                                "avg_pnl"
+                            ],
+
+                        "actual_total_pnl":
+                            actual_summary[
+                                "total_pnl"
+                            ],
+
+                        "actual_profit_factor":
+                            actual_pf,
+
+                        "actual_max_drawdown":
+                            actual_summary[
+                                "max_drawdown"
+                            ],
+
+                        # ==========================
+                        # SL STRUCTURAL ONLY
+                        # ==========================
+
+                        "sl_only_winrate":
+                            sl_summary[
+                                "winrate"
+                            ],
+
+                        "sl_only_avg_win":
+                            sl_summary[
+                                "avg_win"
+                            ],
+
+                        "sl_only_avg_loss":
+                            sl_summary[
+                                "avg_loss"
+                            ],
+
+                        "sl_only_payoff_ratio":
+                            sl_summary[
+                                "payoff_ratio"
+                            ],
+
+                        "sl_only_breakeven_winrate":
+                            sl_summary[
+                                "breakeven_winrate"
+                            ],
+
+                        "sl_only_avg_pnl":
+                            sl_summary[
+                                "avg_pnl"
+                            ],
+
+                        "sl_only_total_pnl":
+                            sl_summary[
+                                "total_pnl"
+                            ],
+
+                        "sl_only_profit_factor":
+                            sl_only_pf,
+
+                        "sl_only_max_drawdown":
+                            sl_summary[
+                                "max_drawdown"
+                            ],
+
+                        # ==========================
+                        # DELTAS
+                        # ==========================
+
+                        "delta_winrate": (
+                            sl_summary[
+                                "winrate"
+                            ]
+                            - actual_summary[
+                                "winrate"
+                            ]
+                        ),
+
+                        "delta_avg_pnl": (
+                            sl_summary[
+                                "avg_pnl"
+                            ]
+                            - actual_summary[
+                                "avg_pnl"
+                            ]
+                        ),
+
+                        "delta_total_pnl": (
+                            sl_summary[
+                                "total_pnl"
+                            ]
+                            - actual_summary[
+                                "total_pnl"
+                            ]
+                        ),
+
+                        "delta_profit_factor":
+                            delta_pf,
+
+                        "drawdown_reduction": (
+                            actual_summary[
+                                "max_drawdown"
+                            ]
+                            - sl_summary[
+                                "max_drawdown"
+                            ]
+                        ),
+                    })
+
+                sl_only_report = pd.DataFrame(
+                    sl_only_rows
+                )
+
+                if sl_only_report.empty:
+                    st.info(
+                        "No SL-only risk caps meet "
+                        "the minimum trade requirement."
+                    )
+
+                else:
+                    sl_only_numeric_cols = [
+                        "coverage_pct",
+
+                        "actual_winrate",
+                        "actual_avg_win",
+                        "actual_avg_loss",
+                        "actual_avg_pnl",
+                        "actual_total_pnl",
+                        "actual_profit_factor",
+                        "actual_max_drawdown",
+
+                        "sl_only_winrate",
+                        "sl_only_avg_win",
+                        "sl_only_avg_loss",
+                        "sl_only_payoff_ratio",
+                        "sl_only_breakeven_winrate",
+                        "sl_only_avg_pnl",
+                        "sl_only_total_pnl",
+                        "sl_only_profit_factor",
+                        "sl_only_max_drawdown",
+
+                        "delta_winrate",
+                        "delta_avg_pnl",
+                        "delta_total_pnl",
+                        "delta_profit_factor",
+                        "drawdown_reduction",
+                    ]
+
+                    for col in sl_only_numeric_cols:
+                        sl_only_report[col] = (
+                            pd.to_numeric(
+                                sl_only_report[col],
+                                errors="coerce",
+                            ).round(4)
+                        )
+
+                    sl_only_report = (
+                        sl_only_report
+                        .sort_values(
+                            by=[
+                                "sl_only_profit_factor",
+                                "sl_only_total_pnl",
+                            ],
+                            ascending=[
+                                False,
+                                False,
+                            ],
+                            na_position="last",
+                        )
+                        .reset_index(drop=True)
+                    )
+
+                    st.dataframe(
+                        sl_only_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.caption(
+                        "Esta tabla no modifica el TP. "
+                        "Cualquier diferencia contra actual "
+                        "proviene exclusivamente del SL "
+                        "estructural y del límite de riesgo."
+                    )
+                
+
+        if replay_analysis_mode == "TP Only":
+
+            # ======================================
+            # TP-ONLY SCANNER
+            # ======================================
+
+            st.markdown(
+                "### TP-Only Scenario Scanner"
+            )
+
+            st.caption(
+                "Cambia únicamente el TP y conserva el "
+                "SL original de cada trade. Permite aislar "
+                "el aporte de la salida ganadora."
+            )
+
+            tp_only_source = (
+                mature_scenarios.copy()
+            )
+
+            tp_only_required_cols = [
+                "entry_ts",
+                "sl_mode",
+                "result",
+                "original_pnl",
+                "tp_target_pct",
+                "original_sl_risk_pct",
+                "simulated_pnl_pct",
+            ]
+
+            tp_only_missing_cols = [
+                col
+                for col in tp_only_required_cols
+                if col not in tp_only_source.columns
+            ]
+
+            if tp_only_missing_cols:
+                st.info(
+                    "Missing TP-only columns: "
+                    + ", ".join(
+                        tp_only_missing_cols
+                    )
+                )
+
+            else:
+                tp_only_source[
+                    "sl_mode"
+                ] = (
+                    tp_only_source[
+                        "sl_mode"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                )
+
+                tp_only_source = (
+                    tp_only_source[
+                        tp_only_source[
+                            "sl_mode"
+                        ].eq("ORIGINAL")
+                    ]
+                    .copy()
+                )
+
+                tp_only_source[
+                    "entry_ts"
+                ] = pd.to_datetime(
+                    tp_only_source[
+                        "entry_ts"
+                    ],
+                    utc=True,
+                    errors="coerce",
+                )
+
+                for col in [
+                    "original_pnl",
+                    "tp_target_pct",
+                    "original_sl_risk_pct",
+                    "simulated_pnl_pct",
+                ]:
+                    tp_only_source[col] = (
+                        pd.to_numeric(
+                            tp_only_source[col],
+                            errors="coerce",
+                        )
+                    )
+
+                tp_only_source[
+                    "result"
+                ] = (
+                    tp_only_source[
+                        "result"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                )
+
+                tp_only_source = (
+                    tp_only_source[
+                        tp_only_source[
+                            "entry_ts"
+                        ].notna()
+                        &
+                        tp_only_source[
+                            "original_pnl"
+                        ].notna()
+                        &
+                        tp_only_source[
+                            "tp_target_pct"
+                        ].notna()
+                        &
+                        tp_only_source[
+                            "original_sl_risk_pct"
+                        ].gt(0)
+                    ]
+                    .copy()
+                )
+
+                tp_only_rows = []
+
+                tp_only_groups = (
+                    tp_only_source.groupby(
+                        "tp_target_pct",
+                        observed=True,
+                    )
+                )
+
+                for (
+                    tp_target_pct,
+                    tp_group,
+                ) in tp_only_groups:
+
+                    tp_group = (
+                        tp_group
+                        .sort_values("entry_ts")
+                        .copy()
+                    )
+
+                    available_trades = len(
+                        tp_group
+                    )
+
+                    resolved_tp_group = (
+                        tp_group[
+                            tp_group[
+                                "result"
+                            ].isin([
+                                "TP",
+                                "SL",
+                            ])
+                            &
+                            tp_group[
+                                "simulated_pnl_pct"
+                            ].notna()
+                        ]
+                        .copy()
+                    )
+
+                    resolved_trades = len(
+                        resolved_tp_group
+                    )
+
+                    if (
+                        resolved_trades
+                        < scenario_min_trades
+                    ):
+                        continue
+
+                    # Si pnl ya contiene los costos reales,
+                    # quitá el descuento de costo de esta
+                    # columna para no duplicarlo.
+                    resolved_tp_group[
+                        "actual_net_pnl"
+                    ] = (
+                        resolved_tp_group[
+                            "original_pnl"
+                        ]
+                        - scenario_cost_pct
+                    )
+
+                    resolved_tp_group[
+                        "tp_only_net_pnl"
+                    ] = (
+                        resolved_tp_group[
+                            "simulated_pnl_pct"
+                        ]
+                        - scenario_cost_pct
+                    )
+
+                    actual_summary = (
+                        summarize_replay_strategy(
+                            strategy_name=(
+                                "Actual management"
+                            ),
+                            pnl_values=(
+                                resolved_tp_group[
+                                    "actual_net_pnl"
+                                ]
+                            ),
+                        )
+                    )
+
+                    tp_only_summary = (
+                        summarize_replay_strategy(
+                            strategy_name=(
+                                "Fixed TP + original SL"
+                            ),
+                            pnl_values=(
+                                resolved_tp_group[
+                                    "tp_only_net_pnl"
+                                ]
+                            ),
+                        )
+                    )
+
+                    actual_pf = actual_summary[
+                        "profit_factor"
+                    ]
+
+                    tp_only_pf = tp_only_summary[
+                        "profit_factor"
+                    ]
+
+                    if (
+                        pd.notna(actual_pf)
+                        and pd.notna(tp_only_pf)
+                        and np.isfinite(actual_pf)
+                        and np.isfinite(tp_only_pf)
+                    ):
+                        delta_pf = (
+                            tp_only_pf
+                            - actual_pf
+                        )
+                    else:
+                        delta_pf = np.nan
+
+                    simulated_tp_count = int(
+                        resolved_tp_group[
+                            "result"
+                        ]
+                        .eq("TP")
+                        .sum()
+                    )
+
+                    simulated_sl_count = int(
+                        resolved_tp_group[
+                            "result"
+                        ]
+                        .eq("SL")
+                        .sum()
+                    )
+
+                    tp_only_rows.append({
+                        "tp_target_pct":
+                            tp_target_pct,
+
+                        "cost_pct":
+                            scenario_cost_pct,
+
+                        "available_trades":
+                            available_trades,
+
+                        "resolved_trades":
+                            resolved_trades,
+
+                        "unresolved_trades": (
+                            available_trades
+                            - resolved_trades
+                        ),
+
+                        "resolved_coverage_pct": (
+                            resolved_trades
+                            / available_trades
+                            * 100
+                            if available_trades
+                            else 0.0
+                        ),
+
+                        "simulated_tp":
+                            simulated_tp_count,
+
+                        "simulated_sl":
+                            simulated_sl_count,
+
+                        # ==========================
+                        # ACTUAL MANAGEMENT
+                        # ==========================
+
+                        "actual_winrate":
+                            actual_summary[
+                                "winrate"
+                            ],
+
+                        "actual_avg_win":
+                            actual_summary[
+                                "avg_win"
+                            ],
+
+                        "actual_avg_loss":
+                            actual_summary[
+                                "avg_loss"
+                            ],
+
+                        "actual_avg_pnl":
+                            actual_summary[
+                                "avg_pnl"
+                            ],
+
+                        "actual_total_pnl":
+                            actual_summary[
+                                "total_pnl"
+                            ],
+
+                        "actual_profit_factor":
+                            actual_pf,
+
+                        "actual_max_drawdown":
+                            actual_summary[
+                                "max_drawdown"
+                            ],
+
+                        # ==========================
+                        # TP-ONLY MANAGEMENT
+                        # ==========================
+
+                        "tp_only_winrate":
+                            tp_only_summary[
+                                "winrate"
+                            ],
+
+                        "tp_only_avg_win":
+                            tp_only_summary[
+                                "avg_win"
+                            ],
+
+                        "tp_only_avg_loss":
+                            tp_only_summary[
+                                "avg_loss"
+                            ],
+
+                        "tp_only_payoff_ratio":
+                            tp_only_summary[
+                                "payoff_ratio"
+                            ],
+
+                        "tp_only_breakeven_winrate":
+                            tp_only_summary[
+                                "breakeven_winrate"
+                            ],
+
+                        "tp_only_avg_pnl":
+                            tp_only_summary[
+                                "avg_pnl"
+                            ],
+
+                        "tp_only_total_pnl":
+                            tp_only_summary[
+                                "total_pnl"
+                            ],
+
+                        "tp_only_profit_factor":
+                            tp_only_pf,
+
+                        "tp_only_max_drawdown":
+                            tp_only_summary[
+                                "max_drawdown"
+                            ],
+
+                        # ==========================
+                        # DELTAS
+                        # ==========================
+
+                        "delta_winrate": (
+                            tp_only_summary[
+                                "winrate"
+                            ]
+                            - actual_summary[
+                                "winrate"
+                            ]
+                        ),
+
+                        "delta_avg_pnl": (
+                            tp_only_summary[
+                                "avg_pnl"
+                            ]
+                            - actual_summary[
+                                "avg_pnl"
+                            ]
+                        ),
+
+                        "delta_total_pnl": (
+                            tp_only_summary[
+                                "total_pnl"
+                            ]
+                            - actual_summary[
+                                "total_pnl"
+                            ]
+                        ),
+
+                        "delta_profit_factor":
+                            delta_pf,
+
+                        "drawdown_reduction": (
+                            actual_summary[
+                                "max_drawdown"
+                            ]
+                            - tp_only_summary[
+                                "max_drawdown"
+                            ]
+                        ),
+                    })
+
+                tp_only_report = pd.DataFrame(
+                    tp_only_rows
+                )
+
+                if tp_only_report.empty:
+                    st.info(
+                        "No TP-only scenarios meet "
+                        "the minimum trade requirement."
+                    )
+
+                else:
+                    tp_only_numeric_cols = [
+                        "resolved_coverage_pct",
+
+                        "actual_winrate",
+                        "actual_avg_win",
+                        "actual_avg_loss",
+                        "actual_avg_pnl",
+                        "actual_total_pnl",
+                        "actual_profit_factor",
+                        "actual_max_drawdown",
+
+                        "tp_only_winrate",
+                        "tp_only_avg_win",
+                        "tp_only_avg_loss",
+                        "tp_only_payoff_ratio",
+                        "tp_only_breakeven_winrate",
+                        "tp_only_avg_pnl",
+                        "tp_only_total_pnl",
+                        "tp_only_profit_factor",
+                        "tp_only_max_drawdown",
+
+                        "delta_winrate",
+                        "delta_avg_pnl",
+                        "delta_total_pnl",
+                        "delta_profit_factor",
+                        "drawdown_reduction",
+                    ]
+
+                    for col in tp_only_numeric_cols:
+                        tp_only_report[col] = (
+                            pd.to_numeric(
+                                tp_only_report[col],
+                                errors="coerce",
+                            ).round(4)
+                        )
+
+                    tp_only_report = (
+                        tp_only_report
+                        .sort_values(
+                            by=[
+                                "tp_only_profit_factor",
+                                "tp_only_total_pnl",
+                                "resolved_trades",
+                            ],
+                            ascending=[
+                                False,
+                                False,
+                                False,
+                            ],
+                            na_position="last",
+                        )
+                        .reset_index(drop=True)
+                    )
+
+                    st.dataframe(
+                        tp_only_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.caption(
+                        "Esta tabla conserva el SL original. "
+                        "Cualquier diferencia contra actual "
+                        "proviene del TP objetivo y de mantener "
+                        "la posición hasta que TP o SL sea "
+                        "tocado dentro de la ventana."
+                    )
+                
+
+        if replay_analysis_mode == "Factorial":
+
+            # ======================================
+            # FACTORIAL MANAGEMENT COMPARISON
+            # ======================================
+
+            st.markdown(
+                "### Factorial Management Comparison"
+            )
+
+            st.caption(
+                "Compara Actual, Solo TP, Solo SL y "
+                "TP + SL estructural sobre exactamente "
+                "los mismos trades. El SL estructural "
+                "utiliza buffer 0%."
+            )
+
+            factorial_scenarios = (
+                mature_scenarios.copy()
+            )
+
+            factorial_replay = (
+                mature_replay.copy()
+            )
+
+            factorial_required_scenario_cols = [
+                "symbol",
+                "side",
+                "entry_ts",
+                "sl_mode",
+                "sl_buffer_pct",
+                "tp_target_pct",
+                "result",
+                "original_pnl",
+                "simulated_pnl_pct",
+                "structural_risk_pct",
+            ]
+
+            factorial_required_replay_cols = [
+                "symbol",
+                "side",
+                "entry_ts",
+                "original_tp_pct",
+                "structural_result",
+                "structural_sl_risk_pct",
+            ]
+
+            factorial_missing_scenario = [
+                col
+                for col
+                in factorial_required_scenario_cols
+                if col
+                not in factorial_scenarios.columns
+            ]
+
+            factorial_missing_replay = [
+                col
+                for col
+                in factorial_required_replay_cols
+                if col
+                not in factorial_replay.columns
+            ]
+
+            if (
+                factorial_missing_scenario
+                or factorial_missing_replay
+            ):
+                st.info(
+                    "Missing factorial columns. "
+                    f"Scenarios: "
+                    f"{factorial_missing_scenario}. "
+                    f"Replay: "
+                    f"{factorial_missing_replay}."
+                )
+
+            else:
+                # ==================================
+                # NORMALIZE
+                # ==================================
+
+                for frame in [
+                    factorial_scenarios,
+                    factorial_replay,
+                ]:
+                    frame["entry_ts"] = (
+                        pd.to_datetime(
+                            frame["entry_ts"],
+                            utc=True,
+                            errors="coerce",
+                        )
+                    )
+
+                    frame["symbol"] = (
+                        frame["symbol"]
+                        .fillna("")
+                        .astype(str)
+                        .str.upper()
+                    )
+
+                    frame["side"] = (
+                        frame["side"]
+                        .fillna("")
+                        .astype(str)
+                        .str.upper()
+                    )
+
+                factorial_scenario_numeric = [
+                    "sl_buffer_pct",
+                    "tp_target_pct",
+                    "original_pnl",
+                    "simulated_pnl_pct",
+                    "structural_risk_pct",
+                ]
+
+                for col in (
+                    factorial_scenario_numeric
+                ):
+                    factorial_scenarios[col] = (
+                        pd.to_numeric(
+                            factorial_scenarios[col],
+                            errors="coerce",
+                        )
+                    )
+
+                for col in [
+                    "original_tp_pct",
+                    "structural_sl_risk_pct",
+                ]:
+                    factorial_replay[col] = (
+                        pd.to_numeric(
+                            factorial_replay[col],
+                            errors="coerce",
+                        )
+                    )
+
+                factorial_scenarios[
+                    "sl_mode"
+                ] = (
+                    factorial_scenarios[
+                        "sl_mode"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                )
+
+                factorial_scenarios[
+                    "result"
+                ] = (
+                    factorial_scenarios[
+                        "result"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                )
+
+                factorial_replay[
+                    "structural_result"
+                ] = (
+                    factorial_replay[
+                        "structural_result"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                )
+
+                factorial_keys = [
+                    "symbol",
+                    "side",
+                    "entry_ts",
+                ]
+
+                # ==================================
+                # TP SELECTOR
+                # ==================================
+
+                factorial_tp_options = sorted(
+                    factorial_scenarios.loc[
+                        factorial_scenarios[
+                            "sl_mode"
+                        ].eq("ORIGINAL"),
+                        "tp_target_pct",
+                    ]
+                    .dropna()
+                    .unique()
+                    .tolist()
+                )
+
+                if not factorial_tp_options:
+                    st.info(
+                        "No TP-only scenarios available."
+                    )
+
+                else:
+                    factorial_default_tp = (
+                        factorial_tp_options.index(1.0)
+                        if 1.0
+                        in factorial_tp_options
+                        else 0
+                    )
+
+                    factorial_selected_tp = (
+                        st.selectbox(
+                            "Factorial TP target",
+                            options=(
+                                factorial_tp_options
+                            ),
+                            index=(
+                                factorial_default_tp
+                            ),
+                            format_func=(
+                                lambda value:
+                                    f"{value:.2f}%"
+                            ),
+                            key=(
+                                "factorial_tp_target"
+                            ),
+                        )
+                    )
+
+                    # ==============================
+                    # TP-ONLY: FIXED TP + ORIGINAL SL
+                    # ==============================
+
+                    factorial_tp_only = (
+                        factorial_scenarios[
+                            factorial_scenarios[
+                                "sl_mode"
+                            ].eq("ORIGINAL")
+                            &
+                            np.isclose(
+                                factorial_scenarios[
+                                    "tp_target_pct"
+                                ],
+                                factorial_selected_tp,
+                            )
+                        ]
+                        [
+                            factorial_keys
+                            + [
+                                "original_pnl",
+                                "result",
+                                "simulated_pnl_pct",
+                            ]
+                        ]
+                        .copy()
+                    )
+
+                    factorial_tp_only = (
+                        factorial_tp_only.rename(
+                            columns={
+                                "result":
+                                    "tp_only_result",
+
+                                "simulated_pnl_pct":
+                                    "tp_only_gross_pnl",
+                            }
+                        )
+                    )
+
+                    # ==============================
+                    # COMBINED: FIXED TP +
+                    # STRUCTURAL SL, BUFFER 0
+                    # ==============================
+
+                    factorial_combined = (
+                        factorial_scenarios[
+                            factorial_scenarios[
+                                "sl_mode"
+                            ].eq("STRUCTURAL")
+                            &
+                            np.isclose(
+                                factorial_scenarios[
+                                    "tp_target_pct"
+                                ],
+                                factorial_selected_tp,
+                            )
+                            &
+                            np.isclose(
+                                factorial_scenarios[
+                                    "sl_buffer_pct"
+                                ].fillna(np.nan),
+                                0.0,
+                            )
+                        ]
+                        [
+                            factorial_keys
+                            + [
+                                "result",
+                                "simulated_pnl_pct",
+                                "structural_risk_pct",
+                            ]
+                        ]
+                        .copy()
+                    )
+
+                    factorial_combined = (
+                        factorial_combined.rename(
+                            columns={
+                                "result":
+                                    "combined_result",
+
+                                "simulated_pnl_pct":
+                                    "combined_gross_pnl",
+
+                                "structural_risk_pct":
+                                    "factorial_structural_risk_pct",
+                            }
+                        )
+                    )
+
+                    # ==============================
+                    # SL-ONLY: ORIGINAL TP +
+                    # STRUCTURAL SL, BUFFER 0
+                    # ==============================
+
+                    factorial_sl_only = (
+                        factorial_replay[
+                            factorial_keys
+                            + [
+                                "original_tp_pct",
+                                "structural_result",
+                                "structural_sl_risk_pct",
+                            ]
+                        ]
+                        .copy()
+                    )
+
+                    factorial_sl_only = (
+                        factorial_sl_only.rename(
+                            columns={
+                                "structural_sl_risk_pct":
+                                    "replay_structural_risk_pct",
+                            }
+                        )
+                    )
+
+                    # Prevent accidental cartesian joins.
+                    factorial_tp_only = (
+                        factorial_tp_only
+                        .drop_duplicates(
+                            subset=factorial_keys,
+                            keep="first",
+                        )
+                    )
+
+                    factorial_combined = (
+                        factorial_combined
+                        .drop_duplicates(
+                            subset=factorial_keys,
+                            keep="first",
+                        )
+                    )
+
+                    factorial_sl_only = (
+                        factorial_sl_only
+                        .drop_duplicates(
+                            subset=factorial_keys,
+                            keep="first",
+                        )
+                    )
+
+                    # ==============================
+                    # MATCH THE SAME TRADES
+                    # ==============================
+
+                    factorial_matched = (
+                        factorial_tp_only
+                        .merge(
+                            factorial_combined,
+                            on=factorial_keys,
+                            how="inner",
+                            validate="one_to_one",
+                        )
+                        .merge(
+                            factorial_sl_only,
+                            on=factorial_keys,
+                            how="inner",
+                            validate="one_to_one",
+                        )
+                    )
+
+                    factorial_matched[
+                        "factorial_structural_risk_pct"
+                    ] = (
+                        factorial_matched[
+                            "factorial_structural_risk_pct"
+                        ]
+                        .fillna(
+                            factorial_matched[
+                                "replay_structural_risk_pct"
+                            ]
+                        )
+                    )
+
+                    # SL-only simulated result.
+                    factorial_matched[
+                        "sl_only_gross_pnl"
+                    ] = np.where(
+                        factorial_matched[
+                            "structural_result"
+                        ].eq("TP"),
+
+                        factorial_matched[
+                            "original_tp_pct"
+                        ],
+
+                        np.where(
+                            factorial_matched[
+                                "structural_result"
+                            ].eq("SL"),
+
+                            -factorial_matched[
+                                "replay_structural_risk_pct"
+                            ],
+
+                            np.nan,
+                        ),
+                    )
+
+                    # All four policies must have a
+                    # resolved, comparable result.
+                    factorial_matched = (
+                        factorial_matched[
+                            factorial_matched[
+                                "tp_only_result"
+                            ].isin(["TP", "SL"])
+                            &
+                            factorial_matched[
+                                "combined_result"
+                            ].isin(["TP", "SL"])
+                            &
+                            factorial_matched[
+                                "structural_result"
+                            ].isin(["TP", "SL"])
+                            &
+                            factorial_matched[
+                                "original_pnl"
+                            ].notna()
+                            &
+                            factorial_matched[
+                                "tp_only_gross_pnl"
+                            ].notna()
+                            &
+                            factorial_matched[
+                                "sl_only_gross_pnl"
+                            ].notna()
+                            &
+                            factorial_matched[
+                                "combined_gross_pnl"
+                            ].notna()
+                            &
+                            factorial_matched[
+                                "factorial_structural_risk_pct"
+                            ].gt(0)
+                        ]
+                        .sort_values("entry_ts")
+                        .copy()
+                    )
+
+                    factorial_risk_caps = [
+                        1.00,
+                        1.25,
+                        1.50,
+                        1.75,
+                        2.00,
+                        2.50,
+                        3.00,
+                        5.00,
+                    ]
+
+                    factorial_rows = []
+
+                    for risk_cap_pct in (
+                        factorial_risk_caps
+                    ):
+                        factorial_accepted = (
+                            factorial_matched[
+                                factorial_matched[
+                                    "factorial_structural_risk_pct"
+                                ].le(risk_cap_pct)
+                            ]
+                            .copy()
+                        )
+
+                        if (
+                            len(factorial_accepted)
+                            < scenario_min_trades
+                        ):
+                            continue
+
+                        # Same cost applied to all
+                        # four policies.
+                        factorial_accepted[
+                            "actual_net_pnl"
+                        ] = (
+                            factorial_accepted[
+                                "original_pnl"
+                            ]
+                            - scenario_cost_pct
+                        )
+
+                        factorial_accepted[
+                            "tp_only_net_pnl"
+                        ] = (
+                            factorial_accepted[
+                                "tp_only_gross_pnl"
+                            ]
+                            - scenario_cost_pct
+                        )
+
+                        factorial_accepted[
+                            "sl_only_net_pnl"
+                        ] = (
+                            factorial_accepted[
+                                "sl_only_gross_pnl"
+                            ]
+                            - scenario_cost_pct
+                        )
+
+                        factorial_accepted[
+                            "combined_net_pnl"
+                        ] = (
+                            factorial_accepted[
+                                "combined_gross_pnl"
+                            ]
+                            - scenario_cost_pct
+                        )
+
+                        policy_columns = {
+                            "Actual":
+                                "actual_net_pnl",
+
+                            "TP only":
+                                "tp_only_net_pnl",
+
+                            "SL only":
+                                "sl_only_net_pnl",
+
+                            "TP + SL structural":
+                                "combined_net_pnl",
+                        }
+
+                        actual_metrics = (
+                            summarize_replay_strategy(
+                                strategy_name="Actual",
+                                pnl_values=(
+                                    factorial_accepted[
+                                        "actual_net_pnl"
+                                    ]
+                                ),
+                            )
+                        )
+
+                        for (
+                            policy_name,
+                            pnl_col,
+                        ) in policy_columns.items():
+
+                            policy_metrics = (
+                                summarize_replay_strategy(
+                                    strategy_name=(
+                                        policy_name
+                                    ),
+                                    pnl_values=(
+                                        factorial_accepted[
+                                            pnl_col
+                                        ]
+                                    ),
+                                )
+                            )
+
+                            policy_pf = (
+                                policy_metrics[
+                                    "profit_factor"
+                                ]
+                            )
+
+                            actual_pf = (
+                                actual_metrics[
+                                    "profit_factor"
+                                ]
+                            )
+
+                            if (
+                                pd.notna(policy_pf)
+                                and pd.notna(actual_pf)
+                                and np.isfinite(policy_pf)
+                                and np.isfinite(actual_pf)
+                            ):
+                                delta_pf = (
+                                    policy_pf
+                                    - actual_pf
+                                )
+                            else:
+                                delta_pf = np.nan
+
+                            factorial_rows.append({
+                                "tp_target_pct":
+                                    factorial_selected_tp,
+
+                                "sl_buffer_pct":
+                                    0.0,
+
+                                "max_structural_risk_pct":
+                                    risk_cap_pct,
+
+                                "cost_pct":
+                                    scenario_cost_pct,
+
+                                "policy":
+                                    policy_name,
+
+                                "trades":
+                                    len(
+                                        factorial_accepted
+                                    ),
+
+                                "coverage_pct": (
+                                    len(
+                                        factorial_accepted
+                                    )
+                                    / len(
+                                        factorial_matched
+                                    )
+                                    * 100
+                                    if len(
+                                        factorial_matched
+                                    )
+                                    else 0.0
+                                ),
+
+                                "winrate":
+                                    policy_metrics[
+                                        "winrate"
+                                    ],
+
+                                "avg_win":
+                                    policy_metrics[
+                                        "avg_win"
+                                    ],
+
+                                "avg_loss":
+                                    policy_metrics[
+                                        "avg_loss"
+                                    ],
+
+                                "payoff_ratio":
+                                    policy_metrics[
+                                        "payoff_ratio"
+                                    ],
+
+                                "avg_pnl":
+                                    policy_metrics[
+                                        "avg_pnl"
+                                    ],
+
+                                "total_pnl":
+                                    policy_metrics[
+                                        "total_pnl"
+                                    ],
+
+                                "profit_factor":
+                                    policy_pf,
+
+                                "max_drawdown":
+                                    policy_metrics[
+                                        "max_drawdown"
+                                    ],
+
+                                "delta_total_pnl_vs_actual": (
+                                    policy_metrics[
+                                        "total_pnl"
+                                    ]
+                                    - actual_metrics[
+                                        "total_pnl"
+                                    ]
+                                ),
+
+                                "delta_profit_factor_vs_actual":
+                                    delta_pf,
+
+                                "drawdown_reduction_vs_actual": (
+                                    actual_metrics[
+                                        "max_drawdown"
+                                    ]
+                                    - policy_metrics[
+                                        "max_drawdown"
+                                    ]
+                                ),
+                            })
+
+                    factorial_report = (
+                        pd.DataFrame(
+                            factorial_rows
+                        )
+                    )
+
+                    if factorial_report.empty:
+                        st.info(
+                            "No factorial scenarios meet "
+                            "the minimum trade requirement."
+                        )
+
+                    else:
+                        factorial_numeric_cols = [
+                            "coverage_pct",
+                            "winrate",
+                            "avg_win",
+                            "avg_loss",
+                            "payoff_ratio",
+                            "avg_pnl",
+                            "total_pnl",
+                            "profit_factor",
+                            "max_drawdown",
+                            "delta_total_pnl_vs_actual",
+                            "delta_profit_factor_vs_actual",
+                            "drawdown_reduction_vs_actual",
+                        ]
+
+                        for col in (
+                            factorial_numeric_cols
+                        ):
+                            factorial_report[col] = (
+                                pd.to_numeric(
+                                    factorial_report[col],
+                                    errors="coerce",
+                                ).round(4)
+                            )
+
+                        policy_order = {
+                            "Actual": 0,
+                            "TP only": 1,
+                            "SL only": 2,
+                            "TP + SL structural": 3,
+                        }
+
+                        factorial_report[
+                            "policy_order"
+                        ] = (
+                            factorial_report[
+                                "policy"
+                            ].map(policy_order)
+                        )
+
+                        factorial_report = (
+                            factorial_report
+                            .sort_values(
+                                by=[
+                                    "max_structural_risk_pct",
+                                    "policy_order",
+                                ],
+                                ascending=[
+                                    True,
+                                    True,
+                                ],
+                            )
+                            .drop(
+                                columns=[
+                                    "policy_order"
+                                ]
+                            )
+                            .reset_index(drop=True)
+                        )
+
+                        st.dataframe(
+                            factorial_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.caption(
+                            "Todas las políticas de cada "
+                            "risk cap utilizan exactamente "
+                            "los mismos trades. Esto permite "
+                            "atribuir correctamente el efecto "
+                            "del TP, del SL y de su combinación."
+                        )
+                                
+
+        if (
+            replay_analysis_mode
+            == "Combined + Robustness"
+        ):
+
+            # ======================================
+            # SELECTED SCENARIO ROBUSTNESS
+            # ======================================
+
+            st.markdown(
+                "### Selected Scenario Robustness"
+            )
+
+            st.caption(
+                "Valida una configuración en distintas "
+                "partes del período y elimina sus mejores "
+                "concentraciones."
+            )
+
+            robustness_col_1, robustness_col_2, (
+                robustness_col_3
+            ) = st.columns(3)
+
+            robustness_tp_options = sorted(
+                scenario_ranking[
+                    "tp_target_pct"
+                ]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+
+            robustness_buffer_options = sorted(
+                scenario_ranking[
+                    "sl_buffer_pct"
+                ]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+
+            robustness_risk_options = sorted(
+                scenario_ranking[
+                    "max_structural_risk_pct"
+                ]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+
+            default_tp = (
+                robustness_tp_options.index(1.0)
+                if 1.0 in robustness_tp_options
+                else 0
+            )
+
+            default_buffer = (
+                robustness_buffer_options.index(0.1)
+                if 0.1 in robustness_buffer_options
+                else 0
+            )
+
+            default_risk = (
+                robustness_risk_options.index(3.0)
+                if 3.0 in robustness_risk_options
+                else 0
+            )
+
+            with robustness_col_1:
+                robustness_tp = st.selectbox(
+                    "Robustness TP target",
+                    options=robustness_tp_options,
+                    index=default_tp,
+                    format_func=(
+                        lambda value:
+                            f"{value:.2f}%"
+                    ),
+                    key=(
+                        "structural_robustness_tp"
+                    ),
+                )
+
+            with robustness_col_2:
+                robustness_buffer = st.selectbox(
+                    "Robustness SL buffer",
+                    options=(
+                        robustness_buffer_options
+                    ),
+                    index=default_buffer,
+                    format_func=(
+                        lambda value:
+                            f"{value:.2f}%"
+                    ),
+                    key=(
+                        "structural_robustness_buffer"
+                    ),
+                )
+
+            with robustness_col_3:
+                robustness_risk = st.selectbox(
+                    "Robustness max risk",
+                    options=robustness_risk_options,
+                    index=default_risk,
+                    format_func=(
+                        lambda value:
+                            f"{value:.2f}%"
+                    ),
+                    key=(
+                        "structural_robustness_risk"
+                    ),
+                )
+
+            selected_robustness_df = scanner_df[
+                np.isclose(
+                    scanner_df["tp_target_pct"],
+                    robustness_tp,
+                )
+                &
+                np.isclose(
+                    scanner_df["sl_buffer_pct"],
+                    robustness_buffer,
+                )
+                &
+                scanner_df[
+                    "structural_risk_pct"
+                ].le(robustness_risk)
+            ].copy()
+
+            selected_robustness_df = (
+                selected_robustness_df
+                .dropna(
+                    subset=[
+                        "entry_ts",
+                        "original_pnl",
+                        "simulated_pnl_pct",
+                    ]
+                )
+                .sort_values("entry_ts")
+                .copy()
+            )
+
+            selected_robustness_df[
+                "actual_net_pnl"
+            ] = (
+                selected_robustness_df[
+                    "original_pnl"
+                ]
+                - scenario_cost_pct
+            )
+
+            selected_robustness_df[
+                "structural_net_pnl"
+            ] = (
+                selected_robustness_df[
+                    "simulated_pnl_pct"
+                ]
+                - scenario_cost_pct
+            )
+
+            selected_robustness_df[
+                "robustness_date"
+            ] = (
+                selected_robustness_df[
+                    "entry_ts"
+                ].dt.date
+            )
+
+            selected_robustness_df[
+                "robustness_batch_30m"
+            ] = (
+                selected_robustness_df[
+                    "entry_ts"
+                ].dt.floor("30min")
+            )
+
+            robustness_rows = []
+
+            def append_structural_robustness(
+                scenario_name,
+                scenario_data,
+            ):
+                scenario_data = (
+                    scenario_data
+                    .sort_values("entry_ts")
+                    .copy()
+                )
+
+                actual_summary = (
+                    summarize_replay_strategy(
+                        strategy_name=(
+                            "Actual management"
+                        ),
+                        pnl_values=scenario_data[
+                            "actual_net_pnl"
+                        ],
+                    )
+                )
+
+                structural_summary = (
+                    summarize_replay_strategy(
+                        strategy_name=(
+                            "Structural management"
+                        ),
+                        pnl_values=scenario_data[
+                            "structural_net_pnl"
+                        ],
+                    )
+                )
+
+                actual_pf = actual_summary[
+                    "profit_factor"
+                ]
+
+                structural_pf = (
+                    structural_summary[
+                        "profit_factor"
+                    ]
+                )
+
+                if (
+                    pd.notna(actual_pf)
+                    and pd.notna(structural_pf)
+                    and np.isfinite(actual_pf)
+                    and np.isfinite(structural_pf)
+                ):
+                    delta_pf = (
+                        structural_pf
+                        - actual_pf
+                    )
+                else:
+                    delta_pf = np.nan
+
+                robustness_rows.append({
+                    "scenario": scenario_name,
+
+                    "trades":
+                        len(scenario_data),
+
+                    "actual_winrate":
+                        actual_summary["winrate"],
+
+                    "structural_winrate":
+                        structural_summary[
+                            "winrate"
+                        ],
+
+                    "actual_avg_pnl":
+                        actual_summary["avg_pnl"],
+
+                    "structural_avg_pnl":
+                        structural_summary[
+                            "avg_pnl"
+                        ],
+
+                    "actual_total_pnl":
+                        actual_summary[
+                            "total_pnl"
+                        ],
+
+                    "structural_total_pnl":
+                        structural_summary[
+                            "total_pnl"
+                        ],
+
+                    "delta_total_pnl": (
+                        structural_summary[
+                            "total_pnl"
+                        ]
+                        - actual_summary[
+                            "total_pnl"
+                        ]
+                    ),
+
+                    "actual_profit_factor":
+                        actual_pf,
+
+                    "structural_profit_factor":
+                        structural_pf,
+
+                    "delta_profit_factor":
+                        delta_pf,
+
+                    "actual_max_drawdown":
+                        actual_summary[
+                            "max_drawdown"
+                        ],
+
+                    "structural_max_drawdown":
+                        structural_summary[
+                            "max_drawdown"
+                        ],
+
+                    "drawdown_reduction": (
+                        actual_summary[
+                            "max_drawdown"
+                        ]
+                        - structural_summary[
+                            "max_drawdown"
+                        ]
+                    ),
+                })
+
+            if selected_robustness_df.empty:
+                st.info(
+                    "No trades available for the "
+                    "selected robustness scenario."
+                )
+
+            else:
+                # ==================================
+                # FULL SAMPLE
+                # ==================================
+
+                append_structural_robustness(
+                    "Full sample",
+                    selected_robustness_df,
+                )
+
+                # ==================================
+                # FIRST VS SECOND HALF
+                # ==================================
+
+                robustness_midpoint = (
+                    len(selected_robustness_df)
+                    // 2
+                )
+
+                if robustness_midpoint > 0:
+                    append_structural_robustness(
+                        "First half",
+                        selected_robustness_df.iloc[
+                            :robustness_midpoint
+                        ],
+                    )
+
+                    append_structural_robustness(
+                        "Second half",
+                        selected_robustness_df.iloc[
+                            robustness_midpoint:
+                        ],
+                    )
+
+                # ==================================
+                # WITHOUT BEST SYMBOL
+                # ==================================
+
+                if (
+                    "symbol"
+                    in selected_robustness_df.columns
+                ):
+                    symbol_performance = (
+                        selected_robustness_df
+                        .dropna(subset=["symbol"])
+                        .groupby("symbol")[
+                            "structural_net_pnl"
+                        ]
+                        .sum()
+                    )
+
+                    if not symbol_performance.empty:
+                        best_symbol = (
+                            symbol_performance.idxmax()
+                        )
+
+                        append_structural_robustness(
+                            (
+                                "Without best symbol: "
+                                f"{best_symbol}"
+                            ),
+                            selected_robustness_df[
+                                selected_robustness_df[
+                                    "symbol"
+                                ] != best_symbol
+                            ],
+                        )
+
+                # ==================================
+                # WITHOUT BEST DAY
+                # ==================================
+
+                day_performance = (
+                    selected_robustness_df
+                    .dropna(
+                        subset=[
+                            "robustness_date"
+                        ]
+                    )
+                    .groupby(
+                        "robustness_date"
+                    )[
+                        "structural_net_pnl"
+                    ]
+                    .sum()
+                )
+
+                if not day_performance.empty:
+                    best_day = (
+                        day_performance.idxmax()
+                    )
+
+                    append_structural_robustness(
+                        (
+                            "Without best day: "
+                            f"{best_day}"
+                        ),
+                        selected_robustness_df[
+                            selected_robustness_df[
+                                "robustness_date"
+                            ] != best_day
+                        ],
+                    )
+
+                # ==================================
+                # WITHOUT BEST 30M BATCH
+                # ==================================
+
+                batch_performance = (
+                    selected_robustness_df
+                    .dropna(
+                        subset=[
+                            "robustness_batch_30m"
+                        ]
+                    )
+                    .groupby(
+                        "robustness_batch_30m"
+                    )[
+                        "structural_net_pnl"
+                    ]
+                    .sum()
+                )
+
+                if not batch_performance.empty:
+                    best_batch = (
+                        batch_performance.idxmax()
+                    )
+
+                    append_structural_robustness(
+                        (
+                            "Without best batch: "
+                            f"{best_batch}"
+                        ),
+                        selected_robustness_df[
+                            selected_robustness_df[
+                                "robustness_batch_30m"
+                            ] != best_batch
+                        ],
+                    )
+
+                structural_robustness_report = (
+                    pd.DataFrame(
+                        robustness_rows
+                    )
+                )
+
+                robustness_numeric_cols = [
+                    "actual_winrate",
+                    "structural_winrate",
+                    "actual_avg_pnl",
+                    "structural_avg_pnl",
+                    "actual_total_pnl",
+                    "structural_total_pnl",
+                    "delta_total_pnl",
+                    "actual_profit_factor",
+                    "structural_profit_factor",
+                    "delta_profit_factor",
+                    "actual_max_drawdown",
+                    "structural_max_drawdown",
+                    "drawdown_reduction",
+                ]
+
+                for col in robustness_numeric_cols:
+                    structural_robustness_report[
+                        col
+                    ] = pd.to_numeric(
+                        structural_robustness_report[
+                            col
+                        ],
+                        errors="coerce",
+                    ).round(4)
+
+                st.dataframe(
+                    structural_robustness_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.caption(
+                    "La configuración es robusta si mantiene "
+                    "PnL y PF estructural positivos en ambas "
+                    "mitades y después de eliminar sus mejores "
+                    "concentraciones."
+                )
+
+
+        if replay_analysis_mode == "Diagnostics":
+
+            # ==========================================
+            # RAW REPORT DIAGNOSTICS
+            # ==========================================
+            with st.expander("Replay report diagnostics"):
+                d1, d2, d3 = st.columns(3)
+
+                d1.metric(
+                    "Replay rows",
+                    len(replay),
+                )
+
+                d2.metric(
+                    "TP/SL scenario rows",
+                    len(scenarios),
+                )
+
+                d3.metric(
+                    "Partial scenario rows",
+                    len(partials),
+                )
+
+                if "analysis_status" in replay.columns:
+                    status_summary = (
+                        replay["analysis_status"]
+                        .fillna("UNKNOWN")
+                        .value_counts()
+                        .rename_axis("status")
+                        .reset_index(name="trades")
+                    )
+
+                    st.dataframe(
+                        status_summary,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
