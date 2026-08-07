@@ -74,6 +74,9 @@ class CompressionWatch:
     atr_ratio: Optional[float] = None
     volume_ratio: Optional[float] = None
 
+    compression_range_pct: Optional[float] = None
+    avg_body_pct: Optional[float] = None
+
     watch_age: int = 0
 
     pullback_pct: Optional[float] = None
@@ -354,6 +357,12 @@ class CompressionStateMachine:
                     range_ratio=compression.get("range_ratio"),
                     atr_ratio=compression.get("atr_ratio"),
                     volume_ratio=compression.get("volume_ratio"),
+                    compression_range_pct=compression.get(
+                        "compression_range_pct"
+                    ),
+                    avg_body_pct=compression.get(
+                        "avg_body_pct"
+                    ),
                     watch_age=0,
                     compression_height_pct=compression.get("compression_height_pct"),
                     compression_duration=compression.get("compression_duration"),
@@ -419,9 +428,6 @@ class CompressionStateMachine:
 
         if watch.state == CompressionState.WATCHING_COMPRESSION:
             if compression.get("is_compression"):
-                watch.range_ratio = compression.get("range_ratio", watch.range_ratio)
-                watch.atr_ratio = compression.get("atr_ratio", watch.atr_ratio)
-                watch.volume_ratio = compression.get("volume_ratio", watch.volume_ratio)
                 
                 old_high = watch.compression_high
                 old_low = watch.compression_low
@@ -450,7 +456,6 @@ class CompressionStateMachine:
                 #    float(compression["compression_low"]),
                 #)
                 
-                watch.compression_score = int(compression.get("score", 0))
                 watch.trend_score = int(trend.get("score", watch.trend_score))
 
             if breakout.get("breakout"):

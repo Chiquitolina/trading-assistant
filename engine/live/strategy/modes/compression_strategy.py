@@ -71,7 +71,22 @@ class CompressionStrategy:
 
             "compression_high": compression_state.get("compression_high"),
             "compression_low": compression_state.get("compression_low"),
-            "compression_range_pct": compression.get("compression_range_pct"),
+            "compression_range_pct": compression_state.get(
+                "compression_range_pct"
+            ),
+
+            "range_ratio": compression_state.get(
+                "range_ratio"
+            ),
+            "atr_ratio": compression_state.get(
+                "atr_ratio"
+            ),
+            "volume_ratio": compression_state.get(
+                "volume_ratio"
+            ),
+            "avg_body_pct": compression_state.get(
+                "avg_body_pct"
+            ),
             
             "compression_height_pct": compression_state.get("compression_height_pct"),
             "compression_duration": compression_state.get("compression_duration"),
@@ -93,11 +108,6 @@ class CompressionStrategy:
 
             "compression_shape": compression_state.get("compression_shape"),
             "compression_quality_label": compression_state.get("compression_quality_label"),
-
-            "range_ratio": compression.get("range_ratio"),
-            "atr_ratio": compression.get("atr_ratio"),
-            "volume_ratio": compression.get("volume_ratio"),
-            "avg_body_pct": compression.get("avg_body_pct"),
 
             "breakout_detected": breakout.get("breakout"),
             "breakout_ts": compression_state.get("breakout_ts"),
@@ -330,10 +340,21 @@ class CompressionStrategy:
                 "compression_shape": compression_state.get("compression_shape"),
                 "compression_quality_label": compression_state.get("compression_quality_label"),
 
-                "range_ratio": compression.get("range_ratio"),
-                "atr_ratio": compression.get("atr_ratio"),
-                "volume_ratio": compression.get("volume_ratio"),
-                "avg_body_pct": compression.get("avg_body_pct"),
+                "compression_range_pct": compression_state.get(
+                    "compression_range_pct"
+                ),
+                "range_ratio": compression_state.get(
+                    "range_ratio"
+                ),
+                "atr_ratio": compression_state.get(
+                    "atr_ratio"
+                ),
+                "volume_ratio": compression_state.get(
+                    "volume_ratio"
+                ),
+                "avg_body_pct": compression_state.get(
+                    "avg_body_pct"
+                ),
                 "compression_reasons": compression.get("reasons"),
 
                 "breakout_detected": breakout.get("breakout"),
