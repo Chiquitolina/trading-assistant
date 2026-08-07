@@ -437,7 +437,6 @@ class CompressionStateMachine:
                     avg_body_pct=compression.get(
                         "avg_body_pct"
                     ),
-
                     base_mode=compression.get("base_mode"),
                     base_lookback=compression.get("base_lookback"),
                     watch_age=0,
@@ -510,6 +509,7 @@ class CompressionStateMachine:
         if watch.state == CompressionState.WATCH_CREATED:
             watch.state = CompressionState.WATCHING_COMPRESSION
             watch.reason = "watch_created_now_watching"
+            return watch.to_dict()
 
         if (
             watch.state == CompressionState.WATCHING_COMPRESSION
