@@ -36,6 +36,16 @@ TRADES_FILE = BASE_DIR / "trades.csv"
 PAPER_SIGNALS_FILE = BASE_DIR / "paper_signals.csv"
 STATUS_FILE = BASE_DIR / "status.json"
 
+SYSTEM_DESCRIPTION_FILE = (
+    BASE_DIR
+    / "dashboard_system_description.json"
+)
+
+POSITION_SNAPSHOTS_DIR = (
+    BASE_DIR
+    / "snapshots"
+)
+
 POST_TRADE_REPLAY_FILE = (
     BASE_DIR
     / "reports"
@@ -115,6 +125,126 @@ def fmt_price_for_display(x, decimals=10):
         return f"{float(x):.{decimals}f}".rstrip("0").rstrip(".")
     except Exception:
         return str(x)
+    
+@st.cache_data(ttl=2)
+def build_open_position_inspector_df(
+    open_positions,
+    snapshots_dir,
+    default_trigger_tf="30m",
+):
+    if not open_positions:
+        return pd.DataFrame()
+
+    snapshots_dir = Path(snapshots_dir)
+    rows = []
+
+    for exchange_position in open_positions:
+        exchange_position = dict(
+            exchange_position
+        )
+
+        symbol = str(
+            exchange_position.get("symbol", "")
+        ).upper()
+
+        position_data = {}
+        context_data = {}
+        snapshot_available = False
+
+        if symbol:
+            snapshot_path = (
+                snapshots_dir
+                / f"{symbol}.json"
+            )
+
+            if snapshot_path.exists():
+                try:
+                    with open(
+                        snapshot_path,
+                        "r",
+                        encoding="utf-8",
+                    ) as file:
+                        snapshot = json.load(file)
+
+                    position_data = (
+                        snapshot.get("position")
+                        or {}
+                    )
+
+                    context_data = (
+                        snapshot.get("context")
+                        or position_data.get(
+                            "signal_context"
+                        )
+                        or {}
+                    )
+
+                    snapshot_available = True
+
+                except Exception:
+                    position_data = {}
+                    context_data = {}
+
+        # El exchange prevalece para mark price,
+        # quantity y PnL actuales.
+        row = {
+            **context_data,
+            **position_data,
+            **exchange_position,
+        }
+
+        row["symbol"] = symbol
+
+        row["status"] = "OPEN"
+
+        row["entry_price"] = (
+            exchange_position.get("entry_price")
+            or position_data.get("real_entry")
+            or position_data.get("entry_price")
+            or position_data.get("entry")
+        )
+
+        row["real_entry"] = (
+            position_data.get("real_entry")
+            or row["entry_price"]
+        )
+
+        row["entry"] = (
+            position_data.get("entry")
+            or row["entry_price"]
+        )
+
+        row["entry_ts"] = (
+            position_data.get("entry_ts")
+            or position_data.get("opened_ts")
+            or context_data.get("entry_ts")
+        )
+
+        row["tp"] = (
+            position_data.get("tp")
+            or exchange_position.get("tp")
+        )
+
+        row["sl"] = (
+            position_data.get("sl")
+            or exchange_position.get("sl")
+        )
+
+        row["trigger_tf"] = (
+            context_data.get("trigger_tf")
+            or default_trigger_tf
+        )
+
+        row["_snapshot_available"] = (
+            snapshot_available
+        )
+
+        rows.append(row)
+
+    return (
+        pd.DataFrame(rows)
+        .reset_index(drop=True)
+    )
     
 def load_watch_history(symbol, base_dir="compression_watch_journal", limit=50):
     path = Path(base_dir) / f"{symbol}.jsonl"
@@ -3674,6 +3804,60 @@ def get_today_pnl_usd(df, tz_name):
 
     return round(df.loc[mask, "pnl_usd"].fillna(0).sum(), 2)
 
+def load_system_description():
+    if not SYSTEM_DESCRIPTION_FILE.exists():
+        return ""
+
+    try:
+        with open(
+            SYSTEM_DESCRIPTION_FILE,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            data = json.load(file)
+
+        return str(
+            data.get("description", "")
+            or ""
+        )
+
+    except Exception:
+        return ""
+
+
+def save_system_description(description):
+    description = str(description or "").strip()
+
+    payload = {
+        "description": description,
+        "updated_at": (
+            pd.Timestamp.now(tz="UTC")
+            .isoformat()
+        ),
+    }
+
+    temporary_path = (
+        SYSTEM_DESCRIPTION_FILE
+        .with_suffix(".tmp")
+    )
+
+    with open(
+        temporary_path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            payload,
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    # Reemplazo atómico para evitar un JSON parcial.
+    os.replace(
+        temporary_path,
+        SYSTEM_DESCRIPTION_FILE,
+    )
 
 def get_default_status():
     return {
@@ -4099,6 +4283,87 @@ pnl_today_usd = get_today_pnl_usd(df_raw, TZ)
 # =========================
 st.markdown("## 🧠 System Status")
 
+if (
+    "system_description_input"
+    not in st.session_state
+):
+    st.session_state[
+        "system_description_input"
+    ] = load_system_description()
+    
+st.markdown(
+    "### 📝 System Description"
+)
+
+system_description = st.text_area(
+    "Descripción de la instancia",
+    key="system_description_input",
+    height=110,
+    placeholder=(
+        "Ejemplo: Compression Windows 30m, "
+        "lookbacks 10/15/20/25/30, base 40 "
+        "superpuesta. Rama experimental."
+    ),
+    label_visibility="collapsed",
+)
+
+description_col_1, description_col_2 = (
+    st.columns([
+        1,
+        5,
+    ])
+)
+
+with description_col_1:
+    save_description = st.button(
+        "💾 Save description",
+        key="save_system_description",
+        use_container_width=True,
+    )
+
+with description_col_2:
+    if SYSTEM_DESCRIPTION_FILE.exists():
+        try:
+            with open(
+                SYSTEM_DESCRIPTION_FILE,
+                "r",
+                encoding="utf-8",
+            ) as file:
+                description_metadata = (
+                    json.load(file)
+                )
+
+            description_updated_at = (
+                description_metadata.get(
+                    "updated_at"
+                )
+            )
+
+            if description_updated_at:
+                st.caption(
+                    "Last description update: "
+                    f"{description_updated_at}"
+                )
+
+        except Exception:
+            pass
+
+if save_description:
+    try:
+        save_system_description(
+            system_description
+        )
+
+        st.success(
+            "System description saved."
+        )
+
+    except Exception as exc:
+        st.error(
+            "Could not save system description: "
+            f"{exc}"
+        )
+
 with st.container(border=True):
 
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -4159,32 +4424,170 @@ with st.container(border=True):
     if open_positions:
 
         st.success(
-            f"🟢 {len(open_positions)} open position(s) on exchange"
+            f"🟢 {len(open_positions)} "
+            "open position(s) on exchange"
         )
 
-        positions_df = pd.DataFrame(open_positions)
+        open_inspector_source_df = (
+            build_open_position_inspector_df(
+                open_positions=open_positions,
+                snapshots_dir=(
+                    POSITION_SNAPSHOTS_DIR
+                ),
+                default_trigger_tf=(
+                    trigger_tf
+                    if trigger_tf not in (
+                        None,
+                        "",
+                        "N/A",
+                    )
+                    else "30m"
+                ),
+            )
+        )
 
-        numeric_cols = [
+        open_display_cols = [
+            "symbol",
+            "side",
             "quantity",
             "entry_price",
             "mark_price",
             "unrealized_pnl",
+            "tp",
+            "sl",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_ready_price",
+            "compression_score",
+            "compression_shape",
+            "compression_quality_label",
+            "trigger_tf",
         ]
 
-        for col in numeric_cols:
-            if col in positions_df.columns:
-                positions_df[col] = pd.to_numeric(
-                    positions_df[col],
-                    errors="coerce"
-                ).round(4)
+        available_open_cols = [
+            col
+            for col in open_display_cols
+            if col in open_inspector_source_df.columns
+        ]
 
-        st.dataframe(
-            positions_df,
-            use_container_width=True
+        open_positions_display_df = (
+            open_inspector_source_df[
+                available_open_cols
+            ]
+            .copy()
         )
 
+        open_numeric_cols = [
+            "quantity",
+            "entry_price",
+            "mark_price",
+            "unrealized_pnl",
+            "tp",
+            "sl",
+            "compression_high",
+            "compression_low",
+            "breakout_price",
+            "entry_ready_price",
+            "compression_score",
+        ]
+
+        for col in open_numeric_cols:
+            if col in open_positions_display_df.columns:
+                open_positions_display_df[col] = (
+                    pd.to_numeric(
+                        open_positions_display_df[col],
+                        errors="coerce",
+                    ).round(8)
+                )
+
+        st.caption(
+            "Seleccioná una posición abierta para "
+            "inspeccionar su compresión."
+        )
+
+        open_positions_event = st.dataframe(
+            open_positions_display_df,
+            use_container_width=True,
+            hide_index=True,
+            key="open_positions_inspector_table",
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+
+        selected_open_rows = (
+            open_positions_event
+            .selection
+            .rows
+        )
+
+        if selected_open_rows:
+            selected_open_position = (
+                selected_open_rows[0]
+            )
+
+            selected_open_row = (
+                open_inspector_source_df.iloc[
+                    selected_open_position
+                ]
+            )
+
+            snapshot_available = bool(
+                selected_open_row.get(
+                    "_snapshot_available",
+                    False,
+                )
+            )
+
+            required_compression_values = [
+                selected_open_row.get(
+                    "compression_high"
+                ),
+                selected_open_row.get(
+                    "compression_low"
+                ),
+                selected_open_row.get(
+                    "compression_created_ts"
+                ),
+            ]
+
+            has_compression_context = any(
+                pd.notna(value)
+                for value in required_compression_values
+            )
+
+            if not snapshot_available:
+                st.warning(
+                    "No position snapshot was found for "
+                    f"{selected_open_row.get('symbol')}. "
+                    "Only exchange data is available."
+                )
+
+            elif not has_compression_context:
+                st.info(
+                    "The selected position has a snapshot, "
+                    "but no compression context."
+                )
+
+            else:
+                render_trade_inspector_for_row(
+                    row=selected_open_row,
+                    status="OPEN",
+                    key_prefix=(
+                        "open_trade_inspector_"
+                        + str(
+                            selected_open_row.get(
+                                "symbol",
+                                selected_open_position,
+                            )
+                        )
+                    ),
+                )
+
     else:
-        st.info("⚪ No open positions on exchange")
+        st.info(
+            "⚪ No open positions on exchange"
+        )
 
 # =========================
 # NO TRADES YET
