@@ -11035,7 +11035,10 @@ with tab_compression_quality:
         for col in round_cols:
             if col in volume_atr_report.columns:
                 volume_atr_report[col] = (
-                    volume_atr_report[col].round(4)
+                    pd.to_numeric(
+                        volume_atr_report[col],
+                        errors="coerce",
+                    ).round(4)
                 )
 
         sort_metric = (
