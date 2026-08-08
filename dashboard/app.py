@@ -36,6 +36,11 @@ TRADES_FILE = BASE_DIR / "trades.csv"
 PAPER_SIGNALS_FILE = BASE_DIR / "paper_signals.csv"
 STATUS_FILE = BASE_DIR / "status.json"
 
+SYSTEM_DESCRIPTION_FILE = (
+    BASE_DIR
+    / "dashboard_system_description.json"
+)
+
 POSITION_SNAPSHOTS_DIR = (
     BASE_DIR
     / "snapshots"
@@ -3799,6 +3804,60 @@ def get_today_pnl_usd(df, tz_name):
 
     return round(df.loc[mask, "pnl_usd"].fillna(0).sum(), 2)
 
+def load_system_description():
+    if not SYSTEM_DESCRIPTION_FILE.exists():
+        return ""
+
+    try:
+        with open(
+            SYSTEM_DESCRIPTION_FILE,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            data = json.load(file)
+
+        return str(
+            data.get("description", "")
+            or ""
+        )
+
+    except Exception:
+        return ""
+
+
+def save_system_description(description):
+    description = str(description or "").strip()
+
+    payload = {
+        "description": description,
+        "updated_at": (
+            pd.Timestamp.now(tz="UTC")
+            .isoformat()
+        ),
+    }
+
+    temporary_path = (
+        SYSTEM_DESCRIPTION_FILE
+        .with_suffix(".tmp")
+    )
+
+    with open(
+        temporary_path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            payload,
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    # Reemplazo atómico para evitar un JSON parcial.
+    os.replace(
+        temporary_path,
+        SYSTEM_DESCRIPTION_FILE,
+    )
 
 def get_default_status():
     return {
@@ -4223,6 +4282,87 @@ pnl_today_usd = get_today_pnl_usd(df_raw, TZ)
 # SYSTEM STATUS
 # =========================
 st.markdown("## 🧠 System Status")
+
+if (
+    "system_description_input"
+    not in st.session_state
+):
+    st.session_state[
+        "system_description_input"
+    ] = load_system_description()
+    
+st.markdown(
+    "### 📝 System Description"
+)
+
+system_description = st.text_area(
+    "Descripción de la instancia",
+    key="system_description_input",
+    height=110,
+    placeholder=(
+        "Ejemplo: Compression Windows 30m, "
+        "lookbacks 10/15/20/25/30, base 40 "
+        "superpuesta. Rama experimental."
+    ),
+    label_visibility="collapsed",
+)
+
+description_col_1, description_col_2 = (
+    st.columns([
+        1,
+        5,
+    ])
+)
+
+with description_col_1:
+    save_description = st.button(
+        "💾 Save description",
+        key="save_system_description",
+        use_container_width=True,
+    )
+
+with description_col_2:
+    if SYSTEM_DESCRIPTION_FILE.exists():
+        try:
+            with open(
+                SYSTEM_DESCRIPTION_FILE,
+                "r",
+                encoding="utf-8",
+            ) as file:
+                description_metadata = (
+                    json.load(file)
+                )
+
+            description_updated_at = (
+                description_metadata.get(
+                    "updated_at"
+                )
+            )
+
+            if description_updated_at:
+                st.caption(
+                    "Last description update: "
+                    f"{description_updated_at}"
+                )
+
+        except Exception:
+            pass
+
+if save_description:
+    try:
+        save_system_description(
+            system_description
+        )
+
+        st.success(
+            "System description saved."
+        )
+
+    except Exception as exc:
+        st.error(
+            "Could not save system description: "
+            f"{exc}"
+        )
 
 with st.container(border=True):
 
