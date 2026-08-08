@@ -57,6 +57,15 @@ class CompressionWatch:
     compression_shape: Optional[str] = None
     compression_quality_label: Optional[str] = None
 
+    selected_lookback: Optional[int] = None
+    selection_score: Optional[float] = None
+    selection_reason: Optional[str] = None
+    candidate_count: Optional[int] = None
+    valid_candidate_count: Optional[int] = None
+    compression_candidates_json: Optional[str] = None
+    base_mode: Optional[str] = None
+    base_lookback: Optional[int] = None
+
     breakout_ts: Optional[int] = None
     breakout_price: Optional[float] = None
     breakout_high: Optional[float] = None
@@ -392,6 +401,29 @@ class CompressionStateMachine:
 
                     compression_shape=compression.get("compression_shape"),
                     compression_quality_label=compression.get("compression_quality_label"),
+
+                    selected_lookback=compression.get(
+                        "selected_lookback"
+                    ),
+                    selection_score=compression.get(
+                        "selection_score"
+                    ),
+                    selection_reason=compression.get(
+                        "selection_reason"
+                    ),
+                    candidate_count=compression.get(
+                        "candidate_count"
+                    ),
+                    valid_candidate_count=compression.get(
+                        "valid_candidate_count"
+                    ),
+                    compression_candidates_json=compression.get(
+                        "candidates_json"
+                    ),
+                    base_mode=compression.get("base_mode"),
+                    base_lookback=compression.get(
+                        "base_lookback"
+                    ),
                 )
 
                 self.watches[symbol] = watch

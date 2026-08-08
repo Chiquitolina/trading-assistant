@@ -215,17 +215,36 @@ def detect_compression(
     df: pd.DataFrame,
     lookback: int = 10,
     base_lookback: int = 40,
+    base_mode: str = "overlapping",
     max_range_ratio: float = 0.75,
     max_atr_ratio: float = 0.85,
     max_volume_ratio: float = 1.10,
     max_body_pct: float = 0.55,
     min_score: int = 3,
 ):
-    if df is None or len(df) < base_lookback + lookback:
+    if base_mode not in {
+        "overlapping",
+        "separate",
+        "separate_dynamic",
+    }:
+        raise ValueError(
+            f"Unsupported compression base_mode: {base_mode}"
+        )
+
+    required_rows = (
+        base_lookback + lookback
+        if base_mode != "overlapping"
+        else max(base_lookback, lookback)
+    )
+
+    if df is None or len(df) < required_rows:
         return {
             "is_compression": False,
             "score": 0,
             "reason": "not_enough_data",
+            "lookback": lookback,
+            "base_lookback": base_lookback,
+            "base_mode": base_mode,
         }
 
     d = df.copy()
@@ -245,11 +264,14 @@ def detect_compression(
 
     d = d.dropna(subset=required_cols).reset_index(drop=True)
 
-    if len(d) < base_lookback + lookback:
+    if len(d) < required_rows:
         return {
             "is_compression": False,
             "score": 0,
             "reason": "not_enough_clean_data",
+            "lookback": lookback,
+            "base_lookback": base_lookback,
+            "base_mode": base_mode,
         }
 
     d["range"] = d["high"] - d["low"]
@@ -265,8 +287,14 @@ def detect_compression(
     d["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     d["atr"] = d["tr"].rolling(14).mean()
 
-    recent = d.tail(lookback)
-    base = d.tail(base_lookback)
+    recent = d.iloc[-lookback:].copy()
+
+    if base_mode == "overlapping":
+        base = d.iloc[-base_lookback:].copy()
+    else:
+        base = d.iloc[
+            -(base_lookback + lookback):-lookback
+        ].copy()
 
     recent_range_avg = recent["range"].mean()
     base_range_avg = base["range"].mean()
@@ -342,6 +370,7 @@ def detect_compression(
 
         "lookback": lookback,
         "base_lookback": base_lookback,
+        "base_mode": base_mode,
 
         "range_ratio": round(float(range_ratio), 4),
         "atr_ratio": round(float(atr_ratio), 4),
