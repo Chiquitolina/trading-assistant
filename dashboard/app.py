@@ -23,6 +23,19 @@ load_dotenv(BASE_DIR / ".env")
 
 from engine.backtest.metrics import calculate_metrics  # noqa
 from dashboard.analytics.mfe_mae import build_mfe_mae_report
+from dashboard.analytics.experiment_comparator import (
+    build_daily_report,
+    build_decision_matrix,
+    build_filter_value_report,
+    build_lookback_report,
+    build_overview_report as build_experiment_overview_report,
+    build_overlap_report,
+    build_robustness_report as build_experiment_robustness_report,
+    calculate_strategy_summary as calculate_experiment_summary,
+    match_trade_opportunities,
+    normalize_experiment_trades,
+    parse_candidate_rows,
+)
 
 from dashboard.services.trade_inspector_service import (
     TradeInspectorService,
@@ -33,6 +46,18 @@ from dashboard.charts.trade_inspector_chart import (
 )
 
 TRADES_FILE = BASE_DIR / "trades.csv"
+DYNAMIC_X4_ROOT = Path(
+    os.getenv(
+        "DYNAMIC_X4_ROOT",
+        str(BASE_DIR.parent / "trad-dynamic-x4"),
+    )
+).expanduser().resolve()
+DYNAMIC_X4_TRADES_FILE = Path(
+    os.getenv(
+        "DYNAMIC_X4_TRADES_PATH",
+        str(DYNAMIC_X4_ROOT / "trades.csv"),
+    )
+).expanduser().resolve()
 PAPER_SIGNALS_FILE = BASE_DIR / "paper_signals.csv"
 STATUS_FILE = BASE_DIR / "status.json"
 
@@ -4610,6 +4635,7 @@ if df_raw.empty:
     tab_compression_analytics,
     tab_compression_outcomes,
     tab_compression_pipeline,
+    tab_experiment_comparator,
     tab_tp_sl_replay,
 ) = st.tabs([
     "📊 Overview",
@@ -4624,6 +4650,7 @@ if df_raw.empty:
     "🔬 Compression Analytics",
     "🧬 Compression Outcomes",
     "Compression Pipeline",
+    "🧪 Experiment Comparator",
     "🧪 TP / SL Replay",
 ])
 
@@ -14568,6 +14595,527 @@ with tab_compression_outcomes:
 # ==========================================================
 # TP / SL POST-TRADE REPLAY
 # ==========================================================
+with tab_experiment_comparator:
+
+    st.markdown("## 🧪 Strategy Experiment Comparator")
+    st.caption(
+        "Control: original con base superpuesta y lookback 10. "
+        "Experimento: base separada dinámica 4× con lookback variable."
+    )
+
+    comparator_path = st.text_input(
+        "Dynamic X4 trades.csv",
+        value=str(DYNAMIC_X4_TRADES_FILE),
+        key="experiment_comparator_trades_path",
+        help=(
+            "La ruta puede apuntar a una carpeta vecina. "
+            "También puede configurarse con DYNAMIC_X4_TRADES_PATH."
+        ),
+    )
+    comparator_file = Path(comparator_path).expanduser()
+
+    source_1, source_2 = st.columns(2)
+    source_1.code(str(TRADES_FILE), language=None)
+    source_2.code(str(comparator_file), language=None)
+
+    if not comparator_file.exists():
+        st.warning(
+            "No se encontró el trades.csv de Dynamic X4. "
+            "Configurá DYNAMIC_X4_TRADES_PATH o corregí la ruta superior."
+        )
+
+    else:
+        dynamic_raw_df = load_csv_cached(comparator_file)
+        original_comparison_df = normalize_experiment_trades(
+            df_raw,
+            source="ORIGINAL",
+            timezone=TZ,
+        )
+        dynamic_comparison_df = normalize_experiment_trades(
+            dynamic_raw_df,
+            source="DYNAMIC_X4",
+            timezone=TZ,
+        )
+
+        if original_comparison_df.empty or dynamic_comparison_df.empty:
+            st.info(
+                "Ambos CSV deben contener trades con entry_ts válido."
+            )
+
+        else:
+            original_min = original_comparison_df[
+                "comparison_entry_local"
+            ].min().date()
+            original_max = original_comparison_df[
+                "comparison_entry_local"
+            ].max().date()
+            dynamic_min = dynamic_comparison_df[
+                "comparison_entry_local"
+            ].min().date()
+            dynamic_max = dynamic_comparison_df[
+                "comparison_entry_local"
+            ].max().date()
+            common_start = max(original_min, dynamic_min)
+            common_end = min(original_max, dynamic_max)
+
+            if common_start > common_end:
+                st.warning(
+                    "Los CSV no tienen un período temporal compartido."
+                )
+
+            else:
+                filter_1, filter_2, filter_3 = st.columns(3)
+                with filter_1:
+                    comparator_start = st.date_input(
+                        "Common start date",
+                        value=common_start,
+                        min_value=common_start,
+                        max_value=common_end,
+                        key="experiment_comparator_start",
+                    )
+                with filter_2:
+                    comparator_end = st.date_input(
+                        "Common end date",
+                        value=common_end,
+                        min_value=common_start,
+                        max_value=common_end,
+                        key="experiment_comparator_end",
+                    )
+                with filter_3:
+                    matching_tolerance = st.select_slider(
+                        "Matching tolerance",
+                        options=[15, 30, 45, 60, 90, 120],
+                        value=60,
+                        format_func=lambda value: f"±{value} min",
+                        key="experiment_matching_tolerance",
+                    )
+
+                if comparator_start > comparator_end:
+                    st.error("Common start date must be before end date.")
+
+                else:
+                    original_filtered = original_comparison_df[
+                        original_comparison_df["comparison_date"].between(
+                            comparator_start, comparator_end
+                        )
+                    ].copy().reset_index(drop=True)
+                    dynamic_filtered = dynamic_comparison_df[
+                        dynamic_comparison_df["comparison_date"].between(
+                            comparator_start, comparator_end
+                        )
+                    ].copy().reset_index(drop=True)
+
+                    matched_df, original_only_df, dynamic_only_df = (
+                        match_trade_opportunities(
+                            original_filtered,
+                            dynamic_filtered,
+                            tolerance_minutes=matching_tolerance,
+                        )
+                    )
+                    overview_report = build_experiment_overview_report(
+                        original_filtered,
+                        dynamic_filtered,
+                    )
+                    decision_matrix = build_decision_matrix(
+                        matched_df,
+                        original_only_df,
+                        dynamic_only_df,
+                    )
+                    filter_value = build_filter_value_report(
+                        original_only_df,
+                        dynamic_only_df,
+                    )
+                    overlap = build_overlap_report(
+                        original_filtered,
+                        dynamic_filtered,
+                        matched_df,
+                    )
+
+                    (
+                        experiment_overview_tab,
+                        experiment_matrix_tab,
+                        experiment_incremental_tab,
+                        experiment_lookback_tab,
+                        experiment_daily_tab,
+                        experiment_robustness_tab,
+                        experiment_inspector_tab,
+                    ) = st.tabs([
+                        "Overview",
+                        "Opportunity Matrix",
+                        "Filtered vs Added",
+                        "Lookback Selection",
+                        "Daily Stability",
+                        "Robustness",
+                        "Comparative Inspector",
+                    ])
+
+                    with experiment_overview_tab:
+                        st.markdown("### Comparable-period performance")
+                        rounded_overview = overview_report.copy()
+                        numeric_overview = rounded_overview.select_dtypes(
+                            include=[np.number]
+                        ).columns
+                        rounded_overview[numeric_overview] = (
+                            rounded_overview[numeric_overview].round(4)
+                        )
+                        st.dataframe(
+                            rounded_overview,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        o1, o2, o3, o4, o5 = st.columns(5)
+                        o1.metric(
+                            "Matched opportunities",
+                            overlap["matched_opportunities"],
+                        )
+                        o2.metric(
+                            "Original match rate",
+                            f'{overlap["original_match_rate"]:.2f}%',
+                        )
+                        o3.metric(
+                            "Dynamic match rate",
+                            f'{overlap["dynamic_match_rate"]:.2f}%',
+                        )
+                        o4.metric(
+                            "Original-only",
+                            len(original_only_df),
+                        )
+                        o5.metric(
+                            "Dynamic-only",
+                            len(dynamic_only_df),
+                        )
+
+                        st.caption(
+                            "El matching es uno-a-uno: mismo símbolo, mismo "
+                            "side y entrada dentro de la tolerancia elegida."
+                        )
+
+                        st.markdown("### Risk and execution overlap")
+                        r1, r2, r3, r4, r5, r6 = st.columns(6)
+                        r1.metric(
+                            "Position overlaps",
+                            overlap["temporal_position_overlaps"],
+                        )
+                        r2.metric(
+                            "Same-symbol overlaps",
+                            overlap["same_symbol_position_overlaps"],
+                        )
+                        r3.metric(
+                            "Same 30m batch",
+                            overlap["same_30m_batch_entries"],
+                        )
+                        r4.metric(
+                            "Avg entry delta",
+                            (
+                                f'{overlap["avg_entry_delta_minutes"]:.2f} min'
+                                if pd.notna(
+                                    overlap["avg_entry_delta_minutes"]
+                                )
+                                else "-"
+                            ),
+                        )
+                        matched_corr = overlap["matched_pnl_correlation"]
+                        r5.metric(
+                            "Matched PnL corr",
+                            (
+                                f"{matched_corr:.3f}"
+                                if pd.notna(matched_corr)
+                                else "-"
+                            ),
+                        )
+                        r6.metric(
+                            "Max combined positions",
+                            overlap["max_combined_positions"],
+                            help=(
+                                "Máximo de posiciones simultáneas sumando "
+                                "ambas ramas durante el período."
+                            ),
+                        )
+                        if overlap["max_combined_notional"] > 0:
+                            st.caption(
+                                "Maximum combined notional: "
+                                f'{overlap["max_combined_notional"]:.2f}'
+                            )
+
+                    with experiment_matrix_tab:
+                        st.markdown("### Decision and outcome matrix")
+                        st.dataframe(
+                            decision_matrix.round(4),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        if not matched_df.empty:
+                            st.markdown("### Matched opportunities")
+                            st.dataframe(
+                                matched_df.sort_values(
+                                    "original_entry_ts", ascending=False
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                    with experiment_incremental_tab:
+                        st.markdown("### Dynamic filter report")
+                        f1, f2, f3, f4 = st.columns(4)
+                        f1.metric("SL avoided", filter_value["sl_avoided"])
+                        f2.metric(
+                            "TP sacrificed", filter_value["tp_sacrificed"]
+                        )
+                        precision = filter_value["avoidance_precision"]
+                        f3.metric(
+                            "Avoidance precision",
+                            f"{precision:.2f}%" if pd.notna(precision) else "-",
+                        )
+                        f4.metric(
+                            "Net filter value",
+                            f'{filter_value["net_filter_value"]:.4f}%',
+                        )
+
+                        f5, f6, f7, f8 = st.columns(4)
+                        f5.metric(
+                            "Avoided loss value",
+                            f'{filter_value["avoided_loss_value"]:.4f}%',
+                        )
+                        f6.metric(
+                            "Sacrificed profit",
+                            f'{filter_value["sacrificed_profit_value"]:.4f}%',
+                        )
+                        f7.metric(
+                            "Dynamic-only PnL",
+                            f'{filter_value["dynamic_only_pnl"]:.4f}%',
+                        )
+                        f8.metric(
+                            "Combined incremental value",
+                            f'{filter_value["combined_incremental_value"]:.4f}%',
+                        )
+
+                        original_only_summary = calculate_experiment_summary(
+                            original_only_df
+                        )
+                        dynamic_only_summary = calculate_experiment_summary(
+                            dynamic_only_df
+                        )
+                        exclusive_report = pd.DataFrame([
+                            {
+                                "group": "Original only (filtered)",
+                                **original_only_summary,
+                            },
+                            {
+                                "group": "Dynamic only (added)",
+                                **dynamic_only_summary,
+                            },
+                        ])
+                        st.dataframe(
+                            exclusive_report.round(4),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        selected_exclusive_group = st.radio(
+                            "Inspect exclusive trades",
+                            ["Original only", "Dynamic only"],
+                            horizontal=True,
+                            key="experiment_exclusive_group",
+                        )
+                        exclusive_source = (
+                            original_only_df
+                            if selected_exclusive_group == "Original only"
+                            else dynamic_only_df
+                        )
+                        st.dataframe(
+                            exclusive_source,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                    with experiment_lookback_tab:
+                        st.markdown("### Outcome by selected lookback")
+                        lookback_report = build_lookback_report(
+                            dynamic_filtered
+                        )
+                        st.dataframe(
+                            lookback_report.round(4),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        candidate_report = parse_candidate_rows(
+                            dynamic_filtered
+                        )
+                        if candidate_report.empty:
+                            st.info(
+                                "No valid compression_candidates_json data "
+                                "is available yet."
+                            )
+                        else:
+                            st.markdown("### Replacement vs discovery")
+                            selection_type_report = (
+                                candidate_report.groupby(
+                                    "selection_type", dropna=False
+                                )
+                                .agg(
+                                    trades=("pnl", "size"),
+                                    tp=(
+                                        "outcome",
+                                        lambda values: values.eq("TP").sum(),
+                                    ),
+                                    sl=(
+                                        "outcome",
+                                        lambda values: values.eq("SL").sum(),
+                                    ),
+                                    avg_pnl=("pnl", "mean"),
+                                    total_pnl=("pnl", "sum"),
+                                    avg_selection_margin=(
+                                        "selection_margin_vs_10", "mean"
+                                    ),
+                                )
+                                .reset_index()
+                            )
+                            st.dataframe(
+                                selection_type_report.round(4),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                            st.dataframe(
+                                candidate_report.sort_values(
+                                    "entry_ts", ascending=False
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                    with experiment_daily_tab:
+                        st.markdown("### Result by day")
+                        daily_report = build_daily_report(
+                            original_filtered,
+                            dynamic_filtered,
+                        )
+                        st.dataframe(
+                            daily_report.round(4),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        possible_regime_cols = [
+                            "btc_context_state",
+                            "btc_trade_risk_state",
+                            "btc_direction_alignment",
+                        ]
+                        available_regime_cols = [
+                            col for col in possible_regime_cols
+                            if col in original_filtered.columns
+                            and col in dynamic_filtered.columns
+                        ]
+                        if available_regime_cols:
+                            regime_col = st.selectbox(
+                                "BTC regime dimension",
+                                available_regime_cols,
+                                key="experiment_regime_dimension",
+                            )
+                            regime_rows = []
+                            regime_values = sorted(
+                                set(
+                                    original_filtered[regime_col]
+                                    .dropna().astype(str)
+                                )
+                                | set(
+                                    dynamic_filtered[regime_col]
+                                    .dropna().astype(str)
+                                )
+                            )
+                            for regime in regime_values:
+                                for strategy, frame in [
+                                    ("Original", original_filtered),
+                                    ("Dynamic X4", dynamic_filtered),
+                                ]:
+                                    subset = frame[
+                                        frame[regime_col].astype(str).eq(regime)
+                                    ]
+                                    regime_rows.append({
+                                        "regime": regime,
+                                        "strategy": strategy,
+                                        **calculate_experiment_summary(subset),
+                                    })
+                            st.dataframe(
+                                pd.DataFrame(regime_rows).round(4),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                    with experiment_robustness_tab:
+                        st.markdown("### Temporal and concentration robustness")
+                        original_robustness = (
+                            build_experiment_robustness_report(
+                                original_filtered, "Original"
+                            )
+                        )
+                        dynamic_robustness = (
+                            build_experiment_robustness_report(
+                                dynamic_filtered, "Dynamic X4"
+                            )
+                        )
+                        robustness_report = pd.concat(
+                            [original_robustness, dynamic_robustness],
+                            ignore_index=True,
+                        )
+                        st.dataframe(
+                            robustness_report.round(4),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                    with experiment_inspector_tab:
+                        st.markdown("### Comparative Trade Inspector")
+                        if matched_df.empty:
+                            st.info("No matched opportunities are available.")
+                        else:
+                            inspector_source = matched_df.sort_values(
+                                "original_entry_ts", ascending=False
+                            ).reset_index(drop=True)
+                            inspector_event = st.dataframe(
+                                inspector_source,
+                                use_container_width=True,
+                                hide_index=True,
+                                key="experiment_matched_trade_selector",
+                                on_select="rerun",
+                                selection_mode="single-row",
+                            )
+                            selected_rows = inspector_event.selection.rows
+                            if selected_rows:
+                                selected_match = inspector_source.iloc[
+                                    selected_rows[0]
+                                ]
+                                original_row = original_filtered.iloc[
+                                    int(selected_match["original_index"])
+                                ]
+                                dynamic_row = dynamic_filtered.iloc[
+                                    int(selected_match["dynamic_index"])
+                                ]
+                                st.markdown("#### Original")
+                                render_trade_inspector_for_row(
+                                    original_row,
+                                    status="CLOSED",
+                                    key_prefix=(
+                                        "experiment_original_"
+                                        + str(selected_match["match_id"])
+                                    ),
+                                )
+                                st.markdown("#### Dynamic X4")
+                                render_trade_inspector_for_row(
+                                    dynamic_row,
+                                    status="CLOSED",
+                                    key_prefix=(
+                                        "experiment_dynamic_"
+                                        + str(selected_match["match_id"])
+                                    ),
+                                )
+                            else:
+                                st.info(
+                                    "Seleccioná una oportunidad compartida "
+                                    "para abrir ambos inspectores."
+                                )
+
+
 with tab_tp_sl_replay:
     st.subheader("🧪 TP / SL Post-Trade Replay")
 
