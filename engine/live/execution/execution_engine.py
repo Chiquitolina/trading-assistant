@@ -54,18 +54,8 @@ class ExecutionEngine:
         if side == "SHORT":
             return price - slippage if is_entry else price + slippage
         
-    def _resolve_leverage(self, plan, default_leverage: int = 2) -> int:
-        side = plan.side
-        direction = plan.signal_context.get("direction")
-        momentum = plan.signal_context.get("momentum")
-
-        if (
-            side == "LONG"
-            and direction == "up"
-            and momentum == "inside_bar"
-        ):
-            print("[LEVERAGE ROUTER] LONG up inside_bar -> 3x")
-            return 3
+    def _resolve_leverage(self, plan, default_leverage: int = 10) -> int:
+        return 10
 
         return default_leverage
             
