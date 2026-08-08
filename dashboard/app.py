@@ -4951,6 +4951,161 @@ with tab_overview:
             daily_summary[col] = daily_summary[col].round(3)
 
         st.dataframe(daily_summary, use_container_width=True)
+        
+        # =========================
+        # PERFORMANCE BY DATE
+        # =========================
+        st.markdown("### 📅 Profit Factor by Date")
+
+        performance_by_date_df = (
+            df_view
+            .dropna(
+                subset=[
+                    "entry_ts_dt",
+                    "pnl",
+                ]
+            )
+            .copy()
+        )
+
+        if performance_by_date_df.empty:
+            st.info(
+                "No trades available for daily performance."
+            )
+
+        else:
+            performance_by_date_df["trade_date"] = (
+                performance_by_date_df[
+                    "entry_ts_dt"
+                ].dt.date
+            )
+
+            performance_by_date_df["day_name"] = (
+                performance_by_date_df[
+                    "entry_ts_dt"
+                ].dt.day_name()
+            )
+
+            performance_by_date = (
+                performance_by_date_df
+                .groupby(
+                    [
+                        "trade_date",
+                        "day_name",
+                    ],
+                    observed=False,
+                )
+                .agg(
+                    trades=(
+                        "pnl",
+                        "count",
+                    ),
+                    wins=(
+                        "pnl",
+                        lambda x: int(
+                            (x > 0).sum()
+                        ),
+                    ),
+                    losses=(
+                        "pnl",
+                        lambda x: int(
+                            (x <= 0).sum()
+                        ),
+                    ),
+                    winrate=(
+                        "pnl",
+                        lambda x: (
+                            (x > 0).mean() * 100
+                        ),
+                    ),
+                    gross_profit=(
+                        "pnl",
+                        lambda x: x[
+                            x > 0
+                        ].sum(),
+                    ),
+                    gross_loss=(
+                        "pnl",
+                        lambda x: abs(
+                            x[x < 0].sum()
+                        ),
+                    ),
+                    profit_factor=(
+                        "pnl",
+                        profit_factor,
+                    ),
+                    avg_pnl=(
+                        "pnl",
+                        "mean",
+                    ),
+                    net_pnl=(
+                        "pnl",
+                        "sum",
+                    ),
+                )
+                .reset_index()
+                .sort_values(
+                    "trade_date",
+                    ascending=False,
+                )
+            )
+
+            numeric_cols = [
+                "winrate",
+                "gross_profit",
+                "gross_loss",
+                "profit_factor",
+                "avg_pnl",
+                "net_pnl",
+            ]
+
+            for col in numeric_cols:
+                performance_by_date[col] = (
+                    pd.to_numeric(
+                        performance_by_date[col],
+                        errors="coerce",
+                    ).round(3)
+                )
+
+            st.dataframe(
+                performance_by_date,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "trade_date": st.column_config.DateColumn(
+                        "Date",
+                        format="YYYY-MM-DD",
+                    ),
+                    "day_name": "Day",
+                    "trades": "Trades",
+                    "wins": "Wins",
+                    "losses": "Losses",
+                    "winrate": st.column_config.NumberColumn(
+                        "Winrate",
+                        format="%.2f%%",
+                    ),
+                    "gross_profit": st.column_config.NumberColumn(
+                        "Gross Profit",
+                        format="%.3f",
+                    ),
+                    "gross_loss": st.column_config.NumberColumn(
+                        "Gross Loss",
+                        format="%.3f",
+                    ),
+                    "profit_factor": st.column_config.NumberColumn(
+                        "Profit Factor",
+                        format="%.2f",
+                    ),
+                    "avg_pnl": st.column_config.NumberColumn(
+                        "Avg PnL",
+                        format="%.3f%%",
+                    ),
+                    "net_pnl": st.column_config.NumberColumn(
+                        "Net PnL",
+                        format="%.3f%%",
+                    ),
+                },
+            )
             
             
     # =========================
