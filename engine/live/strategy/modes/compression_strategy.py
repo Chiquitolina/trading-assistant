@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 
 from enums.actions import Action
@@ -13,6 +15,16 @@ from signals.indicators.compression_breakout_detector import (
 )
 from signals.indicators.compression_state_machine import CompressionStateMachine
 
+
+COMPRESSION_LOOKBACKS = (10, 15, 20, 25, 30)
+COMPRESSION_BASE_MULTIPLIER = 4
+COMPRESSION_BASE_MODE = "separate_dynamic"
+INDICATOR_WARMUP_CANDLES = 20
+
+ALLOWED_COMPRESSION_DURATIONS = (20,)
+
+BLOCKED_BREAKOUT_EXTENSION_MIN_PCT = 0.25
+BLOCKED_BREAKOUT_EXTENSION_MAX_PCT = 0.50
 
 class CompressionStrategy:
 
@@ -37,6 +49,136 @@ class CompressionStrategy:
         )
 
         self.last_context_by_symbol = {}
+
+    @staticmethod
+    def _selection_score(candidate):
+        quality_bonus = {
+            "GOOD_SHAPE": 1.0,
+            "OK_SHAPE": 0.5,
+            "BAD_SHAPE": 0.0,
+        }.get(
+            candidate.get("compression_quality_label"),
+            0.0,
+        )
+
+        return round(
+            float(candidate.get("score", 0))
+            + quality_bonus
+            + float(candidate.get("inside_ratio", 0) or 0)
+            + float(candidate.get("touches_high_ratio", 0) or 0)
+            + float(candidate.get("touches_low_ratio", 0) or 0),
+            4,
+        )
+
+    def _detect_best_compression(self, prev_df):
+        candidates = []
+
+        for lookback in COMPRESSION_LOOKBACKS:
+            base_lookback = (
+                lookback
+                * COMPRESSION_BASE_MULTIPLIER
+            )
+
+            candidate = detect_compression(
+                prev_df,
+                lookback=lookback,
+                base_lookback=base_lookback,
+                base_mode=COMPRESSION_BASE_MODE,
+                max_range_ratio=0.65,
+                max_atr_ratio=0.75,
+                max_volume_ratio=0.95,
+                max_body_pct=0.50,
+                min_score=3,
+            )
+
+            candidate["selection_score"] = (
+                self._selection_score(candidate)
+            )
+            candidates.append(candidate)
+
+        valid_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.get("is_compression")
+        ]
+
+        candidate_pool = (
+            valid_candidates
+            if valid_candidates
+            else candidates
+        )
+
+        selected = max(
+            candidate_pool,
+            key=lambda candidate: (
+                float(
+                    candidate.get(
+                        "selection_score",
+                        0,
+                    )
+                ),
+                -int(candidate.get("lookback", 0)),
+            ),
+        ).copy()
+
+        selected["selected_lookback"] = (
+            selected.get("lookback")
+        )
+        selected["selection_reason"] = (
+            "best_valid_candidate"
+            if valid_candidates
+            else "best_candidate_no_valid_compression"
+        )
+        selected["candidate_count"] = len(candidates)
+        selected["valid_candidate_count"] = len(
+            valid_candidates
+        )
+
+        candidate_rows = []
+
+        for candidate in candidates:
+            candidate_rows.append({
+                "lookback": candidate.get("lookback"),
+                "base_lookback": candidate.get(
+                    "base_lookback"
+                ),
+                "base_mode": candidate.get("base_mode"),
+                "is_compression": candidate.get(
+                    "is_compression"
+                ),
+                "compression_score": candidate.get("score"),
+                "selection_score": candidate.get(
+                    "selection_score"
+                ),
+                "range_ratio": candidate.get("range_ratio"),
+                "atr_ratio": candidate.get("atr_ratio"),
+                "volume_ratio": candidate.get("volume_ratio"),
+                "compression_range_pct": candidate.get(
+                    "compression_range_pct"
+                ),
+                "compression_shape": candidate.get(
+                    "compression_shape"
+                ),
+                "compression_quality_label": candidate.get(
+                    "compression_quality_label"
+                ),
+                "touches_high_ratio": candidate.get(
+                    "touches_high_ratio"
+                ),
+                "touches_low_ratio": candidate.get(
+                    "touches_low_ratio"
+                ),
+                "touch_imbalance_ratio": candidate.get(
+                    "touch_imbalance_ratio"
+                ),
+            })
+
+        selected["candidates_json"] = json.dumps(
+            candidate_rows,
+            separators=(",", ":"),
+        )
+
+        return selected
         
     def _build_signal_context(
         self,
@@ -109,6 +251,15 @@ class CompressionStrategy:
             "compression_shape": compression_state.get("compression_shape"),
             "compression_quality_label": compression_state.get("compression_quality_label"),
 
+            "compression_selected_lookback": compression_state.get("selected_lookback"),
+            "compression_selection_score": compression_state.get("selection_score"),
+            "compression_selection_reason": compression_state.get("selection_reason"),
+            "compression_candidate_count": compression_state.get("candidate_count"),
+            "compression_valid_candidate_count": compression_state.get("valid_candidate_count"),
+            "compression_candidates_json": compression_state.get("compression_candidates_json"),
+            "compression_base_mode": compression_state.get("base_mode"),
+            "compression_base_lookback": compression_state.get("base_lookback"),
+
             "breakout_detected": breakout.get("breakout"),
             "breakout_ts": compression_state.get("breakout_ts"),
             "breakout_price": compression_state.get("breakout_price"),
@@ -152,7 +303,17 @@ class CompressionStrategy:
 
         candles = self.buffer.get_candles(symbol, tf)
 
-        if len(candles) < 80:
+        minimum_candles = (
+            max(COMPRESSION_LOOKBACKS)
+            + (
+                max(COMPRESSION_LOOKBACKS)
+                * COMPRESSION_BASE_MULTIPLIER
+            )
+            + INDICATOR_WARMUP_CANDLES
+            + 1
+        )
+
+        if len(candles) < minimum_candles:
             trade_action = TradeAction(
                 action=Action.HOLD,
                 signal=signal,
@@ -181,15 +342,8 @@ class CompressionStrategy:
             min_score=4,
         )
 
-        compression = detect_compression(
-            prev_df,
-            lookback=10,
-            base_lookback=40,
-            max_range_ratio=0.65,
-            max_atr_ratio=0.75,
-            max_volume_ratio=0.95,
-            max_body_pct=0.50,
-            min_score=3,
+        compression = self._detect_best_compression(
+            prev_df
         )
 
         watch = self.machine.get(symbol)
@@ -249,19 +403,125 @@ class CompressionStrategy:
             btc_context=btc_context
         )
 
-        if compression_state["state"] == "ENTRY_READY":
-            trade_action = TradeAction(
-                action=Action.LONG,
-                signal=signal,
-                strategy_name="compression_strategy",
-                reason="compression_breakout"
+        compression_duration = compression_state.get(
+            "compression_duration"
+        )
+
+        breakout_extension_pct = compression_state.get(
+            "breakout_extension_pct"
+        )
+
+        try:
+            breakout_extension_pct = float(
+                breakout_extension_pct
             )
+        except (TypeError, ValueError):
+            breakout_extension_pct = None
+
+
+        if compression_state["state"] == "ENTRY_READY":
+
+            duration_allowed = (
+                compression_duration
+                in ALLOWED_COMPRESSION_DURATIONS
+            )
+
+            breakout_extension_blocked = (
+                breakout_extension_pct is not None
+                and
+                BLOCKED_BREAKOUT_EXTENSION_MIN_PCT
+                <= breakout_extension_pct
+                <
+                BLOCKED_BREAKOUT_EXTENSION_MAX_PCT
+            )
+
+            if not duration_allowed:
+                print(
+                    f"[COMPRESSION FILTER] "
+                    f"symbol={symbol} "
+                    f"duration={compression_duration} "
+                    f"breakout_extension_pct="
+                    f"{breakout_extension_pct} "
+                    f"decision=BLOCKED "
+                    f"reason=duration_not_allowed"
+                )
+
+                trade_action = TradeAction(
+                    action=Action.HOLD,
+                    signal=signal,
+                    strategy_name="compression_strategy",
+                    reason="compression_duration_not_allowed",
+                )
+
+            elif breakout_extension_pct is None:
+                print(
+                    f"[COMPRESSION FILTER] "
+                    f"symbol={symbol} "
+                    f"duration={compression_duration} "
+                    f"breakout_extension_pct=None "
+                    f"decision=BLOCKED "
+                    f"reason=missing_breakout_extension_pct"
+                )
+
+                trade_action = TradeAction(
+                    action=Action.HOLD,
+                    signal=signal,
+                    strategy_name="compression_strategy",
+                    reason="missing_breakout_extension_pct",
+                )
+
+            elif breakout_extension_blocked:
+                print(
+                    f"[COMPRESSION FILTER] "
+                    f"symbol={symbol} "
+                    f"duration={compression_duration} "
+                    f"breakout_extension_pct="
+                    f"{breakout_extension_pct:.4f} "
+                    f"blocked_range=["
+                    f"{BLOCKED_BREAKOUT_EXTENSION_MIN_PCT}, "
+                    f"{BLOCKED_BREAKOUT_EXTENSION_MAX_PCT}) "
+                    f"decision=BLOCKED"
+                )
+
+                trade_action = TradeAction(
+                    action=Action.HOLD,
+                    signal=signal,
+                    strategy_name="compression_strategy",
+                    reason=(
+                        "breakout_extension_pct_"
+                        "blocked_025_050"
+                    ),
+                )
+
+            else:
+                print(
+                    f"[COMPRESSION FILTER] "
+                    f"symbol={symbol} "
+                    f"duration={compression_duration} "
+                    f"breakout_extension_pct="
+                    f"{breakout_extension_pct:.4f} "
+                    f"decision=ALLOWED"
+                )
+
+                trade_action = TradeAction(
+                    action=Action.LONG,
+                    signal=signal,
+                    strategy_name="compression_strategy",
+                    reason=(
+                        "compression_breakout_"
+                        "duration_and_extension_allowed"
+                    ),
+                )
+
         else:
             trade_action = TradeAction(
                 action=Action.HOLD,
                 signal=signal,
                 strategy_name="compression_strategy",
-                reason=compression_state.get("reason", "compression_waiting")
+                reason=compression_state.get(
+                    "reason",
+                    "compression_waiting",
+                ),
             )
 
         return CompressionResult(
@@ -339,6 +599,15 @@ class CompressionStrategy:
 
                 "compression_shape": compression_state.get("compression_shape"),
                 "compression_quality_label": compression_state.get("compression_quality_label"),
+
+                "selected_lookback": compression_state.get("selected_lookback"),
+                "selection_score": compression_state.get("selection_score"),
+                "selection_reason": compression_state.get("selection_reason"),
+                "candidate_count": compression_state.get("candidate_count"),
+                "valid_candidate_count": compression_state.get("valid_candidate_count"),
+                "compression_candidates_json": compression_state.get("compression_candidates_json"),
+                "base_mode": compression_state.get("base_mode"),
+                "base_lookback": compression_state.get("base_lookback"),
 
                 "compression_range_pct": compression_state.get(
                     "compression_range_pct"
