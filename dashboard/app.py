@@ -14934,54 +14934,49 @@ with tab_experiment_comparator:
                         lookback_report = build_lookback_report(
                             dynamic_filtered
                         )
-                        st.dataframe(
-                            lookback_report.round(4),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        candidate_report = parse_candidate_rows(
-                            dynamic_filtered
-                        )
-                        if candidate_report.empty:
+
+                        if lookback_report.empty:
                             st.info(
-                                "No valid compression_candidates_json data "
-                                "is available yet."
+                                "No selected lookback data is available."
                             )
+
                         else:
-                            st.markdown("### Replacement vs discovery")
-                            selection_type_report = (
-                                candidate_report.groupby(
-                                    "selection_type", dropna=False
-                                )
-                                .agg(
-                                    trades=("pnl", "size"),
-                                    tp=(
-                                        "outcome",
-                                        lambda values: values.eq("TP").sum(),
-                                    ),
-                                    sl=(
-                                        "outcome",
-                                        lambda values: values.eq("SL").sum(),
-                                    ),
-                                    avg_pnl=("pnl", "mean"),
-                                    total_pnl=("pnl", "sum"),
-                                    avg_selection_margin=(
-                                        "selection_margin_vs_10", "mean"
-                                    ),
-                                )
-                                .reset_index()
-                            )
+                            preferred_lookback_cols = [
+                                "selected_lookback",
+                                "trades",
+                                "tp",
+                                "sl",
+                                "winrate",
+                                "profit_factor",
+                                "total_pnl",
+                                "avg_pnl",
+                                "avg_win",
+                                "avg_loss",
+                                "max_drawdown",
+                                "fees",
+                                "fee_impact_pct",
+                                "coverage_pct",
+                            ]
+
+                            available_lookback_cols = [
+                                column
+                                for column
+                                in preferred_lookback_cols
+                                if column in lookback_report.columns
+                            ]
+
                             st.dataframe(
-                                selection_type_report.round(4),
+                                lookback_report[
+                                    available_lookback_cols
+                                ].round(4),
                                 use_container_width=True,
                                 hide_index=True,
                             )
-                            st.dataframe(
-                                candidate_report.sort_values(
-                                    "entry_ts", ascending=False
-                                ),
-                                use_container_width=True,
-                                hide_index=True,
+
+                            st.caption(
+                                "Uses compression_selected_lookback when "
+                                "available and compression_duration as "
+                                "fallback for historical trades."
                             )
 
                     with experiment_daily_tab:
