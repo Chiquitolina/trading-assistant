@@ -101,10 +101,27 @@ def normalize_experiment_trades(df, source, timezone):
         default=np.where(out["pnl"] > 0, "TP", "SL"),
     )
 
-    selected_lookback = _first_available(
-        out,
-        ["compression_selected_lookback", "selected_lookback"],
+    selected_lookback = pd.Series(
+        pd.NA,
+        index=out.index,
+        dtype="Float64",
     )
+
+    for candidate_column in [
+        "compression_selected_lookback",
+        "selected_lookback",
+        "compression_lookback",
+        "compression_duration",
+    ]:
+        if candidate_column not in out.columns:
+            continue
+
+        selected_lookback = selected_lookback.fillna(
+            pd.to_numeric(
+                out[candidate_column],
+                errors="coerce",
+            )
+        )
     out["comparison_selected_lookback"] = pd.to_numeric(
         selected_lookback, errors="coerce"
     ).astype("Int64")
@@ -432,11 +449,16 @@ def build_lookback_report(dynamic_df):
     if dynamic_df.empty:
         return pd.DataFrame()
     rows = []
+    total_trades = len(dynamic_df)
     for lookback, group in dynamic_df.groupby(
         "comparison_selected_lookback", dropna=False
     ):
         rows.append({
             "selected_lookback": lookback,
+            "coverage_pct": (
+                len(group) / total_trades * 100
+                if total_trades else 0.0
+            ),
             **calculate_strategy_summary(group),
         })
     return pd.DataFrame(rows).sort_values("selected_lookback")
