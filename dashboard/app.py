@@ -49,7 +49,7 @@ TRADES_FILE = BASE_DIR / "trades.csv"
 DYNAMIC_X4_ROOT = Path(
     os.getenv(
         "DYNAMIC_X4_ROOT",
-        str(BASE_DIR.parent / "trad-dynamic-x4"),
+        str(BASE_DIR.parent / "cuarta"),
     )
 ).expanduser().resolve()
 DYNAMIC_X4_TRADES_FILE = Path(
