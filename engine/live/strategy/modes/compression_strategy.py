@@ -16,6 +16,16 @@ from signals.indicators.compression_state_machine import CompressionStateMachine
 
 class CompressionStrategy:
 
+    COMPRESSION_LOOKBACK = 20
+    COMPRESSION_BASE_LOOKBACK = 80
+    COMPRESSION_BASE_MODE = "separate_fixed"
+    MIN_REQUIRED_CANDLES = (
+        COMPRESSION_LOOKBACK
+        + COMPRESSION_BASE_LOOKBACK
+        + 20
+        + 1
+    )
+
     def __init__(
         self,
         buffer,
@@ -91,6 +101,10 @@ class CompressionStrategy:
             "compression_height_pct": compression_state.get("compression_height_pct"),
             "compression_duration": compression_state.get("compression_duration"),
 
+            "compression_selected_lookback": self.COMPRESSION_LOOKBACK,
+            "compression_base_lookback": self.COMPRESSION_BASE_LOOKBACK,
+            "compression_base_mode": self.COMPRESSION_BASE_MODE,
+
             "upper_slope": compression_state.get("upper_slope"),
             "lower_slope": compression_state.get("lower_slope"),
             "slope_difference": compression_state.get("slope_difference"),
@@ -132,7 +146,7 @@ class CompressionStrategy:
         self,
         symbol,
         signal,
-        tf="15m",
+        tf="30m",
         btc_context=None,
         current_position=None,
     ):
@@ -152,7 +166,7 @@ class CompressionStrategy:
 
         candles = self.buffer.get_candles(symbol, tf)
 
-        if len(candles) < 80:
+        if len(candles) < self.MIN_REQUIRED_CANDLES:
             trade_action = TradeAction(
                 action=Action.HOLD,
                 signal=signal,
@@ -183,8 +197,8 @@ class CompressionStrategy:
 
         compression = detect_compression(
             prev_df,
-            lookback=10,
-            base_lookback=40,
+            lookback=self.COMPRESSION_LOOKBACK,
+            base_lookback=self.COMPRESSION_BASE_LOOKBACK,
             max_range_ratio=0.65,
             max_atr_ratio=0.75,
             max_volume_ratio=0.95,
@@ -321,6 +335,10 @@ class CompressionStrategy:
 
                 "compression_height_pct": compression_state.get("compression_height_pct"),
                 "compression_duration": compression_state.get("compression_duration"),
+
+                "compression_selected_lookback": self.COMPRESSION_LOOKBACK,
+                "compression_base_lookback": self.COMPRESSION_BASE_LOOKBACK,
+                "compression_base_mode": self.COMPRESSION_BASE_MODE,
 
                 "upper_slope": compression_state.get("upper_slope"),
                 "lower_slope": compression_state.get("lower_slope"),
