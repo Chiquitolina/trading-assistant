@@ -311,7 +311,10 @@ class EntryEngine:
         # ==========================
         # TP ESPERADO
         # ==========================
-        if not use_fixed_levels:
+        if (
+            not use_fixed_levels
+            and strategy_name != "compression_strategy"
+        ):
             ok, expected_tp_pct = min_expected_tp_ok(
                 entry,
                 atr,

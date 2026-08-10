@@ -338,8 +338,10 @@ compression_strategy = CompressionStrategy(
     journal=compression_watch_journal,
     max_watch_candles=8,
     max_pullback_candles=5,
-    pullback_max_pct=1.2,
-    pullback_min_hold_high=True,
+    moderate_breakout_min_pct=0.50,
+    moderate_breakout_max_pct=0.75,
+    entry_vs_breakout_min_pct=-0.25,
+    entry_vs_breakout_max_pct=0.00,
 )
 
 # =========================================================
@@ -839,6 +841,19 @@ try:
                         **(plan.signal_context or {}),
                         **compression_signal_context,
                     }
+                    
+                if STRATEGY_MODE == "compression":
+                    management_ok = (
+                        execution_strategy.prepare_plan(plan)
+                    )
+
+                    if not management_ok:
+                        print(
+                            f"[COMPRESSION PLAN] "
+                            f"symbol={plan.symbol} "
+                            f"discarded_by_structural_management"
+                        )
+                        continue
                     
                 try:
                     btc_correlation_context = (

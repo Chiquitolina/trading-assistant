@@ -19,7 +19,7 @@ class Position:
     signal_price: float
     signal_ts: int
     
-    leverage: int = 1
+    leverage: int = 5
     is_testnet: bool = False
 
     signal_context: dict | None = None

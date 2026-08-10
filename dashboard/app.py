@@ -3,6 +3,8 @@ import sys
 import json
 from pathlib import Path
 
+import plotly.graph_objects as go
+
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -87,6 +89,12 @@ PARTIAL_TP_SCENARIOS_FILE = (
     BASE_DIR
     / "reports"
     / "partial_tp_scenarios.csv"
+)
+
+TP_SL_REPLAY_CANDIDATES_FILE = (
+    BASE_DIR
+    / "reports"
+    / "tp_sl_replay_candidates.json"
 )
 TZ = "America/Argentina/Buenos_Aires"
 SYMBOL = "BTCUSDT"
@@ -271,30 +279,137 @@ def build_open_position_inspector_df(
         .reset_index(drop=True)
     )
     
-def load_watch_history(symbol, base_dir="compression_watch_journal", limit=50):
-    path = Path(base_dir) / f"{symbol}.jsonl"
+def normalize_epoch_ms(value):
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(value, (int, float)):
+        numeric_value = int(value)
+
+        # Ya está expresado en milisegundos
+        if numeric_value > 10_000_000_000:
+            return numeric_value
+
+        # Segundos Unix
+        return numeric_value * 1000
+
+    timestamp = pd.to_datetime(
+        value,
+        utc=True,
+        errors="coerce",
+    )
+
+    if pd.isna(timestamp):
+        return None
+
+    return int(timestamp.timestamp() * 1000)
+
+
+def load_watch_history(
+    symbol,
+    compression_created_ts=None,
+    base_dir="compression_watch_journal",
+):
+    path = (
+        Path(base_dir)
+        / f"{str(symbol).upper()}.jsonl"
+    )
 
     if not path.exists():
         return pd.DataFrame()
 
     rows = []
 
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+
+            if not line:
+                continue
+
             try:
                 rows.append(json.loads(line))
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
                 continue
 
     if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    history_df = pd.DataFrame(rows)
 
-    if "logged_at" in df.columns:
-        df = df.sort_values("logged_at", ascending=False)
+    # Filtrar la watch exacta del trade.
+    created_ts_ms = normalize_epoch_ms(
+        compression_created_ts
+    )
 
-    return df.head(limit)
+    if (
+        created_ts_ms is not None
+        and "compression_created_ts"
+        in history_df.columns
+    ):
+        journal_created_ts = pd.to_numeric(
+            history_df["compression_created_ts"],
+            errors="coerce",
+        )
+
+        history_df = history_df[
+            journal_created_ts == created_ts_ms
+        ].copy()
+
+    if history_df.empty:
+        return history_df
+
+    # Extraer OHLCV guardado dentro de last_candle.
+    if "last_candle" in history_df.columns:
+        for field in [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "atr",
+        ]:
+            history_df[f"candle_{field}"] = (
+                history_df["last_candle"].apply(
+                    lambda candle: (
+                        candle.get(field)
+                        if isinstance(candle, dict)
+                        else None
+                    )
+                )
+            )
+
+    if "compression_updated_ts" in history_df.columns:
+        history_df["timestamp"] = (
+            pd.to_datetime(
+                pd.to_numeric(
+                    history_df[
+                        "compression_updated_ts"
+                    ],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(
+                "America/Argentina/Cordoba"
+            )
+        )
+
+        history_df = history_df.sort_values(
+            "compression_updated_ts",
+            ascending=True,
+        )
+
+    return history_df.reset_index(drop=True)
     
 def safe_metric(metrics_dict, key, is_percent=False):
     value = metrics_dict.get(key, 0)
@@ -308,6 +423,201 @@ def safe_metric(metrics_dict, key, is_percent=False):
         return f"{value:.2f}%"
 
     return round(value, 2)
+
+def add_watch_history_to_chart(
+    fig,
+    selected_trade,
+):
+    history_df = load_watch_history(
+        symbol=selected_trade.symbol,
+        compression_created_ts=(
+            selected_trade.compression_created_ts
+        ),
+    )
+
+    if (
+        history_df.empty
+        or "event" not in history_df.columns
+        or "compression_updated_ts"
+        not in history_df.columns
+    ):
+        return fig
+
+    history_df = history_df.copy()
+
+    # El gráfico usa UTC sin información de timezone.
+    history_df["chart_ts"] = (
+        pd.to_datetime(
+            pd.to_numeric(
+                history_df["compression_updated_ts"],
+                errors="coerce",
+            ),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_localize(None)
+    )
+
+    wait_rows = history_df[
+        history_df["event"].eq("WAIT_PULLBACK")
+    ]
+
+    ready_rows = history_df[
+        history_df["event"].eq("ENTRY_READY")
+    ]
+
+    if wait_rows.empty:
+        return fig
+
+    wait_row = wait_rows.iloc[0]
+    wait_ts = wait_row.get("chart_ts")
+
+    if pd.isna(wait_ts):
+        return fig
+
+    ready_row = (
+        ready_rows.iloc[0]
+        if not ready_rows.empty
+        else None
+    )
+
+    ready_ts = (
+        ready_row.get("chart_ts")
+        if ready_row is not None
+        else history_df.iloc[-1].get("chart_ts")
+    )
+
+    # Franja temporal del estado WAIT_PULLBACK.
+    if pd.notna(ready_ts):
+        fig.add_vrect(
+            x0=wait_ts,
+            x1=ready_ts,
+            fillcolor="#f59e0b",
+            opacity=0.10,
+            line_width=0,
+            layer="below",
+            annotation_text="WAIT_PULLBACK",
+            annotation_position="top left",
+            annotation_font={
+                "color": "#f59e0b",
+                "size": 9,
+            },
+        )
+
+    # Mostrar solamente el punto del pullback válido.
+    if ready_row is not None:
+        pullback_ts = ready_row.get("chart_ts")
+        pullback_price = ready_row.get("candle_low")
+        pullback_pct = ready_row.get("pullback_pct")
+
+        if (
+            pd.notna(pullback_ts)
+            and pd.notna(pullback_price)
+        ):
+            fig.add_trace(
+                go.Scatter(
+                    x=[pullback_ts],
+                    y=[float(pullback_price)],
+                    mode="markers",
+                    name="Valid pullback",
+                    marker={
+                        "symbol": "triangle-down",
+                        "size": 11,
+                        "color": "#fb923c",
+                        "line": {
+                            "color": "#111827",
+                            "width": 1,
+                        },
+                    },
+                    hovertemplate=(
+                        "<b>VALID PULLBACK</b><br>"
+                        "Time: %{x}<br>"
+                        "Low: %{y:.8f}<br>"
+                        f"Pullback: {pullback_pct}%"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+    return fig
+
+def render_compression_watch_history(
+    selected_trade,
+    key_prefix="watch_history",
+):
+    history_df = load_watch_history(
+        symbol=selected_trade.symbol,
+        compression_created_ts=(
+            selected_trade.compression_created_ts
+        ),
+    )
+
+    with st.expander(
+        "🧭 Compression Watch History",
+        expanded=False,
+    ):
+        if history_df.empty:
+            st.info(
+                "No watch journal records were found "
+                "for this trade."
+            )
+            return
+
+        display_columns = [
+            "timestamp",
+            "event",
+            "reason",
+            "watch_age",
+            "candles_waiting",
+            "candle_open",
+            "candle_high",
+            "candle_low",
+            "candle_close",
+            "breakout_price",
+            "breakout_extension_pct",
+            "pullback_pct",
+            "valid_pullback",
+            "holds_compression_high",
+            "continuation",
+        ]
+
+        display_columns = [
+            column
+            for column in display_columns
+            if column in history_df.columns
+        ]
+
+        st.dataframe(
+            history_df[display_columns],
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_table",
+        )
+
+        st.markdown("#### Selected trade pullback summary")
+
+        st.json({
+            "pullback_first_ts": (
+                selected_trade.pullback_first_ts.isoformat()
+                if selected_trade.pullback_first_ts is not None
+                else None
+            ),
+            "pullback_valid_ts": (
+                selected_trade.pullback_valid_ts.isoformat()
+                if selected_trade.pullback_valid_ts is not None
+                else None
+            ),
+            "pullback_price": selected_trade.pullback_price,
+            "entry_ready_ts": (
+                selected_trade.entry_ready_ts.isoformat()
+                if selected_trade.entry_ready_ts is not None
+                else None
+            ),
+            "entry_ready_price": (
+                selected_trade.entry_ready_price
+            ),
+        })
 
 def render_trade_inspector_for_row(
     row,
@@ -446,6 +756,11 @@ def render_trade_inspector_for_row(
             "scrollZoom": True,
         },
     )
+    
+    render_compression_watch_history(
+        selected_trade=selected_trade,
+        key_prefix=f"{key_prefix}_watch_history",
+    )
 
     with st.expander(
         f"{inspector_timeframe} candles",
@@ -471,6 +786,350 @@ def render_trade_inspector_for_row(
             use_container_width=True,
             hide_index=True,
         )
+        
+# ==========================================
+# TP / SL REPLAY SEGMENT HELPERS
+# ==========================================
+
+def build_replay_trade_keys(data):
+    """
+    Construye una clave estable compartida entre:
+
+    - trades.csv
+    - post_trade_replay.csv
+    - tp_sl_scenarios.csv
+    - partial_tp_scenarios.csv
+
+    La identidad utilizada es:
+        SYMBOL + entry_ts UTC en milisegundos
+    """
+    if data is None or data.empty:
+        return pd.Series(
+            dtype="string",
+            index=getattr(data, "index", None),
+        )
+
+    if "symbol" not in data.columns:
+        return pd.Series(
+            pd.NA,
+            index=data.index,
+            dtype="string",
+        )
+
+    entry_column = None
+
+    if "entry_ts" in data.columns:
+        entry_column = "entry_ts"
+
+    elif "entry_ts_dt" in data.columns:
+        entry_column = "entry_ts_dt"
+
+    if entry_column is None:
+        return pd.Series(
+            pd.NA,
+            index=data.index,
+            dtype="string",
+        )
+
+    raw_entry_ts = data[entry_column]
+
+    # Primero intentamos interpretar timestamps de texto o datetime.
+    entry_datetime = pd.to_datetime(
+        raw_entry_ts,
+        utc=True,
+        errors="coerce",
+    )
+
+    # Los timestamps numéricos necesitan una unidad explícita.
+    numeric_entry_ts = pd.to_numeric(
+        raw_entry_ts,
+        errors="coerce",
+    )
+
+    numeric_mask = numeric_entry_ts.notna()
+
+    if numeric_mask.any():
+        numeric_values = numeric_entry_ts.loc[
+            numeric_mask
+        ].abs()
+
+        seconds_mask = numeric_values < 1e11
+
+        milliseconds_mask = (
+            (numeric_values >= 1e11)
+            & (numeric_values < 1e14)
+        )
+
+        microseconds_mask = (
+            (numeric_values >= 1e14)
+            & (numeric_values < 1e17)
+        )
+
+        nanoseconds_mask = numeric_values >= 1e17
+
+        for unit, unit_mask in [
+            ("s", seconds_mask),
+            ("ms", milliseconds_mask),
+            ("us", microseconds_mask),
+            ("ns", nanoseconds_mask),
+        ]:
+            matching_indexes = unit_mask[
+                unit_mask
+            ].index
+
+            if len(matching_indexes) == 0:
+                continue
+
+            entry_datetime.loc[
+                matching_indexes
+            ] = pd.to_datetime(
+                numeric_entry_ts.loc[
+                    matching_indexes
+                ],
+                unit=unit,
+                utc=True,
+                errors="coerce",
+            )
+
+    symbol = (
+        data["symbol"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    # Pasamos todo a epoch milliseconds para que un mismo
+    # timestamp tenga la misma representación en todos los CSV.
+    entry_epoch_ms = pd.Series(
+        pd.NA,
+        index=data.index,
+        dtype="Int64",
+    )
+
+    valid_datetime_mask = entry_datetime.notna()
+
+    if valid_datetime_mask.any():
+        entry_epoch_ms.loc[
+            valid_datetime_mask
+        ] = (
+            entry_datetime.loc[
+                valid_datetime_mask
+            ]
+            .astype("int64")
+            // 1_000_000
+        ).astype("Int64")
+
+    trade_keys = (
+        symbol
+        + "|"
+        + entry_epoch_ms.astype("string")
+    )
+
+    valid_key_mask = (
+        symbol.ne("")
+        & entry_epoch_ms.notna()
+    )
+
+    return trade_keys.where(
+        valid_key_mask,
+        pd.NA,
+    )
+
+
+def save_tp_sl_replay_segment(
+    trades_df,
+    source,
+    description,
+    selected_filters=None,
+    bucket_definition=None,
+):
+    """
+    Guarda un conjunto de trades únicos para utilizarlo
+    posteriormente dentro de TP / SL Replay.
+    """
+    if trades_df is None or trades_df.empty:
+        return {
+            "saved": False,
+            "reason": "No trades were selected.",
+        }
+
+    segment_df = trades_df.copy()
+
+    segment_df["replay_trade_key"] = (
+        build_replay_trade_keys(segment_df)
+    )
+
+    valid_trade_keys = (
+        segment_df["replay_trade_key"]
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
+
+    if not valid_trade_keys:
+        return {
+            "saved": False,
+            "reason": (
+                "The selected trades do not contain valid "
+                "symbol and entry timestamp values."
+            ),
+        }
+
+    st.session_state["tp_sl_replay_segment"] = {
+        "source": str(source),
+        "description": str(description),
+        "selected_filters": selected_filters or [],
+        "bucket_definition": bucket_definition,
+        "trade_keys": valid_trade_keys,
+        "trade_count": len(valid_trade_keys),
+    }
+
+    return {
+        "saved": True,
+        "trade_count": len(valid_trade_keys),
+    }
+
+
+def build_replay_bucket_definition(
+    first_bucket_col,
+    second_bucket_col,
+    selected_keys,
+):
+    selected_pairs = []
+
+    for selected_key in sorted(selected_keys):
+        first_value, separator, second_value = (
+            str(selected_key).partition(" || ")
+        )
+
+        if not separator:
+            continue
+
+        selected_pairs.append({
+            "first_value": first_value,
+            "second_value": second_value,
+        })
+
+    return {
+        "first_bucket_col": str(first_bucket_col),
+        "second_bucket_col": str(second_bucket_col),
+        "selected_pairs": selected_pairs,
+    }
+
+
+def filter_by_replay_bucket_definition(
+    data,
+    bucket_definition,
+):
+    if data is None or data.empty or not bucket_definition:
+        return pd.DataFrame()
+
+    first_col = bucket_definition.get(
+        "first_bucket_col"
+    )
+    second_col = bucket_definition.get(
+        "second_bucket_col"
+    )
+    selected_pairs = bucket_definition.get(
+        "selected_pairs",
+        [],
+    )
+
+    if (
+        not first_col
+        or not second_col
+        or first_col not in data.columns
+        or second_col not in data.columns
+        or not selected_pairs
+    ):
+        return pd.DataFrame()
+
+    selected_pair_keys = {
+        (
+            str(pair.get("first_value")),
+            str(pair.get("second_value")),
+        )
+        for pair in selected_pairs
+    }
+
+    first_values = data[first_col].astype(str)
+    second_values = data[second_col].astype(str)
+
+    match_mask = pd.Series(
+        list(zip(first_values, second_values)),
+        index=data.index,
+    ).isin(selected_pair_keys)
+
+    return data[match_mask].copy()
+
+
+def load_tp_sl_replay_candidates():
+    if not TP_SL_REPLAY_CANDIDATES_FILE.exists():
+        return []
+
+    try:
+        with TP_SL_REPLAY_CANDIDATES_FILE.open(
+            "r",
+            encoding="utf-8",
+        ) as candidate_file:
+            payload = json.load(candidate_file)
+
+        candidates = payload.get("candidates", [])
+
+        return (
+            candidates
+            if isinstance(candidates, list)
+            else []
+        )
+
+    except Exception:
+        return []
+
+
+def save_tp_sl_replay_candidates(candidates):
+    TP_SL_REPLAY_CANDIDATES_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temporary_path = (
+        TP_SL_REPLAY_CANDIDATES_FILE
+        .with_suffix(".json.tmp")
+    )
+
+    payload = {
+        "version": 1,
+        "candidates": candidates,
+    }
+
+    with temporary_path.open(
+        "w",
+        encoding="utf-8",
+    ) as candidate_file:
+        json.dump(
+            payload,
+            candidate_file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    temporary_path.replace(
+        TP_SL_REPLAY_CANDIDATES_FILE
+    )
+
+
+def candidate_checkpoint_status(forward_trades):
+    if forward_trades < 10:
+        return "Collecting data", 10
+    if forward_trades < 20:
+        return "First reading available", 20
+    if forward_trades < 30:
+        return "Preliminary validation", 30
+    if forward_trades < 50:
+        return "Growing validation sample", 50
+    return "Forward sample established", None
 
 def render_bucket_robustness_explorer(
     source_df,
@@ -835,6 +1494,43 @@ def render_bucket_robustness_explorer(
     u3.metric("Duplicate rows", int(duplicate_rows))
 
     render_summary_metrics(edge_df)
+    
+    replay_segment_description = (
+        f"{first_bucket_label} × "
+        f"{second_bucket_label}"
+    )
+
+    replay_bucket_definition = (
+        build_replay_bucket_definition(
+            first_bucket_col=first_bucket_col,
+            second_bucket_col=second_bucket_col,
+            selected_keys=selected_keys,
+        )
+    )
+
+    if st.button(
+        "🧪 Send selected trades to TP / SL Replay",
+        key=f"{key_prefix}_send_to_tp_sl_replay",
+        type="primary",
+        use_container_width=True,
+    ):
+        save_result = save_tp_sl_replay_segment(
+            trades_df=edge_df,
+            source="Bucket Robustness Explorer",
+            description=replay_segment_description,
+            selected_filters=selected_labels,
+            bucket_definition=replay_bucket_definition,
+        )
+
+        if save_result["saved"]:
+            st.success(
+                f"{save_result['trade_count']} unique trades "
+                "were sent to TP / SL Replay."
+            )
+        else:
+            st.error(
+                save_result["reason"]
+            )
 
     if duplicate_rows > 0:
         st.warning(
@@ -847,6 +1543,7 @@ def render_bucket_robustness_explorer(
 
     (
         trades_tab,
+        deep_dive_tab,
         days_tab,
         symbols_tab,
         batches_tab,
@@ -854,6 +1551,7 @@ def render_bucket_robustness_explorer(
         robustness_tab,
     ) = st.tabs([
         "All Trades",
+        "Structure & Risk",
         "By Day",
         "By Symbol",
         "30m Batches",
@@ -1006,6 +1704,124 @@ def render_bucket_robustness_explorer(
                     f"{selected_trade_row['trade_key']}"
                 ),
             )
+        
+    # ==========================================
+    # STRUCTURE AND RISK DEEP DIVE
+    # ==========================================
+    with deep_dive_tab:
+        st.markdown(
+            "##### Structure and risk inside selected buckets"
+        )
+
+        st.caption(
+            "Analiza solamente los trades pertenecientes a las "
+            "combinaciones seleccionadas en Breakout Extension % "
+            "× Entry vs Breakout %. MFE y MAE son métricas "
+            "posteriores al trade y se usan solo como diagnóstico."
+        )
+
+        deep_dive_dimensions = {
+            "Entry vs Compression High":
+                "entry_vs_compression_bucket",
+
+            "Compression Height":
+                "compression_height_bucket",
+
+            "Structural Risk":
+                "structural_risk_detail_bucket",
+
+            "Compression Duration":
+                "compression_duration_bucket",
+
+            "Compression Shape":
+                "compression_shape",
+        }
+
+        available_deep_dive_dimensions = {
+            label: column
+            for label, column
+            in deep_dive_dimensions.items()
+            if (
+                column in edge_df.columns
+                and edge_df[column].notna().any()
+            )
+        }
+
+        if not available_deep_dive_dimensions:
+            st.info(
+                "No structure or risk dimensions are available "
+                "for the selected trades."
+            )
+
+        else:
+            dd1, dd2 = st.columns([2, 1])
+
+            deep_dive_labels = list(
+                available_deep_dive_dimensions.keys()
+            )
+
+            default_deep_dive_label = (
+                "Entry vs Compression High"
+                if "Entry vs Compression High"
+                in deep_dive_labels
+                else deep_dive_labels[0]
+            )
+
+            with dd1:
+                selected_deep_dive_label = st.selectbox(
+                    "Deep-dive dimension",
+                    options=deep_dive_labels,
+                    index=deep_dive_labels.index(
+                        default_deep_dive_label
+                    ),
+                    key=f"{key_prefix}_deep_dive_dimension",
+                )
+
+            with dd2:
+                deep_dive_min_trades = st.number_input(
+                    "Minimum trades",
+                    min_value=1,
+                    max_value=max(1, len(edge_df)),
+                    value=min(3, max(1, len(edge_df))),
+                    step=1,
+                    key=f"{key_prefix}_deep_dive_min_trades",
+                )
+
+            selected_deep_dive_col = (
+                available_deep_dive_dimensions[
+                    selected_deep_dive_label
+                ]
+            )
+
+            deep_dive_report = build_group_report(
+                edge_df,
+                selected_deep_dive_col,
+            )
+
+            if not deep_dive_report.empty:
+                deep_dive_report = deep_dive_report[
+                    deep_dive_report["trades"]
+                    >= int(deep_dive_min_trades)
+                ].copy()
+
+            if deep_dive_report.empty:
+                st.info(
+                    "No groups meet the selected minimum "
+                    "trade requirement."
+                )
+
+            else:
+                st.dataframe(
+                    deep_dive_report,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=f"{key_prefix}_deep_dive_report",
+                )
+
+                st.caption(
+                    "trade_share_pct muestra qué porcentaje de "
+                    "los trades seleccionados pertenece a cada grupo."
+                )
 
     # ==========================================
     # BY DAY
@@ -2937,6 +3753,143 @@ def add_compression_analytics_buckets(data: pd.DataFrame) -> pd.DataFrame:
         )
 
     return out
+
+
+@st.cache_data(show_spinner=False)
+def add_compression_analytics_buckets_cached(
+    data: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Bucket enrichment is deterministic and relatively expensive.
+    Streamlit reuses it until the input dataframe changes.
+    """
+    return add_compression_analytics_buckets(data)
+
+
+@st.cache_data(show_spinner=False)
+def build_candidate_bucket_trades_cached(
+    data: pd.DataFrame,
+    bucket_definition_json: str,
+) -> pd.DataFrame:
+    bucket_definition = json.loads(
+        bucket_definition_json
+    )
+
+    bucket_source = (
+        add_compression_analytics_buckets(data)
+    )
+
+    bucket_trades = (
+        filter_by_replay_bucket_definition(
+            bucket_source,
+            bucket_definition,
+        )
+    )
+
+    if bucket_trades.empty:
+        return bucket_trades
+
+    bucket_trades["replay_trade_key"] = (
+        build_replay_trade_keys(bucket_trades)
+    )
+
+    entry_source = (
+        bucket_trades["entry_ts_dt"]
+        if "entry_ts_dt" in bucket_trades.columns
+        else bucket_trades.get("entry_ts")
+    )
+
+    bucket_trades["candidate_entry_ts"] = (
+        pd.to_datetime(
+            entry_source,
+            utc=True,
+            errors="coerce",
+        )
+    )
+
+    return (
+        bucket_trades
+        .dropna(subset=[
+            "replay_trade_key",
+            "candidate_entry_ts",
+        ])
+        .drop_duplicates(
+            subset=["replay_trade_key"],
+            keep="first",
+        )
+        .copy()
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def build_candidate_scenarios_cached(
+    scenarios: pd.DataFrame,
+    observation_hours: int,
+    tp_target_pct: float,
+    sl_buffer_pct: float,
+) -> pd.DataFrame:
+    cutoff = (
+        pd.Timestamp.now(tz="UTC")
+        - pd.Timedelta(hours=observation_hours)
+    )
+
+    work = scenarios[
+        scenarios["exit_ts"].le(cutoff)
+    ].copy()
+
+    required_columns = [
+        "sl_mode",
+        "result",
+        "tp_target_pct",
+        "sl_buffer_pct",
+        "structural_risk_pct",
+        "simulated_pnl_pct",
+        "original_pnl",
+        "replay_trade_key",
+    ]
+
+    if any(
+        column not in work.columns
+        for column in required_columns
+    ):
+        return pd.DataFrame()
+
+    work["sl_mode"] = (
+        work["sl_mode"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    work["result"] = (
+        work["result"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    return (
+        work[
+            work["sl_mode"].eq("STRUCTURAL")
+            & work["result"].isin(["TP", "SL"])
+            & np.isclose(
+                work["tp_target_pct"],
+                tp_target_pct,
+            )
+            & np.isclose(
+                work["sl_buffer_pct"],
+                sl_buffer_pct,
+            )
+            & work["structural_risk_pct"].gt(0)
+            & work["simulated_pnl_pct"].notna()
+            & work["original_pnl"].notna()
+        ]
+        .sort_values("entry_ts")
+        .drop_duplicates(
+            subset=["replay_trade_key"],
+            keep="first",
+        )
+        .copy()
+    )
 
 
 def build_btc_direction_matrix(df: pd.DataFrame) -> pd.DataFrame:
@@ -5446,6 +6399,11 @@ with tab_overview:
                 interval_minutes=inspector_interval_minutes,
                 timeframe=inspector_timeframe,
             )
+            
+            inspector_fig = add_watch_history_to_chart(
+                fig=inspector_fig,
+                selected_trade=selected_trade,
+            )
 
             st.plotly_chart(
                 inspector_fig,
@@ -5474,6 +6432,11 @@ with tab_overview:
                     use_container_width=True,
                     hide_index=True,
                 )
+                
+        render_compression_watch_history(
+            selected_trade=selected_trade,
+            key_prefix="closed_trade_watch_history",
+        )
 
         # =========================
         # NORMALIZED DEBUG DATA
@@ -5483,6 +6446,7 @@ with tab_overview:
             "Normalized trade data",
             expanded=False,
         ):
+            
             st.json({
                 "symbol": selected_trade.symbol,
                 "status": selected_trade.status,
@@ -10324,7 +11288,9 @@ with tab_compression_quality:
         st.info(f"Missing columns: {missing_cols}")
 
     else:
-        qdf = add_compression_analytics_buckets(df_view)
+        qdf = add_compression_analytics_buckets_cached(
+            df_view
+        ).copy()
         
         audit_numeric_cols = [
             "pnl",
@@ -10536,6 +11502,33 @@ with tab_compression_quality:
                     "3-5%",
                     "5-10%",
                     ">10%",
+                ],
+                include_lowest=True,
+            )
+        
+        if "structural_risk_pct" in qdf.columns:
+            qdf["structural_risk_detail_bucket"] = pd.cut(
+                qdf["structural_risk_pct"],
+                bins=[
+                    -float("inf"),
+                    0.50,
+                    0.75,
+                    1.00,
+                    1.50,
+                    2.00,
+                    3.00,
+                    5.00,
+                    float("inf"),
+                ],
+                labels=[
+                    "<= 0.50%",
+                    "0.50% - 0.75%",
+                    "0.75% - 1.00%",
+                    "1.00% - 1.50%",
+                    "1.50% - 2.00%",
+                    "2.00% - 3.00%",
+                    "3.00% - 5.00%",
+                    "> 5.00%",
                 ],
                 include_lowest=True,
             )
@@ -11448,7 +12441,11 @@ with tab_compression_analytics:
         st.info(f"Missing columns: {missing_cols}")
 
     else:
-        compression_df = add_compression_analytics_buckets(df_view)
+        compression_df = (
+            add_compression_analytics_buckets_cached(
+                df_view
+            ).copy()
+        )
 
         compression_df["pnl"] = pd.to_numeric(
             compression_df["pnl"],
@@ -12844,8 +13841,10 @@ with tab_compression_outcomes:
     # PREPARE DATA
     # ======================================================
 
-    outcome_source_df = add_compression_analytics_buckets(
-        df_view
+    outcome_source_df = (
+        add_compression_analytics_buckets_cached(
+            df_view
+        ).copy()
     )
 
     # Evita incluir trades de estrategias que no sean compresión.
@@ -15228,6 +16227,519 @@ with tab_tp_sl_replay:
                     partials[column],
                     errors="coerce",
                 )
+                
+        # ==========================================
+        # REPLAY TRADE KEYS
+        # ==========================================
+        replay["replay_trade_key"] = (
+            build_replay_trade_keys(replay)
+        )
+
+        scenarios["replay_trade_key"] = (
+            build_replay_trade_keys(scenarios)
+        )
+
+        partials["replay_trade_key"] = (
+            build_replay_trade_keys(partials)
+        )
+
+        # Candidate evaluation must always start from the
+        # complete report, before the historical segment filter.
+        candidate_scenarios_source = scenarios.copy()
+
+        # Conservamos los totales antes de aplicar
+        # el segmento seleccionado.
+        all_replay_trade_count = (
+            replay["replay_trade_key"]
+            .dropna()
+            .nunique()
+        )
+
+        all_scenario_trade_count = (
+            scenarios["replay_trade_key"]
+            .dropna()
+            .nunique()
+        )
+
+        all_partial_trade_count = (
+            partials["replay_trade_key"]
+            .dropna()
+            .nunique()
+        )
+
+        # ==========================================
+        # REPLAY UNIVERSE
+        # ==========================================
+        st.markdown("### Replay Universe")
+
+        replay_segment = st.session_state.get(
+            "tp_sl_replay_segment"
+        )
+
+        replay_universe_options = [
+            "All trades",
+        ]
+
+        if (
+            replay_segment
+            and replay_segment.get("trade_keys")
+        ):
+            replay_universe_options.append(
+                "Selected bucket segment"
+            )
+
+        selected_replay_universe = st.radio(
+            "Trades included in this replay",
+            options=replay_universe_options,
+            horizontal=True,
+            key="tp_sl_replay_universe",
+        )
+
+        if (
+            selected_replay_universe
+            == "Selected bucket segment"
+        ):
+            segment_trade_keys = set(
+                str(key)
+                for key in replay_segment.get(
+                    "trade_keys",
+                    []
+                )
+            )
+
+            segment_source = replay_segment.get(
+                "source",
+                "Unknown source",
+            )
+
+            segment_description = replay_segment.get(
+                "description",
+                "Selected bucket segment",
+            )
+
+            segment_filters = replay_segment.get(
+                "selected_filters",
+                [],
+            )
+
+            requested_segment_trades = len(
+                segment_trade_keys
+            )
+
+            replay_match_mask = (
+                replay["replay_trade_key"]
+                .astype("string")
+                .isin(segment_trade_keys)
+            )
+
+            scenario_match_mask = (
+                scenarios["replay_trade_key"]
+                .astype("string")
+                .isin(segment_trade_keys)
+            )
+
+            partial_match_mask = (
+                partials["replay_trade_key"]
+                .astype("string")
+                .isin(segment_trade_keys)
+            )
+
+            replay = replay[
+                replay_match_mask
+            ].copy()
+
+            scenarios = scenarios[
+                scenario_match_mask
+            ].copy()
+
+            partials = partials[
+                partial_match_mask
+            ].copy()
+
+            matched_replay_trades = (
+                replay["replay_trade_key"]
+                .dropna()
+                .nunique()
+            )
+
+            matched_scenario_trades = (
+                scenarios["replay_trade_key"]
+                .dropna()
+                .nunique()
+            )
+
+            matched_partial_trades = (
+                partials["replay_trade_key"]
+                .dropna()
+                .nunique()
+            )
+
+            st.info(
+                f"Source: {segment_source}  \n"
+                f"Segment: {segment_description}"
+            )
+
+            segment_col_1, segment_col_2, segment_col_3, segment_col_4 = (
+                st.columns(4)
+            )
+
+            segment_col_1.metric(
+                "Selected trades",
+                requested_segment_trades,
+            )
+
+            segment_col_2.metric(
+                "Post-trade matches",
+                matched_replay_trades,
+            )
+
+            segment_col_3.metric(
+                "TP/SL scenario matches",
+                matched_scenario_trades,
+            )
+
+            segment_col_4.metric(
+                "Partial scenario matches",
+                matched_partial_trades,
+            )
+
+            if segment_filters:
+                with st.expander(
+                    "Selected bucket combinations",
+                    expanded=False,
+                ):
+                    for selected_filter in segment_filters:
+                        st.write(
+                            f"• {selected_filter}"
+                        )
+
+            if matched_replay_trades == 0:
+                st.error(
+                    "None of the selected trades matched "
+                    "post_trade_replay.csv. Check symbol and "
+                    "entry_ts consistency."
+                )
+
+            elif (
+                matched_replay_trades
+                < requested_segment_trades
+            ):
+                missing_replay_trades = (
+                    requested_segment_trades
+                    - matched_replay_trades
+                )
+
+                st.warning(
+                    f"{missing_replay_trades} selected trades "
+                    "do not currently exist in "
+                    "post_trade_replay.csv."
+                )
+
+            if matched_scenario_trades == 0:
+                st.warning(
+                    "The selected trades have no rows in "
+                    "tp_sl_scenarios.csv."
+                )
+
+            clear_segment_col, _ = st.columns(
+                [1, 3]
+            )
+
+            with clear_segment_col:
+                if st.button(
+                    "Clear selected segment",
+                    key="clear_tp_sl_replay_segment",
+                    use_container_width=True,
+                ):
+                    st.session_state.pop(
+                        "tp_sl_replay_segment",
+                        None,
+                    )
+
+                    st.session_state[
+                        "tp_sl_replay_universe"
+                    ] = "All trades"
+
+                    st.rerun()
+
+        else:
+            all_col_1, all_col_2, all_col_3 = (
+                st.columns(3)
+            )
+
+            all_col_1.metric(
+                "Post-trade replay trades",
+                all_replay_trade_count,
+            )
+
+            all_col_2.metric(
+                "TP/SL scenario trades",
+                all_scenario_trade_count,
+            )
+
+            all_col_3.metric(
+                "Partial scenario trades",
+                all_partial_trade_count,
+            )
+
+        st.markdown("---")
+
+        # ==========================================
+        # SAVED CANDIDATE MANAGEMENT
+        # ==========================================
+        st.markdown("### Saved Candidate")
+
+        replay_candidates = (
+            load_tp_sl_replay_candidates()
+        )
+
+        segment_bucket_definition = (
+            replay_segment.get("bucket_definition")
+            if (
+                replay_segment
+                and selected_replay_universe
+                == "Selected bucket segment"
+            )
+            else None
+        )
+
+        if (
+            selected_replay_universe
+            == "Selected bucket segment"
+            and not segment_bucket_definition
+        ):
+            st.info(
+                "Send this bucket to TP / SL Replay again. "
+                "The current session segment predates structured "
+                "bucket rules and cannot recognize future trades."
+            )
+
+        if segment_bucket_definition:
+            with st.expander(
+                "Freeze current segment as a candidate",
+                expanded=not replay_candidates,
+            ):
+                candidate_name = st.text_input(
+                    "Candidate name",
+                    value="Breakout × Entry Candidate v1",
+                    key="tp_sl_candidate_name",
+                )
+
+                candidate_col_1, candidate_col_2 = (
+                    st.columns(2)
+                )
+
+                with candidate_col_1:
+                    candidate_tp_pct = st.number_input(
+                        "Fixed TP (%)",
+                        min_value=0.05,
+                        max_value=20.0,
+                        value=1.0,
+                        step=0.05,
+                        format="%.2f",
+                        key="tp_sl_candidate_tp_pct",
+                    )
+
+                    candidate_buffer_pct = st.number_input(
+                        "Structural SL buffer (%)",
+                        min_value=0.0,
+                        max_value=5.0,
+                        value=0.0,
+                        step=0.05,
+                        format="%.2f",
+                        key="tp_sl_candidate_buffer_pct",
+                    )
+
+                with candidate_col_2:
+                    candidate_risk_cap_pct = st.number_input(
+                        "Maximum structural risk (%)",
+                        min_value=0.1,
+                        max_value=10.0,
+                        value=2.5,
+                        step=0.25,
+                        format="%.2f",
+                        key="tp_sl_candidate_risk_cap_pct",
+                    )
+
+                    candidate_cost_pct = st.number_input(
+                        "Round-trip cost (%)",
+                        min_value=0.0,
+                        max_value=2.0,
+                        value=0.1,
+                        step=0.025,
+                        format="%.3f",
+                        key="tp_sl_candidate_cost_pct",
+                    )
+
+                if st.button(
+                    "Freeze current candidate",
+                    key="freeze_tp_sl_candidate",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    created_at = pd.Timestamp.now(
+                        tz="UTC"
+                    )
+
+                    candidate_id = (
+                        created_at.strftime(
+                            "%Y%m%dT%H%M%S%fZ"
+                        )
+                    )
+
+                    replay_candidates.append({
+                        "id": candidate_id,
+                        "name": (
+                            candidate_name.strip()
+                            or candidate_id
+                        ),
+                        "created_at": created_at.isoformat(),
+                        "source": replay_segment.get(
+                            "source",
+                            "Bucket Robustness Explorer",
+                        ),
+                        "description": replay_segment.get(
+                            "description",
+                            "Selected bucket segment",
+                        ),
+                        "selected_filters": replay_segment.get(
+                            "selected_filters",
+                            [],
+                        ),
+                        "bucket_definition": (
+                            segment_bucket_definition
+                        ),
+                        "discovery_trade_keys": replay_segment.get(
+                            "trade_keys",
+                            [],
+                        ),
+                        "management": {
+                            "tp_mode": "FIXED",
+                            "tp_target_pct": float(
+                                candidate_tp_pct
+                            ),
+                            "sl_mode": "STRUCTURAL",
+                            "sl_buffer_pct": float(
+                                candidate_buffer_pct
+                            ),
+                            "max_structural_risk_pct": float(
+                                candidate_risk_cap_pct
+                            ),
+                            "cost_pct": float(
+                                candidate_cost_pct
+                            ),
+                        },
+                    })
+
+                    save_tp_sl_replay_candidates(
+                        replay_candidates
+                    )
+
+                    st.session_state[
+                        "active_tp_sl_candidate_id"
+                    ] = candidate_id
+
+                    st.success(
+                        "Candidate frozen. New qualifying trades "
+                        "will be classified as Forward."
+                    )
+                    st.rerun()
+
+        active_candidate = None
+
+        if replay_candidates:
+            candidate_by_id = {
+                candidate["id"]: candidate
+                for candidate in replay_candidates
+            }
+
+            candidate_ids = list(candidate_by_id)
+
+            saved_active_candidate_id = (
+                st.session_state.get(
+                    "active_tp_sl_candidate_id"
+                )
+            )
+
+            if saved_active_candidate_id not in candidate_by_id:
+                saved_active_candidate_id = candidate_ids[-1]
+
+            selected_candidate_id = st.selectbox(
+                "Candidate to evaluate",
+                options=candidate_ids,
+                index=candidate_ids.index(
+                    saved_active_candidate_id
+                ),
+                format_func=lambda candidate_id: (
+                    candidate_by_id[candidate_id].get(
+                        "name",
+                        candidate_id,
+                    )
+                ),
+                key="tp_sl_candidate_selector",
+            )
+
+            st.session_state[
+                "active_tp_sl_candidate_id"
+            ] = selected_candidate_id
+
+            active_candidate = candidate_by_id[
+                selected_candidate_id
+            ]
+
+            active_management = active_candidate.get(
+                "management",
+                {},
+            )
+
+            st.info(
+                f"Frozen: {active_candidate.get('created_at')}  \n"
+                f"TP: {active_management.get('tp_target_pct')}% · "
+                f"SL: structural · "
+                f"Buffer: {active_management.get('sl_buffer_pct')}% · "
+                f"Risk cap: "
+                f"{active_management.get('max_structural_risk_pct')}% · "
+                f"Cost: {active_management.get('cost_pct')}%"
+            )
+
+            delete_candidate_col, _ = st.columns([1, 3])
+
+            with delete_candidate_col:
+                confirm_candidate_delete = st.checkbox(
+                    "Confirm candidate deletion",
+                    key="confirm_tp_sl_candidate_delete",
+                )
+
+                if st.button(
+                    "Delete selected candidate",
+                    key="delete_tp_sl_candidate",
+                    use_container_width=True,
+                    disabled=not confirm_candidate_delete,
+                ):
+                    replay_candidates = [
+                        candidate
+                        for candidate in replay_candidates
+                        if candidate.get("id")
+                        != selected_candidate_id
+                    ]
+
+                    save_tp_sl_replay_candidates(
+                        replay_candidates
+                    )
+
+                    st.session_state.pop(
+                        "active_tp_sl_candidate_id",
+                        None,
+                    )
+                    st.rerun()
+
+        else:
+            st.caption(
+                "No frozen candidates yet. Select a structured "
+                "bucket segment to create the first one."
+            )
+
+        st.markdown("---")
 
         # ==========================================
         # OBSERVATION WINDOW
@@ -15258,6 +16770,347 @@ with tab_tp_sl_replay:
         mature_partials = partials[
             partials["exit_ts"] <= cutoff
         ].copy()
+
+        # ==========================================
+        # FROZEN CANDIDATE: DISCOVERY VS FORWARD
+        # ==========================================
+        if active_candidate:
+            st.markdown("### Candidate Validation")
+
+            candidate_definition = active_candidate.get(
+                "bucket_definition",
+                {},
+            )
+            candidate_management = active_candidate.get(
+                "management",
+                {},
+            )
+
+            candidate_created_at = pd.to_datetime(
+                active_candidate.get("created_at"),
+                utc=True,
+                errors="coerce",
+            )
+
+            candidate_definition_json = json.dumps(
+                candidate_definition,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+            candidate_bucket_trades = (
+                build_candidate_bucket_trades_cached(
+                    df_raw,
+                    candidate_definition_json,
+                ).copy()
+            )
+
+            discovery_trade_keys = {
+                str(trade_key)
+                for trade_key in active_candidate.get(
+                    "discovery_trade_keys",
+                    [],
+                )
+            }
+
+            discovery_bucket_trades = (
+                candidate_bucket_trades[
+                    candidate_bucket_trades[
+                        "replay_trade_key"
+                    ]
+                    .astype(str)
+                    .isin(discovery_trade_keys)
+                ]
+                .copy()
+            )
+
+            forward_bucket_trades = (
+                candidate_bucket_trades[
+                    candidate_bucket_trades[
+                        "candidate_entry_ts"
+                    ].ge(candidate_created_at)
+                    &
+                    ~candidate_bucket_trades[
+                        "replay_trade_key"
+                    ]
+                    .astype(str)
+                    .isin(discovery_trade_keys)
+                ]
+                .copy()
+            )
+
+            candidate_required_columns = [
+                "sl_mode",
+                "result",
+                "tp_target_pct",
+                "sl_buffer_pct",
+                "structural_risk_pct",
+                "simulated_pnl_pct",
+                "original_pnl",
+                "replay_trade_key",
+            ]
+
+            missing_candidate_columns = [
+                column
+                for column in candidate_required_columns
+                if column
+                not in candidate_scenarios_source.columns
+            ]
+
+            candidate_tp = float(
+                candidate_management.get(
+                    "tp_target_pct",
+                    1.0,
+                )
+            )
+            candidate_buffer = float(
+                candidate_management.get(
+                    "sl_buffer_pct",
+                    0.0,
+                )
+            )
+            candidate_risk_cap = float(
+                candidate_management.get(
+                    "max_structural_risk_pct",
+                    2.5,
+                )
+            )
+            candidate_cost = float(
+                candidate_management.get(
+                    "cost_pct",
+                    0.1,
+                )
+            )
+
+            candidate_scenarios = pd.DataFrame()
+
+            if not missing_candidate_columns:
+                candidate_scenarios = (
+                    build_candidate_scenarios_cached(
+                        candidate_scenarios_source,
+                        observation_hours,
+                        candidate_tp,
+                        candidate_buffer,
+                    ).copy()
+                )
+
+            if (
+                pd.isna(candidate_created_at)
+                or candidate_bucket_trades.empty
+                or missing_candidate_columns
+            ):
+                if missing_candidate_columns:
+                    st.warning(
+                        "Candidate report columns missing: "
+                        + ", ".join(
+                            missing_candidate_columns
+                        )
+                    )
+                elif candidate_bucket_trades.empty:
+                    st.warning(
+                        "The frozen bucket definition could not "
+                        "be reconstructed from trades.csv."
+                    )
+                else:
+                    st.warning(
+                        "The candidate freeze timestamp is invalid."
+                    )
+
+            else:
+                candidate_report_rows = []
+                candidate_sample_stats = {}
+
+                sample_trade_keys = {
+                    "Discovery": discovery_trade_keys,
+                    "Forward": set(
+                        forward_bucket_trades[
+                            "replay_trade_key"
+                        ].astype(str)
+                    ),
+                }
+
+                for sample_name, sample_keys in (
+                    sample_trade_keys.items()
+                ):
+                    sample_available = (
+                        candidate_scenarios[
+                            candidate_scenarios[
+                                "replay_trade_key"
+                            ]
+                            .astype(str)
+                            .isin(sample_keys)
+                        ]
+                        .copy()
+                    )
+
+                    sample_accepted = (
+                        sample_available[
+                            sample_available[
+                                "structural_risk_pct"
+                            ].le(candidate_risk_cap)
+                        ]
+                        .copy()
+                    )
+
+                    sample_accepted[
+                        "actual_net_pnl"
+                    ] = (
+                        sample_accepted["original_pnl"]
+                        - candidate_cost
+                    )
+                    sample_accepted[
+                        "candidate_net_pnl"
+                    ] = (
+                        sample_accepted[
+                            "simulated_pnl_pct"
+                        ]
+                        - candidate_cost
+                    )
+
+                    candidate_sample_stats[sample_name] = {
+                        "bucket_trades": len(
+                            discovery_bucket_trades
+                            if sample_name == "Discovery"
+                            else forward_bucket_trades
+                        ),
+                        "scenario_matches": len(
+                            sample_available
+                        ),
+                        "accepted": len(sample_accepted),
+                        "rejected": (
+                            len(sample_available)
+                            - len(sample_accepted)
+                        ),
+                    }
+
+                    for policy_name, pnl_column in {
+                        "Actual": "actual_net_pnl",
+                        "Candidate": "candidate_net_pnl",
+                    }.items():
+                        policy_metrics = (
+                            summarize_replay_strategy(
+                                strategy_name=policy_name,
+                                pnl_values=sample_accepted[
+                                    pnl_column
+                                ],
+                            )
+                        )
+
+                        candidate_report_rows.append({
+                            "sample": sample_name,
+                            "policy": policy_name,
+                            "bucket_trades": (
+                                candidate_sample_stats[
+                                    sample_name
+                                ]["bucket_trades"]
+                            ),
+                            "scenario_matches": len(
+                                sample_available
+                            ),
+                            "accepted_trades": len(
+                                sample_accepted
+                            ),
+                            "rejected_trades": (
+                                len(sample_available)
+                                - len(sample_accepted)
+                            ),
+                            "coverage_pct": (
+                                len(sample_accepted)
+                                / len(sample_available)
+                                * 100
+                                if len(sample_available)
+                                else 0.0
+                            ),
+                            "winrate": policy_metrics[
+                                "winrate"
+                            ],
+                            "avg_pnl": policy_metrics[
+                                "avg_pnl"
+                            ],
+                            "total_pnl": policy_metrics[
+                                "total_pnl"
+                            ],
+                            "profit_factor": policy_metrics[
+                                "profit_factor"
+                            ],
+                            "max_drawdown": policy_metrics[
+                                "max_drawdown"
+                            ],
+                        })
+
+                forward_stats = candidate_sample_stats[
+                    "Forward"
+                ]
+                forward_status, next_checkpoint = (
+                    candidate_checkpoint_status(
+                        forward_stats["accepted"]
+                    )
+                )
+
+                validation_col_1, validation_col_2, validation_col_3, validation_col_4 = (
+                    st.columns(4)
+                )
+
+                validation_col_1.metric(
+                    "Forward bucket trades",
+                    forward_stats["bucket_trades"],
+                )
+                validation_col_2.metric(
+                    "Forward scenario matches",
+                    forward_stats["scenario_matches"],
+                )
+                validation_col_3.metric(
+                    "Forward accepted by cap",
+                    forward_stats["accepted"],
+                )
+                validation_col_4.metric(
+                    "Forward rejected by cap",
+                    forward_stats["rejected"],
+                )
+
+                checkpoint_text = (
+                    f" · Next checkpoint: {next_checkpoint}"
+                    if next_checkpoint is not None
+                    else ""
+                )
+
+                st.caption(
+                    f"Forward status: {forward_status}"
+                    f"{checkpoint_text} accepted trades."
+                )
+
+                candidate_report = pd.DataFrame(
+                    candidate_report_rows
+                )
+
+                for numeric_column in [
+                    "coverage_pct",
+                    "winrate",
+                    "avg_pnl",
+                    "total_pnl",
+                    "profit_factor",
+                    "max_drawdown",
+                ]:
+                    candidate_report[numeric_column] = (
+                        pd.to_numeric(
+                            candidate_report[numeric_column],
+                            errors="coerce",
+                        ).round(4)
+                    )
+
+                st.dataframe(
+                    candidate_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.caption(
+                    "Discovery is frozen to the original trade "
+                    "keys. Forward includes only qualifying bucket "
+                    "trades entered after the candidate freeze time."
+                )
+
+            st.markdown("---")
 
         # ==========================================
         # REPLAY COVERAGE
@@ -15323,8 +17176,12 @@ with tab_tp_sl_replay:
         )
 
         c3.metric(
-            "Original SL saved",
+            "Saved by structural SL",
             saved_sl_count,
+            help=(
+                "Trades where the compression structural level "
+                "would have avoided the original stop loss."
+            ),
         )
 
         c4.metric(
@@ -15357,6 +17214,28 @@ with tab_tp_sl_replay:
         scenario_cost_pct = 0.10
         scenario_min_trades = 50
 
+        selected_bucket_replay = (
+            selected_replay_universe
+            == "Selected bucket segment"
+        )
+
+        if selected_bucket_replay:
+            if total_trades <= 15:
+                replay_min_trades_default = 5
+            elif total_trades <= 40:
+                replay_min_trades_default = 10
+            elif total_trades <= 100:
+                replay_min_trades_default = 20
+            else:
+                replay_min_trades_default = 50
+
+            replay_min_trades_default = min(
+                replay_min_trades_default,
+                max(total_trades, 1),
+            )
+        else:
+            replay_min_trades_default = 50
+
         if replay_analysis_mode in [
             "Combined + Robustness",
             "SL Only",
@@ -15385,14 +17264,75 @@ with tab_tp_sl_replay:
                 )
 
             with replay_control_2:
-                scenario_min_trades = st.slider(
-                    "Minimum accepted trades",
-                    min_value=10,
-                    max_value=150,
-                    value=50,
-                    step=10,
-                    key="shared_replay_min_trades",
-                )
+                if selected_bucket_replay and total_trades < 5:
+                    scenario_min_trades = max(
+                        total_trades,
+                        1,
+                    )
+
+                    st.number_input(
+                        "Minimum accepted trades",
+                        value=scenario_min_trades,
+                        step=1,
+                        disabled=True,
+                        key=(
+                            "shared_replay_min_trades_"
+                            "small_segment"
+                        ),
+                    )
+
+                    st.warning(
+                        "This segment has fewer than 5 mature "
+                        "trades. Results are exploratory and "
+                        "not statistically robust."
+                    )
+
+                elif selected_bucket_replay:
+                    segment_min_trades_key = (
+                        "shared_replay_min_trades_segment"
+                    )
+
+                    saved_segment_min_trades = (
+                        st.session_state.get(
+                            segment_min_trades_key
+                        )
+                    )
+
+                    if (
+                        saved_segment_min_trades is not None
+                        and not (
+                            5
+                            <= saved_segment_min_trades
+                            <= total_trades
+                        )
+                    ):
+                        st.session_state[
+                            segment_min_trades_key
+                        ] = replay_min_trades_default
+
+                    scenario_min_trades = st.slider(
+                        "Minimum accepted trades",
+                        min_value=5,
+                        max_value=total_trades,
+                        value=replay_min_trades_default,
+                        step=1,
+                        key=segment_min_trades_key,
+                    )
+
+                    st.caption(
+                        f"Adaptive to this segment: "
+                        f"{total_trades} mature trades available."
+                    )
+
+                else:
+                    scenario_min_trades = st.slider(
+                        "Minimum accepted trades",
+                        min_value=10,
+                        max_value=150,
+                        value=50,
+                        step=10,
+                        key="shared_replay_min_trades_all",
+                    )
         
 
         if replay_analysis_mode == "Overview":
@@ -15705,6 +17645,7 @@ with tab_tp_sl_replay:
                     1.50,
                     1.75,
                     2.00,
+                    2.50,
                     3.00,
                     5.00,
                 ]

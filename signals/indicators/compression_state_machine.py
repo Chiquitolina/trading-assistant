@@ -63,6 +63,12 @@ class CompressionWatch:
     breakout_volume_ratio: Optional[float] = None
     breakout_extension_pct: Optional[float] = None
     breakout_extension_atr: Optional[float] = None
+    
+    moderate_breakout_candidate: bool = False
+
+    entry_vs_breakout_pct: Optional[float] = None
+    entry_condition_matched: bool = False
+    entry_profile: Optional[str] = None
 
     candles_waiting: int = 0
     max_wait_candles: int = 5
@@ -112,14 +118,29 @@ class CompressionStateMachine:
         self,
         max_watch_candles=8,
         max_pullback_candles=5,
-        pullback_max_pct=1.2,
-        pullback_min_hold_high=True,
+        moderate_breakout_min_pct=0.50,
+        moderate_breakout_max_pct=0.75,
+        entry_vs_breakout_min_pct=-0.25,
+        entry_vs_breakout_max_pct=0.00,
     ):
         self.watches = {}
+
         self.max_watch_candles = max_watch_candles
         self.max_pullback_candles = max_pullback_candles
-        self.pullback_max_pct = pullback_max_pct
-        self.pullback_min_hold_high = pullback_min_hold_high
+
+        self.moderate_breakout_min_pct = (
+            moderate_breakout_min_pct
+        )
+        self.moderate_breakout_max_pct = (
+            moderate_breakout_max_pct
+        )
+
+        self.entry_vs_breakout_min_pct = (
+            entry_vs_breakout_min_pct
+        )
+        self.entry_vs_breakout_max_pct = (
+            entry_vs_breakout_max_pct
+        )
 
     def active_watches(self):
         return [
@@ -146,181 +167,196 @@ class CompressionStateMachine:
         if not watch.breakout_price:
             watch.state = CompressionState.EXPIRED
             watch.reason = "missing_breakout_price"
-            return watch.to_dict()
-
-        pullback_from_breakout_pct = (
-            (watch.breakout_price - low) / watch.breakout_price
-        ) * 100
-
-        distance_above_compression_high_pct = (
-            (low - watch.compression_high) / watch.compression_high
-        ) * 100
-
-        # Por ahora mantenemos el comportamiento viejo
-        pullback_pct = pullback_from_breakout_pct
-
-        holds_compression_high = close >= watch.compression_high
-
-        valid_pullback = (
-            pullback_pct <= self.pullback_max_pct
-            and (
-                holds_compression_high
-                if self.pullback_min_hold_high
-                else True
-            )
-        )
-
-        continuation = close >= watch.compression_high
-
-        watch.pullback_pct = round(pullback_pct, 4)
-        watch.pullback_from_breakout_pct = round(pullback_from_breakout_pct, 4)
-        watch.distance_above_compression_high_pct = round(distance_above_compression_high_pct, 4)
-        
-        watch.valid_pullback = valid_pullback
-        watch.holds_compression_high = holds_compression_high
-        watch.continuation = continuation
-
-        watch.pullback_detected = valid_pullback
-        watch.continuation_detected = continuation
-        
-        # ============================================
-        # PULLBACK EVENT INSTRUMENTATION
-        # ============================================
-        # No cambia la lógica actual.
-        # Registra la primera vez que el sistema
-        # considera válido el pullback.
-
-        if valid_pullback:
-            if watch.pullback_first_ts is None:
-                watch.pullback_first_ts = ts
-
-            if watch.pullback_valid_ts is None:
-                watch.pullback_valid_ts = ts
-
-            if watch.pullback_price is None:
-                watch.pullback_price = low
-        
-        breakout_ext_pct_text = (
-            f"{watch.breakout_extension_pct:.3f}%"
-            if watch.breakout_extension_pct is not None
-            else "None"
-        )
-
-        breakout_ext_atr_text = (
-            f"{watch.breakout_extension_atr:.3f}"
-            if watch.breakout_extension_atr is not None
-            else "None"
-        )
-        
-        print(
-            "\n"
-            "========================================\n"
-            f"[COMPRESSION PIPELINE] {symbol}\n"
-            "========================================\n"
-            f"State               : {watch.state.value}\n"
-            f"Waiting             : {watch.candles_waiting}/{self.max_pullback_candles}\n"
-            "\n"
-            "----- BREAKOUT -----\n"
-            f"Breakout Ext %      : {breakout_ext_pct_text}\n"
-            f"Breakout Ext ATR    : {breakout_ext_atr_text}\n"
-            f"Breakout Price      : {watch.breakout_price:.8f}\n"
-            f"Breakout High       : {watch.breakout_high:.8f}\n"
-            f"Compression High    : {watch.compression_high:.8f}\n"
-            f"Compression Low     : {watch.compression_low:.8f}\n"
-            "\n"
-            "----- CURRENT CANDLE -----\n"
-            f"High                : {high:.8f}\n"
-            f"Low                 : {low:.8f}\n"
-            f"Close               : {close:.8f}\n"
-            "\n"
-            "----- EVALUATION -----\n"
-            f"Pullback %          : {pullback_pct:.3f}%\n"
-            f"Pullback From BO   : {pullback_from_breakout_pct:.3f}%\n"
-            f"Distance Above Hi  : {distance_above_compression_high_pct:.3f}%\n"
-            f"Hold Compression    : {holds_compression_high}\n"
-            f"Continuation        : {continuation}\n"
-            f"Valid Pullback      : {valid_pullback}\n"
-            "\n"
-            "----- FLAGS -----\n"
-            f"breakout_detected   : {watch.breakout_detected}\n"
-            f"pullback_detected   : {watch.pullback_detected}\n"
-            f"continuation_detect : {watch.continuation_detected}\n"
-            f"entry_ready         : {watch.entry_ready}\n"
-            "\n"
-            f"Reason              : {watch.reason}\n"
-            "========================================\n"
-        )
-
-        print(
-            f"[PULLBACK DEBUG] "
-            f"{symbol} "
-            f"waiting={watch.candles_waiting}/{self.max_pullback_candles} "
-            f"pullback_pct={pullback_pct:.2f} "
-            f"pullback_from_bo={pullback_from_breakout_pct:.2f} "
-            f"dist_above_hi={distance_above_compression_high_pct:.2f} "
-            f"valid_pullback={valid_pullback} "
-            f"hold_high={holds_compression_high} "
-            f"continuation={continuation} "
-            f"close={close:.8f} "
-            f"low={low:.8f} "
-            f"breakout_price={watch.breakout_price:.8f} "
-            f"compression_high={watch.compression_high:.8f}"
-        )
-
-        if valid_pullback and continuation:
-            print(
-                "\n"
-                "########################################\n"
-                f"[ENTRY READY] {symbol}\n"
-                "########################################\n"
-                f"Entry Price      : {close:.8f}\n"
-                f"Current High     : {high:.8f}\n"
-                f"Current Low      : {low:.8f}\n"
-                f"Pullback %       : {pullback_pct:.3f}%\n"
-                f"Pullback First TS: {watch.pullback_first_ts}\n"
-                f"Pullback Valid TS: {watch.pullback_valid_ts}\n"
-                f"Pullback Price   : {watch.pullback_price}\n"
-                f"Entry Ready TS  : {watch.entry_ready_ts}\n"
-                f"Compression High : {watch.compression_high:.8f}\n"
-                f"Breakout Price   : {watch.breakout_price:.8f}\n"
-                f"Breakout Ext %  : {breakout_ext_pct_text}\n"
-                f"Breakout Ext ATR: {breakout_ext_atr_text}\n"
-                "########################################\n"
-            )
-
-            watch.state = CompressionState.ENTRY_READY
-            watch.entry_ready = True
-
-            if watch.entry_ready_ts is None:
-                watch.entry_ready_ts = ts
-
-            watch.entry_price = close
-            watch.reason = "pullback_hold_and_continuation"
 
             result = watch.to_dict()
             self.remove(symbol)
             return result
 
-        print(
-            "\n"
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
-            f"[PULLBACK REJECTED] {symbol}\n"
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
-            f"Pullback %     : {pullback_pct:.3f}%\n"
-            f"Pullback BO    : {pullback_from_breakout_pct:.3f}%\n"
-            f"Dist Above Hi  : {distance_above_compression_high_pct:.3f}%\n"
-            f"Hold High      : {holds_compression_high}\n"
-            f"Continuation   : {continuation}\n"
-            f"Valid Pullback : {valid_pullback}\n"
-            f"Close          : {close:.8f}\n"
-            f"High           : {high:.8f}\n"
-            f"Low            : {low:.8f}\n"
-            f"Breakout Price : {watch.breakout_price:.8f}\n"
-            f"Compression Hi : {watch.compression_high:.8f}\n"
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+        # Distancia del low respecto del breakout.
+        # Se conserva como métrica descriptiva del retroceso real.
+        pullback_from_breakout_pct = (
+            (
+                watch.breakout_price
+                - low
+            )
+            / watch.breakout_price
+            * 100
         )
 
-        watch.reason = "waiting_valid_pullback"
+        # Distancia del cierre potencial de entrada respecto del breakout.
+        # Esta es la métrica equivalente al bucket analizado.
+        entry_vs_breakout_pct = (
+            (
+                close
+                - watch.breakout_price
+            )
+            / watch.breakout_price
+            * 100
+        )
+
+        distance_above_compression_high_pct = (
+            (
+                low
+                - watch.compression_high
+            )
+            / watch.compression_high
+            * 100
+        )
+
+        holds_compression_high = (
+            close >= watch.compression_high
+        )
+
+        entry_inside_retrace_band = (
+            self.entry_vs_breakout_min_pct
+            <= entry_vs_breakout_pct
+            <= self.entry_vs_breakout_max_pct
+        )
+
+        entry_condition = (
+            watch.moderate_breakout_candidate
+            and entry_inside_retrace_band
+            and holds_compression_high
+        )
+
+        # Métricas del estado actual.
+        watch.pullback_pct = round(
+            pullback_from_breakout_pct,
+            4,
+        )
+
+        watch.pullback_from_breakout_pct = round(
+            pullback_from_breakout_pct,
+            4,
+        )
+
+        watch.entry_vs_breakout_pct = round(
+            entry_vs_breakout_pct,
+            4,
+        )
+
+        watch.distance_above_compression_high_pct = round(
+            distance_above_compression_high_pct,
+            4,
+        )
+
+        watch.valid_pullback = entry_condition
+        watch.holds_compression_high = holds_compression_high
+        watch.continuation = holds_compression_high
+
+        watch.pullback_detected = (
+            entry_inside_retrace_band
+        )
+
+        watch.continuation_detected = (
+            holds_compression_high
+        )
+
+        watch.entry_condition_matched = (
+            entry_condition
+        )
+
+        # Registrar el primer low observado después del breakout.
+        if watch.pullback_first_ts is None:
+            watch.pullback_first_ts = ts
+            watch.pullback_price = low
+        else:
+            # Conserva el low más profundo observado durante WAIT_PULLBACK.
+            if (
+                watch.pullback_price is None
+                or low < watch.pullback_price
+            ):
+                watch.pullback_price = low
+
+        print(
+            "\n"
+            "========================================\n"
+            f"[MODERATE BREAKOUT RETRACE] {symbol}\n"
+            "========================================\n"
+            f"State                  : {watch.state.value}\n"
+            f"Waiting                : "
+            f"{watch.candles_waiting}/"
+            f"{self.max_pullback_candles}\n"
+            "\n"
+            f"Breakout Price         : "
+            f"{watch.breakout_price:.8f}\n"
+            f"Breakout Extension %   : "
+            f"{watch.breakout_extension_pct}\n"
+            f"Moderate Candidate     : "
+            f"{watch.moderate_breakout_candidate}\n"
+            "\n"
+            f"Current High           : {high:.8f}\n"
+            f"Current Low            : {low:.8f}\n"
+            f"Current Close          : {close:.8f}\n"
+            "\n"
+            f"Pullback Low %         : "
+            f"{pullback_from_breakout_pct:.4f}%\n"
+            f"Entry vs Breakout %    : "
+            f"{entry_vs_breakout_pct:.4f}%\n"
+            f"Required Entry Band    : "
+            f"[{self.entry_vs_breakout_min_pct:.2f}%, "
+            f"{self.entry_vs_breakout_max_pct:.2f}%]\n"
+            f"Inside Entry Band      : "
+            f"{entry_inside_retrace_band}\n"
+            f"Holds Compression High : "
+            f"{holds_compression_high}\n"
+            f"Entry Condition        : "
+            f"{entry_condition}\n"
+            "========================================\n"
+        )
+
+        if entry_condition:
+            watch.state = CompressionState.ENTRY_READY
+            watch.entry_ready = True
+            watch.entry_condition_matched = True
+
+            if watch.pullback_valid_ts is None:
+                watch.pullback_valid_ts = ts
+
+            if watch.entry_ready_ts is None:
+                watch.entry_ready_ts = ts
+
+            watch.entry_price = close
+            watch.entry_profile = (
+                "MODERATE_BREAKOUT_RETRACE"
+            )
+            watch.reason = (
+                "moderate_breakout_retrace_entry_ready"
+            )
+
+            result = watch.to_dict()
+            self.remove(symbol)
+            return result
+
+        # Todavía está arriba del breakout: esperar retroceso.
+        if (
+            entry_vs_breakout_pct
+            > self.entry_vs_breakout_max_pct
+        ):
+            watch.reason = (
+                "waiting_retrace_to_breakout_band"
+            )
+
+        # Retrocedió más de 0,25%, pero podría recuperar
+        # la banda dentro del máximo de velas.
+        elif (
+            entry_vs_breakout_pct
+            < self.entry_vs_breakout_min_pct
+        ):
+            watch.reason = (
+                "price_below_retrace_band_waiting_recovery"
+            )
+
+        elif not holds_compression_high:
+            watch.reason = (
+                "compression_high_not_held"
+            )
+
+        else:
+            watch.reason = (
+                "waiting_entry_condition"
+            )
+
         return watch.to_dict()
 
     def update(
@@ -462,54 +498,83 @@ class CompressionStateMachine:
                 watch.breakout_detected = True
                 watch.breakout_confirmed = True
 
-                watch.state = CompressionState.WAIT_PULLBACK
-
                 watch.breakout_ts = ts
                 watch.breakout_price = close
                 watch.breakout_high = high
-                watch.breakout_volume_ratio = breakout.get("volume_ratio")
-                
-                watch.breakout_extension_pct = (
-                    (close - watch.compression_high) / watch.compression_high
-                ) * 100 if watch.compression_high else None
-
-                watch.breakout_extension_atr = (
-                    (close - watch.compression_high) / atr
-                ) if atr and atr > 0 else None
-
-                watch.candles_waiting = 0
-                watch.reason = "breakout_detected_waiting_pullback"
-
-                return self._evaluate_pullback_entry(
-                    watch=watch,
-                    symbol=symbol,
-                    ts=ts,
-                    close=close,
-                    low=low,
-                    high=high
+                watch.breakout_volume_ratio = (
+                    breakout.get("volume_ratio")
                 )
 
-            return watch.to_dict()
+                watch.breakout_extension_pct = (
+                    (
+                        close
+                        - watch.compression_high
+                    )
+                    / watch.compression_high
+                    * 100
+                    if watch.compression_high
+                    else None
+                )
+
+                watch.breakout_extension_atr = (
+                    (
+                        close
+                        - watch.compression_high
+                    )
+                    / atr
+                    if atr and atr > 0
+                    else None
+                )
+
+                watch.moderate_breakout_candidate = (
+                    watch.breakout_extension_pct is not None
+                    and self.moderate_breakout_min_pct
+                    <= watch.breakout_extension_pct
+                    <= self.moderate_breakout_max_pct
+                )
+
+                watch.entry_profile = (
+                    "MODERATE_BREAKOUT_RETRACE"
+                )
+
+                # Esta rama solamente acepta breakouts moderados.
+                if not watch.moderate_breakout_candidate:
+                    watch.state = CompressionState.EXPIRED
+                    watch.reason = (
+                        "breakout_outside_moderate_band"
+                    )
+
+                    result = watch.to_dict()
+                    self.remove(symbol)
+                    return result
+
+                # El breakout es válido, pero no se evalúa
+                # como pullback en la misma vela.
+                watch.state = CompressionState.WAIT_PULLBACK
+                watch.candles_waiting = 0
+                watch.reason = (
+                    "moderate_breakout_waiting_retrace"
+                )
+
+                return watch.to_dict()
 
         if watch.state == CompressionState.BREAKOUT_DETECTED:
             watch.state = CompressionState.WAIT_PULLBACK
             watch.candles_waiting = 0
-            watch.reason = "waiting_pullback"
+            watch.reason = "waiting_retrace"
 
-            return self._evaluate_pullback_entry(
-                watch=watch,
-                symbol=symbol,
-                ts=ts,
-                close=close,
-                low=low,
-                high=high
-            )
+            return watch.to_dict()
 
         if watch.state == CompressionState.WAIT_PULLBACK:
-
-            if watch.candles_waiting > self.max_pullback_candles:
+            if (
+                watch.candles_waiting
+                > self.max_pullback_candles
+            ):
                 watch.state = CompressionState.EXPIRED
-                watch.reason = "pullback_expired"
+                watch.reason = (
+                    "moderate_retrace_entry_expired"
+                )
+
                 result = watch.to_dict()
                 self.remove(symbol)
                 return result
@@ -520,7 +585,7 @@ class CompressionStateMachine:
                 ts=ts,
                 close=close,
                 low=low,
-                high=high
+                high=high,
             )
 
         return watch.to_dict()

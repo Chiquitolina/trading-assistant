@@ -835,7 +835,7 @@ class ExecutionEngine:
         )
         return time.perf_counter()
 
-    def open_position(self, plan, leverage: int = 1):
+    def open_position(self, plan, leverage: int = 5):
         
         started = time.perf_counter()
         t = started
@@ -2345,7 +2345,7 @@ class ExecutionEngine:
         position = Position(
             symbol=symbol,
             side=side,
-            leverage=int(position_data.get("leverage", 1)),
+            leverage=int(position_data.get("leverage", 5)),
             is_testnet=self.is_testnet,
             quantity=quantity,
 

@@ -22,8 +22,10 @@ class CompressionStrategy:
         journal=None,
         max_watch_candles=8,
         max_pullback_candles=5,
-        pullback_max_pct=1.2,
-        pullback_min_hold_high=True,
+        moderate_breakout_min_pct=0.50,
+        moderate_breakout_max_pct=0.75,
+        entry_vs_breakout_min_pct=-0.25,
+        entry_vs_breakout_max_pct=0.00,
     ):
         self.stats = {}
         self.buffer = buffer
@@ -32,8 +34,18 @@ class CompressionStrategy:
         self.machine = CompressionStateMachine(
             max_watch_candles=max_watch_candles,
             max_pullback_candles=max_pullback_candles,
-            pullback_max_pct=pullback_max_pct,
-            pullback_min_hold_high=pullback_min_hold_high,
+            moderate_breakout_min_pct=(
+                moderate_breakout_min_pct
+            ),
+            moderate_breakout_max_pct=(
+                moderate_breakout_max_pct
+            ),
+            entry_vs_breakout_min_pct=(
+                entry_vs_breakout_min_pct
+            ),
+            entry_vs_breakout_max_pct=(
+                entry_vs_breakout_max_pct
+            ),
         )
 
         self.last_context_by_symbol = {}
@@ -109,7 +121,12 @@ class CompressionStrategy:
             "compression_shape": compression_state.get("compression_shape"),
             "compression_quality_label": compression_state.get("compression_quality_label"),
 
-            "breakout_detected": breakout.get("breakout"),
+            "breakout_detected": compression_state.get(
+                "breakout_detected"
+            ),
+            "breakout_confirmed": compression_state.get(
+                "breakout_confirmed"
+            ),
             "breakout_ts": compression_state.get("breakout_ts"),
             "breakout_price": compression_state.get("breakout_price"),
             "breakout_high": compression_state.get("breakout_high"),
@@ -117,6 +134,101 @@ class CompressionStrategy:
 
             "breakout_extension_pct": compression_state.get("breakout_extension_pct"),
             "breakout_extension_atr": compression_state.get("breakout_extension_atr"),
+            
+            "moderate_breakout_candidate": (
+                compression_state.get(
+                    "moderate_breakout_candidate"
+                )
+            ),
+
+            "entry_vs_breakout_pct": (
+                compression_state.get(
+                    "entry_vs_breakout_pct"
+                )
+            ),
+
+            "entry_condition_matched": (
+                compression_state.get(
+                    "entry_condition_matched"
+                )
+            ),
+
+            "entry_profile": (
+                compression_state.get(
+                    "entry_profile"
+                )
+            ),
+
+            "pullback_pct": (
+                compression_state.get(
+                    "pullback_pct"
+                )
+            ),
+
+            "pullback_from_breakout_pct": (
+                compression_state.get(
+                    "pullback_from_breakout_pct"
+                )
+            ),
+
+            "distance_above_compression_high_pct": (
+                compression_state.get(
+                    "distance_above_compression_high_pct"
+                )
+            ),
+
+            "pullback_first_ts": (
+                compression_state.get(
+                    "pullback_first_ts"
+                )
+            ),
+
+            "pullback_valid_ts": (
+                compression_state.get(
+                    "pullback_valid_ts"
+                )
+            ),
+
+            "pullback_price": (
+                compression_state.get(
+                    "pullback_price"
+                )
+            ),
+
+            "entry_ready_ts": (
+                compression_state.get(
+                    "entry_ready_ts"
+                )
+            ),
+
+            "valid_pullback": (
+                compression_state.get(
+                    "valid_pullback"
+                )
+            ),
+
+            "holds_compression_high": (
+                compression_state.get(
+                    "holds_compression_high"
+                )
+            ),
+
+            "continuation": (
+                compression_state.get(
+                    "continuation"
+                )
+            ),
+            "pullback_detected": (
+                compression_state.get(
+                    "pullback_detected"
+                )
+            ),
+
+            "continuation_detected": (
+                compression_state.get(
+                    "continuation_detected"
+                )
+            ),
 
             "entry_ready_price": compression_state.get("entry_price"),
             
@@ -254,7 +366,10 @@ class CompressionStrategy:
                 action=Action.LONG,
                 signal=signal,
                 strategy_name="compression_strategy",
-                reason="compression_breakout"
+                reason=compression_state.get(
+                    "reason",
+                    "moderate_breakout_retrace_entry_ready",
+                ),
             )
         else:
             trade_action = TradeAction(
@@ -357,21 +472,111 @@ class CompressionStrategy:
                 ),
                 "compression_reasons": compression.get("reasons"),
 
-                "breakout_detected": breakout.get("breakout"),
-                "breakout_reason": breakout.get("reason"),
-                "breakout_failed_reasons": breakout.get("failed_reasons"),
-                "breakout_volume_ratio": breakout.get("volume_ratio"),
+                # Estado persistido del breakout original.
+                "breakout_detected": compression_state.get(
+                    "breakout_detected"
+                ),
+                "breakout_confirmed": compression_state.get(
+                    "breakout_confirmed"
+                ),
 
-                "breakout_price": compression_state.get("breakout_price"),
-                "breakout_high": compression_state.get("breakout_high"),
-                "breakout_extension_pct": compression_state.get("breakout_extension_pct"),
-                "breakout_extension_atr": compression_state.get("breakout_extension_atr"),
+                "breakout_price": compression_state.get(
+                    "breakout_price"
+                ),
+                "breakout_high": compression_state.get(
+                    "breakout_high"
+                ),
+                "breakout_volume_ratio": compression_state.get(
+                    "breakout_volume_ratio"
+                ),
+                "breakout_extension_pct": compression_state.get(
+                    "breakout_extension_pct"
+                ),
+                "breakout_extension_atr": compression_state.get(
+                    "breakout_extension_atr"
+                ),
 
-                "pullback_pct": compression_state.get("pullback_pct"),
-                "valid_pullback": compression_state.get("valid_pullback"),
-                "holds_compression_high": compression_state.get("holds_compression_high"),
-                "continuation": compression_state.get("continuation"),
+                # Resultado del detector sobre la vela actual.
+                "current_candle_breakout": breakout.get(
+                    "breakout"
+                ),
+                "current_breakout_reason": breakout.get(
+                    "reason"
+                ),
+                "current_breakout_failed_reasons": breakout.get(
+                    "failed_reasons"
+                ),
+                "current_breakout_volume_ratio": breakout.get(
+                    "volume_ratio"
+                ),
 
+                # Nuevo perfil de entrada.
+                "moderate_breakout_candidate": (
+                    compression_state.get(
+                        "moderate_breakout_candidate"
+                    )
+                ),
+                "entry_profile": compression_state.get(
+                    "entry_profile"
+                ),
+                "entry_vs_breakout_pct": (
+                    compression_state.get(
+                        "entry_vs_breakout_pct"
+                    )
+                ),
+                "entry_condition_matched": (
+                    compression_state.get(
+                        "entry_condition_matched"
+                    )
+                ),
+
+                # Retroceso observado.
+                "pullback_pct": compression_state.get(
+                    "pullback_pct"
+                ),
+                "pullback_from_breakout_pct": (
+                    compression_state.get(
+                        "pullback_from_breakout_pct"
+                    )
+                ),
+                "distance_above_compression_high_pct": (
+                    compression_state.get(
+                        "distance_above_compression_high_pct"
+                    )
+                ),
+
+                "pullback_first_ts": compression_state.get(
+                    "pullback_first_ts"
+                ),
+                "pullback_valid_ts": compression_state.get(
+                    "pullback_valid_ts"
+                ),
+                "pullback_price": compression_state.get(
+                    "pullback_price"
+                ),
+
+                "valid_pullback": compression_state.get(
+                    "valid_pullback"
+                ),
+                "holds_compression_high": compression_state.get(
+                    "holds_compression_high"
+                ),
+                "continuation": compression_state.get(
+                    "continuation"
+                ),
+                "pullback_detected": compression_state.get(
+                    "pullback_detected"
+                ),
+                "continuation_detected": compression_state.get(
+                    "continuation_detected"
+                ),
+
+                "entry_ready_ts": compression_state.get(
+                    "entry_ready_ts"
+                ),
+                "entry_ready_price": compression_state.get(
+                    "entry_price"
+                ),
                 "last_candle": df_tf.iloc[-1].to_dict(),
                 "last_10_candles": prev_df[
                     ["open", "high", "low", "close", "volume"]
