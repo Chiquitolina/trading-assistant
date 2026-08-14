@@ -846,6 +846,7 @@ try:
         if STRATEGY_MODE == "compression":
             pullback_symbols = []
 
+            # Consume todos los cierres de 5m.
             while True:
                 pullback_symbol = (
                     buffer.consume_any_closed_tf(
@@ -860,25 +861,48 @@ try:
                     pullback_symbol
                 )
 
-            if pullback_symbols:
-                print(
-                    f"\033[93m[{PULLBACK_TF} PULLBACK BATCH]"
-                    f"\033[0m "
-                    f"symbols={len(pullback_symbols)}"
-                )
+            # Evita repetir el mismo símbolo dentro
+            # de la misma tanda de eventos.
+            pullback_symbols = list(
+                dict.fromkeys(pullback_symbols)
+            )
+
+            # De todos los cierres de 5m, solamente
+            # conserva watches en WAIT_PULLBACK.
+            eligible_pullback_symbols = []
 
             for symbol in pullback_symbols:
-                watch = compression_strategy.machine.get(
-                    symbol
+                watch = (
+                    compression_strategy.machine.get(
+                        symbol
+                    )
                 )
 
                 if (
-                    watch is None
-                    or watch.state.value
-                    != "WAIT_PULLBACK"
+                    watch is not None
+                    and watch.state.value
+                    == "WAIT_PULLBACK"
                 ):
-                    continue
+                    eligible_pullback_symbols.append(
+                        symbol
+                    )
 
+            # Ahora solamente imprime si realmente
+            # existe alguna watch esperando pullback.
+            if eligible_pullback_symbols:
+                print(
+                    f"\033[93m["
+                    f"{PULLBACK_TF} PULLBACK BATCH]"
+                    f"\033[0m "
+                    f"closed_events="
+                    f"{len(pullback_symbols)} "
+                    f"waiting_watches="
+                    f"{len(eligible_pullback_symbols)}"
+                )
+
+            pullback_plans_queued = 0
+
+            for symbol in eligible_pullback_symbols:
                 closed_candle_ts = (
                     buffer.last_ws_close_time
                     .get(symbol, {})
@@ -889,7 +913,9 @@ try:
                     continue
 
                 btc_context = (
-                    btc_context_service.evaluate(buffer)
+                    btc_context_service.evaluate(
+                        buffer
+                    )
                 )
 
                 pullback_result = (
@@ -911,7 +937,7 @@ try:
                 ):
                     continue
 
-                prepare_and_queue_plan(
+                queued = prepare_and_queue_plan(
                     trade_action=pullback_trade_action,
                     signal=pullback_trade_action.signal,
                     signal_context=(
@@ -921,8 +947,13 @@ try:
                     closed_candle_ts=closed_candle_ts,
                 )
 
-            if pullback_symbols:
-                resolve_pending_plans()                
+                if queued:
+                    pullback_plans_queued += 1
+
+            # Solamente resuelve la selección si realmente
+            # se generó por lo menos un plan.
+            if pullback_plans_queued > 0:
+                resolve_pending_plans()              
 
         # =================================================
         # TRIGGER TF CLOSED
