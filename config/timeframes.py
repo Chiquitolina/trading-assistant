@@ -62,6 +62,9 @@ MODE_CONFIG = {
 
         "compression_enabled": True,
         "compression_tf": MAIN_TF,
+        "structure_tf": MAIN_TF,
+        "pullback_tf": "5m",
+        "max_pullback_wait_minutes": 150,
     }
 }
 

@@ -21,7 +21,7 @@ class CompressionStrategy:
         buffer,
         journal=None,
         max_watch_candles=8,
-        max_pullback_candles=5,
+        max_pullback_wait_minutes=150,
         pullback_max_pct=1.2,
         pullback_min_hold_high=True,
     ):
@@ -31,12 +31,17 @@ class CompressionStrategy:
 
         self.machine = CompressionStateMachine(
             max_watch_candles=max_watch_candles,
-            max_pullback_candles=max_pullback_candles,
+            max_pullback_wait_minutes=(
+                max_pullback_wait_minutes
+            ),
             pullback_max_pct=pullback_max_pct,
-            pullback_min_hold_high=pullback_min_hold_high,
+            pullback_min_hold_high=(
+                pullback_min_hold_high
+            ),
         )
 
         self.last_context_by_symbol = {}
+        self.last_signal_by_symbol = {}
         
     def _build_signal_context(
         self,
@@ -60,6 +65,25 @@ class CompressionStrategy:
             "compression_created_ts": compression_state.get("created_ts"),
             "compression_updated_ts": compression_state.get("updated_ts"),
             "compression_candles_waiting": compression_state.get("candles_waiting"),
+            
+            "wait_pullback_started_ts": (
+                compression_state.get(
+                    "wait_pullback_started_ts"
+                )
+            ),
+            "pullback_trigger_tf": (
+                compression_state.get(
+                    "pullback_trigger_tf"
+                )
+            ),
+            "pullback_elapsed_minutes": (
+                compression_state.get(
+                    "pullback_elapsed_minutes"
+                )
+            ),
+            "max_pullback_wait_minutes": (
+                self.machine.max_pullback_wait_minutes
+            ),
 
             "trend_score": compression_state.get("trend_score") or trend.get("score"),
             "trend_reasons": trend.get("reasons"),
@@ -109,7 +133,12 @@ class CompressionStrategy:
             "compression_shape": compression_state.get("compression_shape"),
             "compression_quality_label": compression_state.get("compression_quality_label"),
 
-            "breakout_detected": breakout.get("breakout"),
+            "breakout_detected": compression_state.get(
+                "breakout_detected"
+            ),
+            "breakout_confirmed": compression_state.get(
+                "breakout_confirmed"
+            ),
             "breakout_ts": compression_state.get("breakout_ts"),
             "breakout_price": compression_state.get("breakout_price"),
             "breakout_high": compression_state.get("breakout_high"),
@@ -119,6 +148,40 @@ class CompressionStrategy:
             "breakout_extension_atr": compression_state.get("breakout_extension_atr"),
 
             "entry_ready_price": compression_state.get("entry_price"),
+            
+            "pullback_first_ts": compression_state.get(
+                "pullback_first_ts"
+            ),
+            "pullback_valid_ts": compression_state.get(
+                "pullback_valid_ts"
+            ),
+            "pullback_price": compression_state.get(
+                "pullback_price"
+            ),
+            "entry_ready_ts": compression_state.get(
+                "entry_ready_ts"
+            ),
+            "pullback_from_breakout_pct": (
+                compression_state.get(
+                    "pullback_from_breakout_pct"
+                )
+            ),
+            "distance_above_compression_high_pct": (
+                compression_state.get(
+                    "distance_above_compression_high_pct"
+                )
+            ),
+            "valid_pullback": compression_state.get(
+                "valid_pullback"
+            ),
+            "holds_compression_high": (
+                compression_state.get(
+                    "holds_compression_high"
+                )
+            ),
+            "continuation": compression_state.get(
+                "continuation"
+            ),
             
             "btc_velocity_15m": getattr(btc_context, "velocity_15m", None),
             "btc_velocity_1h": getattr(btc_context, "velocity_1h", None),
@@ -149,6 +212,8 @@ class CompressionStrategy:
                 trade_action=trade_action,
                 signal_context={}
             )
+            
+        self.last_signal_by_symbol[symbol] = signal
 
         candles = self.buffer.get_candles(symbol, tf)
 
@@ -230,6 +295,7 @@ class CompressionStrategy:
             breakout=breakout,
             df_tf=df_tf,
             prev_df=prev_df,
+            evaluation_tf=tf,
         )
 
         if compression_state["state"] != "IDLE":
@@ -268,6 +334,200 @@ class CompressionStrategy:
             trade_action=trade_action,
             signal_context=signal_context,
         )
+        
+    def evaluate_pullback(
+        self,
+        symbol,
+        signal=None,
+        tf="5m",
+        btc_context=None,
+    ):
+        if signal is None:
+            signal = self.last_signal_by_symbol.get(
+                symbol
+            )
+
+        if signal is None:
+            trade_action = TradeAction(
+                action=Action.HOLD,
+                signal=None,
+                strategy_name="compression_strategy",
+                reason="no_stored_structure_signal",
+            )
+
+            return CompressionResult(
+                trade_action=trade_action,
+                signal_context={},
+            )
+
+        watch = self.machine.get(symbol)
+
+        if (
+            watch is None
+            or watch.state.value != "WAIT_PULLBACK"
+        ):
+            trade_action = TradeAction(
+                action=Action.HOLD,
+                signal=signal,
+                strategy_name="compression_strategy",
+                reason="no_wait_pullback_watch",
+            )
+
+            return CompressionResult(
+                trade_action=trade_action,
+                signal_context={},
+            )
+
+        candles = self.buffer.get_candles(
+            symbol,
+            tf,
+        )
+
+        if not candles:
+            trade_action = TradeAction(
+                action=Action.HOLD,
+                signal=signal,
+                strategy_name="compression_strategy",
+                reason="no_pullback_candles",
+            )
+
+            return CompressionResult(
+                trade_action=trade_action,
+                signal_context={},
+            )
+
+        df_tf = pd.DataFrame(candles)
+
+        required_columns = {
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        }
+
+        if not required_columns.issubset(
+            df_tf.columns
+        ):
+            trade_action = TradeAction(
+                action=Action.HOLD,
+                signal=signal,
+                strategy_name="compression_strategy",
+                reason="invalid_pullback_candle_columns",
+            )
+
+            return CompressionResult(
+                trade_action=trade_action,
+                signal_context={},
+            )
+
+        current_candle = (
+            df_tf.iloc[-1].to_dict()
+        )
+
+        compression_state = (
+            self.machine.update_pullback(
+                symbol=symbol,
+                candle=current_candle,
+                trigger_tf=tf,
+            )
+        )
+
+        self._count_state(
+            compression_state["state"]
+        )
+
+        stored_context = (
+            self.last_context_by_symbol.get(
+                symbol,
+                {},
+            )
+        )
+
+        trend = stored_context.get(
+            "trend",
+            {},
+        )
+        compression = stored_context.get(
+            "compression",
+            {},
+        )
+        breakout = stored_context.get(
+            "breakout",
+            {},
+        )
+
+        self.last_context_by_symbol[symbol] = {
+            "trend": trend,
+            "compression": compression,
+            "breakout": breakout,
+            "compression_state": (
+                compression_state
+            ),
+        }
+
+        prev_df = df_tf.iloc[:-1].copy()
+
+        self._log(
+            symbol=symbol,
+            compression_state=compression_state,
+            trend=trend,
+            compression=compression,
+            breakout=breakout,
+            df_tf=df_tf,
+            prev_df=prev_df,
+            evaluation_tf=tf,
+        )
+
+        signal_context = (
+            self._build_signal_context(
+                signal=signal,
+                compression_state=(
+                    compression_state
+                ),
+                trend=trend,
+                compression=compression,
+                breakout=breakout,
+                btc_context=btc_context,
+            )
+        )
+
+        signal_context["structure_tf"] = "30m"
+        signal_context["pullback_trigger_tf"] = tf
+
+        if (
+            compression_state["state"]
+            == "ENTRY_READY"
+        ):
+            trade_action = TradeAction(
+                action=Action.LONG,
+                signal=signal,
+                strategy_name=(
+                    "compression_strategy"
+                ),
+                reason=compression_state.get(
+                    "reason",
+                    "pullback_5m_entry_ready",
+                ),
+            )
+        else:
+            trade_action = TradeAction(
+                action=Action.HOLD,
+                signal=signal,
+                strategy_name=(
+                    "compression_strategy"
+                ),
+                reason=compression_state.get(
+                    "reason",
+                    "waiting_pullback_5m",
+                ),
+            )
+
+        return CompressionResult(
+            trade_action=trade_action,
+            signal_context=signal_context,
+        )
 
     def get_context(self, symbol):
         return self.last_context_by_symbol.get(symbol, {})
@@ -296,6 +556,7 @@ class CompressionStrategy:
         breakout,
         df_tf,
         prev_df,
+        evaluation_tf=None,
     ):
         if not self.journal:
             return
@@ -310,6 +571,27 @@ class CompressionStrategy:
                 "reason": compression_state.get("reason"),
                 "watch_age": compression_state.get("watch_age"),
                 "candles_waiting": compression_state.get("candles_waiting"),
+                
+                "evaluation_tf": evaluation_tf,
+                "structure_tf": "30m",
+                "pullback_trigger_tf": (
+                    compression_state.get(
+                        "pullback_trigger_tf"
+                    )
+                ),
+                "pullback_elapsed_minutes": (
+                    compression_state.get(
+                        "pullback_elapsed_minutes"
+                    )
+                ),
+                "max_pullback_wait_minutes": (
+                    self.machine.max_pullback_wait_minutes
+                ),
+                "wait_pullback_started_ts": (
+                    compression_state.get(
+                        "wait_pullback_started_ts"
+                    )
+                ),
                 
                 "compression_created_ts": compression_state.get("created_ts"),
                 "compression_updated_ts": compression_state.get("updated_ts"),
@@ -357,7 +639,15 @@ class CompressionStrategy:
                 ),
                 "compression_reasons": compression.get("reasons"),
 
-                "breakout_detected": breakout.get("breakout"),
+                "breakout_detected": compression_state.get(
+                    "breakout_detected"
+                ),
+                "breakout_confirmed": compression_state.get(
+                    "breakout_confirmed"
+                ),
+                "current_candle_breakout": breakout.get(
+                    "breakout"
+                ),
                 "breakout_reason": breakout.get("reason"),
                 "breakout_failed_reasons": breakout.get("failed_reasons"),
                 "breakout_volume_ratio": breakout.get("volume_ratio"),
@@ -368,6 +658,31 @@ class CompressionStrategy:
                 "breakout_extension_atr": compression_state.get("breakout_extension_atr"),
 
                 "pullback_pct": compression_state.get("pullback_pct"),
+                "pullback_from_breakout_pct": (
+                    compression_state.get(
+                        "pullback_from_breakout_pct"
+                    )
+                ),
+                "distance_above_compression_high_pct": (
+                    compression_state.get(
+                        "distance_above_compression_high_pct"
+                    )
+                ),
+                "pullback_first_ts": compression_state.get(
+                    "pullback_first_ts"
+                ),
+                "pullback_valid_ts": compression_state.get(
+                    "pullback_valid_ts"
+                ),
+                "pullback_price": compression_state.get(
+                    "pullback_price"
+                ),
+                "entry_ready_ts": compression_state.get(
+                    "entry_ready_ts"
+                ),
+                "entry_ready_price": compression_state.get(
+                    "entry_price"
+                ),
                 "valid_pullback": compression_state.get("valid_pullback"),
                 "holds_compression_high": compression_state.get("holds_compression_high"),
                 "continuation": compression_state.get("continuation"),

@@ -63,6 +63,10 @@ class CompressionWatch:
     breakout_volume_ratio: Optional[float] = None
     breakout_extension_pct: Optional[float] = None
     breakout_extension_atr: Optional[float] = None
+    
+    wait_pullback_started_ts: Optional[int] = None
+    pullback_trigger_tf: Optional[str] = None
+    pullback_elapsed_minutes: Optional[float] = None
 
     candles_waiting: int = 0
     max_wait_candles: int = 5
@@ -111,15 +115,27 @@ class CompressionStateMachine:
     def __init__(
         self,
         max_watch_candles=8,
-        max_pullback_candles=5,
+        max_pullback_wait_minutes=150,
         pullback_max_pct=1.2,
         pullback_min_hold_high=True,
     ):
         self.watches = {}
-        self.max_watch_candles = max_watch_candles
-        self.max_pullback_candles = max_pullback_candles
-        self.pullback_max_pct = pullback_max_pct
-        self.pullback_min_hold_high = pullback_min_hold_high
+
+        self.max_watch_candles = (
+            max_watch_candles
+        )
+
+        self.max_pullback_wait_minutes = (
+            max_pullback_wait_minutes
+        )
+
+        self.pullback_max_pct = (
+            pullback_max_pct
+        )
+
+        self.pullback_min_hold_high = (
+            pullback_min_hold_high
+        )
 
     def active_watches(self):
         return [
@@ -162,7 +178,7 @@ class CompressionStateMachine:
         holds_compression_high = close >= watch.compression_high
 
         valid_pullback = (
-            pullback_pct <= self.pullback_max_pct
+            0.0 <= pullback_pct <= self.pullback_max_pct
             and (
                 holds_compression_high
                 if self.pullback_min_hold_high
@@ -218,7 +234,12 @@ class CompressionStateMachine:
             f"[COMPRESSION PIPELINE] {symbol}\n"
             "========================================\n"
             f"State               : {watch.state.value}\n"
-            f"Waiting             : {watch.candles_waiting}/{self.max_pullback_candles}\n"
+            f"Waiting Candles     : "
+            f"{watch.candles_waiting}\n"
+            f"Elapsed Minutes     : "
+            f"{watch.pullback_elapsed_minutes}\n"
+            f"Max Wait Minutes    : "
+            f"{self.max_pullback_wait_minutes}\n"
             "\n"
             "----- BREAKOUT -----\n"
             f"Breakout Ext %      : {breakout_ext_pct_text}\n"
@@ -254,7 +275,10 @@ class CompressionStateMachine:
         print(
             f"[PULLBACK DEBUG] "
             f"{symbol} "
-            f"waiting={watch.candles_waiting}/{self.max_pullback_candles} "
+            f"trigger_tf={watch.pullback_trigger_tf} "
+            f"waiting_candles={watch.candles_waiting} "
+            f"elapsed_minutes={watch.pullback_elapsed_minutes} "
+            f"max_minutes={self.max_pullback_wait_minutes} "
             f"pullback_pct={pullback_pct:.2f} "
             f"pullback_from_bo={pullback_from_breakout_pct:.2f} "
             f"dist_above_hi={distance_above_compression_high_pct:.2f} "
@@ -402,10 +426,21 @@ class CompressionStateMachine:
                 "state": CompressionState.IDLE.value,
                 "reason": "no_watch",
             }
+            
+        # Una watch en WAIT_PULLBACK solamente se actualiza
+        # mediante update_pullback() con velas de 5m.
+        if watch.state == CompressionState.WAIT_PULLBACK:
+            watch.reason = "waiting_pullback_5m"
+            return watch.to_dict()
 
         watch.updated_ts = ts
-        watch.candles_waiting += 1
         watch.watch_age += 1
+
+        if watch.state in (
+            CompressionState.WATCH_CREATED,
+            CompressionState.WATCHING_COMPRESSION,
+        ):
+            watch.candles_waiting += 1
         
         # ============================================
         # First candle after watch creation
@@ -480,47 +515,108 @@ class CompressionStateMachine:
                 watch.candles_waiting = 0
                 watch.reason = "breakout_detected_waiting_pullback"
 
-                return self._evaluate_pullback_entry(
-                    watch=watch,
-                    symbol=symbol,
-                    ts=ts,
-                    close=close,
-                    low=low,
-                    high=high
-                )
+                watch.wait_pullback_started_ts = ts
+                watch.pullback_trigger_tf = "5m"
+
+                return watch.to_dict()
 
             return watch.to_dict()
 
         if watch.state == CompressionState.BREAKOUT_DETECTED:
             watch.state = CompressionState.WAIT_PULLBACK
             watch.candles_waiting = 0
-            watch.reason = "waiting_pullback"
-
-            return self._evaluate_pullback_entry(
-                watch=watch,
-                symbol=symbol,
-                ts=ts,
-                close=close,
-                low=low,
-                high=high
+            watch.wait_pullback_started_ts = (
+                watch.breakout_ts or ts
             )
+            watch.pullback_trigger_tf = "5m"
+            watch.reason = "waiting_pullback_5m"
 
-        if watch.state == CompressionState.WAIT_PULLBACK:
-
-            if watch.candles_waiting > self.max_pullback_candles:
-                watch.state = CompressionState.EXPIRED
-                watch.reason = "pullback_expired"
-                result = watch.to_dict()
-                self.remove(symbol)
-                return result
-
-            return self._evaluate_pullback_entry(
-                watch=watch,
-                symbol=symbol,
-                ts=ts,
-                close=close,
-                low=low,
-                high=high
-            )
-
+            return watch.to_dict()
+        
         return watch.to_dict()
+    
+    def update_pullback(
+        self,
+        symbol: str,
+        candle: dict,
+        trigger_tf: str = "5m",
+    ):
+        watch = self.watches.get(symbol)
+
+        if watch is None:
+            return {
+                "symbol": symbol,
+                "state": CompressionState.IDLE.value,
+                "reason": "no_active_watch",
+            }
+
+        if watch.state != CompressionState.WAIT_PULLBACK:
+            return watch.to_dict()
+
+        if not watch.breakout_price:
+            watch.state = CompressionState.EXPIRED
+            watch.reason = "missing_breakout_price"
+
+            result = watch.to_dict()
+            self.remove(symbol)
+            return result
+
+        ts = normalize_timestamp(
+            candle["timestamp"]
+        )
+
+        # Evita evaluar una vela anterior o perteneciente
+        # al timestamp del breakout.
+        if (
+            watch.breakout_ts is None
+            or ts <= watch.breakout_ts
+        ):
+            watch.reason = (
+                "waiting_first_post_breakout_5m_candle"
+            )
+            return watch.to_dict()
+
+        close = float(candle["close"])
+        high = float(candle["high"])
+        low = float(candle["low"])
+
+        wait_started_ts = (
+            watch.wait_pullback_started_ts
+            or watch.breakout_ts
+        )
+
+        elapsed_minutes = (
+            ts - wait_started_ts
+        ) / 60_000
+
+        watch.pullback_elapsed_minutes = round(
+            elapsed_minutes,
+            2,
+        )
+
+        watch.pullback_trigger_tf = trigger_tf
+
+        if (
+            elapsed_minutes
+            > self.max_pullback_wait_minutes
+        ):
+            watch.state = CompressionState.EXPIRED
+            watch.reason = (
+                "pullback_expired_by_time"
+            )
+
+            result = watch.to_dict()
+            self.remove(symbol)
+            return result
+
+        watch.updated_ts = ts
+        watch.candles_waiting += 1
+
+        return self._evaluate_pullback_entry(
+            watch=watch,
+            symbol=symbol,
+            ts=ts,
+            close=close,
+            low=low,
+            high=high,
+        )
