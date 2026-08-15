@@ -43,6 +43,10 @@ from engine.live.strategy.entry_engine import EntryEngine
 from engine.live.strategy.router import StrategyRouter
 
 from engine.live.execution.execution_engine import ExecutionEngine
+from engine.live.execution.pending_entries.bucket_touch_entry_manager import (
+    BucketTouchEntryManager,
+)
+
 from engine.live.execution.strategies.default_execution_strategy import (
     DefaultExecutionStrategy
 )
@@ -309,6 +313,14 @@ execution = ExecutionEngine(
     symbol=SYMBOL
 )
 
+bucket_touch_manager = BucketTouchEntryManager(
+    breakout_min_pct=0.50,
+    breakout_max_pct=0.75,
+    entry_band_min_pct=-0.25,
+    entry_band_max_pct=0.00,
+    expiry_minutes=150,
+)
+
 status_writer = StatusWriter()
 
 status_data = status_writer._read_current()
@@ -522,6 +534,94 @@ try:
         # =================================================
         # PRICE UPDATE
         # =================================================
+        
+        # =================================================
+        # BUCKET V2 PENDING ENTRY UPDATE
+        # =================================================
+
+        if STRATEGY_MODE == "compression":
+
+            for pending_symbol in bucket_touch_manager.symbols():
+
+                pending_price = buffer.last_price(
+                    pending_symbol
+                )
+
+                pending_timestamp = buffer.last_timestamp(
+                    pending_symbol
+                )
+
+                if (
+                    pending_price is None
+                    or pending_timestamp is None
+                ):
+                    continue
+
+                triggered_entry = (
+                    bucket_touch_manager.evaluate_price(
+                        symbol=pending_symbol,
+                        price=pending_price,
+                        timestamp=pending_timestamp,
+                    )
+                )
+
+                if triggered_entry is None:
+                    continue
+
+                if not execution.can_open_position(
+                    pending_symbol
+                ):
+                    bucket_touch_manager.mark_failed(
+                        pending_symbol,
+                        reason="cannot_open_position_at_touch",
+                    )
+                    continue
+
+                try:
+                    opening_position = True
+
+                    executed = execution_strategy.on_signal(
+                        execution_engine=execution,
+                        trade_action=(
+                            triggered_entry.trade_action
+                        ),
+                        plan=triggered_entry.plan,
+                    )
+
+                    if executed:
+                        bucket_touch_manager.mark_executed(
+                            pending_symbol
+                        )
+
+                        update_status(
+                            status_writer,
+                            last_executed_strategy=(
+                                "BucketTouchEntryV2"
+                            ),
+                        )
+
+                    else:
+                        bucket_touch_manager.mark_failed(
+                            pending_symbol,
+                            reason=(
+                                "execution_strategy_rejected"
+                            ),
+                        )
+
+                except Exception as exc:
+                    bucket_touch_manager.mark_failed(
+                        pending_symbol,
+                        reason=f"execution_error:{exc}",
+                    )
+
+                    print(
+                        f"[BUCKET V2 EXECUTION ERROR] "
+                        f"symbol={pending_symbol} "
+                        f"error={exc}"
+                    )
+
+                finally:
+                    opening_position = False
 
         for pos_symbol in list(execution.positions.keys()):
 
@@ -1003,59 +1103,45 @@ try:
                         continue
 
                     # =================================================
-                    # EXECUTION OF SELECTED CANDIDATE
+                    # BUCKET V2: ARM PENDING ENTRY
                     # =================================================
 
-                    try:
-                        opening_position = True
+                    armed_timestamp = buffer.last_timestamp(
+                        symbol
+                    )
 
-                        exec_started = time.perf_counter()
-
-                        executed = execution_strategy.on_signal(
-                            execution_engine=execution,
-                            trade_action=trade_action,
-                            plan=plan,
+                    if armed_timestamp is None:
+                        armed_timestamp = int(
+                            time.time() * 1000
                         )
 
-                        if (
-                            STRATEGY_MODE == "compression"
-                            and executed
-                        ):
-                            compression_entries_opened_in_batch += 1
+                    armed = bucket_touch_manager.arm(
+                        plan=plan,
+                        trade_action=trade_action,
+                        timestamp=armed_timestamp,
+                    )
 
-                        exec_elapsed = (
-                            time.perf_counter() - exec_started
+                    if not armed:
+                        candidate.reject(
+                            "bucket_v2_not_armed"
                         )
 
                         print(
-                            f"\033[91m[EXECUTION TIME]\033[0m "
+                            f"[BUCKET V2 SELECTION REJECTED] "
                             f"symbol={symbol} "
                             f"rank={candidate.rank} "
-                            f"score={candidate.score:.4f} "
-                            f"elapsed={exec_elapsed:.2f}s"
+                            f"score={candidate.score:.4f}"
                         )
 
-                        update_status(
-                            status_writer,
-                            last_executed_strategy=(
-                                execution_strategy.__class__.__name__
-                            ),
-                        )
+                        continue
 
-                        logger.debug(
-                            f"[LIVE MAIN] "
-                            f"execution result: {executed}"
-                        )
-
-                    except Exception as e:
-                        print(
-                            f"[LIVE MAIN] "
-                            f"❌ execution error but loop continues: {e}"
-                        )
-
-                    finally:
-                        opening_position = False
-                    
+                    print(
+                        f"[BUCKET V2 PLAN ARMED] "
+                        f"symbol={symbol} "
+                        f"rank={candidate.rank} "
+                        f"score={candidate.score:.4f}"
+                    )
+                                        
             batch_elapsed = time.perf_counter() - batch_started
 
             if STRATEGY_MODE == "compression":
