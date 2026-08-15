@@ -3271,6 +3271,7 @@ def add_compression_analytics_buckets(data: pd.DataFrame) -> pd.DataFrame:
         "entry_distance_pct",
         "entry_vs_compression_pct",
         "entry_vs_breakout_pct",
+        "entry_ready_vs_breakout_pct",
     ]
 
     for col in numeric_cols:
@@ -3704,6 +3705,46 @@ def add_compression_analytics_buckets(data: pd.DataFrame) -> pd.DataFrame:
     if "entry_vs_breakout_pct" in out.columns:
         out["entry_vs_breakout_bucket"] = pd.cut(
             out["entry_vs_breakout_pct"],
+            bins=[
+                -np.inf,
+                -1.00,
+                -0.50,
+                -0.25,
+                -0.10,
+                0,
+                0.10,
+                0.25,
+                0.50,
+                0.75,
+                1.00,
+                1.50,
+                2.00,
+                np.inf,
+            ],
+            labels=[
+                "< -1.00%",
+                "-1.00% - -0.50%",
+                "-0.50% - -0.25%",
+                "-0.25% - -0.10%",
+                "-0.10% - 0%",
+                "0% - 0.10%",
+                "0.10% - 0.25%",
+                "0.25% - 0.50%",
+                "0.50% - 0.75%",
+                "0.75% - 1.00%",
+                "1.00% - 1.50%",
+                "1.50% - 2.00%",
+                "> 2.00%",
+            ],
+        )
+        
+    # =========================
+    # ENTRY READY VS BREAKOUT
+    # Forward-safe: conocida antes de ejecutar
+    # =========================
+    if "entry_ready_vs_breakout_pct" in out.columns:
+        out["entry_ready_vs_breakout_bucket"] = pd.cut(
+            out["entry_ready_vs_breakout_pct"],
             bins=[
                 -np.inf,
                 -1.00,
@@ -4977,6 +5018,7 @@ df_raw = df.copy()
 compression_numeric_cols = [
     # Prices / execution
     "real_entry",
+    "entry_ready_price",
     "compression_high",
     "compression_low",
     "breakout_price",
@@ -5085,6 +5127,108 @@ if all(col in df_raw.columns for col in required_compression_cols):
 
     df_raw["entry_vs_compression_pct"] = df_raw["entry_vs_compression_pct"].round(4)
     df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
+    
+    df_raw["entry_vs_compression_pct"] = df_raw[
+        "entry_vs_compression_pct"
+    ].round(4)
+
+    df_raw["entry_vs_breakout_pct"] = df_raw[
+        "entry_vs_breakout_pct"
+    ].round(4)
+
+    # =========================
+    # FORWARD-SAFE ENTRY LOCATION
+    # =========================
+
+    required_forward_cols = [
+        "side",
+        "entry_ready_price",
+        "breakout_price",
+    ]
+
+    if all(
+        col in df_raw.columns
+        for col in required_forward_cols
+    ):
+        valid_forward_prices = (
+            df_raw["entry_ready_price"].notna()
+            & df_raw["breakout_price"].notna()
+            & df_raw["entry_ready_price"].gt(0)
+            & df_raw["breakout_price"].gt(0)
+        )
+
+        df_raw["entry_ready_vs_breakout_pct"] = np.nan
+
+        long_mask = (
+            valid_forward_prices
+            & df_raw["side"]
+            .astype(str)
+            .str.upper()
+            .eq("LONG")
+        )
+
+        short_mask = (
+            valid_forward_prices
+            & df_raw["side"]
+            .astype(str)
+            .str.upper()
+            .eq("SHORT")
+        )
+
+        df_raw.loc[
+            long_mask,
+            "entry_ready_vs_breakout_pct",
+        ] = (
+            (
+                df_raw.loc[
+                    long_mask,
+                    "entry_ready_price",
+                ]
+                - df_raw.loc[
+                    long_mask,
+                    "breakout_price",
+                ]
+            )
+            / df_raw.loc[
+                long_mask,
+                "breakout_price",
+            ]
+            * 100
+        )
+
+        df_raw.loc[
+            short_mask,
+            "entry_ready_vs_breakout_pct",
+        ] = (
+            (
+                df_raw.loc[
+                    short_mask,
+                    "breakout_price",
+                ]
+                - df_raw.loc[
+                    short_mask,
+                    "entry_ready_price",
+                ]
+            )
+            / df_raw.loc[
+                short_mask,
+                "breakout_price",
+            ]
+            * 100
+        )
+
+        df_raw["entry_ready_vs_breakout_pct"] = (
+            df_raw[
+                "entry_ready_vs_breakout_pct"
+            ].round(4)
+        )
+
+    else:
+        df_raw["entry_ready_vs_breakout_pct"] = np.nan
+
+    df_raw["late_entry"] = (
+        df_raw["entry_vs_compression_pct"] > 1.0
+    )
 
     df_raw["late_entry"] = df_raw["entry_vs_compression_pct"] > 1.0
     
@@ -11812,6 +11956,118 @@ with tab_compression_quality:
                 )
 
         st.markdown("---")
+                
+        # =========================
+        # BREAKOUT EXTENSION × ENTRY READY VS BREAKOUT
+        # =========================
+
+        st.markdown("---")
+
+        st.markdown(
+            "### 🧪 Breakout Extension % × Entry Ready vs Breakout %"
+        )
+
+        st.caption(
+            "Validación forward-safe. Usa el precio de ENTRY_READY, "
+            "conocido antes de enviar la orden, en lugar de real_entry."
+        )
+
+        forward_combo_cols = [
+            "breakout_extension_pct_bucket",
+            "entry_ready_vs_breakout_bucket",
+        ]
+
+        if not all(col in qdf.columns for col in forward_combo_cols):
+            missing_forward_cols = [
+                col
+                for col in forward_combo_cols
+                if col not in qdf.columns
+            ]
+
+            st.info(
+                "Missing forward bucket columns: "
+                f"{missing_forward_cols}"
+            )
+
+        else:
+            forward_valid_rows = qdf[
+                qdf["entry_ready_vs_breakout_pct"].notna()
+                & qdf["breakout_extension_pct"].notna()
+            ].copy()
+
+            st.caption(
+                f"Trades con métricas forward disponibles: "
+                f"{len(forward_valid_rows)} de {len(qdf)}"
+            )
+
+            if forward_valid_rows.empty:
+                st.info(
+                    "No hay trades con entry_ready_price y breakout_price válidos."
+                )
+
+            else:
+                max_forward_min_trades = min(
+                    30,
+                    len(forward_valid_rows),
+                )
+
+                if max_forward_min_trades <= 1:
+                    min_trades_forward_combo = 1
+                    st.caption(
+                        "Minimum trades fijado en 1 porque solo hay "
+                        "un trade disponible."
+                    )
+                else:
+                    min_trades_forward_combo = st.slider(
+                        "Minimum trades per forward combination",
+                        min_value=1,
+                        max_value=max_forward_min_trades,
+                        value=min(5, max_forward_min_trades),
+                        step=1,
+                        key="breakout_extension_entry_ready_min_trades",
+                    )
+
+                forward_combo_report = (
+                    build_compression_analytics_report(
+                        forward_valid_rows,
+                        forward_combo_cols,
+                        min_trades=min_trades_forward_combo,
+                    )
+                )
+
+                if forward_combo_report.empty:
+                    st.info(
+                        "No forward-safe combinations meet the "
+                        "minimum trade requirement."
+                    )
+
+                else:
+                    st.dataframe(
+                        forward_combo_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.caption(
+                        "Esta es la tabla que debe utilizarse para construir "
+                        "el filtro de la rama bucket-forward-v2."
+                    )
+
+                    forward_robustness_report = (
+                        forward_combo_report.rename(
+                            columns={"profit_factor": "pf"}
+                        )
+                    )
+
+                    render_bucket_robustness_explorer(
+                        source_df=forward_valid_rows,
+                        summary_df=forward_robustness_report,
+                        first_bucket_col="breakout_extension_pct_bucket",
+                        second_bucket_col="entry_ready_vs_breakout_bucket",
+                        first_bucket_label="Breakout Extension %",
+                        second_bucket_label="Entry Ready vs Breakout %",
+                        key_prefix="breakout_extension_entry_ready",
+                    )
 
         st.markdown("### Entry Distance from Compression")
 
