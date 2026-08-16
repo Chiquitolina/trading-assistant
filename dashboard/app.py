@@ -1563,111 +1563,127 @@ def render_bucket_robustness_explorer(
     # ALL TRADES
     # ==========================================
     with trades_tab:
-        preferred_cols = [
-            # Identidad
-            "trade_key",
-            "symbol",
-            "side",
-
-            # Timestamps
-            "compression_created_ts_dt",
-            "signal_ts_dt",
-            "breakout_ts_dt",
-            "entry_ready_ts_dt",
-            "entry_ts_dt",
-            "exit_ts_dt",
-
-            # Resultado
-            "pnl",
-            "exit_reason",
-            "leverage",
-            "pnl_unleveraged_pct",
-            "realized_r",
-
-            # Buckets seleccionados
-            first_bucket_col,
-            second_bucket_col,
-
-            # Precios
-            "signal_price",
-            "compression_high",
-            "compression_low",
-            "breakout_price",
-            "entry_ready_price",
-            "entry",
-            "real_entry",
-            "tp",
-            "sl",
-
-            # Distancias y riesgo
-            "entry_vs_compression_pct",
-            "real_entry_vs_compression_pct",
-            "entry_vs_breakout_pct",
-            "real_entry_vs_breakout_pct",
-            "real_entry_vs_ready_pct",
-            "signal_to_real_entry_pct",
-
-            "structural_risk_pct",
-            "structural_risk_bucket",
-            "planned_reward_pct",
-            "planned_rr",
-
-            # Breakout
-            "breakout_extension_atr",
-            "breakout_extension_pct",
-            "breakout_volume_ratio",
-
-            # Duraciones
-            "watch_to_breakout_minutes",
-            "breakout_to_ready_minutes",
-            "ready_to_entry_seconds",
-
-            # Compresión
-            "compression_shape",
-            "compression_quality_label",
-            "compression_score",
-            "trend_score",
-            "range_ratio",
-            "atr_ratio",
-            "volume_ratio",
-
-            # MFE / MAE
-            "max_favorable_pct",
-            "max_adverse_pct",
-
-            # BTC
-            "btc_corr_5m_1h",
-            "btc_beta_5m_1h",
-            "btc_r2_5m_1h",
-
-            # Configuración
-            "trigger_tf",
-            "strategy_mode",
-            "base_mode",
-            "selected_lookback",
-            "compression_base_lookback",
-        ]
-
-        available_cols = [
-            col for col in preferred_cols
-            if col in edge_df.columns
-        ]
-
+        # Ordenar los trades seleccionados.
         trade_detail_df = edge_df.sort_values(
-            "entry_datetime"
-            if edge_df["entry_datetime"].notna().any()
-            else "pnl",
+            (
+                "entry_datetime"
+                if (
+                    "entry_datetime" in edge_df.columns
+                    and edge_df["entry_datetime"].notna().any()
+                )
+                else "pnl"
+            ),
             ascending=False,
         )
 
+        # Mantiene todas las features con sus tipos originales
+        # para el Trade Inspector.
         inspector_source_df = (
             trade_detail_df
             .reset_index(drop=True)
+            .copy()
         )
 
-        trade_display_df = inspector_source_df[
-            available_cols
-        ].copy()
+        # La tabla visible parte del dataframe completo.
+        trade_display_df = inspector_source_df.copy()
+
+        # Ocultar solamente columnas auxiliares creadas internamente
+        # por Analyze selected buckets.
+        internal_helper_cols = [
+            "_first_bucket",
+            "_second_bucket",
+            "_bucket_key",
+            "is_win",
+            "entry_datetime",
+            "entry_date",
+            "entry_30m",
+        ]
+
+        trade_display_df = trade_display_df.drop(
+            columns=[
+                col
+                for col in internal_helper_cols
+                if col in trade_display_df.columns
+            ],
+            errors="ignore",
+        )
+
+        # Formatear timestamps solamente para visualización.
+        timestamp_pairs = [
+            ("compression_created_ts", "compression_created_ts_dt"),
+            ("signal_ts", "signal_ts_dt"),
+            ("breakout_ts", "breakout_ts_dt"),
+            ("entry_ready_ts", "entry_ready_ts_dt"),
+            ("entry_ts", "entry_ts_dt"),
+            ("exit_ts", "exit_ts_dt"),
+        ]
+
+        datetime_helper_cols = []
+
+        for raw_col, dt_col in timestamp_pairs:
+            if dt_col not in trade_display_df.columns:
+                continue
+
+            parsed_ts = pd.to_datetime(
+                trade_display_df[dt_col],
+                errors="coerce",
+                utc=True,
+            )
+
+            if raw_col in trade_display_df.columns:
+                trade_display_df[raw_col] = parsed_ts.dt.strftime(
+                    "%d-%m-%Y %H:%M"
+                )
+            else:
+                trade_display_df[dt_col] = parsed_ts.dt.strftime(
+                    "%d-%m-%Y %H:%M"
+                )
+
+            if (
+                raw_col in trade_display_df.columns
+                and dt_col != raw_col
+            ):
+                datetime_helper_cols.append(dt_col)
+
+        trade_display_df = trade_display_df.drop(
+            columns=datetime_helper_cols,
+            errors="ignore",
+        )
+
+        # Mover primero las columnas más importantes.
+        leading_cols = [
+            "trade_key",
+            "symbol",
+            "side",
+            "leverage",
+            "signal_ts",
+            "entry_ts",
+            "exit_ts",
+            "real_entry",
+            "real_exit",
+            "pnl",
+            "pnl_usd",
+            "fees",
+            "exit_reason",
+            first_bucket_col,
+            second_bucket_col,
+        ]
+
+        leading_cols = [
+            col
+            for col in dict.fromkeys(leading_cols)
+            if col in trade_display_df.columns
+        ]
+
+        remaining_cols = [
+            col
+            for col in trade_display_df.columns
+            if col not in leading_cols
+        ]
+
+        trade_display_df = trade_display_df[
+            leading_cols + remaining_cols
+        ]
 
         st.caption(
             "Seleccioná un trade para inspeccionar "
