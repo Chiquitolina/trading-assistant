@@ -1563,111 +1563,127 @@ def render_bucket_robustness_explorer(
     # ALL TRADES
     # ==========================================
     with trades_tab:
-        preferred_cols = [
-            # Identidad
-            "trade_key",
-            "symbol",
-            "side",
-
-            # Timestamps
-            "compression_created_ts_dt",
-            "signal_ts_dt",
-            "breakout_ts_dt",
-            "entry_ready_ts_dt",
-            "entry_ts_dt",
-            "exit_ts_dt",
-
-            # Resultado
-            "pnl",
-            "exit_reason",
-            "leverage",
-            "pnl_unleveraged_pct",
-            "realized_r",
-
-            # Buckets seleccionados
-            first_bucket_col,
-            second_bucket_col,
-
-            # Precios
-            "signal_price",
-            "compression_high",
-            "compression_low",
-            "breakout_price",
-            "entry_ready_price",
-            "entry",
-            "real_entry",
-            "tp",
-            "sl",
-
-            # Distancias y riesgo
-            "entry_vs_compression_pct",
-            "real_entry_vs_compression_pct",
-            "entry_vs_breakout_pct",
-            "real_entry_vs_breakout_pct",
-            "real_entry_vs_ready_pct",
-            "signal_to_real_entry_pct",
-
-            "structural_risk_pct",
-            "structural_risk_bucket",
-            "planned_reward_pct",
-            "planned_rr",
-
-            # Breakout
-            "breakout_extension_atr",
-            "breakout_extension_pct",
-            "breakout_volume_ratio",
-
-            # Duraciones
-            "watch_to_breakout_minutes",
-            "breakout_to_ready_minutes",
-            "ready_to_entry_seconds",
-
-            # Compresión
-            "compression_shape",
-            "compression_quality_label",
-            "compression_score",
-            "trend_score",
-            "range_ratio",
-            "atr_ratio",
-            "volume_ratio",
-
-            # MFE / MAE
-            "max_favorable_pct",
-            "max_adverse_pct",
-
-            # BTC
-            "btc_corr_5m_1h",
-            "btc_beta_5m_1h",
-            "btc_r2_5m_1h",
-
-            # Configuración
-            "trigger_tf",
-            "strategy_mode",
-            "base_mode",
-            "selected_lookback",
-            "compression_base_lookback",
-        ]
-
-        available_cols = [
-            col for col in preferred_cols
-            if col in edge_df.columns
-        ]
-
+        # Ordenar los trades seleccionados.
         trade_detail_df = edge_df.sort_values(
-            "entry_datetime"
-            if edge_df["entry_datetime"].notna().any()
-            else "pnl",
+            (
+                "entry_datetime"
+                if (
+                    "entry_datetime" in edge_df.columns
+                    and edge_df["entry_datetime"].notna().any()
+                )
+                else "pnl"
+            ),
             ascending=False,
         )
 
+        # Mantiene todas las features con sus tipos originales
+        # para el Trade Inspector.
         inspector_source_df = (
             trade_detail_df
             .reset_index(drop=True)
+            .copy()
         )
 
-        trade_display_df = inspector_source_df[
-            available_cols
-        ].copy()
+        # La tabla visible parte del dataframe completo.
+        trade_display_df = inspector_source_df.copy()
+
+        # Ocultar solamente columnas auxiliares creadas internamente
+        # por Analyze selected buckets.
+        internal_helper_cols = [
+            "_first_bucket",
+            "_second_bucket",
+            "_bucket_key",
+            "is_win",
+            "entry_datetime",
+            "entry_date",
+            "entry_30m",
+        ]
+
+        trade_display_df = trade_display_df.drop(
+            columns=[
+                col
+                for col in internal_helper_cols
+                if col in trade_display_df.columns
+            ],
+            errors="ignore",
+        )
+
+        # Formatear timestamps solamente para visualización.
+        timestamp_pairs = [
+            ("compression_created_ts", "compression_created_ts_dt"),
+            ("signal_ts", "signal_ts_dt"),
+            ("breakout_ts", "breakout_ts_dt"),
+            ("entry_ready_ts", "entry_ready_ts_dt"),
+            ("entry_ts", "entry_ts_dt"),
+            ("exit_ts", "exit_ts_dt"),
+        ]
+
+        datetime_helper_cols = []
+
+        for raw_col, dt_col in timestamp_pairs:
+            if dt_col not in trade_display_df.columns:
+                continue
+
+            parsed_ts = pd.to_datetime(
+                trade_display_df[dt_col],
+                errors="coerce",
+                utc=True,
+            )
+
+            if raw_col in trade_display_df.columns:
+                trade_display_df[raw_col] = parsed_ts.dt.strftime(
+                    "%d-%m-%Y %H:%M"
+                )
+            else:
+                trade_display_df[dt_col] = parsed_ts.dt.strftime(
+                    "%d-%m-%Y %H:%M"
+                )
+
+            if (
+                raw_col in trade_display_df.columns
+                and dt_col != raw_col
+            ):
+                datetime_helper_cols.append(dt_col)
+
+        trade_display_df = trade_display_df.drop(
+            columns=datetime_helper_cols,
+            errors="ignore",
+        )
+
+        # Mover primero las columnas más importantes.
+        leading_cols = [
+            "trade_key",
+            "symbol",
+            "side",
+            "leverage",
+            "signal_ts",
+            "entry_ts",
+            "exit_ts",
+            "real_entry",
+            "real_exit",
+            "pnl",
+            "pnl_usd",
+            "fees",
+            "exit_reason",
+            first_bucket_col,
+            second_bucket_col,
+        ]
+
+        leading_cols = [
+            col
+            for col in dict.fromkeys(leading_cols)
+            if col in trade_display_df.columns
+        ]
+
+        remaining_cols = [
+            col
+            for col in trade_display_df.columns
+            if col not in leading_cols
+        ]
+
+        trade_display_df = trade_display_df[
+            leading_cols + remaining_cols
+        ]
 
         st.caption(
             "Seleccioná un trade para inspeccionar "
@@ -3271,6 +3287,7 @@ def add_compression_analytics_buckets(data: pd.DataFrame) -> pd.DataFrame:
         "entry_distance_pct",
         "entry_vs_compression_pct",
         "entry_vs_breakout_pct",
+        "entry_ready_vs_breakout_pct",
     ]
 
     for col in numeric_cols:
@@ -3704,6 +3721,46 @@ def add_compression_analytics_buckets(data: pd.DataFrame) -> pd.DataFrame:
     if "entry_vs_breakout_pct" in out.columns:
         out["entry_vs_breakout_bucket"] = pd.cut(
             out["entry_vs_breakout_pct"],
+            bins=[
+                -np.inf,
+                -1.00,
+                -0.50,
+                -0.25,
+                -0.10,
+                0,
+                0.10,
+                0.25,
+                0.50,
+                0.75,
+                1.00,
+                1.50,
+                2.00,
+                np.inf,
+            ],
+            labels=[
+                "< -1.00%",
+                "-1.00% - -0.50%",
+                "-0.50% - -0.25%",
+                "-0.25% - -0.10%",
+                "-0.10% - 0%",
+                "0% - 0.10%",
+                "0.10% - 0.25%",
+                "0.25% - 0.50%",
+                "0.50% - 0.75%",
+                "0.75% - 1.00%",
+                "1.00% - 1.50%",
+                "1.50% - 2.00%",
+                "> 2.00%",
+            ],
+        )
+        
+    # =========================
+    # ENTRY READY VS BREAKOUT
+    # Forward-safe: conocida antes de ejecutar
+    # =========================
+    if "entry_ready_vs_breakout_pct" in out.columns:
+        out["entry_ready_vs_breakout_bucket"] = pd.cut(
+            out["entry_ready_vs_breakout_pct"],
             bins=[
                 -np.inf,
                 -1.00,
@@ -4977,6 +5034,7 @@ df_raw = df.copy()
 compression_numeric_cols = [
     # Prices / execution
     "real_entry",
+    "entry_ready_price",
     "compression_high",
     "compression_low",
     "breakout_price",
@@ -5085,6 +5143,108 @@ if all(col in df_raw.columns for col in required_compression_cols):
 
     df_raw["entry_vs_compression_pct"] = df_raw["entry_vs_compression_pct"].round(4)
     df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
+    
+    df_raw["entry_vs_compression_pct"] = df_raw[
+        "entry_vs_compression_pct"
+    ].round(4)
+
+    df_raw["entry_vs_breakout_pct"] = df_raw[
+        "entry_vs_breakout_pct"
+    ].round(4)
+
+    # =========================
+    # FORWARD-SAFE ENTRY LOCATION
+    # =========================
+
+    required_forward_cols = [
+        "side",
+        "entry_ready_price",
+        "breakout_price",
+    ]
+
+    if all(
+        col in df_raw.columns
+        for col in required_forward_cols
+    ):
+        valid_forward_prices = (
+            df_raw["entry_ready_price"].notna()
+            & df_raw["breakout_price"].notna()
+            & df_raw["entry_ready_price"].gt(0)
+            & df_raw["breakout_price"].gt(0)
+        )
+
+        df_raw["entry_ready_vs_breakout_pct"] = np.nan
+
+        long_mask = (
+            valid_forward_prices
+            & df_raw["side"]
+            .astype(str)
+            .str.upper()
+            .eq("LONG")
+        )
+
+        short_mask = (
+            valid_forward_prices
+            & df_raw["side"]
+            .astype(str)
+            .str.upper()
+            .eq("SHORT")
+        )
+
+        df_raw.loc[
+            long_mask,
+            "entry_ready_vs_breakout_pct",
+        ] = (
+            (
+                df_raw.loc[
+                    long_mask,
+                    "entry_ready_price",
+                ]
+                - df_raw.loc[
+                    long_mask,
+                    "breakout_price",
+                ]
+            )
+            / df_raw.loc[
+                long_mask,
+                "breakout_price",
+            ]
+            * 100
+        )
+
+        df_raw.loc[
+            short_mask,
+            "entry_ready_vs_breakout_pct",
+        ] = (
+            (
+                df_raw.loc[
+                    short_mask,
+                    "breakout_price",
+                ]
+                - df_raw.loc[
+                    short_mask,
+                    "entry_ready_price",
+                ]
+            )
+            / df_raw.loc[
+                short_mask,
+                "breakout_price",
+            ]
+            * 100
+        )
+
+        df_raw["entry_ready_vs_breakout_pct"] = (
+            df_raw[
+                "entry_ready_vs_breakout_pct"
+            ].round(4)
+        )
+
+    else:
+        df_raw["entry_ready_vs_breakout_pct"] = np.nan
+
+    df_raw["late_entry"] = (
+        df_raw["entry_vs_compression_pct"] > 1.0
+    )
 
     df_raw["late_entry"] = df_raw["entry_vs_compression_pct"] > 1.0
     
@@ -5586,6 +5746,7 @@ if df_raw.empty:
     tab_execution,
     tab_compression_quality,
     tab_compression_analytics,
+    tab_compression_duration,
     tab_compression_outcomes,
     tab_compression_pipeline,
     tab_experiment_comparator,
@@ -5601,6 +5762,7 @@ if df_raw.empty:
     "⏱️ Execution Analysis",
     "🎯 Compression Entry Quality",
     "🔬 Compression Analytics",
+    "⏱️ Compression Duration",
     "🧬 Compression Outcomes",
     "Compression Pipeline",
     "🧪 Experiment Comparator",
@@ -11812,6 +11974,118 @@ with tab_compression_quality:
                 )
 
         st.markdown("---")
+                
+        # =========================
+        # BREAKOUT EXTENSION × ENTRY READY VS BREAKOUT
+        # =========================
+
+        st.markdown("---")
+
+        st.markdown(
+            "### 🧪 Breakout Extension % × Entry Ready vs Breakout %"
+        )
+
+        st.caption(
+            "Validación forward-safe. Usa el precio de ENTRY_READY, "
+            "conocido antes de enviar la orden, en lugar de real_entry."
+        )
+
+        forward_combo_cols = [
+            "breakout_extension_pct_bucket",
+            "entry_ready_vs_breakout_bucket",
+        ]
+
+        if not all(col in qdf.columns for col in forward_combo_cols):
+            missing_forward_cols = [
+                col
+                for col in forward_combo_cols
+                if col not in qdf.columns
+            ]
+
+            st.info(
+                "Missing forward bucket columns: "
+                f"{missing_forward_cols}"
+            )
+
+        else:
+            forward_valid_rows = qdf[
+                qdf["entry_ready_vs_breakout_pct"].notna()
+                & qdf["breakout_extension_pct"].notna()
+            ].copy()
+
+            st.caption(
+                f"Trades con métricas forward disponibles: "
+                f"{len(forward_valid_rows)} de {len(qdf)}"
+            )
+
+            if forward_valid_rows.empty:
+                st.info(
+                    "No hay trades con entry_ready_price y breakout_price válidos."
+                )
+
+            else:
+                max_forward_min_trades = min(
+                    30,
+                    len(forward_valid_rows),
+                )
+
+                if max_forward_min_trades <= 1:
+                    min_trades_forward_combo = 1
+                    st.caption(
+                        "Minimum trades fijado en 1 porque solo hay "
+                        "un trade disponible."
+                    )
+                else:
+                    min_trades_forward_combo = st.slider(
+                        "Minimum trades per forward combination",
+                        min_value=1,
+                        max_value=max_forward_min_trades,
+                        value=min(5, max_forward_min_trades),
+                        step=1,
+                        key="breakout_extension_entry_ready_min_trades",
+                    )
+
+                forward_combo_report = (
+                    build_compression_analytics_report(
+                        forward_valid_rows,
+                        forward_combo_cols,
+                        min_trades=min_trades_forward_combo,
+                    )
+                )
+
+                if forward_combo_report.empty:
+                    st.info(
+                        "No forward-safe combinations meet the "
+                        "minimum trade requirement."
+                    )
+
+                else:
+                    st.dataframe(
+                        forward_combo_report,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.caption(
+                        "Esta es la tabla que debe utilizarse para construir "
+                        "el filtro de la rama bucket-forward-v2."
+                    )
+
+                    forward_robustness_report = (
+                        forward_combo_report.rename(
+                            columns={"profit_factor": "pf"}
+                        )
+                    )
+
+                    render_bucket_robustness_explorer(
+                        source_df=forward_valid_rows,
+                        summary_df=forward_robustness_report,
+                        first_bucket_col="breakout_extension_pct_bucket",
+                        second_bucket_col="entry_ready_vs_breakout_bucket",
+                        first_bucket_label="Breakout Extension %",
+                        second_bucket_label="Entry Ready vs Breakout %",
+                        key_prefix="breakout_extension_entry_ready",
+                    )
 
         st.markdown("### Entry Distance from Compression")
 
@@ -13313,6 +13587,26 @@ with tab_compression_analytics:
                             "Ordenado por Profit Factor, PnL total, "
                             "Winrate y cantidad de trades."
                         )
+                        
+                        confluence_robustness_report = (
+                            confluence_report.rename(
+                                columns={"profit_factor": "pf"}
+                            )
+                        )
+
+                        render_bucket_robustness_explorer(
+                            source_df=analytics_df,
+                            summary_df=confluence_robustness_report,
+                            first_bucket_col=first_dimension,
+                            second_bucket_col=second_dimension,
+                            first_bucket_label=first_dimension_label,
+                            second_bucket_label=second_dimension_label,
+                            key_prefix=(
+                                "compression_confluence_"
+                                f"{first_dimension}_"
+                                f"{second_dimension}"
+                            ),
+                        )
 
             # =========================
             # THREE-WAY DISCOVERY
@@ -13434,6 +13728,761 @@ with tab_compression_analytics:
                     use_container_width=True,
                     hide_index=True,
                 )
+                
+with tab_compression_duration:
+
+    st.markdown("---")
+    st.subheader("⏱️ Compression Duration Analysis")
+
+    st.caption(
+        "Analiza Win Rate, Profit Factor, PnL, MFE y MAE "
+        "para cada duración exacta de compresión."
+    )
+
+    # ==================================================
+    # PREPARE DATA
+    # ==================================================
+    duration_df = (
+        add_compression_analytics_buckets_cached(
+            df_view
+        ).copy()
+    )
+
+    required_duration_cols = [
+        "compression_duration",
+        "pnl",
+    ]
+
+    missing_duration_cols = [
+        col
+        for col in required_duration_cols
+        if col not in duration_df.columns
+    ]
+
+    if missing_duration_cols:
+        st.info(
+            f"Missing duration columns: "
+            f"{missing_duration_cols}"
+        )
+
+    else:
+        duration_df["compression_duration"] = (
+            pd.to_numeric(
+                duration_df["compression_duration"],
+                errors="coerce",
+            )
+        )
+
+        duration_df["pnl"] = pd.to_numeric(
+            duration_df["pnl"],
+            errors="coerce",
+        )
+
+        for numeric_col in [
+            "pnl_usd",
+            "max_favorable_pct",
+            "max_adverse_pct",
+            "selected_lookback",
+        ]:
+            if numeric_col in duration_df.columns:
+                duration_df[numeric_col] = (
+                    pd.to_numeric(
+                        duration_df[numeric_col],
+                        errors="coerce",
+                    )
+                )
+
+        duration_df = duration_df.dropna(
+            subset=[
+                "compression_duration",
+                "pnl",
+            ]
+        ).copy()
+
+        if duration_df.empty:
+            st.info(
+                "There are no trades with "
+                "compression_duration inside the "
+                "selected date range."
+            )
+
+        else:
+            # ==========================================
+            # FILTERS
+            # ==========================================
+            f1, f2, f3 = st.columns(3)
+
+            with f1:
+                max_duration_min_trades = max(
+                    1,
+                    min(
+                        50,
+                        len(duration_df),
+                    ),
+                )
+
+                duration_min_trades = st.slider(
+                    "Minimum trades per duration",
+                    min_value=1,
+                    max_value=max_duration_min_trades,
+                    value=min(
+                        5,
+                        max_duration_min_trades,
+                    ),
+                    step=1,
+                    key="duration_analysis_min_trades",
+                )
+
+            with f2:
+                if "side" in duration_df.columns:
+                    duration_sides = sorted(
+                        duration_df["side"]
+                        .dropna()
+                        .astype(str)
+                        .str.upper()
+                        .unique()
+                        .tolist()
+                    )
+
+                    duration_selected_side = (
+                        st.selectbox(
+                            "Side",
+                            options=(
+                                ["ALL"]
+                                + duration_sides
+                            ),
+                            key=(
+                                "duration_analysis_"
+                                "side"
+                            ),
+                        )
+                    )
+
+                else:
+                    duration_selected_side = "ALL"
+
+            with f3:
+                if "symbol" in duration_df.columns:
+                    duration_symbols = sorted(
+                        duration_df["symbol"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+
+                    duration_selected_symbol = (
+                        st.selectbox(
+                            "Symbol",
+                            options=(
+                                ["ALL"]
+                                + duration_symbols
+                            ),
+                            key=(
+                                "duration_analysis_"
+                                "symbol"
+                            ),
+                        )
+                    )
+
+                else:
+                    duration_selected_symbol = "ALL"
+
+            duration_view_df = duration_df.copy()
+
+            if duration_selected_side != "ALL":
+                duration_view_df = duration_view_df[
+                    duration_view_df["side"]
+                    .astype(str)
+                    .str.upper()
+                    .eq(duration_selected_side)
+                ].copy()
+
+            if duration_selected_symbol != "ALL":
+                duration_view_df = duration_view_df[
+                    duration_view_df["symbol"]
+                    .astype(str)
+                    .eq(duration_selected_symbol)
+                ].copy()
+
+            # ==========================================
+            # OVERALL METRICS
+            # ==========================================
+            duration_all_pnl = (
+                duration_view_df["pnl"]
+                .dropna()
+            )
+
+            duration_total_trades = len(
+                duration_all_pnl
+            )
+
+            duration_total_wins = int(
+                (duration_all_pnl > 0).sum()
+            )
+
+            duration_total_losses = int(
+                (duration_all_pnl <= 0).sum()
+            )
+
+            duration_overall_wr = (
+                duration_total_wins
+                / duration_total_trades
+                * 100
+                if duration_total_trades > 0
+                else 0
+            )
+
+            duration_overall_pf = (
+                compression_profit_factor(
+                    duration_all_pnl
+                )
+            )
+
+            duration_unique_values = int(
+                duration_view_df[
+                    "compression_duration"
+                ]
+                .nunique()
+            )
+
+            om1, om2, om3, om4, om5, om6 = (
+                st.columns(6)
+            )
+
+            om1.metric(
+                "Trades",
+                duration_total_trades,
+            )
+
+            om2.metric(
+                "Wins",
+                duration_total_wins,
+            )
+
+            om3.metric(
+                "Losses",
+                duration_total_losses,
+            )
+
+            om4.metric(
+                "Win Rate",
+                f"{duration_overall_wr:.2f}%",
+            )
+
+            om5.metric(
+                "Profit Factor",
+                (
+                    f"{duration_overall_pf:.2f}"
+                    if duration_overall_pf
+                    is not None
+                    else "∞"
+                ),
+            )
+
+            om6.metric(
+                "Durations",
+                duration_unique_values,
+            )
+
+            # ==========================================
+            # DURATION VS SELECTED LOOKBACK
+            # ==========================================
+            if (
+                "selected_lookback"
+                in duration_view_df.columns
+            ):
+                comparable_duration_df = (
+                    duration_view_df.dropna(
+                        subset=[
+                            "compression_duration",
+                            "selected_lookback",
+                        ]
+                    )
+                )
+
+                comparable_duration_count = len(
+                    comparable_duration_df
+                )
+
+                same_duration_count = int(
+                    (
+                        comparable_duration_df[
+                            "compression_duration"
+                        ]
+                        ==
+                        comparable_duration_df[
+                            "selected_lookback"
+                        ]
+                    ).sum()
+                )
+
+                same_duration_pct = (
+                    same_duration_count
+                    / comparable_duration_count
+                    * 100
+                    if comparable_duration_count > 0
+                    else 0
+                )
+
+                with st.expander(
+                    "Duration vs selected lookback"
+                ):
+                    lc1, lc2, lc3 = st.columns(3)
+
+                    lc1.metric(
+                        "Comparable trades",
+                        comparable_duration_count,
+                    )
+
+                    lc2.metric(
+                        "Exact matches",
+                        same_duration_count,
+                    )
+
+                    lc3.metric(
+                        "Match rate",
+                        f"{same_duration_pct:.2f}%",
+                    )
+
+                    if (
+                        comparable_duration_count > 0
+                        and same_duration_count
+                        != comparable_duration_count
+                    ):
+                        st.warning(
+                            "compression_duration and "
+                            "selected_lookback are not "
+                            "always identical. This tab "
+                            "groups by compression_duration."
+                        )
+
+            # ==========================================
+            # PERFORMANCE BY EXACT DURATION
+            # ==========================================
+            st.markdown("---")
+            st.markdown(
+                "### Performance by exact duration"
+            )
+
+            st.caption(
+                "La duración se analiza por su valor "
+                "exacto: 10, 15, 20, 25, 30, etc."
+            )
+
+            duration_report = (
+                build_compression_analytics_report(
+                    duration_view_df,
+                    ["compression_duration"],
+                    min_trades=duration_min_trades,
+                )
+            )
+
+            if duration_report.empty:
+                st.info(
+                    "No duration has enough trades "
+                    "for the selected minimum."
+                )
+
+            else:
+                duration_report = (
+                    duration_report
+                    .sort_values(
+                        "compression_duration",
+                        ascending=True,
+                    )
+                    .reset_index(drop=True)
+                )
+
+                duration_report_event = (
+                    st.dataframe(
+                        duration_report,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "compression_duration_"
+                            "report"
+                        ),
+                        on_select="rerun",
+                        selection_mode="single-row",
+                    )
+                )
+
+                st.caption(
+                    "Seleccioná una duración para ver "
+                    "todos sus trades."
+                )
+
+                # ======================================
+                # SELECTED DURATION
+                # ======================================
+                selected_duration_rows = (
+                    duration_report_event
+                    .selection
+                    .rows
+                )
+
+                if selected_duration_rows:
+                    selected_duration_position = (
+                        selected_duration_rows[0]
+                    )
+
+                    selected_duration = (
+                        duration_report
+                        .iloc[
+                            selected_duration_position
+                        ][
+                            "compression_duration"
+                        ]
+                    )
+
+                    selected_duration_df = (
+                        duration_view_df[
+                            duration_view_df[
+                                "compression_duration"
+                            ]
+                            .eq(selected_duration)
+                        ]
+                        .copy()
+                    )
+
+                    selected_duration_pnl = (
+                        selected_duration_df[
+                            "pnl"
+                        ]
+                        .dropna()
+                    )
+
+                    selected_duration_wins = int(
+                        (
+                            selected_duration_pnl
+                            > 0
+                        ).sum()
+                    )
+
+                    selected_duration_losses = int(
+                        (
+                            selected_duration_pnl
+                            <= 0
+                        ).sum()
+                    )
+
+                    selected_duration_wr = (
+                        selected_duration_wins
+                        / len(
+                            selected_duration_pnl
+                        )
+                        * 100
+                        if len(
+                            selected_duration_pnl
+                        ) > 0
+                        else 0
+                    )
+
+                    selected_duration_pf = (
+                        compression_profit_factor(
+                            selected_duration_pnl
+                        )
+                    )
+
+                    selected_duration_avg = (
+                        selected_duration_pnl.mean()
+                        if not
+                        selected_duration_pnl.empty
+                        else 0
+                    )
+
+                    selected_duration_total = (
+                        selected_duration_pnl.sum()
+                        if not
+                        selected_duration_pnl.empty
+                        else 0
+                    )
+
+                    st.markdown(
+                        f"### Duration "
+                        f"{selected_duration:g}"
+                    )
+
+                    dm1, dm2, dm3 = st.columns(3)
+
+                    dm1.metric(
+                        "Trades",
+                        len(
+                            selected_duration_pnl
+                        ),
+                    )
+
+                    dm2.metric(
+                        "Wins / Losses",
+                        (
+                            f"{selected_duration_wins}"
+                            f" / "
+                            f"{selected_duration_losses}"
+                        ),
+                    )
+
+                    dm3.metric(
+                        "Win Rate",
+                        (
+                            f"{selected_duration_wr:.2f}%"
+                        ),
+                    )
+
+                    dm4, dm5, dm6 = st.columns(3)
+
+                    dm4.metric(
+                        "Profit Factor",
+                        (
+                            f"{selected_duration_pf:.2f}"
+                            if selected_duration_pf
+                            is not None
+                            else "∞"
+                        ),
+                    )
+
+                    dm5.metric(
+                        "Average PnL",
+                        (
+                            f"{selected_duration_avg:.4f}%"
+                        ),
+                    )
+
+                    dm6.metric(
+                        "Total PnL",
+                        (
+                            f"{selected_duration_total:.4f}%"
+                        ),
+                    )
+
+                    # ==================================
+                    # SORT TRADES
+                    # ==================================
+                    duration_sort_col = None
+
+                    for candidate_col in [
+                        "entry_ts_dt",
+                        "entry_ts",
+                        "signal_ts_dt",
+                        "signal_ts",
+                    ]:
+                        if (
+                            candidate_col
+                            in selected_duration_df.columns
+                        ):
+                            duration_sort_col = (
+                                candidate_col
+                            )
+                            break
+
+                    if duration_sort_col is not None:
+                        selected_duration_df = (
+                            selected_duration_df
+                            .sort_values(
+                                duration_sort_col,
+                                ascending=False,
+                            )
+                        )
+
+                    duration_inspector_source_df = (
+                        selected_duration_df
+                        .reset_index(drop=True)
+                        .copy()
+                    )
+
+                    # ==================================
+                    # FULL FEATURES TABLE
+                    # ==================================
+                    duration_trade_display_df = (
+                        duration_inspector_source_df
+                        .copy()
+                    )
+
+                    duration_internal_cols = [
+                        "_first_bucket",
+                        "_second_bucket",
+                        "_bucket_key",
+                        "entry_datetime",
+                        "entry_date",
+                        "entry_30m",
+                        "is_win",
+                    ]
+
+                    duration_trade_display_df = (
+                        duration_trade_display_df
+                        .drop(
+                            columns=[
+                                col
+                                for col
+                                in duration_internal_cols
+                                if col
+                                in duration_trade_display_df
+                                .columns
+                            ],
+                            errors="ignore",
+                        )
+                    )
+
+                    # Columnas importantes primero.
+                    duration_leading_cols = [
+                        "trade_key",
+                        "symbol",
+                        "side",
+                        "leverage",
+
+                        "signal_ts",
+                        "entry_ts",
+                        "exit_ts",
+
+                        "compression_duration",
+                        "selected_lookback",
+                        "compression_base_lookback",
+
+                        "pnl",
+                        "pnl_usd",
+                        "fees",
+                        "exit_reason",
+
+                        "compression_shape",
+                        "compression_quality_label",
+                        "compression_score",
+                        "trend_score",
+
+                        "compression_height_pct",
+                        "compression_range_pct",
+                        "range_ratio",
+                        "atr_ratio",
+                        "volume_ratio",
+                        "avg_body_pct",
+
+                        "touches_high",
+                        "touches_low",
+                        "inside_ratio",
+                        "upper_slope",
+                        "lower_slope",
+                        "slope_difference",
+
+                        "breakout_extension_pct",
+                        "breakout_extension_atr",
+                        "breakout_volume_ratio",
+
+                        "entry_vs_compression_pct",
+                        "entry_vs_breakout_pct",
+                        "entry_ready_vs_breakout_pct",
+
+                        "structural_risk_pct",
+                        "planned_rr",
+
+                        "max_favorable_pct",
+                        "max_adverse_pct",
+                    ]
+
+                    duration_leading_cols = [
+                        col
+                        for col
+                        in dict.fromkeys(
+                            duration_leading_cols
+                        )
+                        if col
+                        in duration_trade_display_df
+                        .columns
+                    ]
+
+                    duration_remaining_cols = [
+                        col
+                        for col
+                        in duration_trade_display_df
+                        .columns
+                        if col
+                        not in duration_leading_cols
+                    ]
+
+                    duration_trade_display_df = (
+                        duration_trade_display_df[
+                            duration_leading_cols
+                            + duration_remaining_cols
+                        ]
+                    )
+
+                    st.markdown(
+                        "### Trades from selected duration"
+                    )
+
+                    st.caption(
+                        "La tabla contiene todas las "
+                        "features disponibles. Seleccioná "
+                        "un trade para abrir el inspector."
+                    )
+
+                    duration_trade_event = (
+                        st.dataframe(
+                            duration_trade_display_df,
+                            use_container_width=True,
+                            hide_index=True,
+                            key=(
+                                "compression_duration_"
+                                "trade_selector"
+                            ),
+                            on_select="rerun",
+                            selection_mode=(
+                                "single-row"
+                            ),
+                        )
+                    )
+
+                    # ==================================
+                    # TRADE INSPECTOR
+                    # ==================================
+                    selected_duration_trade_rows = (
+                        duration_trade_event
+                        .selection
+                        .rows
+                    )
+
+                    if selected_duration_trade_rows:
+                        selected_trade_position = (
+                            selected_duration_trade_rows[
+                                0
+                            ]
+                        )
+
+                        selected_duration_trade = (
+                            duration_inspector_source_df
+                            .iloc[
+                                selected_trade_position
+                            ]
+                        )
+
+                        selected_duration_trade_key = (
+                            selected_duration_trade
+                            .get(
+                                "trade_key",
+                                selected_trade_position,
+                            )
+                        )
+
+                        st.markdown(
+                            "### Trade Inspector"
+                        )
+
+                        render_trade_inspector_for_row(
+                            row=(
+                                selected_duration_trade
+                            ),
+                            status="CLOSED",
+                            key_prefix=(
+                                "compression_duration_"
+                                + str(
+                                    selected_duration_trade_key
+                                )
+                            ),
+                        )
+
+                else:
+                    st.info(
+                        "Seleccioná una fila de la tabla "
+                        "para inspeccionar esa duración."
+                    )
     
 with tab_compression_pipeline:
     st.subheader("Compression Pipeline")
