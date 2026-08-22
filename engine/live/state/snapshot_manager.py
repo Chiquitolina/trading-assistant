@@ -50,3 +50,15 @@ class SnapshotManager:
 
         if path.exists():
             path.unlink()
+
+    def save_bucket_pending(self, data: dict[str, Any]):
+        self.save("_bucket_v2_pending", data)
+
+    def load_bucket_pending(self) -> dict[str, Any] | None:
+        return self.load("_bucket_v2_pending")
+
+    def save_position(self, position):
+        self.save(position.symbol, {
+            "snapshot_version": 2,
+            "position": position.to_dict(),
+        })

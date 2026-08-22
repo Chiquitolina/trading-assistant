@@ -13,6 +13,9 @@ from binance.exceptions import BinanceAPIException
 from engine.live.execution.order_executor import OrderExecutor
 from engine.live.state.snapshot_manager import SnapshotManager
 from config.strategies.v1 import SYMBOLS, MAX_GLOBAL_POSITIONS
+from models.execution_variant import ExecutionVariant
+from engine.live.execution.leg_protection import LegProtectionManager
+from engine.live.execution.bucket_execution_service import BucketExecutionService
 
 class ExecutionEngine:
 
@@ -36,6 +39,8 @@ class ExecutionEngine:
         self.order_executor = OrderExecutor(exchange)
         self.strategy = strategy
         self.positions: dict[str, Position] = {}
+        self.leg_protection_manager = LegProtectionManager(self.exchange, self.risk_manager)
+        self.bucket_execution = BucketExecutionService(self, self.leg_protection_manager)
         self.max_global_positions = MAX_GLOBAL_POSITIONS
         self.opening_position = False
         self.last_global_entry_ts = 0
@@ -836,6 +841,10 @@ class ExecutionEngine:
         return time.perf_counter()
 
     def open_position(self, plan, leverage: int = 5):
+        if getattr(plan, "execution_variant", None) in {
+            ExecutionVariant.BUCKET_V1, ExecutionVariant.BUCKET_V2,
+        }:
+            return self.bucket_execution.execute(plan)
         
         started = time.perf_counter()
         t = started
@@ -2094,6 +2103,29 @@ class ExecutionEngine:
 
             return
 
+        if snapshot.get("snapshot_version") == 2:
+            restored = Position.from_dict(snapshot["position"])
+            if restored.execution_variant is ExecutionVariant.LEGACY_UNKNOWN:
+                restored.entry_legs = restored.entry_legs[:1]
+            restored.quantity = abs(float(exchange_state["quantity"]))
+            restored.real_entry = float(exchange_state["entry_price"])
+            restored.validate_entry_legs()
+            try:
+                for leg in restored.entry_legs:
+                    if leg.remaining_quantity > 0:
+                        self.leg_protection_manager.verify_leg(leg)
+                self.leg_protection_manager.verify_position(restored)
+            except Exception as exc:
+                print(f"[BUCKET RESTORE] unsafe protection: {exc}; closing position")
+                close_side = "SELL" if restored.side == "LONG" else "BUY"
+                self.exchange.close_position(symbol, close_side, restored.quantity)
+                self.order_executor.cancel_all(symbol)
+                self.snapshot_manager.clear(symbol)
+                return
+            self.positions[symbol] = restored
+            self.position = restored
+            return
+
         position_data = snapshot.get("position", {})
         context = snapshot.get("context", {})
                 
@@ -2366,6 +2398,11 @@ class ExecutionEngine:
             ),
 
             signal_context=context,
+            execution_variant=ExecutionVariant.LEGACY_UNKNOWN,
+            aggregate_position_id=(
+                position_data.get("aggregate_position_id")
+                or f"legacy:{symbol}:{position_data.get('entry_ts', 'unknown')}"
+            ),
 
             # ==========================
             # CURRENT CONTEXT

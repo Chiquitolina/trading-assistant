@@ -19,7 +19,8 @@ class PositionSizer:
     def _round_down_step(self, quantity):
         return math.floor(quantity / self.qty_step) * self.qty_step
 
-    def calculate(self, total_balance, price, leverage, open_positions_count=0):
+    def calculate(self, total_balance, price, leverage, open_positions_count=0,
+                  size_fraction=1.0, fixed_max_positions=None):
         total_balance = float(total_balance)
         price = float(price)
         leverage = float(leverage)
@@ -30,9 +31,10 @@ class PositionSizer:
             (total_usable_margin * leverage) / self.min_notional
         )
 
+        configured_max = self.max_positions if fixed_max_positions is None else int(fixed_max_positions)
         effective_max_positions = max(
             1,
-            min(self.max_positions, possible_positions)
+            min(configured_max, possible_positions)
         )
 
         if open_positions_count >= effective_max_positions:
@@ -47,7 +49,11 @@ class PositionSizer:
             }
 
         slot_margin = total_usable_margin / effective_max_positions
-        raw_notional = slot_margin * leverage
+        size_fraction = float(size_fraction)
+        if not 0 < size_fraction <= 1:
+            raise ValueError("size_fraction must be in (0, 1]")
+        leg_margin = slot_margin * size_fraction
+        raw_notional = leg_margin * leverage
 
         quantity = raw_notional / price
         quantity = self._round_down_step(quantity)
@@ -61,6 +67,8 @@ class PositionSizer:
             "required_margin": float(required_margin),
             "usable_balance": float(total_usable_margin),
             "slot_margin": float(slot_margin),
+            "leg_margin": float(leg_margin),
+            "size_fraction": size_fraction,
             "open_positions_count": int(open_positions_count),
             "max_positions": int(effective_max_positions),
         }

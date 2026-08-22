@@ -174,6 +174,34 @@ class BinanceExchange(BaseExchange):
             print(f"❌ Error obteniendo open orders | symbol={symbol} | error={e}")
             return []
 
+    def get_all_protective_orders(self, symbol: str):
+        orders = list(self.get_open_orders(symbol) or [])
+        try:
+            algo_orders = self.client.futures_get_open_algo_orders(symbol=symbol) or []
+        except Exception:
+            algo_orders = []
+        for order in algo_orders:
+            normalized = dict(order)
+            normalized["orderId"] = order.get("orderId") or order.get("algoId")
+            normalized["type"] = order.get("type") or order.get("orderType")
+            normalized["origQty"] = order.get("origQty") or order.get("quantity")
+            normalized["reduceOnly"] = order.get("reduceOnly", True)
+            orders.append(normalized)
+        return orders
+
+    def cancel_protective_order(self, symbol: str, order_id):
+        try:
+            result = self.cancel_order(symbol, order_id)
+            if result is not None:
+                return result
+        except Exception:
+            pass
+        return self._safe_request(
+            self.client.futures_cancel_algo_order,
+            symbol=symbol,
+            algoId=order_id,
+        )
+
     def get_position(self, symbol: str):
 
         try:

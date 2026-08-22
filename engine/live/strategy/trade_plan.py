@@ -1,5 +1,7 @@
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, Any
+from models.execution_variant import ExecutionVariant
 
 
 def fmt_price(price):
@@ -39,6 +41,33 @@ class TradePlan:
     signal_context: Dict[str, Any] = field(default_factory=dict)
 
     max_hold_candles: int = 10
+    execution_variant: ExecutionVariant | None = None
+    setup_id: str | None = None
+    signal_reason: str | None = None
+    arm_reason: str | None = None
+    execution_reason: str | None = None
+    size_fraction: float = 1.0
+    aggregate_position_id: str | None = None
+
+    def __post_init__(self):
+        self.execution_variant = ExecutionVariant.parse(self.execution_variant)
+        self.signal_context = deepcopy(self.signal_context or {})
+
+    @property
+    def deduplication_key(self):
+        if self.execution_variant is None or self.setup_id is None:
+            return None
+        return self.symbol, self.execution_variant, self.setup_id
+
+    def to_dict(self):
+        data = deepcopy(self.__dict__)
+        if self.execution_variant is not None:
+            data["execution_variant"] = self.execution_variant.value
+        return data
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**deepcopy(data))
 
     def pretty(self):
         ctx = self.signal_context or {}

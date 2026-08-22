@@ -325,6 +325,15 @@ SYMBOLS = [
 
 MAX_GLOBAL_POSITIONS = 20
 
+BUCKET_EXECUTION = {
+    "leverage": 10,
+    "total_usage_pct": 0.30,
+    "buffer": 0.90,
+    "max_unique_symbols": 2,
+    "max_legs_per_symbol": 2,
+    "size_fraction": 0.50,
+}
+
 BACKTEST = {
     "days": 100,
     "lookahead": 1,

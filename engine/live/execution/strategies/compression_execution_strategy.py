@@ -184,6 +184,9 @@ class CompressionExecutionStrategy(
         trade_action,
         plan,
     ):
+        if getattr(plan, "execution_variant", None) is not None:
+            return execution_engine.open_position(plan)
+
         pos = execution_engine.get_position(
             plan.symbol
         )

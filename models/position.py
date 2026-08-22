@@ -1,5 +1,8 @@
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
 from typing import Optional
+from models.entry_leg import EntryLeg
+from models.execution_variant import ExecutionVariant
 
 
 @dataclass
@@ -76,5 +79,80 @@ class Position:
     
     strategy_mode: Optional[str] = None
     router_reason: Optional[str] = None
-    
-    
+    aggregate_position_id: Optional[str] = None
+    execution_variant: Optional[ExecutionVariant] = None
+    execution_reasons: list[str] = field(default_factory=list)
+    entry_legs: list[EntryLeg] = field(default_factory=list)
+    position_increased: bool = False
+    ever_combined: bool = False
+    overlapped_with_other_leg: bool = False
+
+    def __post_init__(self):
+        self.execution_variant = ExecutionVariant.parse(self.execution_variant)
+        self.signal_context = deepcopy(self.signal_context or {})
+        self.execution_reasons = list(self.execution_reasons or [])
+        self.entry_legs = [leg if isinstance(leg, EntryLeg) else EntryLeg.from_dict(leg) for leg in (self.entry_legs or [])]
+        self.refresh_aggregate_identity()
+
+    def validate_entry_legs(self):
+        if not self.entry_legs:
+            return
+        if not self.aggregate_position_id:
+            raise ValueError("Position with entry legs requires aggregate_position_id")
+        if {leg.symbol for leg in self.entry_legs} != {self.symbol}:
+            raise ValueError("Position contains legs from different symbols")
+        if {leg.aggregate_position_id for leg in self.entry_legs} != {self.aggregate_position_id}:
+            raise ValueError("Position contains legs from different aggregate positions")
+        leg_ids = [leg.leg_id for leg in self.entry_legs]
+        keys = [leg.deduplication_key for leg in self.entry_legs]
+        if len(leg_ids) != len(set(leg_ids)):
+            raise ValueError("Position contains duplicate leg_id values")
+        if len(keys) != len(set(keys)):
+            raise ValueError("Position contains duplicate entry leg setups")
+
+    def add_entry_leg(self, new_leg: EntryLeg):
+        self.validate_entry_legs()
+        if new_leg.symbol != self.symbol:
+            raise ValueError("EntryLeg symbol does not match Position symbol")
+        if new_leg.aggregate_position_id != self.aggregate_position_id:
+            raise ValueError("EntryLeg aggregate_position_id does not match Position")
+        if any(leg.leg_id == new_leg.leg_id for leg in self.entry_legs):
+            raise ValueError("Duplicate leg_id")
+        if any(leg.deduplication_key == new_leg.deduplication_key for leg in self.entry_legs):
+            raise ValueError("Duplicate entry leg setup")
+        open_legs = [leg for leg in self.entry_legs if leg.remaining_quantity > 0]
+        if self.entry_legs and not open_legs:
+            raise ValueError("Cannot add a leg to a flat aggregate position")
+        self.entry_legs.append(new_leg)
+        if open_legs:
+            self.position_increased = self.ever_combined = True
+            self.overlapped_with_other_leg = True
+            new_leg.ever_combined = new_leg.overlapped_with_other_leg = True
+            for leg in open_legs:
+                leg.ever_combined = leg.overlapped_with_other_leg = True
+        self.refresh_aggregate_identity()
+
+    def refresh_aggregate_identity(self):
+        self.validate_entry_legs()
+        variants = {leg.variant for leg in self.entry_legs}
+        if {ExecutionVariant.BUCKET_V1, ExecutionVariant.BUCKET_V2}.issubset(variants):
+            self.execution_variant = ExecutionVariant.BUCKET_V1_V2
+        elif len(variants) == 1:
+            self.execution_variant = next(iter(variants))
+        if len(self.entry_legs) > 1:
+            self.position_increased = self.ever_combined = True
+            for leg in self.entry_legs:
+                leg.ever_combined = True
+        self.execution_reasons = list(dict.fromkeys(leg.execution_reason for leg in self.entry_legs))
+
+    def to_dict(self):
+        data = asdict(self)
+        data["execution_variant"] = self.execution_variant.value if self.execution_variant else None
+        data["entry_legs"] = [leg.to_dict() for leg in self.entry_legs]
+        return data
+
+    @classmethod
+    def from_dict(cls, data):
+        values = deepcopy(data)
+        values["entry_legs"] = [EntryLeg.from_dict(x) for x in values.get("entry_legs", [])]
+        return cls(**values)

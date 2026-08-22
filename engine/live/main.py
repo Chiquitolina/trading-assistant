@@ -22,6 +22,9 @@ from signals.snapshots.signal_compression_snapshot_builder import SignalCompress
 from engine.live.snapshots.compression_snapshot_manager import CompressionSnapshotManager
 
 from engine.live.strategy.modes.compression_strategy import CompressionStrategy
+from engine.live.strategy.modes.bucket_pipeline_coordinator import BucketPipelineCoordinator
+from engine.live.execution.pending_entries.bucket_touch_entry_manager import BucketTouchEntryManager
+from models.execution_variant import ExecutionVariant
 from engine.live.execution.strategies.compression_execution_strategy import CompressionExecutionStrategy
 
 from engine.live.position.position_manager import PositionManager
@@ -283,6 +286,11 @@ plan_selection_manager = PlanSelectionManager(
     max_selected_per_window=MAX_SELECTED_PLANS_PER_WINDOW,
     minimum_score=None,
 )
+v2_plan_selection_manager = PlanSelectionManager(
+    scorer=candidate_scorer,
+    max_selected_per_window=MAX_SELECTED_PLANS_PER_WINDOW,
+    minimum_score=None,
+)
 
 trade_manager = TradeManager(
     buffer,
@@ -333,7 +341,7 @@ compression_snapshot_manager = CompressionSnapshotManager()
 
 compression_watch_journal = CompressionWatchJournal()
 
-compression_strategy = CompressionStrategy(
+compression_strategy = BucketPipelineCoordinator(
     buffer=buffer,
     journal=compression_watch_journal,
     max_watch_candles=8,
@@ -343,6 +351,21 @@ compression_strategy = CompressionStrategy(
     entry_vs_breakout_min_pct=-0.25,
     entry_vs_breakout_max_pct=0.00,
 )
+
+bucket_touch_manager = BucketTouchEntryManager(
+    on_change=execution.snapshot_manager.save_bucket_pending,
+)
+execution.bucket_touch_manager = bucket_touch_manager
+pending_snapshot = execution.snapshot_manager.load_bucket_pending()
+if pending_snapshot:
+    from engine.live.strategy.trade_plan import TradePlan
+    bucket_touch_manager.restore(
+        pending_snapshot.get("active", []),
+        plan_loader=TradePlan.from_dict,
+        history_items=pending_snapshot.get("history", []),
+    )
+if STRATEGY_MODE != "compression":
+    bucket_touch_manager.shutdown()
 
 # =========================================================
 # STATUS DEFAULT
@@ -525,7 +548,43 @@ try:
         # PRICE UPDATE
         # =================================================
 
+        if STRATEGY_MODE == "compression":
+            for pending_symbol in bucket_touch_manager.symbols():
+                pending_price = buffer.last_price(pending_symbol)
+                pending_timestamp = buffer.last_timestamp(pending_symbol)
+                if pending_price is None or pending_timestamp is None:
+                    continue
+                triggered = bucket_touch_manager.evaluate_price(
+                    pending_symbol, pending_price, pending_timestamp,
+                )
+                if triggered is None:
+                    continue
+                try:
+                    executed = execution_strategy.on_signal(
+                        execution, triggered.trade_action, triggered.plan,
+                    )
+                    if executed:
+                        bucket_touch_manager.mark_executed(pending_symbol)
+                    else:
+                        bucket_touch_manager.mark_failed(
+                            pending_symbol, "execution_strategy_rejected",
+                        )
+                except Exception as exc:
+                    bucket_touch_manager.mark_failed(
+                        pending_symbol, f"execution_error:{exc}",
+                    )
+
         for pos_symbol in list(execution.positions.keys()):
+
+            if execution.positions[pos_symbol].entry_legs:
+                execution.bucket_execution.reconcile_fills(pos_symbol)
+                if pos_symbol in execution.bucket_execution.manual_closed_symbols:
+                    bucket_touch_manager.cancel(
+                        pos_symbol, "FAILED", "manual_close_no_reopen",
+                    )
+                    execution.bucket_execution.manual_closed_symbols.discard(pos_symbol)
+                if pos_symbol not in execution.positions:
+                    continue
 
             price = buffer.last_price(pos_symbol)
             timestamp = buffer.last_timestamp(pos_symbol)
@@ -725,7 +784,7 @@ try:
                 
                 if STRATEGY_MODE == "compression":
 
-                    compression_result = compression_strategy.evaluate(
+                    pipeline_results = compression_strategy.evaluate(
                         symbol=symbol,
                         signal=signal,
                         tf=TRIGGER_TF,
@@ -733,8 +792,29 @@ try:
                         current_position=execution.get_position(symbol),
                     )
 
-                    trade_action = compression_result.trade_action
-                    compression_signal_context = compression_result.signal_context
+                    v1_result = pipeline_results[0].result
+                    v2_result = pipeline_results[1].result
+                    trade_action = v1_result.trade_action
+                    compression_signal_context = v1_result.signal_context
+
+                    if v2_result.trade_action.action != Action.HOLD:
+                        v2_plan = entry_engine.generate_entry(v2_result.trade_action)
+                        if v2_plan:
+                            v2_plan.signal_context = {
+                                **(v2_plan.signal_context or {}),
+                                **(v2_result.signal_context or {}),
+                            }
+                            v2_plan.execution_variant = ExecutionVariant.BUCKET_V2
+                            v2_plan.setup_id = v2_result.trade_action.setup_id
+                            v2_plan.signal_reason = "compression_breakout"
+                            v2_plan.arm_reason = "bucket_v2_compression_breakout_armed"
+                            v2_plan.execution_reason = "bucket_v2_retrace_band_triggered"
+                            v2_plan.size_fraction = 0.50
+                            v2_plan_selection_manager.add_plan(
+                                plan=v2_plan,
+                                trade_action=v2_result.trade_action,
+                                window_id=int(closed_candle_ts),
+                            )
 
                 else:
                     trade_action = strategy_router.evaluate(
@@ -841,6 +921,14 @@ try:
                         **(plan.signal_context or {}),
                         **compression_signal_context,
                     }
+                    plan.execution_variant = ExecutionVariant.BUCKET_V1
+                    plan.setup_id = (
+                        f"{symbol}:{plan.signal_context.get('compression_created_ts')}:"
+                        f"{plan.signal_context.get('breakout_ts')}"
+                    )
+                    plan.signal_reason = "moderate_breakout_retrace_entry_ready"
+                    plan.execution_reason = "bucket_v1_moderate_breakout_retrace_entry_ready"
+                    plan.size_fraction = 0.50
                     
                 if STRATEGY_MODE == "compression":
                     management_ok = (
@@ -977,6 +1065,19 @@ try:
             # RESOLVE SELECTION WINDOWS
             # =========================================================
 
+            for v2_window_id in sorted(v2_plan_selection_manager.pending_window_ids()):
+                selected_v2, _ = v2_plan_selection_manager.resolve_window(v2_window_id)
+                for v2_candidate in selected_v2:
+                    armed_timestamp = buffer.last_timestamp(v2_candidate.symbol)
+                    if armed_timestamp is None:
+                        armed_timestamp = int(time.time() * 1000)
+                    if not bucket_touch_manager.arm(
+                        plan=v2_candidate.plan,
+                        trade_action=v2_candidate.trade_action,
+                        timestamp=armed_timestamp,
+                    ):
+                        v2_candidate.reject("bucket_v2_not_armed")
+
             pending_window_ids = (
                 plan_selection_manager.pending_window_ids()
             )
@@ -1007,7 +1108,12 @@ try:
                         )
                         continue
 
-                    if not execution.can_open_position(symbol):
+                    bucket_increase = (
+                        getattr(plan, "execution_variant", None)
+                        in {ExecutionVariant.BUCKET_V1, ExecutionVariant.BUCKET_V2}
+                        and execution.get_position(symbol) is not None
+                    )
+                    if not bucket_increase and not execution.can_open_position(symbol):
                         candidate.reject("cannot_open_position")
 
                         print(
@@ -1110,6 +1216,9 @@ try:
 # =========================================================
 
 except KeyboardInterrupt:
+
+    if STRATEGY_MODE == "compression":
+        bucket_touch_manager.shutdown()
 
     ws.stop()
 
