@@ -86,6 +86,10 @@ class Position:
     position_increased: bool = False
     ever_combined: bool = False
     overlapped_with_other_leg: bool = False
+    reconciliation_status: str = "READY"
+    reconciliation_attempts: int = 0
+    next_reconciliation_ts: float = 0.0
+    last_reconciliation_error: Optional[str] = None
 
     def __post_init__(self):
         self.execution_variant = ExecutionVariant.parse(self.execution_variant)

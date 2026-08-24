@@ -21,7 +21,11 @@ class Exchange:
         self.orders[oid] = {"orderId": oid, "origQty": quantity, "executedQty": 0,
                             "reduceOnly": True, "type": kind}
         return self.orders[oid]
-    def place_stop_loss(self, symbol, side, quantity, stop_price, price_rounding): return self._place(quantity, "STOP_MARKET")
+    def place_stop_loss(self, symbol, side, quantity, stop_price, price_rounding, client_algo_id=None):
+        order = self._place(quantity, "STOP_MARKET")
+        order["algoId"] = order.pop("orderId")
+        order["clientAlgoId"] = client_algo_id
+        return order
     def place_take_profit_limit(self, symbol, side, quantity, price, price_rounding): return self._place(quantity, "LIMIT")
     def get_open_orders(self, symbol): return [x for k, x in self.orders.items() if k not in self.cancelled]
     def cancel_order(self, symbol, order_id): self.cancelled.append(order_id)
@@ -54,7 +58,7 @@ def test_virtual_oco_full_fill_cancels_sibling_idempotently():
     position = SimpleNamespace(entry_legs=[entry_leg], quantity=1)
     fill = {"id": "fill-1", "order_id": entry_leg.tp_order_id, "quantity": 1}
     assert manager.process_fill(position, entry_leg, fill)
-    assert entry_leg.sl_order_id in exchange.cancelled and position.quantity == 0
+    assert entry_leg.sl_algo_id in exchange.cancelled and position.quantity == 0
     assert not manager.process_fill(position, entry_leg, fill)
 
 
@@ -64,7 +68,8 @@ def test_virtual_oco_partial_fill_reduces_leg_before_sibling_replacement():
     entry_leg = leg(); manager.place(entry_leg, item)
     original_tp_id = entry_leg.tp_order_id
     position = SimpleNamespace(entry_legs=[entry_leg], quantity=1)
-    fill = {"id": "fill-1", "order_id": entry_leg.sl_order_id, "quantity": .4}
+    entry_leg.sl_materialized_order_id = 42
+    fill = {"id": "fill-1", "order_id": 42, "quantity": .4}
     assert manager.process_fill(position, entry_leg, fill)
     assert entry_leg.remaining_quantity == pytest.approx(.6)
     assert original_tp_id in exchange.cancelled
@@ -76,7 +81,8 @@ def test_virtual_oco_racing_sibling_fills_are_capped_and_idempotent():
     exchange = Exchange(); manager = LegProtectionManager(exchange, RiskManager())
     entry_leg = leg(); manager.place(entry_leg, item)
     position = SimpleNamespace(entry_legs=[entry_leg], quantity=1)
-    tp_id, sl_id = entry_leg.tp_order_id, entry_leg.sl_order_id
+    entry_leg.sl_materialized_order_id = 42
+    tp_id, sl_id = entry_leg.tp_order_id, entry_leg.sl_materialized_order_id
     assert manager.process_fill(position, entry_leg, {
         "id": "tp-race", "order_id": tp_id, "quantity": .7, "price": 101.2,
     })

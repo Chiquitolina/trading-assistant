@@ -66,6 +66,17 @@ class TradeJournal:
                 for key in new_headers
             })
 
+    def _contains_leg(self, leg_id, recovery_key=None):
+        if not os.path.exists(self.file_path):
+            return False
+        with open(self.file_path, "r", newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if leg_id and row.get("leg_id") == str(leg_id):
+                    return True
+                if recovery_key and row.get("recovery_key") == str(recovery_key):
+                    return True
+        return False
+
     def log_leg(self, position, leg):
         if leg.remaining_quantity > 1e-9:
             raise ValueError("cannot journal an open or partially open leg")
@@ -73,6 +84,8 @@ class TradeJournal:
         quantity_closed = sum(float(x["quantity"]) for x in fills) or leg.closed_quantity
         if quantity_closed <= 0:
             raise ValueError("closed leg has no closed quantity")
+        if self._contains_leg(leg.leg_id, leg.recovery_key):
+            return False
         real_exit = sum(float(x["price"]) * float(x["quantity"]) for x in fills) / quantity_closed
         direction = 1 if position.side == "LONG" else -1
         gross_pnl = direction * (real_exit - leg.real_entry) * quantity_closed
@@ -92,4 +105,6 @@ class TradeJournal:
             position_increased=position.position_increased,
             ever_combined=leg.ever_combined,
             overlapped_with_other_leg=leg.overlapped_with_other_leg,
+            recovery_key=leg.recovery_key,
         )
+        return True

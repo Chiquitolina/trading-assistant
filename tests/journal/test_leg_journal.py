@@ -38,3 +38,23 @@ def test_combined_position_writes_two_rows_with_shared_aggregate_id(tmp_path):
     assert len(rows) == 2
     assert {row["execution_variant"] for row in rows} == {"BUCKET_V1", "BUCKET_V2"}
     assert {row["aggregate_position_id"] for row in rows} == {"agg-1"}
+
+
+def test_journal_is_idempotent_by_leg_id_and_recovery_key(tmp_path):
+    path = tmp_path / "trades.csv"; journal = TradeJournal(path); pos = position(); item = leg()
+    pos.add_entry_leg(item); item.remaining_quantity = 0; item.closed_quantity = 1
+    item.exit_fills = [{"quantity": 1, "price": 98}]
+    item.exit_ts = 2000; item.exit_reason = "SL"; item.recovery_key = "stable-recovery"
+    assert journal.log_leg(pos, item)
+    assert not journal.log_leg(pos, item)
+    same_recovery = leg(identity=EntryLegIdentity(
+        "different-leg", "agg-1", "BTCUSDT", "setup-2", ExecutionVariant.BUCKET_V2,
+        "signal", None, "execution", 1000, 1100,
+    ))
+    same_recovery.remaining_quantity = 0; same_recovery.closed_quantity = 1
+    same_recovery.exit_fills = [{"quantity": 1, "price": 98}]
+    same_recovery.exit_ts = 2000; same_recovery.exit_reason = "SL"
+    same_recovery.recovery_key = "stable-recovery"
+    assert not journal.log_leg(pos, same_recovery)
+    with open(path, newline="", encoding="utf-8") as stream:
+        assert len(list(csv.DictReader(stream))) == 1

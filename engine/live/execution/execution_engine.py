@@ -16,6 +16,7 @@ from config.strategies.v1 import SYMBOLS, MAX_GLOBAL_POSITIONS
 from models.execution_variant import ExecutionVariant
 from engine.live.execution.leg_protection import LegProtectionManager
 from engine.live.execution.bucket_execution_service import BucketExecutionService
+from exchange.fill_query import coerce_fill_query_result
 
 class ExecutionEngine:
 
@@ -76,7 +77,14 @@ class ExecutionEngine:
             
     def _get_last_close_fill(self, symbol, side, quantity, entry_ts, limit=1000):
         fills = self.exchange.get_recent_fills(symbol, limit=limit)
-
+        fill_query = coerce_fill_query_result(fills)
+        if not fill_query.ok:
+            print(
+                f"⚠️ Close fill query failed | symbol={symbol} "
+                f"status={fill_query.status.value} error={fill_query.error}"
+            )
+            return None
+        fills = fill_query.fills
         if not fills:
             return None
 

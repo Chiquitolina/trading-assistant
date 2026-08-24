@@ -67,7 +67,11 @@ class EntryLeg:
     signal_context: dict[str, Any] = field(default_factory=dict)
     status: str = "OPEN"
     tp_order_id: Optional[int] = None
+    # sl_order_id is retained only for loading pre-migration snapshots.
     sl_order_id: Optional[int] = None
+    sl_algo_id: Optional[int] = None
+    sl_client_algo_id: Optional[str] = None
+    sl_materialized_order_id: Optional[int] = None
     ever_combined: bool = False
     overlapped_with_other_leg: bool = False
     exit_fills: list[dict[str, Any]] = field(default_factory=list)
@@ -75,6 +79,8 @@ class EntryLeg:
     exit_fees: float = 0.0
     exit_reason: Optional[str] = None
     exit_ts: Optional[int] = None
+    processed_fill_ids: list[str] = field(default_factory=list)
+    recovery_key: Optional[str] = None
     _identity_locked: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __setattr__(self, name, value):
@@ -87,6 +93,7 @@ class EntryLeg:
             raise TypeError("identity must be an EntryLegIdentity")
         self.signal_context = deepcopy(self.signal_context or {})
         self.exit_fills = deepcopy(self.exit_fills or [])
+        self.processed_fill_ids = list(dict.fromkeys(str(x) for x in (self.processed_fill_ids or [])))
         self.validate_quantities()
         if not 0 < float(self.size_fraction) <= 1:
             raise ValueError("size_fraction must be in (0, 1]")
@@ -145,11 +152,16 @@ class EntryLeg:
             "tp": self.tp, "sl": self.sl, "management_profile": self.management_profile,
             "signal_context": deepcopy(self.signal_context), "status": self.status,
             "tp_order_id": self.tp_order_id, "sl_order_id": self.sl_order_id,
+            "sl_algo_id": self.sl_algo_id,
+            "sl_client_algo_id": self.sl_client_algo_id,
+            "sl_materialized_order_id": self.sl_materialized_order_id,
             "ever_combined": self.ever_combined,
             "overlapped_with_other_leg": self.overlapped_with_other_leg,
             "exit_fills": deepcopy(self.exit_fills), "entry_fees": self.entry_fees,
             "exit_fees": self.exit_fees, "exit_reason": self.exit_reason,
             "exit_ts": self.exit_ts,
+            "processed_fill_ids": list(self.processed_fill_ids),
+            "recovery_key": self.recovery_key,
         }
 
     @classmethod

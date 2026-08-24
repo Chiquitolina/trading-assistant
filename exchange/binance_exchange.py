@@ -2,6 +2,8 @@ from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from time import time, sleep
 from binance.client import Client
 from exchange.base_exchange import BaseExchange
+from exchange.fill_query import FillQueryResult, FillQueryStatus
+from exchange.order_history import OrderHistoryResult, classify_query_error
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 class BinanceExchange(BaseExchange):
@@ -299,22 +301,18 @@ class BinanceExchange(BaseExchange):
 
         return response
 
-    def place_stop_loss(self, symbol, side, quantity, stop_price, price_rounding="DOWN"):
+    def place_stop_loss(self, symbol, side, quantity, stop_price, price_rounding="DOWN", client_algo_id=None):
         stop_price = self.normalize_price(symbol, stop_price, price_rounding)
 
         print(f"[EXCHANGE] SL MARKET send | side={side} trigger={stop_price} qty={quantity}")
 
-        response = self._safe_request(
-            self.client.futures_create_order,
-            symbol=symbol,
-            side=side,
-            type="STOP_MARKET",
-            stopPrice=stop_price,
-            quantity=quantity,
-            reduceOnly=True,
-            workingType="MARK_PRICE",
-            priceProtect=True
+        params = dict(
+            symbol=symbol, side=side, type="STOP_MARKET", stopPrice=stop_price,
+            quantity=quantity, reduceOnly=True, workingType="MARK_PRICE", priceProtect=True,
         )
+        if client_algo_id:
+            params["newClientOrderId"] = client_algo_id
+        response = self._safe_request(self.client.futures_create_order, **params)
 
         print(f"[EXCHANGE] SL MARKET created | side={side} trigger={stop_price} response={response}")
         return response
@@ -435,10 +433,45 @@ class BinanceExchange(BaseExchange):
                 symbol=symbol,
                 limit=limit
             )
-            return trades or []
+            if not isinstance(trades, list) or not all(isinstance(x, dict) for x in trades):
+                return FillQueryResult(
+                    FillQueryStatus.FATAL_ERROR,
+                    error=f"invalid fills response: {type(trades).__name__}",
+                )
+            return FillQueryResult.success(trades)
         except Exception as e:
             print(f"❌ Error obteniendo fills | symbol={symbol} | error={e}")
-            return []
+            status_code = getattr(e, "status_code", None)
+            response = getattr(e, "response", None)
+            if status_code is None and response is not None:
+                status_code = getattr(response, "status_code", None)
+            message = str(e).lower()
+            retryable = (
+                isinstance(e, (TimeoutError, ConnectionError))
+                or (isinstance(status_code, int) and status_code >= 500)
+                or any(token in message for token in (
+                    "timeout", "timed out", "bad gateway", "temporarily unavailable",
+                    "connection reset", "connection aborted",
+                ))
+            )
+            return FillQueryResult(
+                FillQueryStatus.RETRYABLE_ERROR if retryable else FillQueryStatus.FATAL_ERROR,
+                error=str(e),
+            )
+
+    def get_reconciliation_history(self, symbol: str):
+        try:
+            orders = self._safe_request(self.client.futures_get_all_orders, symbol=symbol) or []
+            algo_orders = self._safe_request(
+                self.client.futures_get_all_algo_orders, symbol=symbol
+            ) or []
+            if not isinstance(orders, list) or not isinstance(algo_orders, list):
+                raise ValueError("invalid order history response")
+            return OrderHistoryResult.success(orders, algo_orders)
+        except Exception as error:
+            return OrderHistoryResult(
+                classify_query_error(error), error=str(error)
+            )
 
     def adjust_price_to_tick(self, price: float, tick_size: float, side: str = "DOWN") -> Decimal:
         price_dec = Decimal(str(price))
