@@ -16,7 +16,7 @@ from signals.indicators.compression_breakout_detector import (
 from signals.indicators.compression_state_machine import CompressionStateMachine
 
 
-COMPRESSION_LOOKBACKS = (10, 15, 20, 25, 30)
+COMPRESSION_LOOKBACKS = (20,)
 COMPRESSION_BASE_MULTIPLIER = 4
 COMPRESSION_BASE_MODE = "separate_dynamic"
 INDICATOR_WARMUP_CANDLES = 20
