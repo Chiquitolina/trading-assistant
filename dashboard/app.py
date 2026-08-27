@@ -12727,6 +12727,19 @@ with tab_compression_analytics:
         )
 
         compression_df = compression_df.dropna(subset=["pnl"]).copy()
+        
+        # Normalize dynamic lookback fields.
+        if "selected_lookback" in compression_df.columns:
+            compression_df["selected_lookback"] = pd.to_numeric(
+                compression_df["selected_lookback"],
+                errors="coerce",
+            ).astype("Int64")
+
+        if "compression_duration" in compression_df.columns:
+            compression_df["compression_duration"] = pd.to_numeric(
+                compression_df["compression_duration"],
+                errors="coerce",
+            )
 
         # Keep only rows that have at least one compression field.
         compression_identity_cols = [
@@ -12873,6 +12886,13 @@ with tab_compression_analytics:
                 "compression_range_pct",
                 "compression_height_pct",
                 "compression_duration",
+                # =========================
+                # DYNAMIC LOOKBACK
+                # =========================
+                "selected_lookback",
+                "compression_base_lookback",
+                "selection_score",
+                "selection_reason",
                 "upper_slope",
                 "lower_slope",
                 "slope_difference",
@@ -13126,6 +13146,141 @@ with tab_compression_analytics:
                 "Avg / Total PnL",
                 f"{overall_avg_pnl}% / {overall_total_pnl}%",
             )
+            
+            # =========================
+            # SELECTED LOOKBACK ANALYSIS
+            # =========================
+            st.markdown("---")
+            st.markdown("### 🪟 Selected Lookback Analysis")
+
+            st.caption(
+                "Analiza el rendimiento del lookback ganador seleccionado "
+                "por el detector dinámico."
+            )
+
+            if "selected_lookback" not in analytics_df.columns:
+                st.info(
+                    "Missing column: selected_lookback"
+                )
+
+            else:
+                lookback_df = analytics_df.dropna(
+                    subset=["selected_lookback"]
+                ).copy()
+
+                if lookback_df.empty:
+                    st.info(
+                        "There are no trades with selected_lookback "
+                        "inside the selected filters."
+                    )
+
+                else:
+                    lookback_report = (
+                        build_compression_analytics_report(
+                            lookback_df,
+                            ["selected_lookback"],
+                            min_trades=min_trades_compression,
+                        )
+                    )
+
+                    if lookback_report.empty:
+                        st.info(
+                            "No selected lookback has enough trades "
+                            "for the selected minimum."
+                        )
+
+                    else:
+                        lookback_report = (
+                            lookback_report
+                            .sort_values(
+                                "selected_lookback",
+                                ascending=True,
+                            )
+                            .reset_index(drop=True)
+                        )
+
+                        st.dataframe(
+                            lookback_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+            # =========================================
+            # LOOKBACK × COMPRESSION DURATION
+            # =========================================
+            st.markdown(
+                "### 🪟 Selected Lookback × Compression Duration"
+            )
+
+            st.caption(
+                "Cruza la ventana elegida por el detector con la duración "
+                "real guardada para la estructura de compresión."
+            )
+
+            lookback_duration_cols = [
+                "selected_lookback",
+                "compression_duration_bucket",
+            ]
+
+            missing_lookback_duration_cols = [
+                col
+                for col in lookback_duration_cols
+                if col not in analytics_df.columns
+            ]
+
+            if missing_lookback_duration_cols:
+                st.info(
+                    "Missing columns for lookback × duration analysis: "
+                    f"{missing_lookback_duration_cols}"
+                )
+
+            else:
+                lookback_duration_df = analytics_df.dropna(
+                    subset=lookback_duration_cols
+                ).copy()
+
+                if lookback_duration_df.empty:
+                    st.info(
+                        "There are no trades with both selected lookback "
+                        "and compression duration."
+                    )
+
+                else:
+                    lookback_duration_report = (
+                        build_compression_analytics_report(
+                            lookback_duration_df,
+                            [
+                                "selected_lookback",
+                                "compression_duration_bucket",
+                            ],
+                            min_trades=min_trades_compression,
+                        )
+                    )
+
+                    if lookback_duration_report.empty:
+                        st.info(
+                            "No lookback × duration combination has enough "
+                            "trades for the selected minimum."
+                        )
+
+                    else:
+                        lookback_duration_report = (
+                            lookback_duration_report
+                            .sort_values(
+                                [
+                                    "selected_lookback",
+                                    "compression_duration_bucket",
+                                ],
+                                ascending=[True, True],
+                            )
+                            .reset_index(drop=True)
+                        )
+
+                        st.dataframe(
+                            lookback_duration_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
             
             # =========================
             # DETECTOR COMPONENTS
