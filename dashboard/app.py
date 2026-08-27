@@ -13587,6 +13587,26 @@ with tab_compression_analytics:
                             "Ordenado por Profit Factor, PnL total, "
                             "Winrate y cantidad de trades."
                         )
+                        
+                        confluence_robustness_report = (
+                            confluence_report.rename(
+                                columns={"profit_factor": "pf"}
+                            )
+                        )
+
+                        render_bucket_robustness_explorer(
+                            source_df=analytics_df,
+                            summary_df=confluence_robustness_report,
+                            first_bucket_col=first_dimension,
+                            second_bucket_col=second_dimension,
+                            first_bucket_label=first_dimension_label,
+                            second_bucket_label=second_dimension_label,
+                            key_prefix=(
+                                "compression_confluence_"
+                                f"{first_dimension}_"
+                                f"{second_dimension}"
+                            ),
+                        )
 
             # =========================
             # THREE-WAY DISCOVERY
