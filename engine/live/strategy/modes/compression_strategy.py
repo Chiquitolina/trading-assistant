@@ -21,6 +21,7 @@ COMPRESSION_BASE_MULTIPLIER = 4
 COMPRESSION_BASE_MODE = "separate_dynamic"
 INDICATOR_WARMUP_CANDLES = 20
 
+ALLOWED_COMPRESSION_DURATIONS = (20,)
 
 class CompressionStrategy:
 
@@ -399,19 +400,55 @@ class CompressionStrategy:
             btc_context=btc_context
         )
 
+        compression_duration = compression_state.get(
+            "compression_duration"
+        )
+
         if compression_state["state"] == "ENTRY_READY":
-            trade_action = TradeAction(
-                action=Action.LONG,
-                signal=signal,
-                strategy_name="compression_strategy",
-                reason="compression_breakout"
-            )
+
+            if (
+                compression_duration
+                in ALLOWED_COMPRESSION_DURATIONS
+            ):
+                print(
+                    f"[COMPRESSION DURATION FILTER] "
+                    f"symbol={symbol} "
+                    f"duration={compression_duration} "
+                    f"decision=ALLOWED"
+                )
+
+                trade_action = TradeAction(
+                    action=Action.LONG,
+                    signal=signal,
+                    strategy_name="compression_strategy",
+                    reason="compression_breakout_duration_allowed",
+                )
+
+            else:
+                print(
+                    f"[COMPRESSION DURATION FILTER] "
+                    f"symbol={symbol} "
+                    f"duration={compression_duration} "
+                    f"allowed={ALLOWED_COMPRESSION_DURATIONS} "
+                    f"decision=BLOCKED"
+                )
+
+                trade_action = TradeAction(
+                    action=Action.HOLD,
+                    signal=signal,
+                    strategy_name="compression_strategy",
+                    reason="compression_duration_not_allowed",
+                )
+
         else:
             trade_action = TradeAction(
                 action=Action.HOLD,
                 signal=signal,
                 strategy_name="compression_strategy",
-                reason=compression_state.get("reason", "compression_waiting")
+                reason=compression_state.get(
+                    "reason",
+                    "compression_waiting",
+                ),
             )
 
         return CompressionResult(
