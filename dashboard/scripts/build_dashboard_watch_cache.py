@@ -24,7 +24,6 @@ ENTRY_READY_FILE = (
     CACHE_DIR / "entry_ready_events.parquet"
 )
 
-
 def build_watch_cache():
     CACHE_DIR.mkdir(
         parents=True,
