@@ -410,6 +410,296 @@ def load_watch_history(
         )
 
     return history_df.reset_index(drop=True)
+
+@st.cache_data(ttl=10)
+def load_all_entry_ready_events(
+    base_dir="compression_watch_journal",
+):
+    base_path = Path(base_dir)
+
+    if not base_path.exists():
+        return pd.DataFrame()
+
+    rows = []
+
+    for path in base_path.glob("*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                for line in file:
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    if record.get("event") != "ENTRY_READY":
+                        continue
+
+                    last_candle = record.get("last_candle") or {}
+
+                    entry_ready_ts = (
+                        record.get("entry_ready_ts")
+                        or last_candle.get("timestamp")
+                        or record.get("compression_updated_ts")
+                    )
+
+                    rows.append({
+                        "symbol": str(
+                            record.get("symbol", path.stem)
+                        ).upper(),
+
+                        "compression_created_ts": (
+                            record.get("compression_created_ts")
+                        ),
+
+                        "journal_entry_ready_ts": (
+                            entry_ready_ts
+                        ),
+
+                        "entry_ready_watch_age": (
+                            record.get("watch_age")
+                        ),
+
+                        "entry_ready_reason": (
+                            record.get("reason")
+                        ),
+                    })
+
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+
+    result["compression_created_ts"] = pd.to_numeric(
+        result["compression_created_ts"],
+        errors="coerce",
+    )
+
+    result["journal_entry_ready_ts"] = pd.to_numeric(
+        result["journal_entry_ready_ts"],
+        errors="coerce",
+    )
+
+    result = (
+        result
+        .dropna(
+            subset=[
+                "symbol",
+                "compression_created_ts",
+                "journal_entry_ready_ts",
+            ]
+        )
+        .drop_duplicates(
+            subset=[
+                "symbol",
+                "compression_created_ts",
+            ],
+            keep="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    return result
+
+@st.cache_data(ttl=10)
+def load_all_watch_events(
+    base_dir="compression_watch_journal",
+):
+    base_path = Path(base_dir)
+
+    if not base_path.exists():
+        return pd.DataFrame()
+
+    rows = []
+
+    for path in base_path.glob("*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                for line in file:
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    symbol = str(
+                        record.get("symbol", path.stem)
+                    ).upper().strip()
+
+                    last_candle = (
+                        record.get("last_candle")
+                        or {}
+                    )
+
+                    rows.append({
+                        "symbol": symbol,
+                        "event": record.get("event"),
+                        "state": record.get("state"),
+                        "reason": record.get("reason"),
+
+                        "compression_created_ts": record.get(
+                            "compression_created_ts"
+                        ),
+
+                        "event_ts": last_candle.get(
+                            "timestamp"
+                        ),
+
+                        "breakout_detected": record.get(
+                            "breakout_detected"
+                        ),
+
+                        "breakout_ts": record.get(
+                            "breakout_ts"
+                        ),
+
+                        "entry_ready": record.get(
+                            "entry_ready"
+                        ),
+
+                        "watch_age": record.get(
+                            "watch_age"
+                        ),
+
+                        "candles_waiting": record.get(
+                            "candles_waiting"
+                        ),
+
+                        # =========================
+                        # COMPRESSION FEATURES
+                        # =========================
+
+                        "compression_score": record.get(
+                            "compression_score"
+                        ),
+
+                        "trend_score": record.get(
+                            "trend_score"
+                        ),
+
+                        "range_ratio": record.get(
+                            "range_ratio"
+                        ),
+
+                        "atr_ratio": record.get(
+                            "atr_ratio"
+                        ),
+
+                        "volume_ratio": record.get(
+                            "volume_ratio"
+                        ),
+
+                        "avg_body_pct": record.get(
+                            "avg_body_pct"
+                        ),
+
+                        "compression_range_pct": record.get(
+                            "compression_range_pct"
+                        ),
+
+                        "compression_height_pct": record.get(
+                            "compression_height_pct"
+                        ),
+
+                        "compression_duration": record.get(
+                            "compression_duration"
+                        ),
+
+                        "inside_ratio": record.get(
+                            "inside_ratio"
+                        ),
+
+                        "touches_high": record.get(
+                            "touches_high"
+                        ),
+
+                        "touches_low": record.get(
+                            "touches_low"
+                        ),
+
+                        "touches_high_ratio": record.get(
+                            "touches_high_ratio"
+                        ),
+
+                        "touches_low_ratio": record.get(
+                            "touches_low_ratio"
+                        ),
+
+                        "touch_imbalance_ratio": record.get(
+                            "touch_imbalance_ratio"
+                        ),
+
+                        "upper_slope": record.get(
+                            "upper_slope"
+                        ),
+
+                        "lower_slope": record.get(
+                            "lower_slope"
+                        ),
+
+                        "slope_difference": record.get(
+                            "slope_difference"
+                        ),
+
+                        "compression_shape": record.get(
+                            "compression_shape"
+                        ),
+
+                        "compression_quality_label": record.get(
+                            "compression_quality_label"
+                        ),
+
+                        "selected_lookback": record.get(
+                            "selected_lookback"
+                        ),
+
+                        "selection_score": record.get(
+                            "selection_score"
+                        ),
+                    })
+
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+
+    result["compression_created_ts"] = pd.to_numeric(
+        result["compression_created_ts"],
+        errors="coerce",
+    )
+
+    result["event_ts"] = pd.to_numeric(
+        result["event_ts"],
+        errors="coerce",
+    )
+
+    result["breakout_ts"] = pd.to_numeric(
+        result["breakout_ts"],
+        errors="coerce",
+    )
+
+    result = result.dropna(
+        subset=[
+            "symbol",
+            "compression_created_ts",
+        ]
+    ).copy()
+
+    return result
     
 def safe_metric(metrics_dict, key, is_percent=False):
     value = metrics_dict.get(key, 0)
@@ -2220,6 +2510,612 @@ def profit_factor(x):
     wins = x[x > 0].sum()
     losses = abs(x[x < 0].sum())
     return round(wins / losses, 2) if losses > 0 else None
+
+def build_state_machine_timing_report(
+    trades_df,
+    entry_ready_events_df,
+    candle_minutes=1,
+):
+    if trades_df is None or trades_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    if (
+        entry_ready_events_df is None
+        or entry_ready_events_df.empty
+    ):
+        return pd.DataFrame(), pd.DataFrame()
+
+    required_trade_cols = [
+        "symbol",
+        "pnl",
+        "breakout_ts",
+        "compression_created_ts",
+    ]
+
+    missing_cols = [
+        col
+        for col in required_trade_cols
+        if col not in trades_df.columns
+    ]
+
+    if missing_cols:
+        return pd.DataFrame(), pd.DataFrame()
+
+    work = trades_df.copy()
+    ready_events = entry_ready_events_df.copy()
+
+    # ==========================================
+    # NORMALIZE JOIN KEYS
+    # ==========================================
+
+    work["symbol"] = (
+        work["symbol"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    ready_events["symbol"] = (
+        ready_events["symbol"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    work["compression_created_ts"] = pd.to_numeric(
+        work["compression_created_ts"],
+        errors="coerce",
+    )
+
+    ready_events["compression_created_ts"] = pd.to_numeric(
+        ready_events["compression_created_ts"],
+        errors="coerce",
+    )
+
+    # ==========================================
+    # JOIN TRADE ↔ WATCH JOURNAL
+    # ==========================================
+
+    work = work.merge(
+        ready_events,
+        on=[
+            "symbol",
+            "compression_created_ts",
+        ],
+        how="left",
+        validate="many_to_one",
+    )
+
+    # ==========================================
+    # NORMALIZE TIMESTAMPS
+    # ==========================================
+
+    def normalize_timestamp_series(series):
+        numeric = pd.to_numeric(
+            series,
+            errors="coerce",
+        )
+
+        result = pd.Series(
+            pd.NaT,
+            index=series.index,
+            dtype="datetime64[ns, UTC]",
+        )
+
+        milliseconds_mask = (
+            numeric.notna()
+            & numeric.abs().ge(100_000_000_000)
+        )
+
+        seconds_mask = (
+            numeric.notna()
+            & ~milliseconds_mask
+        )
+
+        text_mask = numeric.isna()
+
+        if milliseconds_mask.any():
+            result.loc[milliseconds_mask] = pd.to_datetime(
+                numeric.loc[milliseconds_mask],
+                unit="ms",
+                errors="coerce",
+                utc=True,
+            )
+
+        if seconds_mask.any():
+            result.loc[seconds_mask] = pd.to_datetime(
+                numeric.loc[seconds_mask],
+                unit="s",
+                errors="coerce",
+                utc=True,
+            )
+
+        if text_mask.any():
+            result.loc[text_mask] = pd.to_datetime(
+                series.loc[text_mask],
+                errors="coerce",
+                utc=True,
+            )
+
+        return result
+
+    work["breakout_ts_dt"] = normalize_timestamp_series(
+        work["breakout_ts"]
+    )
+
+    work["entry_ready_ts_dt"] = normalize_timestamp_series(
+        work["journal_entry_ready_ts"]
+    )
+
+    work["pnl"] = pd.to_numeric(
+        work["pnl"],
+        errors="coerce",
+    )
+
+    work = work.dropna(
+        subset=[
+            "pnl",
+            "breakout_ts_dt",
+            "entry_ready_ts_dt",
+        ]
+    ).copy()
+
+    if work.empty:
+        return pd.DataFrame(), work
+
+    # ==========================================
+    # BREAKOUT -> ENTRY READY
+    # ==========================================
+
+    work["breakout_to_ready_minutes"] = (
+        (
+            work["entry_ready_ts_dt"]
+            - work["breakout_ts_dt"]
+        )
+        .dt.total_seconds()
+        .div(60)
+    )
+
+    work["breakout_to_ready_bars"] = (
+        work["breakout_to_ready_minutes"]
+        / float(candle_minutes)
+    ).round()
+
+    work["breakout_to_ready_bars"] = pd.to_numeric(
+        work["breakout_to_ready_bars"],
+        errors="coerce",
+    ).astype("Int64")
+
+    work = work[
+        work["breakout_to_ready_bars"] >= 0
+    ].copy()
+
+    # ==========================================
+    # BUCKET
+    # ==========================================
+
+    def timing_bucket(bars):
+        if pd.isna(bars):
+            return "Unknown"
+
+        bars = int(bars)
+
+        if bars == 0:
+            return "0 bars — same breakout candle"
+
+        if bars == 1:
+            return "1 bar"
+
+        if bars == 2:
+            return "2 bars"
+
+        if bars == 3:
+            return "3 bars"
+
+        if bars <= 5:
+            return "4–5 bars"
+
+        return ">5 bars"
+
+    work["breakout_to_ready_bucket"] = (
+        work["breakout_to_ready_bars"]
+        .apply(timing_bucket)
+    )
+
+    bucket_order = [
+        "0 bars — same breakout candle",
+        "1 bar",
+        "2 bars",
+        "3 bars",
+        "4–5 bars",
+        ">5 bars",
+    ]
+
+    work["breakout_to_ready_bucket"] = pd.Categorical(
+        work["breakout_to_ready_bucket"],
+        categories=bucket_order,
+        ordered=True,
+    )
+
+    # ==========================================
+    # PERFORMANCE REPORT
+    # ==========================================
+
+    report = (
+        work
+        .groupby(
+            "breakout_to_ready_bucket",
+            observed=True,
+        )
+        .agg(
+            trades=("pnl", "count"),
+
+            wins=(
+                "pnl",
+                lambda x: int((x > 0).sum()),
+            ),
+
+            losses=(
+                "pnl",
+                lambda x: int((x <= 0).sum()),
+            ),
+
+            winrate=(
+                "pnl",
+                lambda x: round(
+                    (x > 0).mean() * 100,
+                    2,
+                ),
+            ),
+
+            avg_pnl=("pnl", "mean"),
+
+            total_pnl=("pnl", "sum"),
+
+            profit_factor=(
+                "pnl",
+                profit_factor,
+            ),
+
+            avg_breakout_to_ready_min=(
+                "breakout_to_ready_minutes",
+                "mean",
+            ),
+        )
+        .reset_index()
+    )
+
+    report["avg_pnl"] = report["avg_pnl"].round(4)
+    report["total_pnl"] = report["total_pnl"].round(4)
+
+    report["avg_breakout_to_ready_min"] = (
+        report["avg_breakout_to_ready_min"]
+        .round(2)
+    )
+
+    return report, work
+
+def build_state_machine_funnel(
+    watch_events_df,
+):
+    if (
+        watch_events_df is None
+        or watch_events_df.empty
+    ):
+        return pd.DataFrame(), pd.DataFrame()
+
+    work = watch_events_df.copy()
+
+    required_cols = [
+        "symbol",
+        "compression_created_ts",
+        "event",
+        "state",
+        "breakout_detected",
+        "entry_ready",
+    ]
+
+    missing_cols = [
+        col
+        for col in required_cols
+        if col not in work.columns
+    ]
+
+    if missing_cols:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # ==========================================
+    # NORMALIZE BOOLEAN VALUES
+    # ==========================================
+
+    def to_bool(value):
+        if value is True:
+            return True
+
+        if value is False:
+            return False
+
+        if pd.isna(value):
+            return False
+
+        return str(value).strip().lower() in {
+            "true",
+            "1",
+            "yes",
+        }
+
+    work["_breakout"] = (
+        work["breakout_detected"]
+        .apply(to_bool)
+    )
+
+    work["_entry_ready"] = (
+        work["entry_ready"]
+        .apply(to_bool)
+    )
+
+    work["_event"] = (
+        work["event"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    work["_state"] = (
+        work["state"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    # ==========================================
+    # ONE ROW PER WATCH
+    # ==========================================
+
+    watch_rows = []
+
+    grouped = work.groupby(
+        [
+            "symbol",
+            "compression_created_ts",
+        ],
+        dropna=False,
+    )
+
+    for (
+        symbol,
+        compression_created_ts,
+    ), group in grouped:
+
+        events = set(group["_event"])
+        states = set(group["_state"])
+
+        breakout_reached = bool(
+            group["_breakout"].any()
+            or group["breakout_ts"].notna().any()
+            or "BREAKOUT_DETECTED" in events
+            or "BREAKOUT_DETECTED" in states
+            or "WAIT_PULLBACK" in events
+            or "WAIT_PULLBACK" in states
+            or "ENTRY_READY" in events
+            or "ENTRY_READY" in states
+        )
+
+        entry_ready_reached = bool(
+            group["_entry_ready"].any()
+            or "ENTRY_READY" in events
+            or "ENTRY_READY" in states
+        )
+
+        expired = bool(
+            "EXPIRED" in events
+            or "EXPIRED" in states
+        )
+
+        if entry_ready_reached:
+            outcome = "ENTRY_READY"
+
+        elif expired and breakout_reached:
+            outcome = "EXPIRED_AFTER_BREAKOUT"
+
+        elif expired:
+            outcome = "EXPIRED_NO_BREAKOUT"
+
+        elif breakout_reached:
+            outcome = "BREAKOUT_NO_TERMINAL_EVENT"
+
+        else:
+            outcome = "WATCH_NO_TERMINAL_EVENT"
+            
+        first_row = (
+            group
+            .sort_values(
+                "event_ts",
+                ascending=True,
+                na_position="last",
+            )
+            .iloc[0]
+        )
+
+        watch_rows.append({
+            "symbol": symbol,
+
+            "compression_created_ts": (
+                compression_created_ts
+            ),
+
+            "breakout_reached": (
+                breakout_reached
+            ),
+
+            "entry_ready_reached": (
+                entry_ready_reached
+            ),
+
+            "expired": expired,
+
+            "outcome": outcome,
+
+            # =========================
+            # INITIAL WATCH FEATURES
+            # =========================
+
+            "compression_score": first_row.get(
+                "compression_score"
+            ),
+
+            "trend_score": first_row.get(
+                "trend_score"
+            ),
+
+            "range_ratio": first_row.get(
+                "range_ratio"
+            ),
+
+            "atr_ratio": first_row.get(
+                "atr_ratio"
+            ),
+
+            "volume_ratio": first_row.get(
+                "volume_ratio"
+            ),
+
+            "avg_body_pct": first_row.get(
+                "avg_body_pct"
+            ),
+
+            "compression_range_pct": first_row.get(
+                "compression_range_pct"
+            ),
+
+            "compression_height_pct": first_row.get(
+                "compression_height_pct"
+            ),
+
+            "compression_duration": first_row.get(
+                "compression_duration"
+            ),
+
+            "inside_ratio": first_row.get(
+                "inside_ratio"
+            ),
+
+            "touches_high": first_row.get(
+                "touches_high"
+            ),
+
+            "touches_low": first_row.get(
+                "touches_low"
+            ),
+
+            "touches_high_ratio": first_row.get(
+                "touches_high_ratio"
+            ),
+
+            "touches_low_ratio": first_row.get(
+                "touches_low_ratio"
+            ),
+
+            "touch_imbalance_ratio": first_row.get(
+                "touch_imbalance_ratio"
+            ),
+
+            "upper_slope": first_row.get(
+                "upper_slope"
+            ),
+
+            "lower_slope": first_row.get(
+                "lower_slope"
+            ),
+
+            "slope_difference": first_row.get(
+                "slope_difference"
+            ),
+
+            "compression_shape": first_row.get(
+                "compression_shape"
+            ),
+
+            "compression_quality_label": first_row.get(
+                "compression_quality_label"
+            ),
+
+            "selected_lookback": first_row.get(
+                "selected_lookback"
+            ),
+
+            "selection_score": first_row.get(
+                "selection_score"
+            ),
+        })
+
+    watches = pd.DataFrame(watch_rows)
+
+    if watches.empty:
+        return pd.DataFrame(), watches
+
+    # ==========================================
+    # FUNNEL
+    # ==========================================
+
+    total_watches = len(watches)
+
+    breakout_watches = int(
+        watches["breakout_reached"].sum()
+    )
+
+    entry_ready_watches = int(
+        watches["entry_ready_reached"].sum()
+    )
+
+    funnel = pd.DataFrame([
+        {
+            "stage": "WATCH_CREATED",
+            "watches": total_watches,
+        },
+        {
+            "stage": "BREAKOUT",
+            "watches": breakout_watches,
+        },
+        {
+            "stage": "ENTRY_READY",
+            "watches": entry_ready_watches,
+        },
+    ])
+
+    funnel["vs_initial_pct"] = (
+        funnel["watches"]
+        / total_watches
+        * 100
+    ).round(2)
+
+    funnel["conversion_from_previous_pct"] = 100.0
+
+    if total_watches > 0:
+        funnel.loc[
+            funnel["stage"] == "BREAKOUT",
+            "conversion_from_previous_pct",
+        ] = round(
+            breakout_watches
+            / total_watches
+            * 100,
+            2,
+        )
+
+    if breakout_watches > 0:
+        funnel.loc[
+            funnel["stage"] == "ENTRY_READY",
+            "conversion_from_previous_pct",
+        ] = round(
+            entry_ready_watches
+            / breakout_watches
+            * 100,
+            2,
+        )
+
+    return funnel, watches
 
 def replay_profit_factor(values):
     values = pd.to_numeric(
@@ -5847,6 +6743,1309 @@ with tab_overview:
     col14.metric("Fee Impact", overview_metrics["fee_impact"])
     col15.metric("Fee Drag", overview_metrics["fee_drag"])
     col16.metric("Fee / Avg Win", overview_metrics["fee_to_avg_win"])
+    
+    # ==========================================
+    # STATE MACHINE TIMING
+    # ==========================================
+
+    st.markdown("---")
+    st.subheader("🧭 State Machine Entry Timing")
+
+    st.caption(
+        "Analiza cuánto tiempo pasa entre el breakout "
+        "y ENTRY_READY, y cómo rinden los trades según "
+        "esa espera."
+    )
+
+    entry_ready_events_df = (
+        load_all_entry_ready_events()
+    )
+
+    timing_report, timing_trades_df = (
+        build_state_machine_timing_report(
+            df_view,
+            entry_ready_events_df,
+            candle_minutes=timeframe_to_minutes(trigger_tf),
+        )
+    )
+
+    if timing_report.empty:
+        st.info(
+            "No se pudieron cruzar los trades con eventos "
+            "ENTRY_READY del compression_watch_journal."
+        )
+
+    else:
+        total_timing_trades = len(
+            timing_trades_df
+        )
+
+        same_candle_trades = int(
+            (
+                timing_trades_df[
+                    "breakout_to_ready_bars"
+                ]
+                == 0
+            ).sum()
+        )
+
+        delayed_trades = int(
+            (
+                timing_trades_df[
+                    "breakout_to_ready_bars"
+                ]
+                > 0
+            ).sum()
+        )
+
+        same_candle_pct = (
+            same_candle_trades
+            / total_timing_trades
+            * 100
+            if total_timing_trades > 0
+            else 0
+        )
+
+        t1, t2, t3, t4 = st.columns(4)
+
+        t1.metric(
+            "Trades analyzed",
+            total_timing_trades,
+        )
+
+        t2.metric(
+            "Same breakout candle",
+            same_candle_trades,
+        )
+
+        t3.metric(
+            "Same candle %",
+            f"{same_candle_pct:.2f}%",
+        )
+
+        t4.metric(
+            "Waited ≥ 1 bar",
+            delayed_trades,
+        )
+
+        st.markdown(
+            "#### Breakout → Entry Ready Performance"
+        )
+
+        st.dataframe(
+            timing_report,
+            use_container_width=True,
+            hide_index=True,
+        )
+        
+        # ==========================================
+        # STATE MACHINE FUNNEL
+        # ==========================================
+
+        st.markdown("#### State Machine Watch Funnel")
+
+        st.caption(
+            "Reconstruye todos los watches del journal, "
+            "incluidos los que nunca terminaron en un trade."
+        )
+
+        all_watch_events_df = (
+            load_all_watch_events()
+        )
+        
+        if not all_watch_events_df.empty:
+            watch_created_dt = pd.to_datetime(
+                pd.to_numeric(
+                    all_watch_events_df[
+                        "compression_created_ts"
+                    ],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+
+            all_watch_events_df = (
+                all_watch_events_df[
+                    (
+                        watch_created_dt.dt.date
+                        >= start_date
+                    )
+                    &
+                    (
+                        watch_created_dt.dt.date
+                        <= end_date
+                    )
+                ]
+                .copy()
+            )
+
+        funnel_df, watches_df = (
+            build_state_machine_funnel(
+                all_watch_events_df
+            )
+        )
+        
+        st.markdown(
+            "##### Watch Outcomes"
+        )
+
+        outcome_report = (
+            watches_df
+            .groupby(
+                "outcome",
+                observed=True,
+            )
+            .size()
+            .reset_index(
+                name="watches"
+            )
+        )
+
+        outcome_report["pct"] = (
+            outcome_report["watches"]
+            / len(watches_df)
+            * 100
+        ).round(2)
+
+        outcome_report = (
+            outcome_report
+            .sort_values(
+                "watches",
+                ascending=False,
+            )
+            .reset_index(drop=True)
+        )
+
+        st.dataframe(
+            outcome_report,
+            use_container_width=True,
+            hide_index=True,
+        )
+        
+        # ==========================================
+        # ENTRY READY VS NO BREAKOUT
+        # ==========================================
+
+        st.markdown("---")
+
+        st.markdown(
+            "##### 🔬 ENTRY_READY vs EXPIRED_NO_BREAKOUT"
+        )
+
+        st.caption(
+            "Compara las características iniciales de las "
+            "compresiones que completaron el pipeline contra "
+            "las que expiraron sin breakout."
+        )
+
+        comparison_df = watches_df[
+            watches_df["outcome"].isin([
+                "ENTRY_READY",
+                "EXPIRED_NO_BREAKOUT",
+            ])
+        ].copy()
+
+        feature_cols = [
+            "compression_score",
+            "trend_score",
+            "range_ratio",
+            "atr_ratio",
+            "volume_ratio",
+            "avg_body_pct",
+            "compression_range_pct",
+            "compression_height_pct",
+            "compression_duration",
+            "inside_ratio",
+            "touches_high",
+            "touches_low",
+            "touches_high_ratio",
+            "touches_low_ratio",
+            "touch_imbalance_ratio",
+            "upper_slope",
+            "lower_slope",
+            "slope_difference",
+            "selected_lookback",
+            "selection_score",
+        ]
+
+        feature_cols = [
+            col
+            for col in feature_cols
+            if col in comparison_df.columns
+        ]
+
+        for col in feature_cols:
+            comparison_df[col] = pd.to_numeric(
+                comparison_df[col],
+                errors="coerce",
+            )
+
+        comparison_rows = []
+
+        for feature in feature_cols:
+            ready_values = comparison_df[
+                comparison_df["outcome"] == "ENTRY_READY"
+            ][feature].dropna()
+
+            expired_values = comparison_df[
+                comparison_df["outcome"] == "EXPIRED_NO_BREAKOUT"
+            ][feature].dropna()
+
+            if ready_values.empty or expired_values.empty:
+                continue
+
+            ready_mean = ready_values.mean()
+            expired_mean = expired_values.mean()
+
+            comparison_rows.append({
+                "feature": feature,
+                "entry_ready_n": len(ready_values),
+                "entry_ready_mean": ready_mean,
+                "entry_ready_median": ready_values.median(),
+                "expired_no_breakout_n": len(expired_values),
+                "expired_no_breakout_mean": expired_mean,
+                "expired_no_breakout_median": expired_values.median(),
+                "mean_difference": ready_mean - expired_mean,
+            })
+
+        feature_comparison_df = pd.DataFrame(
+            comparison_rows
+        )
+
+        if feature_comparison_df.empty:
+            st.info(
+                "No hay suficientes features para "
+                "comparar outcomes."
+            )
+
+        else:
+            numeric_cols = [
+                "entry_ready_mean",
+                "entry_ready_median",
+                "expired_no_breakout_mean",
+                "expired_no_breakout_median",
+                "mean_difference",
+            ]
+
+            feature_comparison_df[
+                numeric_cols
+            ] = (
+                feature_comparison_df[
+                    numeric_cols
+                ]
+                .round(4)
+            )
+
+            st.dataframe(
+                feature_comparison_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        if funnel_df.empty:
+            st.info(
+                "No se pudieron reconstruir watches "
+                "desde compression_watch_journal."
+            )
+
+        else:
+            total_watches = len(watches_df)
+
+            breakout_watches = int(
+                watches_df[
+                    "breakout_reached"
+                ].sum()
+            )
+
+            ready_watches = int(
+                watches_df[
+                    "entry_ready_reached"
+                ].sum()
+            )
+
+            expired_watches = int(
+                watches_df[
+                    "expired"
+                ].sum()
+            )
+
+            f1, f2, f3, f4 = st.columns(4)
+
+            f1.metric(
+                "Watches",
+                total_watches,
+            )
+
+            f2.metric(
+                "Reached Breakout",
+                breakout_watches,
+            )
+
+            f3.metric(
+                "Reached Entry Ready",
+                ready_watches,
+            )
+
+            f4.metric(
+                "Expired",
+                expired_watches,
+            )
+
+            st.markdown(
+                "##### Watch Conversion"
+            )
+
+            st.dataframe(
+                funnel_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+                
+            # ==========================================
+            # COMPRESSION HEIGHT % -> WATCH OUTCOME
+            # ==========================================
+
+            st.markdown("---")
+
+            st.markdown(
+                "##### 📏 Compression Height % → Watch Outcome"
+            )
+
+            st.caption(
+                "Mide cómo cambia la probabilidad de breakout y "
+                "ENTRY_READY según el tamaño inicial de la compresión."
+            )
+
+            height_df = watches_df.copy()
+
+            if "compression_height_pct" not in height_df.columns:
+                st.info(
+                    "compression_height_pct no está disponible "
+                    "en los Watch Journals."
+                )
+
+            else:
+                height_df["compression_height_pct"] = pd.to_numeric(
+                    height_df["compression_height_pct"],
+                    errors="coerce",
+                )
+
+                height_df = height_df.dropna(
+                    subset=["compression_height_pct"]
+                ).copy()
+
+                if height_df.empty:
+                    st.info(
+                        "No hay valores válidos de "
+                        "compression_height_pct."
+                    )
+
+                else:
+                    height_bins = [
+                        -float("inf"),
+                        1.0,
+                        1.5,
+                        2.0,
+                        2.5,
+                        3.0,
+                        4.0,
+                        float("inf"),
+                    ]
+
+                    height_labels = [
+                        "< 1.0%",
+                        "1.0–1.5%",
+                        "1.5–2.0%",
+                        "2.0–2.5%",
+                        "2.5–3.0%",
+                        "3.0–4.0%",
+                        "> 4.0%",
+                    ]
+
+                    height_df["height_bucket"] = pd.cut(
+                        height_df["compression_height_pct"],
+                        bins=height_bins,
+                        labels=height_labels,
+                        right=False,
+                        ordered=True,
+                    )
+
+                    height_rows = []
+
+                    for bucket in height_labels:
+                        bucket_df = height_df[
+                            height_df["height_bucket"] == bucket
+                        ]
+
+                        if bucket_df.empty:
+                            continue
+
+                        total = len(bucket_df)
+
+                        breakout_count = int(
+                            bucket_df[
+                                "breakout_reached"
+                            ].sum()
+                        )
+
+                        entry_ready_count = int(
+                            bucket_df[
+                                "entry_ready_reached"
+                            ].sum()
+                        )
+
+                        expired_no_breakout_count = int(
+                            (
+                                bucket_df["outcome"]
+                                == "EXPIRED_NO_BREAKOUT"
+                            ).sum()
+                        )
+
+                        expired_after_breakout_count = int(
+                            (
+                                bucket_df["outcome"]
+                                == "EXPIRED_AFTER_BREAKOUT"
+                            ).sum()
+                        )
+
+                        height_rows.append({
+                            "height_bucket": bucket,
+                            "watches": total,
+                            "breakouts": breakout_count,
+                            "breakout_pct": (
+                                breakout_count / total * 100
+                            ),
+                            "entry_ready": entry_ready_count,
+                            "entry_ready_pct": (
+                                entry_ready_count / total * 100
+                            ),
+                            "breakout_to_ready_pct": (
+                                entry_ready_count
+                                / breakout_count
+                                * 100
+                                if breakout_count > 0
+                                else None
+                            ),
+                            "expired_no_breakout": (
+                                expired_no_breakout_count
+                            ),
+                            "expired_no_breakout_pct": (
+                                expired_no_breakout_count
+                                / total
+                                * 100
+                            ),
+                            "expired_after_breakout": (
+                                expired_after_breakout_count
+                            ),
+                            "expired_after_breakout_pct": (
+                                expired_after_breakout_count
+                                / total
+                                * 100
+                            ),
+                            "breakout_to_expired_pct": (
+                                expired_after_breakout_count
+                                / breakout_count
+                                * 100
+                                if breakout_count > 0
+                                else None
+                            ),
+                            "avg_height_pct": (
+                                bucket_df[
+                                    "compression_height_pct"
+                                ].mean()
+                            ),
+                        })
+
+                    height_report_df = pd.DataFrame(
+                        height_rows
+                    )
+
+                    if height_report_df.empty:
+                        st.info(
+                            "No se pudo construir el análisis "
+                            "por Compression Height."
+                        )
+
+                    else:
+                        pct_cols = [
+                            "breakout_pct",
+                            "entry_ready_pct",
+                            "breakout_to_ready_pct",
+                            "expired_no_breakout_pct",
+                            "expired_after_breakout_pct",
+                            "breakout_to_expired_pct",
+                            "avg_height_pct",
+                        ]
+
+                        height_report_df[
+                            pct_cols
+                        ] = (
+                            height_report_df[
+                                pct_cols
+                            ]
+                            .round(2)
+                        )
+
+                        st.dataframe(
+                            height_report_df,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        
+                        st.markdown("---")
+
+                        st.markdown(
+                            "##### 🔬 Compression Height % × ATR Ratio → Watch Outcome"
+                        )
+
+                        st.caption(
+                            "Cruza el tamaño de la compresión con ATR Ratio "
+                            "para medir breakout y conversión post-breakout."
+                        )
+
+                        height_atr_watch_df = watches_df.copy()
+
+                        required_watch_cols = {
+                            "compression_height_pct",
+                            "atr_ratio",
+                            "breakout_reached",
+                            "entry_ready_reached",
+                            "outcome",
+                        }
+
+                        missing_watch_cols = (
+                            required_watch_cols
+                            - set(height_atr_watch_df.columns)
+                        )
+
+                        if missing_watch_cols:
+                            st.info(
+                                "Faltan columnas para Height × ATR Ratio: "
+                                + ", ".join(sorted(missing_watch_cols))
+                            )
+
+                        else:
+                            height_atr_watch_df[
+                                "compression_height_pct"
+                            ] = pd.to_numeric(
+                                height_atr_watch_df[
+                                    "compression_height_pct"
+                                ],
+                                errors="coerce",
+                            )
+
+                            height_atr_watch_df[
+                                "atr_ratio"
+                            ] = pd.to_numeric(
+                                height_atr_watch_df[
+                                    "atr_ratio"
+                                ],
+                                errors="coerce",
+                            )
+
+                            height_atr_watch_df = (
+                                height_atr_watch_df.dropna(
+                                    subset=[
+                                        "compression_height_pct",
+                                        "atr_ratio",
+                                    ]
+                                )
+                                .copy()
+                            )
+                            
+                        atr_bins = [
+                            -float("inf"),
+                            0.50,
+                            0.65,
+                            0.75,
+                            0.85,
+                            1.00,
+                            float("inf"),
+                        ]
+
+                        atr_labels = [
+                            "< 0.50",
+                            "0.50–0.65",
+                            "0.65–0.75",
+                            "0.75–0.85",
+                            "0.85–1.00",
+                            "> 1.00",
+                        ]
+
+                        height_atr_watch_df[
+                            "height_bucket"
+                        ] = pd.cut(
+                            height_atr_watch_df[
+                                "compression_height_pct"
+                            ],
+                            bins=height_bins,
+                            labels=height_labels,
+                            right=False,
+                            ordered=True,
+                        )
+
+                        height_atr_watch_df[
+                            "atr_bucket"
+                        ] = pd.cut(
+                            height_atr_watch_df[
+                                "atr_ratio"
+                            ],
+                            bins=atr_bins,
+                            labels=atr_labels,
+                            right=False,
+                            ordered=True,
+                        )
+                        
+                        height_atr_watch_rows = []
+
+                        for height_bucket in height_labels:
+                            for atr_bucket in atr_labels:
+
+                                bucket_df = height_atr_watch_df[
+                                    (
+                                        height_atr_watch_df[
+                                            "height_bucket"
+                                        ]
+                                        == height_bucket
+                                    )
+                                    &
+                                    (
+                                        height_atr_watch_df[
+                                            "atr_bucket"
+                                        ]
+                                        == atr_bucket
+                                    )
+                                ]
+
+                                if bucket_df.empty:
+                                    continue
+
+                                watches = len(bucket_df)
+
+                                breakouts = int(
+                                    bucket_df[
+                                        "breakout_reached"
+                                    ].sum()
+                                )
+
+                                entry_ready = int(
+                                    bucket_df[
+                                        "entry_ready_reached"
+                                    ].sum()
+                                )
+
+                                expired_no_breakout = int(
+                                    (
+                                        bucket_df["outcome"]
+                                        == "EXPIRED_NO_BREAKOUT"
+                                    ).sum()
+                                )
+
+                                expired_after_breakout = int(
+                                    (
+                                        bucket_df["outcome"]
+                                        == "EXPIRED_AFTER_BREAKOUT"
+                                    ).sum()
+                                )
+
+                                height_atr_watch_rows.append({
+                                    "height_bucket": (
+                                        height_bucket
+                                    ),
+                                    "atr_bucket": atr_bucket,
+                                    "watches": watches,
+
+                                    "breakouts": breakouts,
+
+                                    "breakout_pct": (
+                                        breakouts
+                                        / watches
+                                        * 100
+                                    ),
+
+                                    "entry_ready": entry_ready,
+
+                                    "entry_ready_pct": (
+                                        entry_ready
+                                        / watches
+                                        * 100
+                                    ),
+
+                                    "breakout_to_ready_pct": (
+                                        entry_ready
+                                        / breakouts
+                                        * 100
+                                        if breakouts > 0
+                                        else None
+                                    ),
+
+                                    "expired_no_breakout_pct": (
+                                        expired_no_breakout
+                                        / watches
+                                        * 100
+                                    ),
+
+                                    "breakout_to_expired_pct": (
+                                        expired_after_breakout
+                                        / breakouts
+                                        * 100
+                                        if breakouts > 0
+                                        else None
+                                    ),
+                                })
+                                
+                        height_atr_watch_report_df = pd.DataFrame(
+                            height_atr_watch_rows
+                        )
+
+                        if height_atr_watch_report_df.empty:
+                            st.info(
+                                "No se pudo construir Height × ATR Ratio."
+                            )
+
+                        else:
+                            pct_cols = [
+                                "breakout_pct",
+                                "entry_ready_pct",
+                                "breakout_to_ready_pct",
+                                "expired_no_breakout_pct",
+                                "breakout_to_expired_pct",
+                            ]
+
+                            height_atr_watch_report_df[
+                                pct_cols
+                            ] = (
+                                height_atr_watch_report_df[
+                                    pct_cols
+                                ]
+                                .round(2)
+                            )
+
+                            st.dataframe(
+                                height_atr_watch_report_df,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        
+                        st.markdown("---")
+
+                        st.markdown(
+                            "##### 💰 Compression Height % → Trade Performance"
+                        )
+
+                        st.caption(
+                            "Cruza los mismos buckets de Compression Height "
+                            "con el resultado de los trades ejecutados."
+                        )
+
+                        trade_height_df = df_view.copy()
+
+                        required_height_trade_cols = {
+                            "compression_height_pct",
+                            "pnl",
+                        }
+
+                        missing_height_trade_cols = (
+                            required_height_trade_cols
+                            - set(trade_height_df.columns)
+                        )
+
+                        if missing_height_trade_cols:
+                            st.info(
+                                "Faltan columnas para analizar performance por Height: "
+                                + ", ".join(sorted(missing_height_trade_cols))
+                            )
+
+                        else:
+                            trade_height_df["compression_height_pct"] = pd.to_numeric(
+                                trade_height_df["compression_height_pct"],
+                                errors="coerce",
+                            )
+
+                            trade_height_df["pnl_numeric"] = (
+                                trade_height_df["pnl"]
+                                .astype(str)
+                                .str.replace("%", "", regex=False)
+                            )
+
+                            trade_height_df["pnl_numeric"] = pd.to_numeric(
+                                trade_height_df["pnl_numeric"],
+                                errors="coerce",
+                            )
+
+                            trade_height_df = trade_height_df.dropna(
+                                subset=[
+                                    "compression_height_pct",
+                                    "pnl_numeric",
+                                ]
+                            ).copy()
+
+                            if trade_height_df.empty:
+                                st.info(
+                                    "No hay trades válidos para analizar "
+                                    "Compression Height."
+                                )
+
+                            else:
+                                trade_height_df["height_bucket"] = pd.cut(
+                                    trade_height_df["compression_height_pct"],
+                                    bins=height_bins,
+                                    labels=height_labels,
+                                    right=False,
+                                    ordered=True,
+                                )
+
+                                trade_height_rows = []
+
+                                for bucket in height_labels:
+                                    bucket_df = trade_height_df[
+                                        trade_height_df["height_bucket"] == bucket
+                                    ]
+
+                                    if bucket_df.empty:
+                                        continue
+
+                                    pnl_values = bucket_df["pnl_numeric"]
+
+                                    trades = len(bucket_df)
+
+                                    wins = int(
+                                        (pnl_values > 0).sum()
+                                    )
+
+                                    losses = int(
+                                        (pnl_values < 0).sum()
+                                    )
+
+                                    winrate = (
+                                        wins / trades * 100
+                                        if trades > 0
+                                        else None
+                                    )
+
+                                    avg_pnl = pnl_values.mean()
+
+                                    total_pnl = pnl_values.sum()
+
+                                    pf = profit_factor(
+                                        pnl_values
+                                    )
+
+                                    trade_height_rows.append({
+                                        "height_bucket": bucket,
+                                        "trades": trades,
+                                        "wins": wins,
+                                        "losses": losses,
+                                        "winrate_pct": winrate,
+                                        "profit_factor": pf,
+                                        "avg_pnl": avg_pnl,
+                                        "total_pnl": total_pnl,
+                                        "avg_height_pct": (
+                                            bucket_df[
+                                                "compression_height_pct"
+                                            ].mean()
+                                        ),
+                                    })
+
+                                trade_height_report_df = pd.DataFrame(
+                                    trade_height_rows
+                                )
+
+                                if trade_height_report_df.empty:
+                                    st.info(
+                                        "No se pudo construir el análisis "
+                                        "de performance por Height."
+                                    )
+
+                                else:
+                                    trade_height_report_df[
+                                        [
+                                            "winrate_pct",
+                                            "profit_factor",
+                                            "avg_pnl",
+                                            "total_pnl",
+                                            "avg_height_pct",
+                                        ]
+                                    ] = (
+                                        trade_height_report_df[
+                                            [
+                                                "winrate_pct",
+                                                "profit_factor",
+                                                "avg_pnl",
+                                                "total_pnl",
+                                                "avg_height_pct",
+                                            ]
+                                        ]
+                                        .round(4)
+                                    )
+
+                                    st.dataframe(
+                                        trade_height_report_df,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+                                    
+                        st.markdown("---")
+
+                        st.markdown(
+                            "##### 💰 Compression Height % × ATR Ratio → Trade Performance"
+                        )
+
+                        st.caption(
+                            "Cruza Height y ATR Ratio con WR, PF y PnL "
+                            "de los trades realmente ejecutados."
+                        )
+
+                        height_atr_trade_df = df_view.copy()
+
+                        required_trade_cols = {
+                            "compression_height_pct",
+                            "atr_ratio",
+                            "pnl",
+                        }
+
+                        missing_trade_cols = (
+                            required_trade_cols
+                            - set(height_atr_trade_df.columns)
+                        )
+
+                        if missing_trade_cols:
+                            st.info(
+                                "Faltan columnas para performance Height × ATR: "
+                                + ", ".join(sorted(missing_trade_cols))
+                            )
+
+                        else:
+                            height_atr_trade_df[
+                                "compression_height_pct"
+                            ] = pd.to_numeric(
+                                height_atr_trade_df[
+                                    "compression_height_pct"
+                                ],
+                                errors="coerce",
+                            )
+
+                            height_atr_trade_df[
+                                "atr_ratio"
+                            ] = pd.to_numeric(
+                                height_atr_trade_df[
+                                    "atr_ratio"
+                                ],
+                                errors="coerce",
+                            )
+
+                            height_atr_trade_df[
+                                "pnl_numeric"
+                            ] = (
+                                height_atr_trade_df["pnl"]
+                                .astype(str)
+                                .str.replace("%", "", regex=False)
+                            )
+
+                            height_atr_trade_df[
+                                "pnl_numeric"
+                            ] = pd.to_numeric(
+                                height_atr_trade_df[
+                                    "pnl_numeric"
+                                ],
+                                errors="coerce",
+                            )
+
+                            height_atr_trade_df = (
+                                height_atr_trade_df.dropna(
+                                    subset=[
+                                        "compression_height_pct",
+                                        "atr_ratio",
+                                        "pnl_numeric",
+                                    ]
+                                )
+                                .copy()
+                            )
+
+                            height_atr_trade_df[
+                                "height_bucket"
+                            ] = pd.cut(
+                                height_atr_trade_df[
+                                    "compression_height_pct"
+                                ],
+                                bins=height_bins,
+                                labels=height_labels,
+                                right=False,
+                                ordered=True,
+                            )
+
+                            height_atr_trade_df[
+                                "atr_bucket"
+                            ] = pd.cut(
+                                height_atr_trade_df[
+                                    "atr_ratio"
+                                ],
+                                bins=atr_bins,
+                                labels=atr_labels,
+                                right=False,
+                                ordered=True,
+                            )
+
+                            height_atr_trade_rows = []
+
+                            for height_bucket in height_labels:
+                                for atr_bucket in atr_labels:
+
+                                    bucket_df = height_atr_trade_df[
+                                        (
+                                            height_atr_trade_df[
+                                                "height_bucket"
+                                            ]
+                                            == height_bucket
+                                        )
+                                        &
+                                        (
+                                            height_atr_trade_df[
+                                                "atr_bucket"
+                                            ]
+                                            == atr_bucket
+                                        )
+                                    ]
+
+                                    if bucket_df.empty:
+                                        continue
+
+                                    pnl_values = bucket_df["pnl_numeric"]
+
+                                    trades = len(bucket_df)
+
+                                    wins = int(
+                                        (pnl_values > 0).sum()
+                                    )
+
+                                    losses = int(
+                                        (pnl_values < 0).sum()
+                                    )
+
+                                    height_atr_trade_rows.append({
+                                        "height_bucket": height_bucket,
+                                        "atr_bucket": atr_bucket,
+                                        "trades": trades,
+                                        "wins": wins,
+                                        "losses": losses,
+
+                                        "winrate_pct": (
+                                            wins / trades * 100
+                                            if trades > 0
+                                            else None
+                                        ),
+
+                                        "profit_factor": (
+                                            profit_factor(pnl_values)
+                                        ),
+
+                                        "avg_pnl": (
+                                            pnl_values.mean()
+                                        ),
+
+                                        "total_pnl": (
+                                            pnl_values.sum()
+                                        ),
+                                    })
+
+                            height_atr_trade_report_df = pd.DataFrame(
+                                height_atr_trade_rows
+                            )
+
+                            if height_atr_trade_report_df.empty:
+                                st.info(
+                                    "No se pudo construir el análisis "
+                                    "de trades Height × ATR Ratio."
+                                )
+
+                            else:
+                                numeric_cols = [
+                                    "winrate_pct",
+                                    "profit_factor",
+                                    "avg_pnl",
+                                    "total_pnl",
+                                ]
+
+                                height_atr_trade_report_df[
+                                    numeric_cols
+                                ] = (
+                                    height_atr_trade_report_df[
+                                        numeric_cols
+                                    ]
+                                    .round(4)
+                                )
+
+                                height_atr_selection = st.dataframe(
+                                    height_atr_trade_report_df,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    on_select="rerun",
+                                    selection_mode="multi-row",
+                                    key="height_atr_trade_selector",
+                                )
+                                
+                                selected_rows = height_atr_selection.selection.rows
+
+                                if selected_rows:
+
+                                    selected_bucket_rows = (
+                                        height_atr_trade_report_df
+                                        .iloc[selected_rows]
+                                        .copy()
+                                    )
+
+                                    st.markdown(
+                                        "##### 🔬 Analyze Selected Height × ATR Bucket"
+                                    )
+
+                                    st.caption(
+                                        "Trades correspondientes exactamente a las "
+                                        "combinaciones Height × ATR seleccionadas."
+                                    )
+                                    
+                                    selected_pairs = set(
+                                        zip(
+                                            selected_bucket_rows[
+                                                "height_bucket"
+                                            ].astype(str),
+
+                                            selected_bucket_rows[
+                                                "atr_bucket"
+                                            ].astype(str),
+                                        )
+                                    )
+
+                                    selected_trades_mask = (
+                                        height_atr_trade_df.apply(
+                                            lambda row: (
+                                                str(row["height_bucket"]),
+                                                str(row["atr_bucket"]),
+                                            ) in selected_pairs,
+                                            axis=1,
+                                        )
+                                    )
+
+                                    selected_height_atr_trades = (
+                                        height_atr_trade_df[
+                                            selected_trades_mask
+                                        ]
+                                        .copy()
+                                    )
+                                    
+                                    selected_pnl = (
+                                        selected_height_atr_trades[
+                                            "pnl_numeric"
+                                        ]
+                                    )
+
+                                    selected_trades_count = len(
+                                        selected_height_atr_trades
+                                    )
+
+                                    selected_wins = int(
+                                        (selected_pnl > 0).sum()
+                                    )
+
+                                    selected_losses = int(
+                                        (selected_pnl < 0).sum()
+                                    )
+
+                                    selected_wr = (
+                                        selected_wins
+                                        / selected_trades_count
+                                        * 100
+                                        if selected_trades_count > 0
+                                        else 0
+                                    )
+
+                                    selected_pf = profit_factor(
+                                        selected_pnl
+                                    )
+
+                                    selected_avg_pnl = (
+                                        selected_pnl.mean()
+                                        if selected_trades_count > 0
+                                        else 0
+                                    )
+
+                                    selected_total_pnl = (
+                                        selected_pnl.sum()
+                                        if selected_trades_count > 0
+                                        else 0
+                                    )
+                                    
+                                    c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+                                    c1.metric(
+                                        "Trades",
+                                        selected_trades_count,
+                                    )
+
+                                    c2.metric(
+                                        "Wins",
+                                        selected_wins,
+                                    )
+
+                                    c3.metric(
+                                        "Losses",
+                                        selected_losses,
+                                    )
+
+                                    c4.metric(
+                                        "Win Rate",
+                                        f"{selected_wr:.2f}%",
+                                    )
+
+                                    c5.metric(
+                                        "Profit Factor",
+                                        (
+                                            f"{selected_pf:.2f}"
+                                            if selected_pf is not None
+                                            else "—"
+                                        ),
+                                    )
+
+                                    c6.metric(
+                                        "Total PnL",
+                                        f"{selected_total_pnl:.2f}%",
+                                    )
+
+                                    st.caption(
+                                        f"Avg PnL por trade: "
+                                        f"{selected_avg_pnl:.4f}%"
+                                    )
+                                    
+                                    preferred_cols = [
+                                        "symbol",
+                                        "side",
+                                        "entry_ts",
+                                        "exit_ts",
+                                        "compression_height_pct",
+                                        "atr_ratio",
+                                        "height_bucket",
+                                        "atr_bucket",
+                                        "breakout_extension_pct",
+                                        "entry_vs_compression_pct",
+                                        "entry_vs_breakout_pct",
+                                        "pnl_numeric",
+                                        "exit_reason",
+                                    ]
+
+                                    visible_cols = [
+                                        col
+                                        for col in preferred_cols
+                                        if col in selected_height_atr_trades.columns
+                                    ]
+
+                                    st.dataframe(
+                                        selected_height_atr_trades[
+                                            visible_cols
+                                        ],
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
         
         #st.markdown("### 📊 Performance by Volume Tier")
 
@@ -12727,6 +14926,19 @@ with tab_compression_analytics:
         )
 
         compression_df = compression_df.dropna(subset=["pnl"]).copy()
+        
+        # Normalize dynamic lookback fields.
+        if "selected_lookback" in compression_df.columns:
+            compression_df["selected_lookback"] = pd.to_numeric(
+                compression_df["selected_lookback"],
+                errors="coerce",
+            ).astype("Int64")
+
+        if "compression_duration" in compression_df.columns:
+            compression_df["compression_duration"] = pd.to_numeric(
+                compression_df["compression_duration"],
+                errors="coerce",
+            )
 
         # Keep only rows that have at least one compression field.
         compression_identity_cols = [
@@ -12873,6 +15085,13 @@ with tab_compression_analytics:
                 "compression_range_pct",
                 "compression_height_pct",
                 "compression_duration",
+                # =========================
+                # DYNAMIC LOOKBACK
+                # =========================
+                "selected_lookback",
+                "compression_base_lookback",
+                "selection_score",
+                "selection_reason",
                 "upper_slope",
                 "lower_slope",
                 "slope_difference",
@@ -13126,6 +15345,141 @@ with tab_compression_analytics:
                 "Avg / Total PnL",
                 f"{overall_avg_pnl}% / {overall_total_pnl}%",
             )
+            
+            # =========================
+            # SELECTED LOOKBACK ANALYSIS
+            # =========================
+            st.markdown("---")
+            st.markdown("### 🪟 Selected Lookback Analysis")
+
+            st.caption(
+                "Analiza el rendimiento del lookback ganador seleccionado "
+                "por el detector dinámico."
+            )
+
+            if "selected_lookback" not in analytics_df.columns:
+                st.info(
+                    "Missing column: selected_lookback"
+                )
+
+            else:
+                lookback_df = analytics_df.dropna(
+                    subset=["selected_lookback"]
+                ).copy()
+
+                if lookback_df.empty:
+                    st.info(
+                        "There are no trades with selected_lookback "
+                        "inside the selected filters."
+                    )
+
+                else:
+                    lookback_report = (
+                        build_compression_analytics_report(
+                            lookback_df,
+                            ["selected_lookback"],
+                            min_trades=min_trades_compression,
+                        )
+                    )
+
+                    if lookback_report.empty:
+                        st.info(
+                            "No selected lookback has enough trades "
+                            "for the selected minimum."
+                        )
+
+                    else:
+                        lookback_report = (
+                            lookback_report
+                            .sort_values(
+                                "selected_lookback",
+                                ascending=True,
+                            )
+                            .reset_index(drop=True)
+                        )
+
+                        st.dataframe(
+                            lookback_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+            # =========================================
+            # LOOKBACK × COMPRESSION DURATION
+            # =========================================
+            st.markdown(
+                "### 🪟 Selected Lookback × Compression Duration"
+            )
+
+            st.caption(
+                "Cruza la ventana elegida por el detector con la duración "
+                "real guardada para la estructura de compresión."
+            )
+
+            lookback_duration_cols = [
+                "selected_lookback",
+                "compression_duration_bucket",
+            ]
+
+            missing_lookback_duration_cols = [
+                col
+                for col in lookback_duration_cols
+                if col not in analytics_df.columns
+            ]
+
+            if missing_lookback_duration_cols:
+                st.info(
+                    "Missing columns for lookback × duration analysis: "
+                    f"{missing_lookback_duration_cols}"
+                )
+
+            else:
+                lookback_duration_df = analytics_df.dropna(
+                    subset=lookback_duration_cols
+                ).copy()
+
+                if lookback_duration_df.empty:
+                    st.info(
+                        "There are no trades with both selected lookback "
+                        "and compression duration."
+                    )
+
+                else:
+                    lookback_duration_report = (
+                        build_compression_analytics_report(
+                            lookback_duration_df,
+                            [
+                                "selected_lookback",
+                                "compression_duration_bucket",
+                            ],
+                            min_trades=min_trades_compression,
+                        )
+                    )
+
+                    if lookback_duration_report.empty:
+                        st.info(
+                            "No lookback × duration combination has enough "
+                            "trades for the selected minimum."
+                        )
+
+                    else:
+                        lookback_duration_report = (
+                            lookback_duration_report
+                            .sort_values(
+                                [
+                                    "selected_lookback",
+                                    "compression_duration_bucket",
+                                ],
+                                ascending=[True, True],
+                            )
+                            .reset_index(drop=True)
+                        )
+
+                        st.dataframe(
+                            lookback_duration_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
             
             # =========================
             # DETECTOR COMPONENTS
@@ -13586,6 +15940,26 @@ with tab_compression_analytics:
                         st.caption(
                             "Ordenado por Profit Factor, PnL total, "
                             "Winrate y cantidad de trades."
+                        )
+                        
+                        confluence_robustness_report = (
+                            confluence_report.rename(
+                                columns={"profit_factor": "pf"}
+                            )
+                        )
+
+                        render_bucket_robustness_explorer(
+                            source_df=analytics_df,
+                            summary_df=confluence_robustness_report,
+                            first_bucket_col=first_dimension,
+                            second_bucket_col=second_dimension,
+                            first_bucket_label=first_dimension_label,
+                            second_bucket_label=second_dimension_label,
+                            key_prefix=(
+                                "compression_confluence_"
+                                f"{first_dimension}_"
+                                f"{second_dimension}"
+                            ),
                         )
 
             # =========================
