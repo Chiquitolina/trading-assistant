@@ -48,6 +48,23 @@ from dashboard.charts.trade_inspector_chart import (
 )
 
 TRADES_FILE = BASE_DIR / "trades.csv"
+
+DASHBOARD_CACHE_DIR = (
+    BASE_DIR
+    / "reports"
+    / "dashboard_cache"
+)
+
+WATCH_EVENTS_CACHE_FILE = (
+    DASHBOARD_CACHE_DIR
+    / "watch_events.parquet"
+)
+
+ENTRY_READY_EVENTS_CACHE_FILE = (
+    DASHBOARD_CACHE_DIR
+    / "entry_ready_events.parquet"
+)
+
 DYNAMIC_X4_ROOT = Path(
     os.getenv(
         "DYNAMIC_X4_ROOT",
@@ -131,6 +148,25 @@ def load_csv_cached(path):
 
     return pd.read_csv(path)
 
+@st.cache_data(show_spinner=False)
+def load_parquet_cached(
+    path,
+    modified_ns,
+):
+    path = Path(path)
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    return pd.read_parquet(path)
+
+def get_file_modified_ns(path):
+    path = Path(path)
+
+    if not path.exists():
+        return None
+
+    return path.stat().st_mtime_ns
 
 # =========================
 # HELPERS
@@ -411,295 +447,31 @@ def load_watch_history(
 
     return history_df.reset_index(drop=True)
 
-@st.cache_data(ttl=10)
-def load_all_entry_ready_events(
-    base_dir="compression_watch_journal",
-):
-    base_path = Path(base_dir)
+def load_all_entry_ready_events():
+    modified_ns = get_file_modified_ns(
+        ENTRY_READY_EVENTS_CACHE_FILE
+    )
 
-    if not base_path.exists():
+    if modified_ns is None:
         return pd.DataFrame()
 
-    rows = []
+    return load_parquet_cached(
+        ENTRY_READY_EVENTS_CACHE_FILE,
+        modified_ns,
+    )
 
-    for path in base_path.glob("*.jsonl"):
-        try:
-            with path.open("r", encoding="utf-8") as file:
-                for line in file:
-                    line = line.strip()
+def load_all_watch_events():
+    modified_ns = get_file_modified_ns(
+        WATCH_EVENTS_CACHE_FILE
+    )
 
-                    if not line:
-                        continue
-
-                    try:
-                        record = json.loads(line)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-
-                    if record.get("event") != "ENTRY_READY":
-                        continue
-
-                    last_candle = record.get("last_candle") or {}
-
-                    entry_ready_ts = (
-                        record.get("entry_ready_ts")
-                        or last_candle.get("timestamp")
-                        or record.get("compression_updated_ts")
-                    )
-
-                    rows.append({
-                        "symbol": str(
-                            record.get("symbol", path.stem)
-                        ).upper(),
-
-                        "compression_created_ts": (
-                            record.get("compression_created_ts")
-                        ),
-
-                        "journal_entry_ready_ts": (
-                            entry_ready_ts
-                        ),
-
-                        "entry_ready_watch_age": (
-                            record.get("watch_age")
-                        ),
-
-                        "entry_ready_reason": (
-                            record.get("reason")
-                        ),
-                    })
-
-        except Exception:
-            continue
-
-    if not rows:
+    if modified_ns is None:
         return pd.DataFrame()
 
-    result = pd.DataFrame(rows)
-
-    result["compression_created_ts"] = pd.to_numeric(
-        result["compression_created_ts"],
-        errors="coerce",
+    return load_parquet_cached(
+        WATCH_EVENTS_CACHE_FILE,
+        modified_ns,
     )
-
-    result["journal_entry_ready_ts"] = pd.to_numeric(
-        result["journal_entry_ready_ts"],
-        errors="coerce",
-    )
-
-    result = (
-        result
-        .dropna(
-            subset=[
-                "symbol",
-                "compression_created_ts",
-                "journal_entry_ready_ts",
-            ]
-        )
-        .drop_duplicates(
-            subset=[
-                "symbol",
-                "compression_created_ts",
-            ],
-            keep="last",
-        )
-        .reset_index(drop=True)
-    )
-
-    return result
-
-@st.cache_data(ttl=10)
-def load_all_watch_events(
-    base_dir="compression_watch_journal",
-):
-    base_path = Path(base_dir)
-
-    if not base_path.exists():
-        return pd.DataFrame()
-
-    rows = []
-
-    for path in base_path.glob("*.jsonl"):
-        try:
-            with path.open("r", encoding="utf-8") as file:
-                for line in file:
-                    line = line.strip()
-
-                    if not line:
-                        continue
-
-                    try:
-                        record = json.loads(line)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-
-                    symbol = str(
-                        record.get("symbol", path.stem)
-                    ).upper().strip()
-
-                    last_candle = (
-                        record.get("last_candle")
-                        or {}
-                    )
-
-                    rows.append({
-                        "symbol": symbol,
-                        "event": record.get("event"),
-                        "state": record.get("state"),
-                        "reason": record.get("reason"),
-
-                        "compression_created_ts": record.get(
-                            "compression_created_ts"
-                        ),
-
-                        "event_ts": last_candle.get(
-                            "timestamp"
-                        ),
-
-                        "breakout_detected": record.get(
-                            "breakout_detected"
-                        ),
-
-                        "breakout_ts": record.get(
-                            "breakout_ts"
-                        ),
-
-                        "entry_ready": record.get(
-                            "entry_ready"
-                        ),
-
-                        "watch_age": record.get(
-                            "watch_age"
-                        ),
-
-                        "candles_waiting": record.get(
-                            "candles_waiting"
-                        ),
-
-                        # =========================
-                        # COMPRESSION FEATURES
-                        # =========================
-
-                        "compression_score": record.get(
-                            "compression_score"
-                        ),
-
-                        "trend_score": record.get(
-                            "trend_score"
-                        ),
-
-                        "range_ratio": record.get(
-                            "range_ratio"
-                        ),
-
-                        "atr_ratio": record.get(
-                            "atr_ratio"
-                        ),
-
-                        "volume_ratio": record.get(
-                            "volume_ratio"
-                        ),
-
-                        "avg_body_pct": record.get(
-                            "avg_body_pct"
-                        ),
-
-                        "compression_range_pct": record.get(
-                            "compression_range_pct"
-                        ),
-
-                        "compression_height_pct": record.get(
-                            "compression_height_pct"
-                        ),
-
-                        "compression_duration": record.get(
-                            "compression_duration"
-                        ),
-
-                        "inside_ratio": record.get(
-                            "inside_ratio"
-                        ),
-
-                        "touches_high": record.get(
-                            "touches_high"
-                        ),
-
-                        "touches_low": record.get(
-                            "touches_low"
-                        ),
-
-                        "touches_high_ratio": record.get(
-                            "touches_high_ratio"
-                        ),
-
-                        "touches_low_ratio": record.get(
-                            "touches_low_ratio"
-                        ),
-
-                        "touch_imbalance_ratio": record.get(
-                            "touch_imbalance_ratio"
-                        ),
-
-                        "upper_slope": record.get(
-                            "upper_slope"
-                        ),
-
-                        "lower_slope": record.get(
-                            "lower_slope"
-                        ),
-
-                        "slope_difference": record.get(
-                            "slope_difference"
-                        ),
-
-                        "compression_shape": record.get(
-                            "compression_shape"
-                        ),
-
-                        "compression_quality_label": record.get(
-                            "compression_quality_label"
-                        ),
-
-                        "selected_lookback": record.get(
-                            "selected_lookback"
-                        ),
-
-                        "selection_score": record.get(
-                            "selection_score"
-                        ),
-                    })
-
-        except Exception:
-            continue
-
-    if not rows:
-        return pd.DataFrame()
-
-    result = pd.DataFrame(rows)
-
-    result["compression_created_ts"] = pd.to_numeric(
-        result["compression_created_ts"],
-        errors="coerce",
-    )
-
-    result["event_ts"] = pd.to_numeric(
-        result["event_ts"],
-        errors="coerce",
-    )
-
-    result["breakout_ts"] = pd.to_numeric(
-        result["breakout_ts"],
-        errors="coerce",
-    )
-
-    result = result.dropna(
-        subset=[
-            "symbol",
-            "compression_created_ts",
-        ]
-    ).copy()
-
-    return result
     
 def safe_metric(metrics_dict, key, is_percent=False):
     value = metrics_dict.get(key, 0)
