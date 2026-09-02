@@ -1,7 +1,6 @@
 from dotenv import load_dotenv
 import os
 import time
-import threading
 import argparse
 
 from engine.live.journal.compression_watch_journal import CompressionWatchJournal
@@ -11,6 +10,10 @@ from pathlib import Path
 
 import pandas as pd
 from signals.indicators.direction import trade_direction
+
+from engine.live.data.local_market_data_provider import (
+    LocalMarketDataProvider,
+)
 
 from signals.utils.logger import BotLogger
 
@@ -25,7 +28,6 @@ from engine.live.strategy.modes.compression_strategy import CompressionStrategy
 from engine.live.execution.strategies.compression_execution_strategy import CompressionExecutionStrategy
 
 from engine.live.position.position_manager import PositionManager
-from engine.live.ws.ws_client import WSClient
 from engine.live.data.data_buffer import DataBuffer
 from engine.live.journal.signal_journal import SignalJournal
 
@@ -51,8 +53,6 @@ from engine.live.execution.strategies.direction_execution_strategy import Direct
 from engine.live.trade.trade_manager import TradeManager
 
 from exchange.binance_exchange import BinanceExchange
-
-from data.market_data import fetch_history
 
 from ui.banners import print_live_banner
 
@@ -107,6 +107,8 @@ logger = BotLogger(debug=DEBUG_LOGS)
 TIMEFRAMES = mode_config["timeframes"]
 TRIGGER_TF = mode_config["trigger_tf"]
 
+BRANCH_LABEL = "lookback-10-base-superpuesta-main-tf-30m"
+
 # =========================================================
 # ENV
 # =========================================================
@@ -153,11 +155,30 @@ buffer = DataBuffer(
     symbols=SYMBOLS
 )
 
+market_data = LocalMarketDataProvider(
+    buffer=buffer,
+    symbols=SYMBOLS,
+    timeframes=TIMEFRAMES,
+    days_by_tf=DAYS_BY_TF,
+    chunk_size=15,
+    stale_after=90,
+)
+
 signal_journal = SignalJournal(
     "live_signals_multi_asset.csv"
 )
 
 print_live_banner()
+
+print(
+    f"\033[96m[BRANCH]\033[0m "
+    f"{BRANCH_LABEL}"
+)
+
+print(
+    f"\033[96m[MARKET DATA]\033[0m "
+    f"provider={market_data.__class__.__name__}"
+)
 
 print(
     f"\033[95m[STRATEGY]\033[0m "
@@ -168,27 +189,7 @@ print(
 # LOAD HISTORICAL
 # =========================================================
 
-for symbol in SYMBOLS:
-    print(symbol)
-    for tf in TIMEFRAMES:
-
-        #print(f"[HISTORY] loading symbol={symbol} tf={tf}")
-
-        days = DAYS_BY_TF.get(tf, 3)
-
-        df_hist = fetch_history(
-            symbol,
-            tf,
-            days
-        )
-
-        #print(f"[HISTORY] {symbol} {tf} fetched rows={len(df_hist)}")
-
-        buffer.load_historical(
-            symbol,
-            tf,
-            df_hist
-        )
+market_data.load_history()
 
         #print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
         
@@ -413,22 +414,7 @@ else:
 # CONNECT WS
 # =========================================================
 
-ws = WSClient(
-    buffer.on_ws_message,
-    timeframes=TIMEFRAMES,
-    symbols=SYMBOLS,
-    chunk_size=15,
-    stale_after=90
-)
-
-ws.start()
-
-ws_thread = threading.Thread(
-    target=ws.run,
-    daemon=True
-)
-
-ws_thread.start()
+market_data.start()
 
 print(
     "\033[94m[LIVE ENGINE]\033[0m "
@@ -471,7 +457,7 @@ def write_heartbeat():
 
     status_writer.write({
         "engine_online": True,
-        "ws_online": ws.is_connected,
+        "ws_online": market_data.is_connected,
         "symbol": symbol_status,
         "balance": balance,
 
@@ -1095,8 +1081,7 @@ try:
 # =========================================================
 
 except KeyboardInterrupt:
-
-    ws.stop()
+    market_data.stop()
 
     status_writer.write({
         "engine_online": False,
