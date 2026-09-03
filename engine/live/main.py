@@ -8,9 +8,6 @@ from engine.live.journal.compression_watch_journal import CompressionWatchJourna
 import json
 from pathlib import Path
 
-import pandas as pd
-from signals.indicators.direction import trade_direction
-
 from engine.live.data.local_market_data_provider import (
     LocalMarketDataProvider,
 )
@@ -244,29 +241,6 @@ print(
 market_data.load_history()
 
         #print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
-        
-# =========================================================
-# INIT PREVIOUS DIRECTION FROM HISTORY
-# =========================================================
-
-last_direction_by_symbol = {}
-
-for symbol in SYMBOLS:
-    candles_trigger = buffer.get_candles(symbol, TRIGGER_TF)
-
-    if not candles_trigger:
-        continue
-
-    df_trigger = pd.DataFrame(candles_trigger)
-
-    direction = trade_direction(df_trigger)
-
-    last_direction_by_symbol[symbol] = direction
-
-    print(
-        f"\033[96m[DIRECTION INIT]\033[0m "
-        f"{symbol} previous_direction={direction}"
-    )
 
 # =========================================================
 # EXCHANGE
@@ -741,32 +715,14 @@ try:
                 # DEBUG ROUTER INPUT
                 # ================================
 
-                previous_direction = last_direction_by_symbol.get(symbol)
-
-                logger.debug("\n[ROUTER DEBUG]")
-                logger.debug(f"prev_direction (from memory) : {previous_direction}")
-                logger.debug(f"signal direction           : {signal.direction.value}")
-                logger.debug(f"signal trend              : {signal.trend.value}")
-                logger.debug(f"signal momentum           : {signal.momentum.value}")
-
-                logger.debug(
-                    f"[DIRECTION TRANSITION] "
-                    f"{symbol} "
-                    f"{previous_direction} -> {signal.direction}"
-                )
-
-                logger.debug("===========================\n")
-                
                 compression_signal_context = {}
-                
+
                 if STRATEGY_MODE == "compression":
 
                     compression_result = compression_strategy.evaluate(
                         symbol=symbol,
                         signal=signal,
-                        tf=TRIGGER_TF,
-                        btc_context=btc_context,
-                        current_position=execution.get_position(symbol),
+                        buffer=buffer,
                     )
 
                     trade_action = compression_result.trade_action
@@ -775,11 +731,9 @@ try:
                 else:
                     trade_action = strategy_router.evaluate(
                         signal,
-                        previous_direction=previous_direction,
-                        current_position=execution.get_position(symbol)
+                        previous_direction=None,
+                        current_position=execution.get_position(symbol),
                     )
-                                  
-                last_direction_by_symbol[symbol] = signal.direction
 
                 update_status(
                     status_writer,
