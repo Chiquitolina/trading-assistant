@@ -15,6 +15,10 @@ from engine.live.data.local_market_data_provider import (
     LocalMarketDataProvider,
 )
 
+from engine.live.data.redis_market_data_provider import (
+    RedisMarketDataProvider,
+)
+
 from signals.utils.logger import BotLogger
 
 from services.market_context.btc_correlation_analyzer import (
@@ -116,6 +120,30 @@ BRANCH_LABEL = "lookback-10-base-superpuesta-main-tf-30m"
 api_key = os.getenv("API_KEY")
 secret = os.getenv("SECRET_KEY")
 
+MARKET_DATA_PROVIDER = os.getenv(
+    "MARKET_DATA_PROVIDER",
+    "local",
+).strip().lower()
+
+REDIS_HOST = os.getenv(
+    "REDIS_HOST",
+    "127.0.0.1",
+)
+
+REDIS_PORT = int(
+    os.getenv(
+        "REDIS_PORT",
+        "6379",
+    )
+)
+
+REDIS_DB = int(
+    os.getenv(
+        "REDIS_DB",
+        "0",
+    )
+)
+
 # =========================================================
 # CONFIG
 # =========================================================
@@ -155,14 +183,33 @@ buffer = DataBuffer(
     symbols=SYMBOLS
 )
 
-market_data = LocalMarketDataProvider(
-    buffer=buffer,
-    symbols=SYMBOLS,
-    timeframes=TIMEFRAMES,
-    days_by_tf=DAYS_BY_TF,
-    chunk_size=15,
-    stale_after=90,
-)
+if MARKET_DATA_PROVIDER == "redis":
+    market_data = RedisMarketDataProvider(
+        buffer=buffer,
+        symbols=SYMBOLS,
+        timeframes=TIMEFRAMES,
+        consumer_name=BRANCH_LABEL,
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB,
+    )
+
+elif MARKET_DATA_PROVIDER == "local":
+    market_data = LocalMarketDataProvider(
+        buffer=buffer,
+        symbols=SYMBOLS,
+        timeframes=TIMEFRAMES,
+        days_by_tf=DAYS_BY_TF,
+        chunk_size=15,
+        stale_after=90,
+    )
+
+else:
+    raise ValueError(
+        "Invalid MARKET_DATA_PROVIDER: "
+        f"{MARKET_DATA_PROVIDER!r}. "
+        "Expected 'local' or 'redis'."
+    )
 
 signal_journal = SignalJournal(
     "live_signals_multi_asset.csv"
@@ -178,6 +225,11 @@ print(
 print(
     f"\033[96m[MARKET DATA]\033[0m "
     f"provider={market_data.__class__.__name__}"
+)
+
+print(
+    f"\033[96m[MARKET DATA]\033[0m "
+    f"mode={MARKET_DATA_PROVIDER}"
 )
 
 print(
