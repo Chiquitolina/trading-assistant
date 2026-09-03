@@ -175,14 +175,47 @@ class RedisMarketDataPublisher:
             timeframe,
         )
 
+        last_history_item = self.redis.lindex(
+            candle_history_key,
+            -1,
+        )
+
+        replace_last = False
+
+        if last_history_item:
+            try:
+                last_candle = json.loads(
+                    last_history_item
+                )
+
+                replace_last = (
+                    int(last_candle["timestamp"])
+                    == int(candle["timestamp"])
+                )
+
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
+                replace_last = False
+
         pipeline = self.redis.pipeline(
             transaction=True,
         )
 
-        pipeline.rpush(
-            candle_history_key,
-            serialized,
-        )
+        if replace_last:
+            pipeline.lset(
+                candle_history_key,
+                -1,
+                serialized,
+            )
+        else:
+            pipeline.rpush(
+                candle_history_key,
+                serialized,
+            )
 
         pipeline.ltrim(
             candle_history_key,
