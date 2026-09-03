@@ -722,7 +722,9 @@ try:
                     compression_result = compression_strategy.evaluate(
                         symbol=symbol,
                         signal=signal,
-                        buffer=buffer,
+                        tf=TRIGGER_TF,
+                        btc_context=btc_context,
+                        current_position=execution.get_position(symbol),
                     )
 
                     trade_action = compression_result.trade_action
