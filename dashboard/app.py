@@ -22066,6 +22066,282 @@ with tab_tp_sl_replay:
                     "Un win rate superior no alcanza si aumenta "
                     "demasiado la pérdida media o el drawdown."
                 )
+                
+                # ======================================
+                # STRUCTURAL RISK BAND ANALYSIS
+                # ======================================
+
+                st.markdown(
+                    "### Structural Performance "
+                    "by Risk Band"
+                )
+
+                st.caption(
+                    "Analiza bandas independientes de "
+                    "riesgo estructural. A diferencia del "
+                    "risk cap, cada fila contiene solamente "
+                    "los trades de esa banda."
+                )
+
+                risk_band_source = (
+                    structural_comparison.copy()
+                )
+
+                risk_band_source[
+                    "structural_sl_risk_pct"
+                ] = pd.to_numeric(
+                    risk_band_source[
+                        "structural_sl_risk_pct"
+                    ],
+                    errors="coerce",
+                )
+
+                risk_band_source = (
+                    risk_band_source[
+                        risk_band_source[
+                            "structural_sl_risk_pct"
+                        ].gt(0)
+                    ]
+                    .copy()
+                )
+
+                risk_band_source[
+                    "structural_risk_band"
+                ] = pd.cut(
+                    risk_band_source[
+                        "structural_sl_risk_pct"
+                    ],
+                    bins=[
+                        0.0,
+                        3.0,
+                        5.0,
+                        7.0,
+                        10.0,
+                        np.inf,
+                    ],
+                    labels=[
+                        "0% - 3%",
+                        ">3% - 5%",
+                        ">5% - 7%",
+                        ">7% - 10%",
+                        ">10%",
+                    ],
+                    include_lowest=True,
+                    right=True,
+                )
+
+                risk_band_rows = []
+
+                total_risk_band_trades = len(
+                    risk_band_source
+                )
+
+                for risk_band, risk_group in (
+                    risk_band_source.groupby(
+                        "structural_risk_band",
+                        observed=True,
+                    )
+                ):
+                    if risk_group.empty:
+                        continue
+
+                    actual_band_metrics = (
+                        summarize_replay_strategy(
+                            strategy_name=(
+                                "Actual management"
+                            ),
+                            pnl_values=risk_group[
+                                "pnl"
+                            ],
+                        )
+                    )
+
+                    structural_band_metrics = (
+                        summarize_replay_strategy(
+                            strategy_name=(
+                                "Original TP + "
+                                "structural SL"
+                            ),
+                            pnl_values=risk_group[
+                                "structural_simulated_pnl"
+                            ],
+                        )
+                    )
+
+                    actual_band_pf = (
+                        actual_band_metrics[
+                            "profit_factor"
+                        ]
+                    )
+
+                    structural_band_pf = (
+                        structural_band_metrics[
+                            "profit_factor"
+                        ]
+                    )
+
+                    comparable_pf = (
+                        pd.notna(actual_band_pf)
+                        and pd.notna(
+                            structural_band_pf
+                        )
+                        and np.isfinite(
+                            actual_band_pf
+                        )
+                        and np.isfinite(
+                            structural_band_pf
+                        )
+                    )
+
+                    risk_band_rows.append({
+                        "risk_band":
+                            str(risk_band),
+
+                        "trades":
+                            len(risk_group),
+
+                        "coverage_pct": (
+                            len(risk_group)
+                            / total_risk_band_trades
+                            * 100
+                            if total_risk_band_trades
+                            else 0.0
+                        ),
+
+                        "avg_risk_pct": (
+                            risk_group[
+                                "structural_sl_risk_pct"
+                            ].mean()
+                        ),
+
+                        "max_risk_pct": (
+                            risk_group[
+                                "structural_sl_risk_pct"
+                            ].max()
+                        ),
+
+                        "actual_winrate": (
+                            actual_band_metrics[
+                                "winrate"
+                            ]
+                        ),
+
+                        "actual_avg_pnl": (
+                            actual_band_metrics[
+                                "avg_pnl"
+                            ]
+                        ),
+
+                        "actual_total_pnl": (
+                            actual_band_metrics[
+                                "total_pnl"
+                            ]
+                        ),
+
+                        "actual_profit_factor": (
+                            actual_band_pf
+                        ),
+
+                        "actual_max_drawdown": (
+                            actual_band_metrics[
+                                "max_drawdown"
+                            ]
+                        ),
+
+                        "structural_winrate": (
+                            structural_band_metrics[
+                                "winrate"
+                            ]
+                        ),
+
+                        "structural_avg_pnl": (
+                            structural_band_metrics[
+                                "avg_pnl"
+                            ]
+                        ),
+
+                        "structural_total_pnl": (
+                            structural_band_metrics[
+                                "total_pnl"
+                            ]
+                        ),
+
+                        "structural_profit_factor": (
+                            structural_band_pf
+                        ),
+
+                        "structural_max_drawdown": (
+                            structural_band_metrics[
+                                "max_drawdown"
+                            ]
+                        ),
+
+                        "delta_total_pnl": (
+                            structural_band_metrics[
+                                "total_pnl"
+                            ]
+                            - actual_band_metrics[
+                                "total_pnl"
+                            ]
+                        ),
+
+                        "delta_profit_factor": (
+                            structural_band_pf
+                            - actual_band_pf
+                            if comparable_pf
+                            else np.nan
+                        ),
+                    })
+
+                structural_risk_band_df = (
+                    pd.DataFrame(
+                        risk_band_rows
+                    )
+                )
+
+                if structural_risk_band_df.empty:
+                    st.info(
+                        "No structural risk bands "
+                        "are available."
+                    )
+
+                else:
+                    risk_band_numeric_cols = [
+                        "coverage_pct",
+                        "avg_risk_pct",
+                        "max_risk_pct",
+
+                        "actual_winrate",
+                        "actual_avg_pnl",
+                        "actual_total_pnl",
+                        "actual_profit_factor",
+                        "actual_max_drawdown",
+
+                        "structural_winrate",
+                        "structural_avg_pnl",
+                        "structural_total_pnl",
+                        "structural_profit_factor",
+                        "structural_max_drawdown",
+
+                        "delta_total_pnl",
+                        "delta_profit_factor",
+                    ]
+
+                    for col in risk_band_numeric_cols:
+                        structural_risk_band_df[
+                            col
+                        ] = pd.to_numeric(
+                            structural_risk_band_df[
+                                col
+                            ],
+                            errors="coerce",
+                        ).round(4)
+
+                    st.dataframe(
+                        structural_risk_band_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
         if (
             replay_analysis_mode
@@ -22189,8 +22465,14 @@ with tab_tp_sl_replay:
                     2.00,
                     2.50,
                     3.00,
+                    4.00,
                     5.00,
+                    6.00,
+                    7.00,
+                    8.00,
+                    10.00,
                 ]
+                
 
                 scenario_report_rows = []
 
@@ -22675,7 +22957,12 @@ with tab_tp_sl_replay:
                     2.00,
                     2.50,
                     3.00,
+                    4.00,
                     5.00,
+                    6.00,
+                    7.00,
+                    8.00,
+                    10.00,
                 ]
 
                 sl_only_available_trades = len(
@@ -24002,7 +24289,12 @@ with tab_tp_sl_replay:
                         2.00,
                         2.50,
                         3.00,
+                        4.00,
                         5.00,
+                        6.00,
+                        7.00,
+                        8.00,
+                        10.00,
                     ]
 
                     factorial_rows = []
