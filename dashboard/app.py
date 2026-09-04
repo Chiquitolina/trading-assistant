@@ -11501,6 +11501,97 @@ with tab_swings:
                                     f'{selected_bucket_summary["avg_mae"]:.4f}%'
                                 ),
                             )
+                            
+
+                            # =====================
+                            # SEND TO TP / SL REPLAY
+                            # =====================
+
+                            replay_description = (
+                                f"{selected_side} | "
+                                f"swing "
+                                f"{selected_reference} "
+                                f"{selected_tf} | "
+                                f"{selected_bucket_label}"
+                            )
+
+                            replay_filters = [
+                                (
+                                    "side == "
+                                    f"{selected_side}"
+                                ),
+                                (
+                                    f"{selected_distance_col} "
+                                    f"in {selected_bucket_label}"
+                                ),
+                            ]
+
+                            send_replay_key = (
+                                f"{selected_side}_"
+                                f"{selected_reference}_"
+                                f"{selected_tf}_"
+                                f"{selected_bucket_label}"
+                            )
+
+                            send_replay_key = (
+                                send_replay_key
+                                .replace(" ", "_")
+                                .replace("%", "pct")
+                                .replace(">", "gt")
+                                .replace("<", "lt")
+                            )
+
+                            if st.button(
+                                (
+                                    "🧪 Send selected bucket "
+                                    "to TP / SL Replay"
+                                ),
+                                key=(
+                                    "send_swing_bucket_"
+                                    "to_replay_"
+                                    f"{send_replay_key}"
+                                ),
+                                type="primary",
+                                use_container_width=True,
+                            ):
+                                replay_save_result = (
+                                    save_tp_sl_replay_segment(
+                                        trades_df=(
+                                            selected_bucket_trades
+                                        ),
+                                        source=(
+                                            "Swing Distance "
+                                            "Bucket Analyzer"
+                                        ),
+                                        description=(
+                                            replay_description
+                                        ),
+                                        selected_filters=(
+                                            replay_filters
+                                        ),
+                                        bucket_definition=None,
+                                    )
+                                )
+
+                                if replay_save_result[
+                                    "saved"
+                                ]:
+                                    st.success(
+                                        (
+                                            f'{replay_save_result["trade_count"]} '
+                                            "unique trades were sent "
+                                            "to TP / SL Replay. "
+                                            "Open the Replay tab "
+                                            "to analyze them."
+                                        )
+                                    )
+
+                                else:
+                                    st.error(
+                                        replay_save_result[
+                                            "reason"
+                                        ]
+                                    )
 
                             # =====================
                             # BUCKET TRADES
