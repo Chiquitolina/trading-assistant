@@ -22026,7 +22026,22 @@ with tab_tp_sl_replay:
                 # HYBRID STRUCTURAL SL
                 # ======================================
 
-                hybrid_risk_threshold_pct = 3.0
+                hybrid_risk_threshold_pct = st.select_slider(
+                    "Hybrid structural SL max risk",
+                    options=[
+                        1.0,
+                        1.5,
+                        2.0,
+                        2.5,
+                        3.0,
+                        3.5,
+                        4.0,
+                        5.0,
+                    ],
+                    value=3.0,
+                    format_func=lambda value: f"{value:.1f}%",
+                    key="hybrid_structural_risk_threshold",
+                )
 
                 hybrid_structural_mask = (
                     structural_comparison[
@@ -22088,8 +22103,8 @@ with tab_tp_sl_replay:
 
                     summarize_replay_strategy(
                         (
-                            "Hybrid: structural SL "
-                            "when risk <= 3%"
+                            "Hybrid: structural SL when risk "
+                            f"<= {hybrid_risk_threshold_pct:g}%"
                         ),
                         structural_comparison[
                             "hybrid_net_pnl"
@@ -22144,17 +22159,18 @@ with tab_tp_sl_replay:
                 )
 
                 st.caption(
-                    "Hybrid <= 3% utiliza el SL estructural "
-                    "cuando la distancia estructural es como "
-                    "máximo 3%. Para riesgos superiores conserva "
-                    "la gestión real. No rechaza trades."
+                    f"Hybrid <= {hybrid_risk_threshold_pct:g}% utiliza "
+                    "el SL estructural cuando la distancia estructural "
+                    f"es como máximo {hybrid_risk_threshold_pct:g}%. "
+                    "Para riesgos superiores conserva la gestión real. "
+                    "No rechaza trades."
                 )
 
                 st.caption(
-                    "Comparación bruta antes de agregar costos "
-                    "específicos al escenario estructural. "
-                    "Un win rate superior no alcanza si aumenta "
-                    "demasiado la pérdida media o el drawdown."
+                    f"Comparación neta: se descuenta un costo estimado "
+                    f"de {hybrid_structural_cost_pct:.2f}% únicamente "
+                    "en los resultados simulados. El PnL real ya incluye "
+                    "sus fees."
                 )
                 
                 # ======================================
