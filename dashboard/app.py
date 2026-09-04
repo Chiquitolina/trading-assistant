@@ -11071,6 +11071,295 @@ with tab_swings:
                 st.dataframe(worst_distance, use_container_width=True)
 
         # =========================
+        # BTC DEPENDENCY x SWING
+        # =========================
+
+        st.markdown(
+            "### BTC Dependency × Swing High 15m"
+        )
+
+        st.caption(
+            "Cruza la fuerza independiente respecto de BTC "
+            "con entradas LONG ubicadas entre -1% y 0% "
+            "del swing high de 15m."
+        )
+
+        btc_swing_required_cols = [
+            "side",
+            "pnl",
+            "dist_swing_high_15m_pct",
+            "btc_corr_15m",
+            "btc_r2_15m",
+            "btc_residual_move_15m_pct",
+        ]
+
+        btc_swing_missing_cols = [
+            col
+            for col in btc_swing_required_cols
+            if col not in swing_df.columns
+        ]
+
+        if btc_swing_missing_cols:
+            st.info(
+                "Missing BTC × swing columns: "
+                f"{btc_swing_missing_cols}"
+            )
+
+        else:
+            btc_swing_df = (
+                add_btc_correlation_buckets(
+                    swing_df,
+                    timeframe="15m",
+                )
+            )
+
+            distance_col = (
+                "dist_swing_high_15m_pct"
+            )
+
+            dependency_col = (
+                "btc_dependency_15m"
+            )
+
+            btc_swing_df[distance_col] = (
+                pd.to_numeric(
+                    btc_swing_df[distance_col],
+                    errors="coerce",
+                )
+            )
+
+            btc_swing_df = btc_swing_df[
+                btc_swing_df["side"]
+                .astype(str)
+                .str.upper()
+                .eq("LONG")
+            ].copy()
+
+            btc_swing_df = btc_swing_df.dropna(
+                subset=[
+                    "pnl",
+                    distance_col,
+                    dependency_col,
+                ]
+            )
+
+            # Excluye trades sin clasificación BTC válida.
+            btc_swing_df = btc_swing_df[
+                btc_swing_df[dependency_col]
+                .ne("unknown")
+            ].copy()
+
+            # Replica exactamente el bucket actual creado
+            # por pd.cut con right=True: (-1%, 0%].
+            btc_swing_df[
+                "in_swing_high_15m_bucket"
+            ] = (
+                (
+                    btc_swing_df[distance_col] > -1.0
+                )
+                & (
+                    btc_swing_df[distance_col] <= 0.0
+                )
+            )
+
+            btc_swing_df[
+                "is_independent_strength"
+            ] = (
+                btc_swing_df[dependency_col]
+                .eq("independent_strength")
+            )
+
+            # =============================================
+            # OVERLAP SUMMARY
+            # =============================================
+
+            total_valid = len(btc_swing_df)
+
+            independent_total = int(
+                btc_swing_df[
+                    "is_independent_strength"
+                ].sum()
+            )
+
+            swing_total = int(
+                btc_swing_df[
+                    "in_swing_high_15m_bucket"
+                ].sum()
+            )
+
+            intersection_total = int(
+                (
+                    btc_swing_df[
+                        "is_independent_strength"
+                    ]
+                    & btc_swing_df[
+                        "in_swing_high_15m_bucket"
+                    ]
+                ).sum()
+            )
+
+            intersection_pct_of_swing = (
+                intersection_total
+                / swing_total
+                * 100
+                if swing_total
+                else 0.0
+            )
+
+            intersection_pct_of_independent = (
+                intersection_total
+                / independent_total
+                * 100
+                if independent_total
+                else 0.0
+            )
+
+            overlap_col1, overlap_col2, overlap_col3 = (
+                st.columns(3)
+            )
+
+            overlap_col1.metric(
+                "Independent strength",
+                independent_total,
+            )
+
+            overlap_col2.metric(
+                "Swing high 15m -1% to 0%",
+                swing_total,
+            )
+
+            overlap_col3.metric(
+                "Intersection",
+                intersection_total,
+            )
+
+            overlap_col4, overlap_col5 = st.columns(2)
+
+            overlap_col4.metric(
+                "% of swing bucket also independent",
+                f"{intersection_pct_of_swing:.2f}%",
+            )
+
+            overlap_col5.metric(
+                "% of independent also in swing bucket",
+                (
+                    f"{intersection_pct_of_independent:.2f}%"
+                ),
+            )
+
+            # =============================================
+            # MUTUALLY EXCLUSIVE 2 x 2 GROUPS
+            # =============================================
+
+            conditions = [
+                (
+                    btc_swing_df[
+                        "is_independent_strength"
+                    ]
+                    & btc_swing_df[
+                        "in_swing_high_15m_bucket"
+                    ]
+                ),
+                (
+                    btc_swing_df[
+                        "is_independent_strength"
+                    ]
+                    & ~btc_swing_df[
+                        "in_swing_high_15m_bucket"
+                    ]
+                ),
+                (
+                    ~btc_swing_df[
+                        "is_independent_strength"
+                    ]
+                    & btc_swing_df[
+                        "in_swing_high_15m_bucket"
+                    ]
+                ),
+            ]
+
+            choices = [
+                (
+                    "Independent strength + "
+                    "swing high -1% to 0%"
+                ),
+                (
+                    "Independent strength + "
+                    "outside swing bucket"
+                ),
+                (
+                    "Other BTC dependency + "
+                    "swing high -1% to 0%"
+                ),
+            ]
+
+            btc_swing_df["btc_swing_group"] = (
+                np.select(
+                    conditions,
+                    choices,
+                    default=(
+                        "Other BTC dependency + "
+                        "outside swing bucket"
+                    ),
+                )
+            )
+
+            btc_swing_results = []
+
+            for group_name, group_df in (
+                btc_swing_df.groupby(
+                    "btc_swing_group",
+                    observed=True,
+                )
+            ):
+                row = swing_stats(
+                    group_name,
+                    group_df,
+                )
+
+                if row:
+                    row["coverage_pct"] = round(
+                        len(group_df)
+                        / total_valid
+                        * 100,
+                        2,
+                    )
+                    btc_swing_results.append(row)
+
+            btc_swing_report = pd.DataFrame(
+                btc_swing_results
+            )
+
+            if btc_swing_report.empty:
+                st.info(
+                    "No BTC dependency × swing data "
+                    "available."
+                )
+
+            else:
+                btc_swing_report = (
+                    btc_swing_report.sort_values(
+                        [
+                            "profit_factor",
+                            "total_return",
+                            "trades",
+                        ],
+                        ascending=[
+                            False,
+                            False,
+                            False,
+                        ],
+                        na_position="last",
+                    )
+                )
+
+                st.dataframe(
+                    btc_swing_report,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # =========================
         # ROUTER x SWING
         # =========================
 
