@@ -206,9 +206,7 @@ def format_replay_duration(total_minutes):
     return f"{hours}h {minutes}m"
 
 
-def build_replay_observation_windows(
-    timeframe,
-):
+def build_replay_observation_windows(timeframe):
     """
     Builds TP/SL replay observation windows using
     the strategy MAIN / trigger timeframe.
@@ -232,9 +230,7 @@ def build_replay_observation_windows(
     if timeframe not in valid_timeframes:
         timeframe = "30m"
 
-    timeframe_minutes = timeframe_to_minutes(
-        timeframe
-    )
+    timeframe_minutes = timeframe_to_minutes(timeframe)
 
     candle_windows = [
         3,
@@ -244,19 +240,21 @@ def build_replay_observation_windows(
         48,
     ]
 
-    return [
-        {
-            "candles": candles,
-            "minutes": candles * timeframe_minutes,
-            "label": (
-                f"{candles} candles · "
-                f"{format_replay_duration(
-                    candles * timeframe_minutes
-                )}"
-            ),
-        }
-        for candles in candle_windows
-    ]
+    windows = []
+
+    for candles in candle_windows:
+        total_minutes = candles * timeframe_minutes
+        duration_label = format_replay_duration(total_minutes)
+
+        windows.append(
+            {
+                "candles": candles,
+                "minutes": total_minutes,
+                "label": f"{candles} candles · {duration_label}",
+            }
+        )
+
+    return windows
 
 def fmt_price_for_display(x, decimals=10):
     if x in (None, "", "N/A"):
