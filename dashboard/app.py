@@ -22009,6 +22009,54 @@ with tab_tp_sl_replay:
                     ],
                 )
 
+                # ======================================
+                # HYBRID STRUCTURAL SL
+                # ======================================
+
+                hybrid_risk_threshold_pct = 3.0
+
+                hybrid_structural_mask = (
+                    structural_comparison[
+                        "structural_sl_risk_pct"
+                    ].gt(0)
+                    &
+                    structural_comparison[
+                        "structural_sl_risk_pct"
+                    ].le(
+                        hybrid_risk_threshold_pct
+                    )
+                )
+
+                structural_comparison[
+                    "hybrid_simulated_pnl"
+                ] = np.where(
+                    hybrid_structural_mask,
+
+                    # Riesgo estructural válido
+                    # entre 0% y 3%:
+                    # usar TP original + SL estructural.
+                    structural_comparison[
+                        "structural_simulated_pnl"
+                    ],
+
+                    # Riesgo igual/inferior a cero
+                    # o superior a 3%:
+                    # conservar la gestión real.
+                    structural_comparison[
+                        "pnl"
+                    ],
+                )
+
+                structural_used_count = int(
+                    hybrid_structural_mask.sum()
+                )
+
+                actual_used_count = int(
+                    (
+                        ~hybrid_structural_mask
+                    ).sum()
+                )
+
                 comparison_rows = [
                     summarize_replay_strategy(
                         "Actual management",
@@ -22024,6 +22072,16 @@ with tab_tp_sl_replay:
                         ),
                         structural_comparison[
                             "structural_simulated_pnl"
+                        ],
+                    ),
+
+                    summarize_replay_strategy(
+                        (
+                            "Hybrid: structural SL "
+                            "when risk <= 3%"
+                        ),
+                        structural_comparison[
+                            "hybrid_simulated_pnl"
                         ],
                     ),
                 ]
@@ -22058,6 +22116,27 @@ with tab_tp_sl_replay:
                     structural_economics_df,
                     use_container_width=True,
                     hide_index=True,
+                )
+                
+                hybrid_col_1, hybrid_col_2 = (
+                    st.columns(2)
+                )
+
+                hybrid_col_1.metric(
+                    "Hybrid: structural SL trades",
+                    structural_used_count,
+                )
+
+                hybrid_col_2.metric(
+                    "Hybrid: actual management trades",
+                    actual_used_count,
+                )
+
+                st.caption(
+                    "Hybrid <= 3% utiliza el SL estructural "
+                    "cuando la distancia estructural es como "
+                    "máximo 3%. Para riesgos superiores conserva "
+                    "la gestión real. No rechaza trades."
                 )
 
                 st.caption(
