@@ -186,6 +186,78 @@ def timeframe_to_minutes(timeframe):
 
     return mapping.get(timeframe, 30)
 
+def format_replay_duration(total_minutes):
+    total_minutes = int(total_minutes)
+
+    if total_minutes < 60:
+        return f"{total_minutes} min"
+
+    if total_minutes % 60 == 0:
+        hours = total_minutes // 60
+
+        if hours == 1:
+            return "1 hour"
+
+        return f"{hours} hours"
+
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+
+    return f"{hours}h {minutes}m"
+
+
+def build_replay_observation_windows(
+    timeframe,
+):
+    """
+    Builds TP/SL replay observation windows using
+    the strategy MAIN / trigger timeframe.
+
+    The structural scale is expressed in candles,
+    not fixed clock hours.
+    """
+    timeframe = str(timeframe or "").strip()
+
+    valid_timeframes = {
+        "1m",
+        "3m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "4h",
+    }
+
+    if timeframe not in valid_timeframes:
+        timeframe = "30m"
+
+    timeframe_minutes = timeframe_to_minutes(
+        timeframe
+    )
+
+    candle_windows = [
+        3,
+        6,
+        12,
+        24,
+        48,
+    ]
+
+    return [
+        {
+            "candles": candles,
+            "minutes": candles * timeframe_minutes,
+            "label": (
+                f"{candles} candles · "
+                f"{format_replay_duration(
+                    candles * timeframe_minutes
+                )}"
+            ),
+        }
+        for candles in candle_windows
+    ]
+
 def fmt_price_for_display(x, decimals=10):
     if x in (None, "", "N/A"):
         return "-"
@@ -4549,13 +4621,15 @@ def build_candidate_bucket_trades_cached(
 @st.cache_data(ttl=60, show_spinner=False)
 def build_candidate_scenarios_cached(
     scenarios: pd.DataFrame,
-    observation_hours: int,
+    observation_minutes: int,
     tp_target_pct: float,
     sl_buffer_pct: float,
 ) -> pd.DataFrame:
     cutoff = (
         pd.Timestamp.now(tz="UTC")
-        - pd.Timedelta(hours=observation_hours)
+        - pd.Timedelta(
+            minutes=observation_minutes
+        )
     )
 
     work = scenarios[
@@ -21286,18 +21360,56 @@ with tab_tp_sl_replay:
         # ==========================================
         # OBSERVATION WINDOW
         # ==========================================
-        observation_hours = st.selectbox(
+
+        replay_timeframe = str(
+            trigger_tf or "30m"
+        ).strip()
+
+        replay_windows = (
+            build_replay_observation_windows(
+                replay_timeframe
+            )
+        )
+
+        replay_window_by_candles = {
+            window["candles"]: window
+            for window in replay_windows
+        }
+
+        observation_candles = st.selectbox(
             "Minimum completed observation window",
-            options=[24, 48, 72],
+            options=list(
+                replay_window_by_candles.keys()
+            ),
             index=2,
-            format_func=lambda value: f"{value} hours",
-            key="tp_sl_replay_observation_hours",
+            format_func=lambda candles: (
+                replay_window_by_candles[
+                    candles
+                ]["label"]
+            ),
+            key="tp_sl_replay_observation_candles",
+        )
+
+        selected_replay_window = (
+            replay_window_by_candles[
+                observation_candles
+            ]
+        )
+
+        observation_minutes = (
+            selected_replay_window["minutes"]
+        )
+
+        st.caption(
+            f"Replay scale: MAIN TF {replay_timeframe} · "
+            f"{observation_candles} candles · "
+            f"{format_replay_duration(observation_minutes)}"
         )
 
         cutoff = (
             pd.Timestamp.now(tz="UTC")
             - pd.Timedelta(
-                hours=observation_hours
+                minutes=observation_minutes
             )
         )
 
@@ -21430,10 +21542,10 @@ with tab_tp_sl_replay:
                 candidate_scenarios = (
                     build_candidate_scenarios_cached(
                         candidate_scenarios_source,
-                        observation_hours,
+                        observation_minutes,
                         candidate_tp,
                         candidate_buffer,
-                    ).copy()
+                    )
                 )
 
             if (
