@@ -22056,6 +22056,10 @@ with tab_tp_sl_replay:
                         hybrid_risk_threshold_pct
                     )
                 )
+                
+                structural_comparison[
+                    "hybrid_uses_structural_sl"
+                ] = hybrid_structural_mask
 
                 structural_comparison[
                     "hybrid_net_pnl"
@@ -22174,6 +22178,246 @@ with tab_tp_sl_replay:
                     "en los resultados simulados. El PnL real ya incluye "
                     "sus fees."
                 )
+                
+                # ======================================
+                # HYBRID TEMPORAL ROBUSTNESS
+                # ======================================
+
+                st.markdown(
+                    "### Hybrid Temporal Robustness"
+                )
+
+                st.caption(
+                    "Compara la gestión actual contra el "
+                    "híbrido seleccionado en la primera y "
+                    "segunda mitad cronológica del mismo "
+                    "conjunto de trades."
+                )
+
+                if "entry_ts" not in structural_comparison.columns:
+                    st.info(
+                        "No existe la columna entry_ts para "
+                        "realizar la validación temporal."
+                    )
+
+                else:
+                    hybrid_temporal_source = (
+                        structural_comparison.copy()
+                    )
+
+                    hybrid_temporal_source[
+                        "entry_ts"
+                    ] = pd.to_datetime(
+                        hybrid_temporal_source[
+                            "entry_ts"
+                        ],
+                        utc=True,
+                        errors="coerce",
+                    )
+
+                    hybrid_temporal_source = (
+                        hybrid_temporal_source[
+                            hybrid_temporal_source[
+                                "entry_ts"
+                            ].notna()
+                        ]
+                        .sort_values("entry_ts")
+                        .reset_index(drop=True)
+                    )
+
+                    if len(hybrid_temporal_source) < 2:
+                        st.info(
+                            "No hay suficientes trades con "
+                            "entry_ts válido para dividir el "
+                            "período."
+                        )
+
+                    else:
+                        temporal_split_index = (
+                            len(
+                                hybrid_temporal_source
+                            )
+                            // 2
+                        )
+
+                        hybrid_temporal_periods = [
+                            (
+                                "First half",
+                                hybrid_temporal_source.iloc[
+                                    :temporal_split_index
+                                ].copy(),
+                            ),
+                            (
+                                "Second half",
+                                hybrid_temporal_source.iloc[
+                                    temporal_split_index:
+                                ].copy(),
+                            ),
+                        ]
+
+                        hybrid_temporal_rows = []
+
+                        for (
+                            period_name,
+                            period_data,
+                        ) in hybrid_temporal_periods:
+                            if period_data.empty:
+                                continue
+
+                            actual_period_metrics = (
+                                summarize_replay_strategy(
+                                    "Actual management",
+                                    period_data["pnl"],
+                                )
+                                                       )
+
+                            hybrid_period_metrics = (
+                                summarize_replay_strategy(
+                                    (
+                                        "Hybrid structural SL "
+                                        "when risk <= "
+                                        f"{hybrid_risk_threshold_pct:g}%"
+                                    ),
+                                    period_data[
+                                        "hybrid_net_pnl"
+                                    ],
+                                )
+                            )
+
+                            actual_total_pnl = float(
+                                actual_period_metrics[
+                                    "total_pnl"
+                                ]
+                            )
+
+                            hybrid_total_pnl = float(
+                                hybrid_period_metrics[
+                                    "total_pnl"
+                                ]
+                            )
+
+                            hybrid_temporal_rows.append(
+                                {
+                                    "period": period_name,
+                                    "date_from": (
+                                        period_data[
+                                            "entry_ts"
+                                        ]
+                                        .min()
+                                        .strftime(
+                                            "%Y-%m-%d"
+                                        )
+                                    ),
+                                    "date_to": (
+                                        period_data[
+                                            "entry_ts"
+                                        ]
+                                        .max()
+                                        .strftime(
+                                            "%Y-%m-%d"
+                                        )
+                                    ),
+                                    "trades": len(
+                                        period_data
+                                    ),
+                                    (
+                                        "structural_sl_trades"
+                                    ): int(
+                                                                               period_data[
+                                            (
+                                                "hybrid_uses_"
+                                                "structural_sl"
+                                            )
+                                        ].sum()
+                                    ),
+                                    "actual_total_pnl": (
+                                        actual_total_pnl
+                                    ),
+                                    "hybrid_total_pnl": (
+                                        hybrid_total_pnl
+                                    ),
+                                    "delta_total_pnl": (
+                                        hybrid_total_pnl
+                                        - actual_total_pnl
+                                    ),
+                                    (
+                                        "actual_profit_factor"
+                                    ): actual_period_metrics[
+                                        "profit_factor"
+                                    ],
+                                    (
+                                        "hybrid_profit_factor"
+                                    ): hybrid_period_metrics[
+                                        "profit_factor"
+                                    ],
+                                    (
+                                        "actual_max_drawdown"
+                                    ): actual_period_metrics[
+                                        "max_drawdown"
+                                    ],
+                                    (
+                                        "hybrid_max_drawdown"
+                                    ): hybrid_period_metrics[
+                                        "max_drawdown"
+                                    ],
+                                }
+                            )
+
+                        hybrid_temporal_df = pd.DataFrame(
+                            hybrid_temporal_rows
+                        )
+
+                        hybrid_temporal_numeric_cols = [
+                            "actual_total_pnl",
+                            "hybrid_total_pnl",
+                            "delta_total_pnl",
+                            "actual_profit_factor",
+                            "hybrid_profit_factor",
+                            "actual_max_drawdown",
+                            "hybrid_max_drawdown",
+                        ]
+
+                        for col in (
+                            hybrid_temporal_numeric_cols
+                        ):
+                            hybrid_temporal_df[col] = (
+                                pd.to_numeric(
+                                    hybrid_temporal_df[col],
+                                    errors="coerce",
+                                ).round(4)
+                            )
+
+                        st.dataframe(
+                            hybrid_temporal_df,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        positive_temporal_halves = int(
+                            (
+                                hybrid_temporal_df[
+                                    "delta_total_pnl"
+                                ] > 0
+                            ).sum()
+                        )
+
+                        if positive_temporal_halves == 2:
+                            st.success(
+                                "El híbrido supera la gestión "
+                                "actual en ambas mitades."
+                            )
+
+                        elif positive_temporal_halves == 1:
+                            st.warning(
+                                "El híbrido mejora solamente "
+                                "una de las dos mitades."
+                            )
+
+                        else:
+                            st.error(
+                                "El híbrido no mejora ninguna "
+                                "de las dos mitades."
+                            )
                 
                 # ======================================
                 # STRUCTURAL RISK BAND ANALYSIS
