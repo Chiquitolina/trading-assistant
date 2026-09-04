@@ -11071,293 +11071,672 @@ with tab_swings:
                 st.dataframe(worst_distance, use_container_width=True)
 
         # =========================
-        # BTC DEPENDENCY x SWING
+        # DISTANCE BUCKETS
         # =========================
 
-        st.markdown(
-            "### BTC Dependency × Swing High 15m"
-        )
+        st.markdown("### Distance Bucket Stats")
 
-        st.caption(
-            "Cruza la fuerza independiente respecto de BTC "
-            "con entradas LONG ubicadas entre -1% y 0% "
-            "del swing high de 15m."
-        )
-
-        btc_swing_required_cols = [
-            "side",
-            "pnl",
-            "dist_swing_high_15m_pct",
-            "btc_corr_15m",
-            "btc_r2_15m",
-            "btc_residual_move_15m_pct",
+        BUCKETS = [
+            -999,
+            -4,
+            -2,
+            -1,
+            0,
+            1,
+            2,
+            4,
+            8,
+            999,
         ]
 
-        btc_swing_missing_cols = [
-            col
-            for col in btc_swing_required_cols
-            if col not in swing_df.columns
+        LABELS = [
+            "< -4%",
+            "-4% to -2%",
+            "-2% to -1%",
+            "-1% to 0%",
+            "0% to 1%",
+            "1% to 2%",
+            "2% to 4%",
+            "4% to 8%",
+            "> 8%",
         ]
 
-        if btc_swing_missing_cols:
+        distance_results = []
+
+        for tf in ["15m", "1h", "4h"]:
+            for side in ["LONG", "SHORT"]:
+                for ref in ["low", "high"]:
+                    distance_col = (
+                        f"dist_swing_{ref}_{tf}_pct"
+                    )
+
+                    if distance_col not in swing_df.columns:
+                        continue
+
+                    distance_temp = swing_df[
+                        swing_df["side"]
+                        .astype(str)
+                        .str.upper()
+                        .eq(side)
+                    ].copy()
+
+                    distance_temp[
+                        distance_col
+                    ] = pd.to_numeric(
+                        distance_temp[distance_col],
+                        errors="coerce",
+                    )
+
+                    distance_temp = (
+                        distance_temp.dropna(
+                            subset=[
+                                distance_col,
+                                "pnl",
+                            ]
+                        )
+                    )
+
+                    if distance_temp.empty:
+                        continue
+
+                    distance_temp[
+                        "bucket"
+                    ] = pd.cut(
+                        distance_temp[distance_col],
+                        bins=BUCKETS,
+                        labels=LABELS,
+                        include_lowest=True,
+                    )
+
+                    for bucket, group in (
+                        distance_temp.groupby(
+                            "bucket",
+                            observed=False,
+                        )
+                    ):
+                        if len(group) == 0:
+                            continue
+
+                        row = swing_stats(
+                            (
+                                f"{side} dist swing "
+                                f"{ref} {tf} {bucket}"
+                            ),
+                            group,
+                        )
+
+                        if row:
+                            row["side"] = side
+                            row["tf"] = tf
+                            row["reference"] = ref
+                            row["bucket"] = str(bucket)
+
+                            distance_results.append(row)
+
+        distance_df = pd.DataFrame(
+            distance_results
+        )
+
+        if distance_df.empty:
             st.info(
-                "Missing BTC × swing columns: "
-                f"{btc_swing_missing_cols}"
+                "No distance bucket data available."
             )
 
         else:
-            btc_swing_df = (
-                add_btc_correlation_buckets(
-                    swing_df,
-                    timeframe="15m",
-                )
-            )
-
-            distance_col = (
-                "dist_swing_high_15m_pct"
-            )
-
-            dependency_col = (
-                "btc_dependency_15m"
-            )
-
-            btc_swing_df[distance_col] = (
-                pd.to_numeric(
-                    btc_swing_df[distance_col],
-                    errors="coerce",
-                )
-            )
-
-            btc_swing_df = btc_swing_df[
-                btc_swing_df["side"]
-                .astype(str)
-                .str.upper()
-                .eq("LONG")
+            distance_filtered = distance_df[
+                distance_df["trades"]
+                >= min_trades_swings
             ].copy()
 
-            btc_swing_df = btc_swing_df.dropna(
-                subset=[
-                    "pnl",
-                    distance_col,
-                    dependency_col,
-                ]
-            )
-
-            # Excluye trades sin clasificación BTC válida.
-            btc_swing_df = btc_swing_df[
-                btc_swing_df[dependency_col]
-                .ne("unknown")
-            ].copy()
-
-            # Replica exactamente el bucket actual creado
-            # por pd.cut con right=True: (-1%, 0%].
-            btc_swing_df[
-                "in_swing_high_15m_bucket"
-            ] = (
-                (
-                    btc_swing_df[distance_col] > -1.0
-                )
-                & (
-                    btc_swing_df[distance_col] <= 0.0
-                )
-            )
-
-            btc_swing_df[
-                "is_independent_strength"
-            ] = (
-                btc_swing_df[dependency_col]
-                .eq("independent_strength")
-            )
-
-            # =============================================
-            # OVERLAP SUMMARY
-            # =============================================
-
-            total_valid = len(btc_swing_df)
-
-            independent_total = int(
-                btc_swing_df[
-                    "is_independent_strength"
-                ].sum()
-            )
-
-            swing_total = int(
-                btc_swing_df[
-                    "in_swing_high_15m_bucket"
-                ].sum()
-            )
-
-            intersection_total = int(
-                (
-                    btc_swing_df[
-                        "is_independent_strength"
-                    ]
-                    & btc_swing_df[
-                        "in_swing_high_15m_bucket"
-                    ]
-                ).sum()
-            )
-
-            intersection_pct_of_swing = (
-                intersection_total
-                / swing_total
-                * 100
-                if swing_total
-                else 0.0
-            )
-
-            intersection_pct_of_independent = (
-                intersection_total
-                / independent_total
-                * 100
-                if independent_total
-                else 0.0
-            )
-
-            overlap_col1, overlap_col2, overlap_col3 = (
-                st.columns(3)
-            )
-
-            overlap_col1.metric(
-                "Independent strength",
-                independent_total,
-            )
-
-            overlap_col2.metric(
-                "Swing high 15m -1% to 0%",
-                swing_total,
-            )
-
-            overlap_col3.metric(
-                "Intersection",
-                intersection_total,
-            )
-
-            overlap_col4, overlap_col5 = st.columns(2)
-
-            overlap_col4.metric(
-                "% of swing bucket also independent",
-                f"{intersection_pct_of_swing:.2f}%",
-            )
-
-            overlap_col5.metric(
-                "% of independent also in swing bucket",
-                (
-                    f"{intersection_pct_of_independent:.2f}%"
-                ),
-            )
-
-            # =============================================
-            # MUTUALLY EXCLUSIVE 2 x 2 GROUPS
-            # =============================================
-
-            conditions = [
-                (
-                    btc_swing_df[
-                        "is_independent_strength"
-                    ]
-                    & btc_swing_df[
-                        "in_swing_high_15m_bucket"
-                    ]
-                ),
-                (
-                    btc_swing_df[
-                        "is_independent_strength"
-                    ]
-                    & ~btc_swing_df[
-                        "in_swing_high_15m_bucket"
-                    ]
-                ),
-                (
-                    ~btc_swing_df[
-                        "is_independent_strength"
-                    ]
-                    & btc_swing_df[
-                        "in_swing_high_15m_bucket"
-                    ]
-                ),
-            ]
-
-            choices = [
-                (
-                    "Independent strength + "
-                    "swing high -1% to 0%"
-                ),
-                (
-                    "Independent strength + "
-                    "outside swing bucket"
-                ),
-                (
-                    "Other BTC dependency + "
-                    "swing high -1% to 0%"
-                ),
-            ]
-
-            btc_swing_df["btc_swing_group"] = (
-                np.select(
-                    conditions,
-                    choices,
-                    default=(
-                        "Other BTC dependency + "
-                        "outside swing bucket"
-                    ),
-                )
-            )
-
-            btc_swing_results = []
-
-            for group_name, group_df in (
-                btc_swing_df.groupby(
-                    "btc_swing_group",
-                    observed=True,
-                )
-            ):
-                row = swing_stats(
-                    group_name,
-                    group_df,
-                )
-
-                if row:
-                    row["coverage_pct"] = round(
-                        len(group_df)
-                        / total_valid
-                        * 100,
-                        2,
-                    )
-                    btc_swing_results.append(row)
-
-            btc_swing_report = pd.DataFrame(
-                btc_swing_results
-            )
-
-            if btc_swing_report.empty:
+            if distance_filtered.empty:
                 st.info(
-                    "No BTC dependency × swing data "
-                    "available."
+                    "No swing distance buckets meet "
+                    "the minimum trade requirement."
                 )
 
             else:
-                btc_swing_report = (
-                    btc_swing_report.sort_values(
+                best_distance = (
+                    distance_filtered
+                    .sort_values(
                         [
                             "profit_factor",
-                            "total_return",
                             "trades",
                         ],
                         ascending=[
                             False,
                             False,
-                            False,
                         ],
                         na_position="last",
                     )
+                    .reset_index(drop=True)
                 )
 
-                st.dataframe(
-                    btc_swing_report,
-                    use_container_width=True,
-                    hide_index=True,
+                worst_distance = (
+                    distance_filtered
+                    .sort_values(
+                        [
+                            "profit_factor",
+                            "avg_return",
+                        ],
+                        ascending=[
+                            True,
+                            True,
+                        ],
+                        na_position="last",
+                    )
+                    .reset_index(drop=True)
                 )
+
+                # =============================
+                # BEST / WORST TABLES
+                # =============================
+
+                col_a, col_b = st.columns(2)
+
+                with col_a:
+                    st.markdown(
+                        "#### Best Swing Buckets"
+                    )
+
+                    best_distance_event = (
+                        st.dataframe(
+                            best_distance,
+                            use_container_width=True,
+                            hide_index=True,
+                            key=(
+                                "best_swing_bucket_"
+                                "selector"
+                            ),
+                            on_select="rerun",
+                            selection_mode=(
+                                "single-row"
+                            ),
+                        )
+                    )
+
+                with col_b:
+                    st.markdown(
+                        "#### Worst Swing Buckets"
+                    )
+
+                    st.dataframe(
+                        worst_distance,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                # =============================
+                # SELECTED BUCKET ANALYZER
+                # =============================
+
+                selected_bucket_rows = (
+                    best_distance_event
+                    .selection
+                    .rows
+                )
+
+                if selected_bucket_rows:
+                    selected_bucket_position = (
+                        selected_bucket_rows[0]
+                    )
+
+                    selected_bucket_row = (
+                        best_distance.iloc[
+                            selected_bucket_position
+                        ]
+                    )
+
+                    selected_side = str(
+                        selected_bucket_row["side"]
+                    ).upper()
+
+                    selected_tf = str(
+                        selected_bucket_row["tf"]
+                    )
+
+                    selected_reference = str(
+                        selected_bucket_row[
+                            "reference"
+                        ]
+                    )
+
+                    selected_bucket_label = str(
+                        selected_bucket_row[
+                            "bucket"
+                        ]
+                    )
+
+                    selected_setup = str(
+                        selected_bucket_row["setup"]
+                    )
+
+                    selected_distance_col = (
+                        f"dist_swing_"
+                        f"{selected_reference}_"
+                        f"{selected_tf}_pct"
+                    )
+
+                    st.markdown(
+                        "### Selected Swing "
+                        "Bucket Analyzer"
+                    )
+
+                    st.caption(
+                        "Seleccionado: "
+                        f"{selected_side} · "
+                        f"swing {selected_reference} "
+                        f"{selected_tf} · "
+                        f"{selected_bucket_label}"
+                    )
+
+                    if (
+                        selected_distance_col
+                        not in swing_df.columns
+                    ):
+                        st.info(
+                            "The selected swing "
+                            "distance column is "
+                            "not available."
+                        )
+
+                    else:
+                        selected_bucket_source = (
+                            swing_df.copy()
+                        )
+
+                        selected_bucket_source[
+                            selected_distance_col
+                        ] = pd.to_numeric(
+                            selected_bucket_source[
+                                selected_distance_col
+                            ],
+                            errors="coerce",
+                        )
+
+                        # Usa exactamente la misma
+                        # definición de buckets que
+                        # la tabla superior.
+                        selected_bucket_source[
+                            "_selected_swing_bucket"
+                        ] = pd.cut(
+                            selected_bucket_source[
+                                selected_distance_col
+                            ],
+                            bins=BUCKETS,
+                            labels=LABELS,
+                            include_lowest=True,
+                        )
+
+                        selected_bucket_mask = (
+                            (
+                                selected_bucket_source[
+                                    "side"
+                                ]
+                                .astype(str)
+                                .str.upper()
+                                .eq(selected_side)
+                            )
+                            &
+                            (
+                                selected_bucket_source[
+                                    "_selected_swing_bucket"
+                                ]
+                                .astype(str)
+                                .eq(
+                                    selected_bucket_label
+                                )
+                            )
+                        )
+
+                        selected_bucket_trades = (
+                            selected_bucket_source[
+                                selected_bucket_mask
+                            ]
+                            .copy()
+                        )
+
+                        selected_bucket_summary = (
+                            swing_stats(
+                                selected_setup,
+                                selected_bucket_trades,
+                            )
+                        )
+
+                        if (
+                            selected_bucket_summary
+                            is None
+                            or
+                            selected_bucket_trades.empty
+                        ):
+                            st.info(
+                                "No trades found for "
+                                "the selected swing "
+                                "bucket."
+                            )
+
+                        else:
+                            # =====================
+                            # BUCKET METRICS
+                            # =====================
+
+                            (
+                                metric_1,
+                                metric_2,
+                                metric_3,
+                                metric_4,
+                                metric_5,
+                            ) = st.columns(5)
+
+                            metric_1.metric(
+                                "Trades",
+                                selected_bucket_summary[
+                                    "trades"
+                                ],
+                            )
+
+                            metric_2.metric(
+                                "Wins / Losses",
+                                (
+                                    f'{selected_bucket_summary["wins"]}'
+                                    " / "
+                                    f'{selected_bucket_summary["losses"]}'
+                                ),
+                            )
+
+                            metric_3.metric(
+                                "Win rate",
+                                (
+                                    f'{selected_bucket_summary["winrate"]:.2f}%'
+                                ),
+                            )
+
+                            selected_bucket_pf = (
+                                selected_bucket_summary[
+                                    "profit_factor"
+                                ]
+                            )
+
+                            metric_4.metric(
+                                "Profit Factor",
+                                (
+                                    f"{selected_bucket_pf:.2f}"
+                                    if (
+                                        selected_bucket_pf
+                                        is not None
+                                    )
+                                    else "∞"
+                                ),
+                            )
+
+                            metric_5.metric(
+                                "Total PnL",
+                                (
+                                    f'{selected_bucket_summary["total_return"]:.4f}%'
+                                ),
+                            )
+
+                            (
+                                metric_6,
+                                metric_7,
+                                metric_8,
+                            ) = st.columns(3)
+
+                            metric_6.metric(
+                                "Average PnL",
+                                (
+                                    f'{selected_bucket_summary["avg_return"]:.4f}%'
+                                ),
+                            )
+
+                            metric_7.metric(
+                                "Average MFE",
+                                (
+                                    f'{selected_bucket_summary["avg_mfe"]:.4f}%'
+                                ),
+                            )
+
+                            metric_8.metric(
+                                "Average MAE",
+                                (
+                                    f'{selected_bucket_summary["avg_mae"]:.4f}%'
+                                ),
+                            )
+
+                            # =====================
+                            # BUCKET TRADES
+                            # =====================
+
+                            selected_trade_cols = [
+                                "trade_key",
+                                "symbol",
+                                "side",
+
+                                "entry_ts_dt",
+                                "entry_ts",
+
+                                "exit_ts_dt",
+                                "exit_ts",
+
+                                "exit_reason",
+                                "pnl",
+
+                                selected_distance_col,
+
+                                "compression_duration",
+                                "selected_lookback",
+                                "selection_score",
+
+                                "compression_high",
+                                "compression_low",
+                                "compression_height_pct",
+                                "compression_score",
+
+                                "range_ratio",
+                                "atr_ratio",
+                                "volume_ratio",
+
+                                "touches_high",
+                                "touches_low",
+                                "touch_imbalance_ratio",
+
+                                "breakout_price",
+                                "breakout_extension_pct",
+                                "breakout_extension_atr",
+                                "breakout_volume_ratio",
+
+                                "entry_vs_compression_pct",
+                                "entry_vs_breakout_pct",
+
+                                "btc_dependency_15m",
+                                "btc_corr_15m",
+                                "btc_beta_15m",
+                                "btc_r2_15m",
+
+                                (
+                                    "btc_directional_"
+                                    "residual_15m_pct"
+                                ),
+
+                                "max_favorable_pct",
+                                "max_adverse_pct",
+                            ]
+
+                            # Elimina columnas
+                            # repetidas conservando
+                            # el orden.
+                            selected_trade_cols = list(
+                                dict.fromkeys(
+                                    selected_trade_cols
+                                )
+                            )
+
+                            available_trade_cols = [
+                                col
+                                for col
+                                in selected_trade_cols
+                                if col
+                                in selected_bucket_trades
+                                .columns
+                            ]
+
+                            selected_sort_col = next(
+                                (
+                                    col
+                                    for col in [
+                                        "entry_ts_dt",
+                                        "entry_ts",
+                                        "signal_ts",
+                                    ]
+                                    if col
+                                    in selected_bucket_trades
+                                    .columns
+                                ),
+                                None,
+                            )
+
+                            if (
+                                selected_sort_col
+                                is not None
+                            ):
+                                selected_trade_source = (
+                                    selected_bucket_trades
+                                    .sort_values(
+                                        selected_sort_col,
+                                        ascending=False,
+                                    )
+                                    .reset_index(
+                                        drop=True
+                                    )
+                                )
+
+                            else:
+                                selected_trade_source = (
+                                    selected_bucket_trades
+                                    .reset_index(
+                                        drop=True
+                                    )
+                                )
+
+                            st.markdown(
+                                "#### Trades From "
+                                "Selected Bucket"
+                            )
+
+                            st.caption(
+                                "Seleccioná un trade "
+                                "para reconstruir "
+                                "visualmente su "
+                                "compresión."
+                            )
+
+                            bucket_widget_key = (
+                                f"{selected_side}_"
+                                f"{selected_tf}_"
+                                f"{selected_reference}_"
+                                f"{selected_bucket_label}"
+                            )
+
+                            bucket_widget_key = (
+                                bucket_widget_key
+                                .replace(" ", "_")
+                                .replace("%", "pct")
+                                .replace(">", "gt")
+                                .replace("<", "lt")
+                            )
+
+                            selected_trade_event = (
+                                st.dataframe(
+                                    selected_trade_source[
+                                        available_trade_cols
+                                    ],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key=(
+                                        "selected_swing_"
+                                        "bucket_trades_"
+                                        f"{bucket_widget_key}"
+                                    ),
+                                    on_select="rerun",
+                                    selection_mode=(
+                                        "single-row"
+                                    ),
+                                )
+                            )
+
+                            selected_trade_rows = (
+                                selected_trade_event
+                                .selection
+                                .rows
+                            )
+
+                            # =====================
+                            # TRADE INSPECTOR
+                            # =====================
+
+                            if selected_trade_rows:
+                                selected_trade_position = (
+                                    selected_trade_rows[
+                                        0
+                                    ]
+                                )
+
+                                selected_trade_row = (
+                                    selected_trade_source
+                                    .iloc[
+                                        selected_trade_position
+                                    ]
+                                )
+
+                                has_trade_key = (
+                                    "trade_key"
+                                    in
+                                    selected_trade_row.index
+                                    and
+                                    pd.notna(
+                                        selected_trade_row[
+                                            "trade_key"
+                                        ]
+                                    )
+                                )
+
+                                if has_trade_key:
+                                    selected_trade_key = (
+                                        str(
+                                            selected_trade_row[
+                                                "trade_key"
+                                            ]
+                                        )
+                                    )
+
+                                else:
+                                    selected_symbol = str(
+                                        selected_trade_row.get(
+                                            "symbol",
+                                            "unknown",
+                                        )
+                                    )
+
+                                    selected_trade_key = (
+                                        f"{selected_symbol}_"
+                                        f"{selected_trade_position}"
+                                    )
+
+                                st.markdown(
+                                    "#### Compression "
+                                    "Reconstruction"
+                                )
+
+                                render_trade_inspector_for_row(
+                                    row=(
+                                        selected_trade_row
+                                    ),
+                                    status="CLOSED",
+                                    key_prefix=(
+                                        "selected_swing_"
+                                        "bucket_"
+                                        f"{selected_trade_key}"
+                                    ),
+                                )
 
         # =========================
         # ROUTER x SWING
