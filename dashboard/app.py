@@ -22008,6 +22008,19 @@ with tab_tp_sl_replay:
                         "structural_sl_risk_pct"
                     ],
                 )
+                
+                # Descuenta el coste estimado solamente
+                # al escenario simulado.
+                hybrid_structural_cost_pct = 0.10
+
+                structural_comparison[
+                    "structural_net_pnl"
+                ] = (
+                    structural_comparison[
+                        "structural_simulated_pnl"
+                    ]
+                    - hybrid_structural_cost_pct
+                )
 
                 # ======================================
                 # HYBRID STRUCTURAL SL
@@ -22028,20 +22041,18 @@ with tab_tp_sl_replay:
                 )
 
                 structural_comparison[
-                    "hybrid_simulated_pnl"
+                    "hybrid_net_pnl"
                 ] = np.where(
                     hybrid_structural_mask,
 
-                    # Riesgo estructural válido
-                    # entre 0% y 3%:
-                    # usar TP original + SL estructural.
+                    # Resultado simulado menos
+                    # el coste round-trip.
                     structural_comparison[
-                        "structural_simulated_pnl"
+                        "structural_net_pnl"
                     ],
 
-                    # Riesgo igual/inferior a cero
-                    # o superior a 3%:
-                    # conservar la gestión real.
+                    # El PnL real ya tiene
+                    # descontados sus fees.
                     structural_comparison[
                         "pnl"
                     ],
@@ -22071,7 +22082,7 @@ with tab_tp_sl_replay:
                             "structural SL"
                         ),
                         structural_comparison[
-                            "structural_simulated_pnl"
+                            "structural_net_pnl"
                         ],
                     ),
 
@@ -22081,7 +22092,7 @@ with tab_tp_sl_replay:
                             "when risk <= 3%"
                         ),
                         structural_comparison[
-                            "hybrid_simulated_pnl"
+                            "hybrid_net_pnl"
                         ],
                     ),
                 ]
@@ -22242,7 +22253,7 @@ with tab_tp_sl_replay:
                                 "structural SL"
                             ),
                             pnl_values=risk_group[
-                                "structural_simulated_pnl"
+                                "structural_net_pnl"
                             ],
                         )
                     )
