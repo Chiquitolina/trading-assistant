@@ -11742,48 +11742,106 @@ with tab_swings:
         # ROUTER x SWING
         # =========================
 
-        st.markdown("### Router Reason × Swing Distance")
+        st.markdown(
+            "### Router Reason × Swing Distance"
+        )
 
         router_results = []
 
         if "router_reason" not in swing_df.columns:
-            st.info("router_reason column not found.")
+            st.info(
+                "router_reason column not found."
+            )
 
         else:
-            for reason in swing_df["router_reason"].dropna().unique():
+            router_reasons = (
+                swing_df["router_reason"]
+                .dropna()
+                .unique()
+            )
+
+            for reason in router_reasons:
                 for side in ["LONG", "SHORT"]:
                     for tf in ["15m", "1h", "4h"]:
                         for ref in ["low", "high"]:
-                            col = f"dist_swing_{ref}_{tf}_pct"
+                            distance_col = (
+                                f"dist_swing_"
+                                f"{ref}_{tf}_pct"
+                            )
 
-                            if col not in swing_df.columns:
+                            if (
+                                distance_col
+                                not in swing_df.columns
+                            ):
                                 continue
 
-                            temp = swing_df[
-                                (swing_df["router_reason"] == reason)
-                                & (swing_df["side"] == side)
+                            router_temp = swing_df[
+                                (
+                                    swing_df[
+                                        "router_reason"
+                                    ].eq(reason)
+                                )
+                                &
+                                (
+                                    swing_df["side"]
+                                    .astype(str)
+                                    .str.upper()
+                                    .eq(side)
+                                )
                             ].copy()
 
-                            temp[col] = pd.to_numeric(temp[col], errors="coerce")
-                            temp = temp.dropna(subset=[col, "pnl"])
+                            router_temp[
+                                distance_col
+                            ] = pd.to_numeric(
+                                router_temp[
+                                    distance_col
+                                ],
+                                errors="coerce",
+                            )
 
-                            if temp.empty:
+                            router_temp = (
+                                router_temp.dropna(
+                                    subset=[
+                                        distance_col,
+                                        "pnl",
+                                    ]
+                                )
+                            )
+
+                            if router_temp.empty:
                                 continue
 
-                            temp["bucket"] = pd.cut(
-                                temp[col],
+                            router_temp[
+                                "bucket"
+                            ] = pd.cut(
+                                router_temp[
+                                    distance_col
+                                ],
                                 bins=BUCKETS,
                                 labels=LABELS,
                                 include_lowest=True,
                             )
 
-                            for bucket, group in temp.groupby("bucket", observed=False):
-                                if len(group) < min_trades_swings:
+                            for bucket, group in (
+                                router_temp.groupby(
+                                    "bucket",
+                                    observed=False,
+                                )
+                            ):
+                                if (
+                                    len(group)
+                                    < min_trades_swings
+                                ):
                                     continue
 
                                 row = swing_stats(
-                                    f"{reason} | {side} | {ref} {tf} | {bucket}",
-                                    group
+                                    (
+                                        f"{reason} | "
+                                        f"{side} | "
+                                        f"{ref} {tf} | "
+                                        f"{bucket}"
+                                    ),
+                                    group,
                                 )
 
                                 if row:
@@ -11791,35 +11849,585 @@ with tab_swings:
                                     row["side"] = side
                                     row["tf"] = tf
                                     row["reference"] = ref
-                                    row["bucket"] = str(bucket)
-                                    router_results.append(row)
+                                    row["bucket"] = str(
+                                        bucket
+                                    )
 
-            router_df = pd.DataFrame(router_results)
+                                    router_results.append(
+                                        row
+                                    )
+
+            router_df = pd.DataFrame(
+                router_results
+            )
 
             if router_df.empty:
-                st.info("No router × swing groups with enough trades.")
-            else:
-                router_best = router_df.sort_values(
-                    ["profit_factor", "trades"],
-                    ascending=[False, False],
-                    na_position="last",
+                st.info(
+                    "No router × swing groups "
+                    "with enough trades."
                 )
 
-                router_worst = router_df.sort_values(
-                    ["profit_factor", "avg_return"],
-                    ascending=[True, True],
-                    na_position="last",
+            else:
+                router_best = (
+                    router_df
+                    .sort_values(
+                        [
+                            "profit_factor",
+                            "trades",
+                        ],
+                        ascending=[
+                            False,
+                            False,
+                        ],
+                        na_position="last",
+                    )
+                    .reset_index(drop=True)
                 )
+
+                router_worst = (
+                    router_df
+                    .sort_values(
+                        [
+                            "profit_factor",
+                            "avg_return",
+                        ],
+                        ascending=[
+                            True,
+                            True,
+                        ],
+                        na_position="last",
+                    )
+                    .reset_index(drop=True)
+                )
+
+                # =============================
+                # BEST / WORST TABLES
+                # =============================
 
                 col_c, col_d = st.columns(2)
 
                 with col_c:
-                    st.markdown("#### Best Router × Swing")
-                    st.dataframe(router_best, use_container_width=True)
+                    st.markdown(
+                        "#### Best Router × Swing"
+                    )
+
+                    router_best_event = (
+                        st.dataframe(
+                            router_best,
+                            use_container_width=True,
+                            hide_index=True,
+                            key=(
+                                "best_router_swing_"
+                                "selector"
+                            ),
+                            on_select="rerun",
+                            selection_mode=(
+                                "single-row"
+                            ),
+                        )
+                    )
 
                 with col_d:
-                    st.markdown("#### Worst Router × Swing")
-                    st.dataframe(router_worst, use_container_width=True)
+                    st.markdown(
+                        "#### Worst Router × Swing"
+                    )
+
+                    st.dataframe(
+                        router_worst,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                # =============================
+                # SELECTED ROUTER × SWING
+                # ANALYZER
+                # =============================
+
+                selected_router_rows = (
+                    router_best_event
+                    .selection
+                    .rows
+                )
+
+                if selected_router_rows:
+                    selected_router_position = (
+                        selected_router_rows[0]
+                    )
+
+                    selected_router_row = (
+                        router_best.iloc[
+                            selected_router_position
+                        ]
+                    )
+
+                    selected_router_reason = (
+                        selected_router_row[
+                            "reason"
+                        ]
+                    )
+
+                    selected_router_side = str(
+                        selected_router_row[
+                            "side"
+                        ]
+                    ).upper()
+
+                    selected_router_tf = str(
+                        selected_router_row["tf"]
+                    )
+
+                    selected_router_reference = str(
+                        selected_router_row[
+                            "reference"
+                        ]
+                    )
+
+                    selected_router_bucket = str(
+                        selected_router_row[
+                            "bucket"
+                        ]
+                    )
+
+                    selected_router_setup = str(
+                        selected_router_row[
+                            "setup"
+                        ]
+                    )
+
+                    selected_router_distance_col = (
+                        f"dist_swing_"
+                        f"{selected_router_reference}_"
+                        f"{selected_router_tf}_pct"
+                    )
+
+                    st.markdown(
+                        "### Selected Router × "
+                        "Swing Analyzer"
+                    )
+
+                    st.caption(
+                        "Seleccionado: "
+                        f"{selected_router_reason} · "
+                        f"{selected_router_side} · "
+                        f"swing "
+                        f"{selected_router_reference} "
+                        f"{selected_router_tf} · "
+                        f"{selected_router_bucket}"
+                    )
+
+                    if (
+                        selected_router_distance_col
+                        not in swing_df.columns
+                    ):
+                        st.info(
+                            "The selected router × "
+                            "swing distance column "
+                            "is not available."
+                        )
+
+                    else:
+                        selected_router_source = (
+                            swing_df.copy()
+                        )
+
+                        selected_router_source[
+                            selected_router_distance_col
+                        ] = pd.to_numeric(
+                            selected_router_source[
+                                selected_router_distance_col
+                            ],
+                            errors="coerce",
+                        )
+
+                        # Usa exactamente los mismos
+                        # límites que la tabla Router
+                        # Reason × Swing Distance.
+                        selected_router_source[
+                            "_selected_router_bucket"
+                        ] = pd.cut(
+                            selected_router_source[
+                                selected_router_distance_col
+                            ],
+                            bins=BUCKETS,
+                            labels=LABELS,
+                            include_lowest=True,
+                        )
+
+                        selected_router_mask = (
+                            (
+                                selected_router_source[
+                                    "router_reason"
+                                ].eq(
+                                    selected_router_reason
+                                )
+                            )
+                            &
+                            (
+                                selected_router_source[
+                                    "side"
+                                ]
+                                .astype(str)
+                                .str.upper()
+                                .eq(
+                                    selected_router_side
+                                )
+                            )
+                            &
+                            (
+                                selected_router_source[
+                                    "_selected_router_bucket"
+                                ]
+                                .astype(str)
+                                .eq(
+                                    selected_router_bucket
+                                )
+                            )
+                        )
+
+                        selected_router_trades = (
+                            selected_router_source[
+                                selected_router_mask
+                            ]
+                            .copy()
+                        )
+
+                        selected_router_summary = (
+                            swing_stats(
+                                selected_router_setup,
+                                selected_router_trades,
+                            )
+                        )
+
+                        if (
+                            selected_router_summary
+                            is None
+                            or
+                            selected_router_trades.empty
+                        ):
+                            st.info(
+                                "No trades found for "
+                                "the selected router × "
+                                "swing bucket."
+                            )
+
+                        else:
+                            # =====================
+                            # BUCKET METRICS
+                            # =====================
+
+                            (
+                                router_metric_1,
+                                router_metric_2,
+                                router_metric_3,
+                                router_metric_4,
+                                router_metric_5,
+                            ) = st.columns(5)
+
+                            router_metric_1.metric(
+                                "Trades",
+                                selected_router_summary[
+                                    "trades"
+                                ],
+                            )
+
+                            router_metric_2.metric(
+                                "Wins / Losses",
+                                (
+                                    f'{selected_router_summary["wins"]}'
+                                    " / "
+                                    f'{selected_router_summary["losses"]}'
+                                ),
+                            )
+
+                            router_metric_3.metric(
+                                "Win rate",
+                                (
+                                    f'{selected_router_summary["winrate"]:.2f}%'
+                                ),
+                            )
+
+                            selected_router_pf = (
+                                selected_router_summary[
+                                    "profit_factor"
+                                ]
+                            )
+
+                            router_metric_4.metric(
+                                "Profit Factor",
+                                (
+                                    f"{selected_router_pf:.2f}"
+                                    if (
+                                        selected_router_pf
+                                        is not None
+                                    )
+                                    else "∞"
+                                ),
+                            )
+
+                            router_metric_5.metric(
+                                "Total PnL",
+                                (
+                                    f'{selected_router_summary["total_return"]:.4f}%'
+                                ),
+                            )
+
+                            (
+                                router_metric_6,
+                                router_metric_7,
+                                router_metric_8,
+                            ) = st.columns(3)
+
+                            router_metric_6.metric(
+                                "Average PnL",
+                                (
+                                    f'{selected_router_summary["avg_return"]:.4f}%'
+                                ),
+                            )
+
+                            router_metric_7.metric(
+                                "Average MFE",
+                                (
+                                    f'{selected_router_summary["avg_mfe"]:.4f}%'
+                                ),
+                            )
+
+                            router_metric_8.metric(
+                                "Average MAE",
+                                (
+                                    f'{selected_router_summary["avg_mae"]:.4f}%'
+                                ),
+                            )
+
+                            # =====================
+                            # SELECTED TRADES
+                            # =====================
+
+                            router_trade_cols = [
+                                "trade_key",
+                                "symbol",
+                                "side",
+                                "router_reason",
+
+                                "entry_ts_dt",
+                                "entry_ts",
+
+                                "exit_ts_dt",
+                                "exit_ts",
+
+                                "exit_reason",
+                                "pnl",
+
+                                (
+                                    selected_router_distance_col
+                                ),
+
+                                "compression_duration",
+                                "selected_lookback",
+                                "selection_score",
+
+                                "compression_high",
+                                "compression_low",
+                                "compression_height_pct",
+                                "compression_score",
+
+                                "range_ratio",
+                                "atr_ratio",
+                                "volume_ratio",
+
+                                "touches_high",
+                                "touches_low",
+                                "touch_imbalance_ratio",
+
+                                "breakout_price",
+                                "breakout_extension_pct",
+                                "breakout_extension_atr",
+                                "breakout_volume_ratio",
+
+                                "entry_vs_compression_pct",
+                                "entry_vs_breakout_pct",
+
+                                "btc_dependency_15m",
+                                "btc_corr_15m",
+                                "btc_beta_15m",
+                                "btc_r2_15m",
+
+                                (
+                                    "btc_directional_"
+                                    "residual_15m_pct"
+                                ),
+
+                                "max_favorable_pct",
+                                "max_adverse_pct",
+                            ]
+
+                            router_trade_cols = list(
+                                dict.fromkeys(
+                                    router_trade_cols
+                                )
+                            )
+
+                            available_router_cols = [
+                                col
+                                for col
+                                in router_trade_cols
+                                if col
+                                in selected_router_trades
+                                .columns
+                            ]
+
+                            router_sort_col = next(
+                                (
+                                    col
+                                    for col in [
+                                        "entry_ts_dt",
+                                        "entry_ts",
+                                        "signal_ts",
+                                    ]
+                                    if col
+                                    in selected_router_trades
+                                    .columns
+                                ),
+                                None,
+                            )
+
+                            if (
+                                router_sort_col
+                                is not None
+                            ):
+                                router_trade_source = (
+                                    selected_router_trades
+                                    .sort_values(
+                                        router_sort_col,
+                                        ascending=False,
+                                    )
+                                    .reset_index(
+                                        drop=True
+                                    )
+                                )
+
+                            else:
+                                router_trade_source = (
+                                    selected_router_trades
+                                    .reset_index(
+                                        drop=True
+                                    )
+                                )
+
+                            st.markdown(
+                                "#### Trades From "
+                                "Selected Router × "
+                                "Swing Bucket"
+                            )
+
+                            st.caption(
+                                "Seleccioná un trade "
+                                "para reconstruir "
+                                "visualmente su "
+                                "compresión."
+                            )
+
+                            router_widget_key = (
+                                f"{selected_router_reason}_"
+                                f"{selected_router_side}_"
+                                f"{selected_router_tf}_"
+                                f"{selected_router_reference}_"
+                                f"{selected_router_bucket}"
+                            )
+
+                            router_widget_key = (
+                                router_widget_key
+                                .replace(" ", "_")
+                                .replace("%", "pct")
+                                .replace(">", "gt")
+                                .replace("<", "lt")
+                                .replace("|", "_")
+                            )
+
+                            router_trade_event = (
+                                st.dataframe(
+                                    router_trade_source[
+                                        available_router_cols
+                                    ],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key=(
+                                        "selected_router_"
+                                        "swing_trades_"
+                                        f"{router_widget_key}"
+                                    ),
+                                    on_select="rerun",
+                                    selection_mode=(
+                                        "single-row"
+                                    ),
+                                )
+                            )
+
+                            router_trade_rows = (
+                                router_trade_event
+                                .selection
+                                .rows
+                            )
+
+                            # =====================
+                            # TRADE INSPECTOR
+                            # =====================
+
+                            if router_trade_rows:
+                                router_trade_position = (
+                                    router_trade_rows[0]
+                                )
+
+                                router_trade_row = (
+                                    router_trade_source
+                                    .iloc[
+                                        router_trade_position
+                                    ]
+                                )
+
+                                router_key_available = (
+                                    "trade_key"
+                                    in router_trade_row.index
+                                    and pd.notna(
+                                        router_trade_row[
+                                            "trade_key"
+                                        ]
+                                    )
+                                )
+
+                                if router_key_available:
+                                    router_trade_key = str(
+                                        router_trade_row[
+                                            "trade_key"
+                                        ]
+                                    )
+
+                                else:
+                                    router_symbol = str(
+                                        router_trade_row.get(
+                                            "symbol",
+                                            "unknown",
+                                        )
+                                    )
+
+                                    router_trade_key = (
+                                        f"{router_symbol}_"
+                                        f"{router_trade_position}"
+                                    )
+
+                                st.markdown(
+                                    "#### Compression "
+                                    "Reconstruction"
+                                )
+
+                                render_trade_inspector_for_row(
+                                    row=router_trade_row,
+                                    status="CLOSED",
+                                    key_prefix=(
+                                        "selected_router_"
+                                        "swing_"
+                                        f"{router_trade_key}"
+                                    ),
+                                )
                     
         # =========================
         # SWING × SWING CROSS
