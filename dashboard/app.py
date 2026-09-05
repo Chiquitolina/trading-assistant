@@ -23324,481 +23324,481 @@ with tab_tp_sl_replay:
             
             if sl_only_mode == "Structural risk":
 
-            # ======================================
-            # SL-ONLY RISK SCANNER
-            # ======================================
+                # ======================================
+                # SL-ONLY RISK SCANNER
+                # ======================================
 
-            st.markdown(
-                "### SL-Only Structural Risk Scanner"
-            )
-
-            st.caption(
-                "Mantiene el TP original de cada trade "
-                "y cambia únicamente el SL por el nivel "
-                "estructural. Así se aísla el aporte del SL."
-            )
-
-            sl_only_df = mature_replay.copy()
-
-            sl_only_required_cols = [
-                "entry_ts",
-                "pnl",
-                "original_tp_pct",
-                "structural_sl_risk_pct",
-                "structural_result",
-            ]
-
-            sl_only_missing_cols = [
-                col
-                for col in sl_only_required_cols
-                if col not in sl_only_df.columns
-            ]
-
-            if sl_only_missing_cols:
-                st.info(
-                    "Missing SL-only columns: "
-                    + ", ".join(
-                        sl_only_missing_cols
-                    )
+                st.markdown(
+                    "### SL-Only Structural Risk Scanner"
                 )
 
-            else:
-                sl_only_df["entry_ts"] = (
-                    pd.to_datetime(
-                        sl_only_df["entry_ts"],
-                        utc=True,
-                        errors="coerce",
-                    )
+                st.caption(
+                    "Mantiene el TP original de cada trade "
+                    "y cambia únicamente el SL por el nivel "
+                    "estructural. Así se aísla el aporte del SL."
                 )
 
-                for col in [
+                sl_only_df = mature_replay.copy()
+
+                sl_only_required_cols = [
+                    "entry_ts",
                     "pnl",
                     "original_tp_pct",
                     "structural_sl_risk_pct",
-                ]:
-                    sl_only_df[col] = pd.to_numeric(
-                        sl_only_df[col],
-                        errors="coerce",
-                    )
-
-                sl_only_df[
-                    "structural_result"
-                ] = (
-                    sl_only_df[
-                        "structural_result"
-                    ]
-                    .fillna("")
-                    .astype(str)
-                    .str.upper()
-                )
-
-                sl_only_df = sl_only_df[
-                    sl_only_df[
-                        "structural_result"
-                    ].isin([
-                        "TP",
-                        "SL",
-                    ])
-                    &
-                    sl_only_df[
-                        "entry_ts"
-                    ].notna()
-                    &
-                    sl_only_df[
-                        "pnl"
-                    ].notna()
-                    &
-                    sl_only_df[
-                        "original_tp_pct"
-                    ].gt(0)
-                    &
-                    sl_only_df[
-                        "structural_sl_risk_pct"
-                    ].gt(0)
-                ].copy()
-
-                sl_only_df = (
-                    sl_only_df
-                    .sort_values("entry_ts")
-                    .reset_index(drop=True)
-                )
-
-                sl_only_risk_caps = [
-                    0.75,
-                    1.00,
-                    1.25,
-                    1.50,
-                    1.75,
-                    2.00,
-                    2.50,
-                    3.00,
-                    4.00,
-                    5.00,
-                    6.00,
-                    7.00,
-                    8.00,
-                    10.00,
+                    "structural_result",
                 ]
 
-                sl_only_available_trades = len(
-                    sl_only_df
-                )
+                sl_only_missing_cols = [
+                    col
+                    for col in sl_only_required_cols
+                    if col not in sl_only_df.columns
+                ]
 
-                sl_only_rows = []
-
-                for risk_cap_pct in (
-                    sl_only_risk_caps
-                ):
-                    sl_only_accepted = (
-                        sl_only_df[
-                            sl_only_df[
-                                "structural_sl_risk_pct"
-                            ].le(risk_cap_pct)
-                        ]
-                        .copy()
-                    )
-
-                    if (
-                        len(sl_only_accepted)
-                        < scenario_min_trades
-                    ):
-                        continue
-
-                    # Si pnl ya contiene costos reales,
-                    # quitá "- scenario_cost_pct" para
-                    # evitar descontarlos dos veces.
-                    sl_only_accepted[
-                        "actual_net_pnl"
-                    ] = (
-                        sl_only_accepted["pnl"]
-                        - scenario_cost_pct
-                    )
-
-                    sl_only_accepted[
-                        "structural_net_pnl"
-                    ] = np.where(
-                        sl_only_accepted[
-                            "structural_result"
-                        ].eq("TP"),
-
-                        sl_only_accepted[
-                            "original_tp_pct"
-                        ],
-
-                        -sl_only_accepted[
-                            "structural_sl_risk_pct"
-                        ],
-                    )
-
-                    sl_only_accepted[
-                        "structural_net_pnl"
-                    ] = (
-                        sl_only_accepted[
-                            "structural_net_pnl"
-                        ]
-                        - scenario_cost_pct
-                    )
-
-                    actual_summary = (
-                        summarize_replay_strategy(
-                            strategy_name=(
-                                "Actual management"
-                            ),
-                            pnl_values=(
-                                sl_only_accepted[
-                                    "actual_net_pnl"
-                                ]
-                            ),
-                        )
-                    )
-
-                    sl_summary = (
-                        summarize_replay_strategy(
-                            strategy_name=(
-                                "Original TP + "
-                                "structural SL"
-                            ),
-                            pnl_values=(
-                                sl_only_accepted[
-                                    "structural_net_pnl"
-                                ]
-                            ),
-                        )
-                    )
-
-                    actual_pf = actual_summary[
-                        "profit_factor"
-                    ]
-
-                    sl_only_pf = sl_summary[
-                        "profit_factor"
-                    ]
-
-                    if (
-                        pd.notna(actual_pf)
-                        and pd.notna(sl_only_pf)
-                        and np.isfinite(actual_pf)
-                        and np.isfinite(sl_only_pf)
-                    ):
-                        delta_pf = (
-                            sl_only_pf
-                            - actual_pf
-                        )
-                    else:
-                        delta_pf = np.nan
-
-                    structural_tp_count = int(
-                        sl_only_accepted[
-                            "structural_result"
-                        ]
-                        .eq("TP")
-                        .sum()
-                    )
-
-                    structural_sl_count = int(
-                        sl_only_accepted[
-                            "structural_result"
-                        ]
-                        .eq("SL")
-                        .sum()
-                    )
-
-                    sl_only_rows.append({
-                        "max_structural_risk_pct":
-                            risk_cap_pct,
-
-                        "cost_pct":
-                            scenario_cost_pct,
-
-                        "available_trades":
-                            sl_only_available_trades,
-
-                        "accepted_trades":
-                            len(sl_only_accepted),
-
-                        "rejected_trades": (
-                            sl_only_available_trades
-                            - len(sl_only_accepted)
-                        ),
-
-                        "coverage_pct": (
-                            len(sl_only_accepted)
-                            / sl_only_available_trades
-                            * 100
-                            if sl_only_available_trades
-                            else 0.0
-                        ),
-
-                        "structural_tp":
-                            structural_tp_count,
-
-                        "structural_sl":
-                            structural_sl_count,
-
-                        # ==========================
-                        # ACTUAL
-                        # ==========================
-
-                        "actual_winrate":
-                            actual_summary[
-                                "winrate"
-                            ],
-
-                        "actual_avg_win":
-                            actual_summary[
-                                "avg_win"
-                            ],
-
-                        "actual_avg_loss":
-                            actual_summary[
-                                "avg_loss"
-                            ],
-
-                        "actual_avg_pnl":
-                            actual_summary[
-                                "avg_pnl"
-                            ],
-
-                        "actual_total_pnl":
-                            actual_summary[
-                                "total_pnl"
-                            ],
-
-                        "actual_profit_factor":
-                            actual_pf,
-
-                        "actual_max_drawdown":
-                            actual_summary[
-                                "max_drawdown"
-                            ],
-
-                        # ==========================
-                        # SL STRUCTURAL ONLY
-                        # ==========================
-
-                        "sl_only_winrate":
-                            sl_summary[
-                                "winrate"
-                            ],
-
-                        "sl_only_avg_win":
-                            sl_summary[
-                                "avg_win"
-                            ],
-
-                        "sl_only_avg_loss":
-                            sl_summary[
-                                "avg_loss"
-                            ],
-
-                        "sl_only_payoff_ratio":
-                            sl_summary[
-                                "payoff_ratio"
-                            ],
-
-                        "sl_only_breakeven_winrate":
-                            sl_summary[
-                                "breakeven_winrate"
-                            ],
-
-                        "sl_only_avg_pnl":
-                            sl_summary[
-                                "avg_pnl"
-                            ],
-
-                        "sl_only_total_pnl":
-                            sl_summary[
-                                "total_pnl"
-                            ],
-
-                        "sl_only_profit_factor":
-                            sl_only_pf,
-
-                        "sl_only_max_drawdown":
-                            sl_summary[
-                                "max_drawdown"
-                            ],
-
-                        # ==========================
-                        # DELTAS
-                        # ==========================
-
-                        "delta_winrate": (
-                            sl_summary[
-                                "winrate"
-                            ]
-                            - actual_summary[
-                                "winrate"
-                            ]
-                        ),
-
-                        "delta_avg_pnl": (
-                            sl_summary[
-                                "avg_pnl"
-                            ]
-                            - actual_summary[
-                                "avg_pnl"
-                            ]
-                        ),
-
-                        "delta_total_pnl": (
-                            sl_summary[
-                                "total_pnl"
-                            ]
-                            - actual_summary[
-                                "total_pnl"
-                            ]
-                        ),
-
-                        "delta_profit_factor":
-                            delta_pf,
-
-                        "drawdown_reduction": (
-                            actual_summary[
-                                "max_drawdown"
-                            ]
-                            - sl_summary[
-                                "max_drawdown"
-                            ]
-                        ),
-                    })
-
-                sl_only_report = pd.DataFrame(
-                    sl_only_rows
-                )
-
-                if sl_only_report.empty:
+                if sl_only_missing_cols:
                     st.info(
-                        "No SL-only risk caps meet "
-                        "the minimum trade requirement."
+                        "Missing SL-only columns: "
+                        + ", ".join(
+                            sl_only_missing_cols
+                        )
                     )
 
                 else:
-                    sl_only_numeric_cols = [
-                        "coverage_pct",
+                    sl_only_df["entry_ts"] = (
+                        pd.to_datetime(
+                            sl_only_df["entry_ts"],
+                            utc=True,
+                            errors="coerce",
+                        )
+                    )
 
-                        "actual_winrate",
-                        "actual_avg_win",
-                        "actual_avg_loss",
-                        "actual_avg_pnl",
-                        "actual_total_pnl",
-                        "actual_profit_factor",
-                        "actual_max_drawdown",
-
-                        "sl_only_winrate",
-                        "sl_only_avg_win",
-                        "sl_only_avg_loss",
-                        "sl_only_payoff_ratio",
-                        "sl_only_breakeven_winrate",
-                        "sl_only_avg_pnl",
-                        "sl_only_total_pnl",
-                        "sl_only_profit_factor",
-                        "sl_only_max_drawdown",
-
-                        "delta_winrate",
-                        "delta_avg_pnl",
-                        "delta_total_pnl",
-                        "delta_profit_factor",
-                        "drawdown_reduction",
-                    ]
-
-                    for col in sl_only_numeric_cols:
-                        sl_only_report[col] = (
-                            pd.to_numeric(
-                                sl_only_report[col],
-                                errors="coerce",
-                            ).round(4)
+                    for col in [
+                        "pnl",
+                        "original_tp_pct",
+                        "structural_sl_risk_pct",
+                    ]:
+                        sl_only_df[col] = pd.to_numeric(
+                            sl_only_df[col],
+                            errors="coerce",
                         )
 
-                    sl_only_report = (
-                        sl_only_report
-                        .sort_values(
-                            by=[
-                                "sl_only_profit_factor",
-                                "sl_only_total_pnl",
-                            ],
-                            ascending=[
-                                False,
-                                False,
-                            ],
-                            na_position="last",
-                        )
+                    sl_only_df[
+                        "structural_result"
+                    ] = (
+                        sl_only_df[
+                            "structural_result"
+                        ]
+                        .fillna("")
+                        .astype(str)
+                        .str.upper()
+                    )
+
+                    sl_only_df = sl_only_df[
+                        sl_only_df[
+                            "structural_result"
+                        ].isin([
+                            "TP",
+                            "SL",
+                        ])
+                        &
+                        sl_only_df[
+                            "entry_ts"
+                        ].notna()
+                        &
+                        sl_only_df[
+                            "pnl"
+                        ].notna()
+                        &
+                        sl_only_df[
+                            "original_tp_pct"
+                        ].gt(0)
+                        &
+                        sl_only_df[
+                            "structural_sl_risk_pct"
+                        ].gt(0)
+                    ].copy()
+
+                    sl_only_df = (
+                        sl_only_df
+                        .sort_values("entry_ts")
                         .reset_index(drop=True)
                     )
 
-                    st.dataframe(
-                        sl_only_report,
-                        use_container_width=True,
-                        hide_index=True,
+                    sl_only_risk_caps = [
+                        0.75,
+                        1.00,
+                        1.25,
+                        1.50,
+                        1.75,
+                        2.00,
+                        2.50,
+                        3.00,
+                        4.00,
+                        5.00,
+                        6.00,
+                        7.00,
+                        8.00,
+                        10.00,
+                    ]
+
+                    sl_only_available_trades = len(
+                        sl_only_df
                     )
 
-                    st.caption(
-                        "Esta tabla no modifica el TP. "
-                        "Cualquier diferencia contra actual "
-                        "proviene exclusivamente del SL "
-                        "estructural y del límite de riesgo."
+                    sl_only_rows = []
+
+                    for risk_cap_pct in (
+                        sl_only_risk_caps
+                    ):
+                        sl_only_accepted = (
+                            sl_only_df[
+                                sl_only_df[
+                                    "structural_sl_risk_pct"
+                                ].le(risk_cap_pct)
+                            ]
+                            .copy()
+                        )
+
+                        if (
+                            len(sl_only_accepted)
+                            < scenario_min_trades
+                        ):
+                            continue
+
+                        # Si pnl ya contiene costos reales,
+                        # quitá "- scenario_cost_pct" para
+                        # evitar descontarlos dos veces.
+                        sl_only_accepted[
+                            "actual_net_pnl"
+                        ] = (
+                            sl_only_accepted["pnl"]
+                            - scenario_cost_pct
+                        )
+
+                        sl_only_accepted[
+                            "structural_net_pnl"
+                        ] = np.where(
+                            sl_only_accepted[
+                                "structural_result"
+                            ].eq("TP"),
+
+                            sl_only_accepted[
+                                "original_tp_pct"
+                            ],
+
+                            -sl_only_accepted[
+                                "structural_sl_risk_pct"
+                            ],
+                        )
+
+                        sl_only_accepted[
+                            "structural_net_pnl"
+                        ] = (
+                            sl_only_accepted[
+                                "structural_net_pnl"
+                            ]
+                            - scenario_cost_pct
+                        )
+
+                        actual_summary = (
+                            summarize_replay_strategy(
+                                strategy_name=(
+                                    "Actual management"
+                                ),
+                                pnl_values=(
+                                    sl_only_accepted[
+                                        "actual_net_pnl"
+                                    ]
+                                ),
+                            )
+                        )
+
+                        sl_summary = (
+                            summarize_replay_strategy(
+                                strategy_name=(
+                                    "Original TP + "
+                                    "structural SL"
+                                ),
+                                pnl_values=(
+                                    sl_only_accepted[
+                                        "structural_net_pnl"
+                                    ]
+                                ),
+                            )
+                        )
+
+                        actual_pf = actual_summary[
+                            "profit_factor"
+                        ]
+
+                        sl_only_pf = sl_summary[
+                            "profit_factor"
+                        ]
+
+                        if (
+                            pd.notna(actual_pf)
+                            and pd.notna(sl_only_pf)
+                            and np.isfinite(actual_pf)
+                            and np.isfinite(sl_only_pf)
+                        ):
+                            delta_pf = (
+                                sl_only_pf
+                                - actual_pf
+                            )
+                        else:
+                            delta_pf = np.nan
+
+                        structural_tp_count = int(
+                            sl_only_accepted[
+                                "structural_result"
+                            ]
+                            .eq("TP")
+                            .sum()
+                        )
+
+                        structural_sl_count = int(
+                            sl_only_accepted[
+                                "structural_result"
+                            ]
+                            .eq("SL")
+                            .sum()
+                        )
+
+                        sl_only_rows.append({
+                            "max_structural_risk_pct":
+                                risk_cap_pct,
+
+                            "cost_pct":
+                                scenario_cost_pct,
+
+                            "available_trades":
+                                sl_only_available_trades,
+
+                            "accepted_trades":
+                                len(sl_only_accepted),
+
+                            "rejected_trades": (
+                                sl_only_available_trades
+                                - len(sl_only_accepted)
+                            ),
+
+                            "coverage_pct": (
+                                len(sl_only_accepted)
+                                / sl_only_available_trades
+                                * 100
+                                if sl_only_available_trades
+                                else 0.0
+                            ),
+
+                            "structural_tp":
+                                structural_tp_count,
+
+                            "structural_sl":
+                                structural_sl_count,
+
+                            # ==========================
+                            # ACTUAL
+                            # ==========================
+
+                            "actual_winrate":
+                                actual_summary[
+                                    "winrate"
+                                ],
+
+                            "actual_avg_win":
+                                actual_summary[
+                                    "avg_win"
+                                ],
+
+                            "actual_avg_loss":
+                                actual_summary[
+                                    "avg_loss"
+                                ],
+
+                            "actual_avg_pnl":
+                                actual_summary[
+                                    "avg_pnl"
+                                ],
+
+                            "actual_total_pnl":
+                                actual_summary[
+                                    "total_pnl"
+                                ],
+
+                            "actual_profit_factor":
+                                actual_pf,
+
+                            "actual_max_drawdown":
+                                actual_summary[
+                                    "max_drawdown"
+                                ],
+
+                            # ==========================
+                            # SL STRUCTURAL ONLY
+                            # ==========================
+
+                            "sl_only_winrate":
+                                sl_summary[
+                                    "winrate"
+                                ],
+
+                            "sl_only_avg_win":
+                                sl_summary[
+                                    "avg_win"
+                                ],
+
+                            "sl_only_avg_loss":
+                                sl_summary[
+                                    "avg_loss"
+                                ],
+
+                            "sl_only_payoff_ratio":
+                                sl_summary[
+                                    "payoff_ratio"
+                                ],
+
+                            "sl_only_breakeven_winrate":
+                                sl_summary[
+                                    "breakeven_winrate"
+                                ],
+
+                            "sl_only_avg_pnl":
+                                sl_summary[
+                                    "avg_pnl"
+                                ],
+
+                            "sl_only_total_pnl":
+                                sl_summary[
+                                    "total_pnl"
+                                ],
+
+                            "sl_only_profit_factor":
+                                sl_only_pf,
+
+                            "sl_only_max_drawdown":
+                                sl_summary[
+                                    "max_drawdown"
+                                ],
+
+                            # ==========================
+                            # DELTAS
+                            # ==========================
+
+                            "delta_winrate": (
+                                sl_summary[
+                                    "winrate"
+                                ]
+                                - actual_summary[
+                                    "winrate"
+                                ]
+                            ),
+
+                            "delta_avg_pnl": (
+                                sl_summary[
+                                    "avg_pnl"
+                                ]
+                                - actual_summary[
+                                    "avg_pnl"
+                                ]
+                            ),
+
+                            "delta_total_pnl": (
+                                sl_summary[
+                                    "total_pnl"
+                                ]
+                                - actual_summary[
+                                    "total_pnl"
+                                ]
+                            ),
+
+                            "delta_profit_factor":
+                                delta_pf,
+
+                            "drawdown_reduction": (
+                                actual_summary[
+                                    "max_drawdown"
+                                ]
+                                - sl_summary[
+                                    "max_drawdown"
+                                ]
+                            ),
+                        })
+
+                    sl_only_report = pd.DataFrame(
+                        sl_only_rows
                     )
-                
+
+                    if sl_only_report.empty:
+                        st.info(
+                            "No SL-only risk caps meet "
+                            "the minimum trade requirement."
+                        )
+
+                    else:
+                        sl_only_numeric_cols = [
+                            "coverage_pct",
+
+                            "actual_winrate",
+                            "actual_avg_win",
+                            "actual_avg_loss",
+                            "actual_avg_pnl",
+                            "actual_total_pnl",
+                            "actual_profit_factor",
+                            "actual_max_drawdown",
+
+                            "sl_only_winrate",
+                            "sl_only_avg_win",
+                            "sl_only_avg_loss",
+                            "sl_only_payoff_ratio",
+                            "sl_only_breakeven_winrate",
+                            "sl_only_avg_pnl",
+                            "sl_only_total_pnl",
+                            "sl_only_profit_factor",
+                            "sl_only_max_drawdown",
+
+                            "delta_winrate",
+                            "delta_avg_pnl",
+                            "delta_total_pnl",
+                            "delta_profit_factor",
+                            "drawdown_reduction",
+                        ]
+
+                        for col in sl_only_numeric_cols:
+                            sl_only_report[col] = (
+                                pd.to_numeric(
+                                    sl_only_report[col],
+                                    errors="coerce",
+                                ).round(4)
+                            )
+
+                        sl_only_report = (
+                            sl_only_report
+                            .sort_values(
+                                by=[
+                                    "sl_only_profit_factor",
+                                    "sl_only_total_pnl",
+                                ],
+                                ascending=[
+                                    False,
+                                    False,
+                                ],
+                                na_position="last",
+                            )
+                            .reset_index(drop=True)
+                        )
+
+                        st.dataframe(
+                            sl_only_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.caption(
+                            "Esta tabla no modifica el TP. "
+                            "Cualquier diferencia contra actual "
+                            "proviene exclusivamente del SL "
+                            "estructural y del límite de riesgo."
+                        )
+                    
 
         if replay_analysis_mode == "TP Only":
 
