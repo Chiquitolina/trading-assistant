@@ -47,7 +47,14 @@ MODE_CONFIG = {
     },
     
     "compression": {
-        "timeframes": ["1m", "5m", "15m", "30m", "1h", "4h"],
+        "timeframes": [
+            "1m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "4h",
+        ],
         "trigger_tf": MAIN_TF,
         "min_atr_pct": 0.20,
         "min_atr": 120,
@@ -56,12 +63,31 @@ MODE_CONFIG = {
         "entry_rules": "standard",
         "allow_longs": True,
         "allow_shorts": False,
+
+        # Conserva los niveles originales de esta rama.
         "use_fixed_levels": False,
         "fixed_tp_pct": 0.30,
         "fixed_sl_pct": 0.40,
 
         "compression_enabled": True,
         "compression_tf": MAIN_TF,
+
+        # ======================================
+        # SWING HIGH 4H BUCKET
+        # ======================================
+        "swing_high_4h_bucket_enabled": True,
+        "swing_high_4h_bucket_min_pct": -1.0,
+        "swing_high_4h_bucket_max_pct": 0.0,
+        "swing_high_4h_bucket_router_reason": (
+            "compression_breakout"
+        ),
+
+        # ======================================
+        # HYBRID STRUCTURAL SL
+        # ======================================
+        "hybrid_structural_sl_enabled": True,
+        "hybrid_structural_max_risk_pct": 2.0,
+        "hybrid_structural_sl_buffer_pct": 0.0,
     }
 }
 

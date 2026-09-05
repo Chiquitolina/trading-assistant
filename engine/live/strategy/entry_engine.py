@@ -142,6 +142,97 @@ class EntryEngine:
             if log_blocked:
                 self._log_blocked_signal(trade_action, reason="SHORT_DISABLED_PAPER_ONLY")
             return None
+        
+        # ======================================
+        # SWING HIGH 4H BUCKET FILTER
+        # ======================================
+
+        swing_bucket_enabled = self.config.get(
+            "swing_high_4h_bucket_enabled",
+            False,
+        )
+
+        swing_bucket_match = True
+
+        if swing_bucket_enabled:
+            expected_router_reason = self.config.get(
+                "swing_high_4h_bucket_router_reason",
+                "compression_breakout",
+            )
+
+            bucket_min_pct = float(
+                self.config.get(
+                    "swing_high_4h_bucket_min_pct",
+                    -1.0,
+                )
+            )
+
+            bucket_max_pct = float(
+                self.config.get(
+                    "swing_high_4h_bucket_max_pct",
+                    0.0,
+                )
+            )
+
+            raw_swing_distance = getattr(
+                signal,
+                "dist_swing_high_4h_pct",
+                None,
+            )
+
+            try:
+                swing_high_4h_distance_pct = float(
+                    raw_swing_distance
+                )
+            except (TypeError, ValueError):
+                swing_high_4h_distance_pct = None
+
+            swing_bucket_match = (
+                side == "LONG"
+                and trade_action.reason
+                == expected_router_reason
+                and swing_high_4h_distance_pct
+                is not None
+                and not pd.isna(
+                    swing_high_4h_distance_pct
+                )
+                and bucket_min_pct
+                < swing_high_4h_distance_pct
+                <= bucket_max_pct
+            )
+
+            if not swing_bucket_match:
+                if log_blocked:
+                    self._log_blocked_signal(
+                        trade_action,
+                        reason=(
+                            "SWING_HIGH_4H_BUCKET_MISMATCH"
+                        ),
+                    )
+
+                if self.debug:
+                    print(
+                        "[SWING BUCKET] blocked | "
+                        f"symbol={getattr(signal, 'symbol', None)} | "
+                        f"side={side} | "
+                        f"router_reason={trade_action.reason} | "
+                        f"distance={swing_high_4h_distance_pct} | "
+                        f"required=("
+                        f"{bucket_min_pct}, "
+                        f"{bucket_max_pct}]"
+                    )
+
+                return None
+
+            if self.debug:
+                print(
+                    "[SWING BUCKET] matched | "
+                    f"symbol={getattr(signal, 'symbol', None)} | "
+                    f"distance={swing_high_4h_distance_pct} | "
+                    f"required=("
+                    f"{bucket_min_pct}, "
+                    f"{bucket_max_pct}]"
+                )
 
         # ==========================
         # DATA
@@ -351,6 +442,47 @@ class EntryEngine:
              # 🔥 ROUTER
             "router_reason": trade_action.reason,
             "strategy_reason": trade_action.reason,
+            
+            # ======================================
+            # SWING BUCKET EXPERIMENT
+            # ======================================
+            "swing_high_4h_bucket_enabled": (
+                swing_bucket_enabled
+            ),
+            "swing_high_4h_bucket_match": (
+                swing_bucket_match
+            ),
+            "swing_high_4h_bucket_min_pct": (
+                self.config.get(
+                    "swing_high_4h_bucket_min_pct"
+                )
+            ),
+            "swing_high_4h_bucket_max_pct": (
+                self.config.get(
+                    "swing_high_4h_bucket_max_pct"
+                )
+            ),
+
+            # ======================================
+            # HYBRID STRUCTURAL SL CONFIG
+            # ======================================
+            "hybrid_structural_sl_enabled": (
+                self.config.get(
+                    "hybrid_structural_sl_enabled",
+                    False,
+                )
+            ),
+            "hybrid_structural_max_risk_pct": (
+                self.config.get(
+                    "hybrid_structural_max_risk_pct"
+                )
+            ),
+            "hybrid_structural_sl_buffer_pct": (
+                self.config.get(
+                    "hybrid_structural_sl_buffer_pct",
+                    0.0,
+                )
+            ),
 
             "momentum_prev1": (
                 signal.momentum_prev1.value
