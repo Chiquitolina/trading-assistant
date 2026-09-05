@@ -24624,6 +24624,148 @@ with tab_tp_sl_replay:
                         "la posición hasta que TP o SL sea "
                         "tocado dentro de la ventana."
                     )
+                    
+                    # ======================================
+                    # TP SURVIVAL / TRANSITION
+                    # ======================================
+
+                    st.markdown(
+                        "### TP Survival / Transition"
+                    )
+
+                    st.caption(
+                        "Muestra cuántos trades siguen llegando "
+                        "al TP a medida que el target se aleja. "
+                        "Winners lost vs previous identifica "
+                        "los puntos donde aumentar el TP empieza "
+                        "a sacrificar operaciones ganadoras."
+                    )
+
+                    tp_survival_rows = []
+
+                    tp_survival_groups = (
+                        tp_only_source
+                        .groupby(
+                            "tp_target_pct",
+                            observed=True,
+                        )
+                    )
+
+                    for (
+                        survival_tp,
+                        survival_group,
+                    ) in tp_survival_groups:
+
+                        survival_available = len(
+                            survival_group
+                        )
+
+                        survival_tp_count = int(
+                            survival_group[
+                                "result"
+                            ]
+                            .eq("TP")
+                            .sum()
+                        )
+
+                        survival_sl_count = int(
+                            survival_group[
+                                "result"
+                            ]
+                            .eq("SL")
+                            .sum()
+                        )
+
+                        survival_unresolved = int(
+                            (
+                                ~survival_group[
+                                    "result"
+                                ].isin([
+                                    "TP",
+                                    "SL",
+                                ])
+                            ).sum()
+                        )
+
+                        tp_survival_rows.append({
+                            "tp_target_pct":
+                                survival_tp,
+
+                            "available_trades":
+                                survival_available,
+
+                            "tp_hits":
+                                survival_tp_count,
+
+                            "sl_hits":
+                                survival_sl_count,
+
+                            "unresolved":
+                                survival_unresolved,
+
+                            "tp_survival_pct": (
+                                survival_tp_count
+                                / survival_available
+                                * 100
+                                if survival_available
+                                else 0.0
+                            ),
+                        })
+
+                    tp_survival_report = (
+                        pd.DataFrame(
+                            tp_survival_rows
+                        )
+                    )
+
+                    if not tp_survival_report.empty:
+
+                        tp_survival_report = (
+                            tp_survival_report
+                            .sort_values(
+                                "tp_target_pct"
+                            )
+                            .reset_index(
+                                drop=True
+                            )
+                        )
+
+                        tp_survival_report[
+                            "winners_lost_vs_previous"
+                        ] = (
+                            tp_survival_report[
+                                "tp_hits"
+                            ]
+                            .shift(1)
+                            - tp_survival_report[
+                                "tp_hits"
+                            ]
+                        )
+
+                        tp_survival_report[
+                            "winners_lost_vs_previous"
+                        ] = (
+                            tp_survival_report[
+                                "winners_lost_vs_previous"
+                            ]
+                            .fillna(0)
+                            .astype(int)
+                        )
+
+                        tp_survival_report[
+                            "tp_survival_pct"
+                        ] = (
+                            tp_survival_report[
+                                "tp_survival_pct"
+                            ]
+                            .round(2)
+                        )
+
+                        st.dataframe(
+                            tp_survival_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
                 
 
         if replay_analysis_mode == "Factorial":
