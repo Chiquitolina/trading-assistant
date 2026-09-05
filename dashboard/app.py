@@ -23798,7 +23798,339 @@ with tab_tp_sl_replay:
                             "proviene exclusivamente del SL "
                             "estructural y del límite de riesgo."
                         )
-                    
+                        
+            if sl_only_mode == "Fixed SL":
+
+                # ======================================
+                # FIXED SL SCANNER
+                # ======================================
+
+                st.markdown(
+                    "### Fixed SL Scanner"
+                )
+
+                st.caption(
+                    "Mantiene el TP original de cada trade "
+                    "y cambia únicamente el SL por una distancia "
+                    "porcentual fija desde la entrada."
+                )
+
+                fixed_sl_df = mature_scenarios.copy()
+
+                fixed_sl_required_cols = [
+                    "entry_ts",
+                    "sl_mode",
+                    "fixed_sl_pct",
+                    "result",
+                    "original_pnl",
+                    "simulated_pnl_pct",
+                ]
+
+                fixed_sl_missing_cols = [
+                    col
+                    for col in fixed_sl_required_cols
+                    if col not in fixed_sl_df.columns
+                ]
+
+                if fixed_sl_missing_cols:
+                    st.info(
+                        "Missing Fixed SL columns: "
+                        + ", ".join(fixed_sl_missing_cols)
+                    )
+
+                else:
+                    fixed_sl_df["sl_mode"] = (
+                        fixed_sl_df["sl_mode"]
+                        .fillna("")
+                        .astype(str)
+                        .str.upper()
+                    )
+
+                    fixed_sl_df = fixed_sl_df[
+                        fixed_sl_df["sl_mode"].eq("FIXED")
+                    ].copy()
+
+                    for col in [
+                        "fixed_sl_pct",
+                        "original_pnl",
+                        "simulated_pnl_pct",
+                    ]:
+                        fixed_sl_df[col] = pd.to_numeric(
+                            fixed_sl_df[col],
+                            errors="coerce",
+                        )
+
+                    fixed_sl_df["result"] = (
+                        fixed_sl_df["result"]
+                        .fillna("")
+                        .astype(str)
+                        .str.upper()
+                    )
+
+                    fixed_sl_df = fixed_sl_df[
+                        fixed_sl_df["fixed_sl_pct"].notna()
+                    ].copy()
+
+                    fixed_sl_rows = []
+
+                    for (
+                        fixed_sl_pct,
+                        fixed_sl_group,
+                    ) in fixed_sl_df.groupby(
+                        "fixed_sl_pct",
+                        observed=True,
+                    ):
+
+                        resolved = fixed_sl_group[
+                            fixed_sl_group["result"].isin([
+                                "TP",
+                                "SL",
+                            ])
+                        ].copy()
+
+                        if len(resolved) < scenario_min_trades:
+                            continue
+
+                        resolved["actual_net_pnl"] = (
+                            resolved["original_pnl"]
+                            - scenario_cost_pct
+                        )
+
+                        resolved["fixed_sl_net_pnl"] = (
+                            resolved["simulated_pnl_pct"]
+                            - scenario_cost_pct
+                        )
+
+                        actual_summary = (
+                            summarize_replay_strategy(
+                                strategy_name="Actual management",
+                                pnl_values=resolved[
+                                    "actual_net_pnl"
+                                ],
+                            )
+                        )
+
+                        fixed_summary = (
+                            summarize_replay_strategy(
+                                strategy_name=(
+                                    f"Original TP + "
+                                    f"{fixed_sl_pct:g}% fixed SL"
+                                ),
+                                pnl_values=resolved[
+                                    "fixed_sl_net_pnl"
+                                ],
+                            )
+                        )
+
+                        actual_pf = actual_summary[
+                            "profit_factor"
+                        ]
+
+                        fixed_pf = fixed_summary[
+                            "profit_factor"
+                        ]
+
+                        if (
+                            pd.notna(actual_pf)
+                            and pd.notna(fixed_pf)
+                            and np.isfinite(actual_pf)
+                            and np.isfinite(fixed_pf)
+                        ):
+                            delta_pf = fixed_pf - actual_pf
+                        else:
+                            delta_pf = np.nan
+
+                        tp_count = int(
+                            resolved["result"].eq("TP").sum()
+                        )
+
+                        sl_count = int(
+                            resolved["result"].eq("SL").sum()
+                        )
+
+                        ambiguous_count = int(
+                            fixed_sl_group[
+                                "result"
+                            ].eq("AMBIGUOUS").sum()
+                        )
+
+                        unresolved_count = int(
+                            fixed_sl_group[
+                                "result"
+                            ].eq("UNRESOLVED").sum()
+                        )
+
+                        fixed_sl_rows.append({
+                            "fixed_sl_pct":
+                                fixed_sl_pct,
+
+                            "cost_pct":
+                                scenario_cost_pct,
+
+                            "available_trades":
+                                len(fixed_sl_group),
+
+                            "resolved_trades":
+                                len(resolved),
+
+                            "tp":
+                                tp_count,
+
+                            "sl":
+                                sl_count,
+
+                            "ambiguous":
+                                ambiguous_count,
+
+                            "unresolved":
+                                unresolved_count,
+
+                            "resolved_coverage_pct": (
+                                len(resolved)
+                                / len(fixed_sl_group)
+                                * 100
+                                if len(fixed_sl_group)
+                                else 0.0
+                            ),
+
+                            "actual_winrate":
+                                actual_summary["winrate"],
+
+                            "actual_avg_pnl":
+                                actual_summary["avg_pnl"],
+
+                            "actual_total_pnl":
+                                actual_summary["total_pnl"],
+
+                            "actual_profit_factor":
+                                actual_pf,
+
+                            "actual_max_drawdown":
+                                actual_summary["max_drawdown"],
+
+                            "fixed_winrate":
+                                fixed_summary["winrate"],
+
+                            "fixed_avg_win":
+                                fixed_summary["avg_win"],
+
+                            "fixed_avg_loss":
+                                fixed_summary["avg_loss"],
+
+                            "fixed_payoff_ratio":
+                                fixed_summary["payoff_ratio"],
+
+                            "fixed_breakeven_winrate":
+                                fixed_summary[
+                                    "breakeven_winrate"
+                                ],
+
+                            "fixed_avg_pnl":
+                                fixed_summary["avg_pnl"],
+
+                            "fixed_total_pnl":
+                                fixed_summary["total_pnl"],
+
+                            "fixed_profit_factor":
+                                fixed_pf,
+
+                            "fixed_max_drawdown":
+                                fixed_summary["max_drawdown"],
+
+                            "delta_winrate": (
+                                fixed_summary["winrate"]
+                                - actual_summary["winrate"]
+                            ),
+
+                            "delta_avg_pnl": (
+                                fixed_summary["avg_pnl"]
+                                - actual_summary["avg_pnl"]
+                            ),
+
+                            "delta_total_pnl": (
+                                fixed_summary["total_pnl"]
+                                - actual_summary["total_pnl"]
+                            ),
+
+                            "delta_profit_factor":
+                                delta_pf,
+
+                            "drawdown_reduction": (
+                                actual_summary["max_drawdown"]
+                                - fixed_summary["max_drawdown"]
+                            ),
+                        })
+
+                    fixed_sl_report = pd.DataFrame(
+                        fixed_sl_rows
+                    )
+
+                    if fixed_sl_report.empty:
+                        st.info(
+                            "No Fixed SL scenarios meet "
+                            "the minimum trade requirement."
+                        )
+
+                    else:
+                        fixed_sl_numeric_cols = [
+                            "fixed_sl_pct",
+                            "resolved_coverage_pct",
+                            "actual_winrate",
+                            "actual_avg_pnl",
+                            "actual_total_pnl",
+                            "actual_profit_factor",
+                            "actual_max_drawdown",
+                            "fixed_winrate",
+                            "fixed_avg_win",
+                            "fixed_avg_loss",
+                            "fixed_payoff_ratio",
+                            "fixed_breakeven_winrate",
+                            "fixed_avg_pnl",
+                            "fixed_total_pnl",
+                            "fixed_profit_factor",
+                            "fixed_max_drawdown",
+                            "delta_winrate",
+                            "delta_avg_pnl",
+                            "delta_total_pnl",
+                            "delta_profit_factor",
+                            "drawdown_reduction",
+                        ]
+
+                        for col in fixed_sl_numeric_cols:
+                            fixed_sl_report[col] = (
+                                pd.to_numeric(
+                                    fixed_sl_report[col],
+                                    errors="coerce",
+                                ).round(4)
+                            )
+
+                        fixed_sl_report = (
+                            fixed_sl_report
+                            .sort_values(
+                                by=[
+                                    "fixed_profit_factor",
+                                    "fixed_total_pnl",
+                                ],
+                                ascending=[
+                                    False,
+                                    False,
+                                ],
+                                na_position="last",
+                            )
+                            .reset_index(drop=True)
+                        )
+
+                        st.dataframe(
+                            fixed_sl_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.caption(
+                            "Cada fila mantiene el TP original "
+                            "y reemplaza únicamente el SL por una "
+                            "distancia fija desde la entrada."
+                        )
 
         if replay_analysis_mode == "TP Only":
 
