@@ -20812,6 +20812,7 @@ with tab_tp_sl_replay:
         scenario_numeric = [
             "original_pnl",
             "sl_buffer_pct",
+            "fixed_sl_pct",
             "tp_target_pct",
             "scenario_risk_pct",
             "structural_risk_pct",
@@ -23310,6 +23311,18 @@ with tab_tp_sl_replay:
         
 
         if replay_analysis_mode == "SL Only":
+            
+            sl_only_mode = st.radio(
+                "SL analysis mode",
+                options=[
+                    "Structural risk",
+                    "Fixed SL",
+                ],
+                horizontal=True,
+                key="tp_sl_replay_sl_only_mode",
+            )
+            
+            if sl_only_mode == "Structural risk":
 
             # ======================================
             # SL-ONLY RISK SCANNER
