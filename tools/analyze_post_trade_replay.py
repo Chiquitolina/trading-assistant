@@ -34,6 +34,16 @@ TP_TARGETS_PCT = [
 
 STRUCTURAL_SL_BUFFERS_PCT = [0.00, 0.10, 0.20]
 
+FIXED_SL_PCTS = [
+    0.50,
+    0.75,
+    1.00,
+    1.25,
+    1.50,
+    1.75,
+    2.00,
+]
+
 PARTIAL_TARGETS_PCT = [
     1.00,
     2.50,
@@ -404,6 +414,24 @@ def price_from_target_pct(
     return (
         entry
         * (1 - target_pct / 100)
+    )
+    
+def price_from_stop_pct(
+    entry,
+    stop_pct,
+    side,
+):
+    side = str(side).upper()
+
+    if side == "LONG":
+        return (
+            entry
+            * (1 - stop_pct / 100)
+        )
+
+    return (
+        entry
+        * (1 + stop_pct / 100)
     )
 
 def replay_partial_strategy(
@@ -837,6 +865,8 @@ def analyze_trade(
         scenario_sl,
         scenario_risk_pct,
         sl_buffer_pct=np.nan,
+        fixed_sl_pct=np.nan,
+        target_pcts=None,
     ):
         """
         Genera todos los TP objetivos contra un SL dado.
@@ -844,6 +874,7 @@ def analyze_trade(
         sl_mode:
             ORIGINAL   -> conserva el SL original
             STRUCTURAL -> usa compression_low/high
+            FIXED      -> usa un SL fijo porcentual desde entry
         """
 
         if (
@@ -852,8 +883,11 @@ def analyze_trade(
             or scenario_risk_pct <= 0
         ):
             return
+        
+        if target_pcts is None:
+            target_pcts = TP_TARGETS_PCT
 
-        for target_pct in TP_TARGETS_PCT:
+        for target_pct in target_pcts:
             scenario_tp = price_from_target_pct(
                 entry=entry,
                 target_pct=target_pct,
@@ -923,6 +957,9 @@ def analyze_trade(
 
                 "sl_buffer_pct":
                     sl_buffer_pct,
+                    
+                "fixed_sl_pct":
+                    fixed_sl_pct,
 
                 "scenario_sl":
                     scenario_sl,
@@ -1017,6 +1054,32 @@ def analyze_trade(
             ),
             sl_buffer_pct=buffer_pct,
         )
+        
+    # ==========================================
+    # SL-ONLY: ORIGINAL TP + FIXED SL
+    # ==========================================
+
+    if (
+        not pd.isna(original_tp_pct)
+        and original_tp_pct > 0
+    ):
+        for fixed_sl_pct in FIXED_SL_PCTS:
+
+            fixed_sl_price = price_from_stop_pct(
+                entry=entry,
+                stop_pct=fixed_sl_pct,
+                side=side,
+            )
+
+            append_tp_scenarios_for_sl(
+                sl_mode="FIXED",
+                scenario_sl=fixed_sl_price,
+                scenario_risk_pct=fixed_sl_pct,
+                fixed_sl_pct=fixed_sl_pct,
+                target_pcts=[
+                    original_tp_pct
+                ],
+            )
             
     partial_rows = []
 
