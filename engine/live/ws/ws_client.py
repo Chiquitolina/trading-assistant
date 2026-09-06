@@ -165,8 +165,17 @@ class WSClient:
         self._group_socket_keys.clear()
 
         if self.twm is not None:
-            print("\033[94m[WS CLIENT]\033[0m ⚠️ Existing TWM found, stopping before reconnect")
-            self._stop_ws()
+            print(
+                "\033[94m[WS CLIENT]\033[0m "
+                "⚠️ Existing TWM found, stopping before reconnect"
+            )
+
+            stopped = self._stop_ws()
+
+            if not stopped:
+                raise RuntimeError(
+                    "Existing WebSocket manager could not be stopped cleanly"
+                )
 
         try:
             ws_loop = asyncio.new_event_loop()
@@ -304,7 +313,16 @@ class WSClient:
             self.is_connected = False
             self.last_message_at = 0.0
 
-            self._stop_ws()
+            stopped = self._stop_ws()
+
+            if not stopped:
+                print(
+                    "\033[91m[WS CLIENT]\033[0m "
+                    "❌ Reconnect aborted: previous WS manager is still alive"
+                )
+
+                self._is_reconnecting = True
+                return
 
             self.retries += 1
 
@@ -338,10 +356,9 @@ class WSClient:
 
     def _stop_ws(self):
         twm = self.twm
-        self.twm = None
 
         if twm is None:
-            return
+            return True
 
         try:
             print(
@@ -356,17 +373,23 @@ class WSClient:
 
             if twm.is_alive():
                 print(
-                    "\033[94m[WS CLIENT]\033[0m "
-                    "⚠️ WS manager did not stop within 15s"
+                    "\033[91m[WS CLIENT]\033[0m "
+                    "❌ WS manager did not stop within 15s"
                 )
-            else:
-                print(
-                    "\033[94m[WS CLIENT]\033[0m "
-                    "✅ WS manager stopped"
-                )
+                return False
+
+            self.twm = None
+
+            print(
+                "\033[94m[WS CLIENT]\033[0m "
+                "✅ WS manager stopped"
+            )
+
+            return True
 
         except Exception as e:
             print(
-                f"\033[94m[WS CLIENT]\033[0m "
-                f"⚠️ Stop error: {e}"
+                f"\033[91m[WS CLIENT]\033[0m "
+                f"❌ Stop error: {e}"
             )
+            return False
