@@ -37,9 +37,27 @@ class WSClient:
         self._group_socket_keys = {}
         self._last_health_log = 0.0
         
+        self._connected_at = 0.0
+        self._group_startup_grace = 30
+        
     def _chunk_list(self, items, size):
         for i in range(0, len(items), size):
             yield items[i:i + size]
+            
+    def _get_dead_groups(self, now):
+        dead_groups = []
+
+        for group_id in self._group_symbols:
+            last = self._group_last_message.get(group_id, 0.0)
+
+            if last <= 0:
+                dead_groups.append(group_id)
+                continue
+
+            if now - last > self.stale_after:
+                dead_groups.append(group_id)
+
+        return dead_groups
 
     def start(self):
         if self.running:
@@ -77,6 +95,18 @@ class WSClient:
                             f"messages={count} "
                             f"last_age={age_text}"
                         )
+                        
+                    if (
+                        self._connected_at > 0
+                        and now - self._connected_at > self._group_startup_grace
+                    ):
+                        dead_groups = self._get_dead_groups(now)
+
+                        if dead_groups:
+                            print(
+                                f"\033[91m[WS CLIENT]\033[0m "
+                                f"❌ Dead WS groups detected: {dead_groups}"
+                            )
 
                 if self._is_reconnecting:
                     self._reconnect()
@@ -191,6 +221,8 @@ class WSClient:
                 )
 
                 time.sleep(1)
+                
+            self._connected_at = time.time()
 
             self.retries = 0
             self._is_reconnecting = False
