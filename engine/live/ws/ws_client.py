@@ -40,6 +40,8 @@ class WSClient:
         self._connected_at = 0.0
         self._group_startup_grace = 30
         
+        self._group_ready_timeout = 60
+        
     def _chunk_list(self, items, size):
         for i in range(0, len(items), size):
             yield items[i:i + size]
@@ -230,7 +232,43 @@ class WSClient:
                 )
 
                 time.sleep(1)
-                
+
+            validation_started = time.time()
+
+            print(
+                f"\033[94m[WS CLIENT]\033[0m "
+                f"⏳ Waiting for all {len(self._group_symbols)} WS groups..."
+            )
+
+            while time.time() - validation_started < self._group_ready_timeout:
+                missing_groups = [
+                    group_id
+                    for group_id in self._group_symbols
+                    if self._group_message_count.get(group_id, 0) <= 0
+                ]
+
+                if not missing_groups:
+                    break
+
+                time.sleep(1)
+
+            else:
+                missing_groups = [
+                    group_id
+                    for group_id in self._group_symbols
+                    if self._group_message_count.get(group_id, 0) <= 0
+                ]
+
+                missing_details = {
+                    group_id: self._group_symbols.get(group_id, ())
+                    for group_id in missing_groups
+                }
+
+                raise RuntimeError(
+                    f"WS initialization incomplete: "
+                    f"groups without messages={missing_details}"
+                )
+
             self._connected_at = time.time()
 
             self.retries = 0
@@ -238,7 +276,9 @@ class WSClient:
 
             print(
                 f"\n\033[94m[WS CLIENT]\033[0m "
-                f"📡 WS initialized total_streams={total_streams}\n"
+                f"✅ WS ready "
+                f"groups={len(self._group_symbols)}/{len(self._group_symbols)} "
+                f"total_streams={total_streams}\n"
             )
 
         except Exception:
