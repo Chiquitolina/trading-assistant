@@ -90,6 +90,66 @@ class ExecutionEngine:
                 )
 
         return journal_context
+    
+    @staticmethod
+    def _btc_timeframe_journal_context(ctx):
+        ctx = ctx if isinstance(ctx, dict) else {}
+
+        journal_context = {}
+
+        # Las métricas principales de 15m, 1h y 4h
+        # ya se escriben explícitamente en log_trade().
+        # Aquí agregamos las nuevas de 5m y 30m.
+        for timeframe in (
+            "5m",
+            "30m",
+        ):
+            field_names = [
+                f"btc_corr_{timeframe}",
+                f"btc_beta_{timeframe}",
+                f"btc_r2_{timeframe}",
+                f"symbol_move_{timeframe}_pct",
+                f"btc_move_{timeframe}_pct",
+                (
+                    f"btc_expected_move_"
+                    f"{timeframe}_pct"
+                ),
+                (
+                    f"btc_residual_move_"
+                    f"{timeframe}_pct"
+                ),
+            ]
+
+            for field_name in field_names:
+                journal_context[field_name] = ctx.get(
+                    field_name
+                )
+
+        # Guarda si el cálculo estuvo disponible
+        # y, si no, la causa.
+        for timeframe in (
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "4h",
+        ):
+            available_field = (
+                f"btc_corr_available_{timeframe}"
+            )
+            reason_field = (
+                f"btc_corr_reason_{timeframe}"
+            )
+
+            journal_context[
+                available_field
+            ] = ctx.get(available_field)
+
+            journal_context[
+                reason_field
+            ] = ctx.get(reason_field)
+
+        return journal_context
 
     def __init__(self, exchange, position_manager, strategy, symbol):
         self.exchange = exchange
@@ -724,6 +784,10 @@ class ExecutionEngine:
             compression_quality_label=ctx.get("compression_quality_label"),
             
             **self._multitimeframe_journal_context(
+                ctx
+            ),
+            
+            **self._btc_timeframe_journal_context(
                 ctx
             ),
         )
@@ -2203,6 +2267,10 @@ class ExecutionEngine:
             compression_quality_label=ctx.get("compression_quality_label"),
             
             **self._multitimeframe_journal_context(
+                ctx
+            ),
+            
+            **self._btc_timeframe_journal_context(
                 ctx
             ),
         )
