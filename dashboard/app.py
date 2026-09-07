@@ -4753,7 +4753,13 @@ def build_btc_direction_pivot(matrix: pd.DataFrame) -> pd.DataFrame:
 # BTC CORRELATION ANALYTICS
 # =========================================================
 
-BTC_CORRELATION_TIMEFRAMES = ["15m", "1h", "4h"]
+BTC_CORRELATION_TIMEFRAMES = [
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "4h",
+]
 
 CONTEXT_TIMEFRAMES = [
     "5m",
@@ -11825,14 +11831,26 @@ with tab_swings:
                                 "entry_vs_compression_pct",
                                 "entry_vs_breakout_pct",
 
-                                "btc_dependency_15m",
-                                "btc_corr_15m",
-                                "btc_beta_15m",
-                                "btc_r2_15m",
-
                                 (
-                                    "btc_directional_"
-                                    "residual_15m_pct"
+                                    f"btc_dependency_"
+                                    f"{selected_tf}"
+                                ),
+                                (
+                                    f"btc_corr_"
+                                    f"{selected_tf}"
+                                ),
+                                (
+                                    f"btc_beta_"
+                                    f"{selected_tf}"
+                                ),
+                                (
+                                    f"btc_r2_"
+                                    f"{selected_tf}"
+                                ),
+                                (
+                                    f"btc_directional_"
+                                    f"residual_"
+                                    f"{selected_tf}_pct"
                                 ),
 
                                 "max_favorable_pct",
@@ -12524,14 +12542,26 @@ with tab_swings:
                                 "entry_vs_compression_pct",
                                 "entry_vs_breakout_pct",
 
-                                "btc_dependency_15m",
-                                "btc_corr_15m",
-                                "btc_beta_15m",
-                                "btc_r2_15m",
-
                                 (
-                                    "btc_directional_"
-                                    "residual_15m_pct"
+                                    f"btc_dependency_"
+                                    f"{selected_router_tf}"
+                                ),
+                                (
+                                    f"btc_corr_"
+                                    f"{selected_router_tf}"
+                                ),
+                                (
+                                    f"btc_beta_"
+                                    f"{selected_router_tf}"
+                                ),
+                                (
+                                    f"btc_r2_"
+                                    f"{selected_router_tf}"
+                                ),
+                                (
+                                    f"btc_directional_"
+                                    f"residual_"
+                                    f"{selected_router_tf}_pct"
                                 ),
 
                                 "max_favorable_pct",
@@ -16479,33 +16509,44 @@ with tab_compression_analytics:
                 "btc_direction_1h",
                 "btc_context_state",
                 "btc_context_reason",
-
+                
                 # =========================
-                # ORIGINAL BTC CORRELATION
+                # STANDARD BTC CORRELATION
                 # =========================
-                "btc_corr_15m",
-                "btc_beta_15m",
-                "btc_r2_15m",
-                "symbol_move_15m_pct",
-                "btc_move_15m_pct",
-                "btc_expected_move_15m_pct",
-                "btc_residual_move_15m_pct",
-
-                "btc_corr_1h",
-                "btc_beta_1h",
-                "btc_r2_1h",
-                "symbol_move_1h_pct",
-                "btc_move_1h_pct",
-                "btc_expected_move_1h_pct",
-                "btc_residual_move_1h_pct",
-
-                "btc_corr_4h",
-                "btc_beta_4h",
-                "btc_r2_4h",
-                "symbol_move_4h_pct",
-                "btc_move_4h_pct",
-                "btc_expected_move_4h_pct",
-                "btc_residual_move_4h_pct",
+                *[
+                    field_name
+                    for timeframe
+                    in BTC_CORRELATION_TIMEFRAMES
+                    for field_name in [
+                        f"btc_corr_{timeframe}",
+                        f"btc_beta_{timeframe}",
+                        f"btc_r2_{timeframe}",
+                        (
+                            f"symbol_move_"
+                            f"{timeframe}_pct"
+                        ),
+                        (
+                            f"btc_move_"
+                            f"{timeframe}_pct"
+                        ),
+                        (
+                            f"btc_expected_move_"
+                            f"{timeframe}_pct"
+                        ),
+                        (
+                            f"btc_residual_move_"
+                            f"{timeframe}_pct"
+                        ),
+                        (
+                            f"btc_corr_available_"
+                            f"{timeframe}"
+                        ),
+                        (
+                            f"btc_corr_reason_"
+                            f"{timeframe}"
+                        ),
+                    ]
+                ],
 
                 # =========================
                 # FAST BTC CORRELATION
