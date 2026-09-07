@@ -5740,7 +5740,9 @@ paper_df = load_csv_cached(PAPER_SIGNALS_FILE)
 # =========================
 numeric_cols = [
     "pnl",
+    "pnl_gross",
     "pnl_usd",
+    "fees",
     "signal_price",
     "entry",
     "real_entry",
@@ -5752,7 +5754,71 @@ numeric_cols = [
 
 for col in numeric_cols:
     if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce",
+        )
+
+
+# =========================
+# ESTIMATED NET PNL USD
+# =========================
+
+df["pnl_net_usd"] = np.nan
+df["fees_usd_est"] = np.nan
+
+required_usd_columns = {
+    "pnl",
+    "pnl_gross",
+    "pnl_usd",
+}
+
+if required_usd_columns.issubset(df.columns):
+    valid_usd_mask = (
+        df["pnl"].notna()
+        & df["pnl_gross"].notna()
+        & df["pnl_usd"].notna()
+        & df["pnl_gross"].abs().gt(1e-12)
+    )
+
+    # pnl_usd representa el PnL bruto monetario.
+    # Aplicamos el retorno neto sobre el mismo notional.
+    df.loc[
+        valid_usd_mask,
+        "pnl_net_usd",
+    ] = (
+        df.loc[
+            valid_usd_mask,
+            "pnl_usd",
+        ]
+        *
+        (
+            df.loc[
+                valid_usd_mask,
+                "pnl",
+            ]
+            /
+            df.loc[
+                valid_usd_mask,
+                "pnl_gross",
+            ]
+        )
+    )
+
+    df.loc[
+        valid_usd_mask,
+        "fees_usd_est",
+    ] = (
+        df.loc[
+            valid_usd_mask,
+            "pnl_usd",
+        ]
+        -
+        df.loc[
+            valid_usd_mask,
+            "pnl_net_usd",
+        ]
+    )
         
 
 # =========================
@@ -6558,7 +6624,11 @@ with tab_overview:
 
     overview_metrics = calculate_metrics(df_view.to_dict("records"))
 
-    net_pnl_usd = safe_sum(df_view, "pnl_usd")
+    net_pnl_usd = safe_sum(
+        df_view,
+        "pnl_net_usd",
+    )
+    
     best_trade = safe_max(df_view, "pnl")
 
     st.markdown("### 📊 Performance")
@@ -8751,30 +8821,87 @@ with tab_overview:
             })
         
     # =========================
-    # EQUITY CURVE USD
+    # NET EQUITY CURVE USD
     # =========================
 
-    if "entry_ts_dt" in df_raw.columns and "pnl_usd" in df_raw.columns:
-
+    if (
+        "exit_ts_dt" in df_view.columns
+        and "pnl_net_usd" in df_view.columns
+    ):
         st.markdown("---")
-        st.subheader("💵 Equity Curve USD")
+        st.subheader("💵 Net Equity Curve USD")
 
         df_equity_usd = (
-            df_raw
-            .dropna(subset=["entry_ts_dt", "pnl_usd"])
-            .sort_values("entry_ts_dt")
+            df_view
+            .dropna(
+                subset=[
+                    "exit_ts_dt",
+                    "pnl_net_usd",
+                ]
+            )
+            .sort_values("exit_ts_dt")
             .copy()
         )
 
         if not df_equity_usd.empty:
-            df_equity_usd["equity_usd"] = df_equity_usd["pnl_usd"].cumsum()
+            df_equity_usd[
+                "equity_usd"
+            ] = (
+                df_equity_usd[
+                    "pnl_net_usd"
+                ].cumsum()
+            )
 
             st.line_chart(
-                df_equity_usd.set_index("entry_ts_dt")["equity_usd"],
+                df_equity_usd
+                .set_index("exit_ts_dt")[
+                    "equity_usd"
+                ],
                 use_container_width=True,
             )
+
+            total_gross_usd = safe_sum(
+                df_equity_usd,
+                "pnl_usd",
+            )
+
+            total_fees_usd = safe_sum(
+                df_equity_usd,
+                "fees_usd_est",
+            )
+
+            total_net_usd = safe_sum(
+                df_equity_usd,
+                "pnl_net_usd",
+            )
+
+            gross_col, fees_col, net_col = (
+                st.columns(3)
+            )
+
+            gross_col.metric(
+                "Gross PnL USD",
+                f"{total_gross_usd:.2f} USDT",
+            )
+
+            fees_col.metric(
+                "Estimated Fees USD",
+                f"{total_fees_usd:.2f} USDT",
+            )
+
+            net_col.metric(
+                "Net PnL USD",
+                f"{total_net_usd:.2f} USDT",
+            )
+
+            st.caption(
+                "La curva descuenta los fees estimados, "
+                "se ordena por fecha de cierre y respeta "
+                "los filtros comerciales."
+            )
+
         else:
-            st.info("No USD equity data.")
+            st.info("No net USD equity data.")
             
 # =========================================================
 # BTC CORRELATION TAB
