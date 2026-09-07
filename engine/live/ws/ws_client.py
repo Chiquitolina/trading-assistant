@@ -42,6 +42,14 @@ class WSClient:
         
         self._group_ready_timeout = 60
         
+        self._callback_samples = 0
+        self._callback_total_time = 0.0
+        self._callback_max_time = 0.0
+        self._callback_slow_10ms = 0
+        self._callback_slow_50ms = 0
+        self._callback_slow_100ms = 0
+        self._last_callback_stats_log = time.time()
+        
     def _chunk_list(self, items, size):
         for i in range(0, len(items), size):
             yield items[i:i + size]
@@ -320,7 +328,55 @@ class WSClient:
                     "✅ First WebSocket message received"
                 )
 
+            callback_started = time.perf_counter()
+
             self.on_message(msg)
+
+            callback_elapsed = time.perf_counter() - callback_started
+
+            self._callback_samples += 1
+            self._callback_total_time += callback_elapsed
+
+            if callback_elapsed > self._callback_max_time:
+                self._callback_max_time = callback_elapsed
+
+            if callback_elapsed >= 0.010:
+                self._callback_slow_10ms += 1
+
+            if callback_elapsed >= 0.050:
+                self._callback_slow_50ms += 1
+
+            if callback_elapsed >= 0.100:
+                self._callback_slow_100ms += 1
+
+            now = time.time()
+
+            if now - self._last_callback_stats_log >= 30:
+                avg_ms = (
+                    self._callback_total_time
+                    / max(self._callback_samples, 1)
+                    * 1000
+                )
+
+                max_ms = self._callback_max_time * 1000
+
+                print(
+                    f"\033[94m[WS CALLBACK]\033[0m "
+                    f"samples={self._callback_samples} "
+                    f"avg={avg_ms:.2f}ms "
+                    f"max={max_ms:.2f}ms "
+                    f"slow_10ms={self._callback_slow_10ms} "
+                    f"slow_50ms={self._callback_slow_50ms} "
+                    f"slow_100ms={self._callback_slow_100ms}"
+                )
+
+                self._callback_samples = 0
+                self._callback_total_time = 0.0
+                self._callback_max_time = 0.0
+                self._callback_slow_10ms = 0
+                self._callback_slow_50ms = 0
+                self._callback_slow_100ms = 0
+                self._last_callback_stats_log = now
 
         except Exception as e:
             print(

@@ -434,6 +434,21 @@ class EntryEngine:
         # ==========================
         signal_context = {
             "symbol": plan_symbol,
+            "main_tf": getattr(
+                signal,
+                "main_tf",
+                self.entry_tf,
+            ),
+            "signal_context_tf": getattr(
+                signal,
+                "signal_context_tf",
+                self.entry_tf,
+            ),
+            "swing_lookback": getattr(
+                signal,
+                "swing_lookback",
+                None,
+            ),
             "trend": signal.trend.value,
             "direction": signal.direction.value,
             "momentum": signal.momentum.value,
@@ -509,23 +524,7 @@ class EntryEngine:
             "sl_mult": cfg["sl_mult"],
             "tp_mult": cfg["tp_mult"],
             "min_tp": cfg["min_tp"],
-            
-            # ==========================
-            # HTF EXTENSION CONTEXT
-            # ==========================
-            "dist_ema50_15m_pct": getattr(signal, "dist_ema50_15m_pct", None),
-            "dist_ema99_15m_pct": getattr(signal, "dist_ema99_15m_pct", None),
-
-            "dist_ema50_1h_pct": getattr(signal, "dist_ema50_1h_pct", None),
-            "dist_ema99_1h_pct": getattr(signal, "dist_ema99_1h_pct", None),
-
-            "dist_ema50_4h_pct": getattr(signal, "dist_ema50_4h_pct", None),
-            "dist_ema99_4h_pct": getattr(signal, "dist_ema99_4h_pct", None),
-            
-            "dist_ema20_15m_pct": getattr(signal, "dist_ema20_15m_pct", None),
-            "dist_ema20_1h_pct": getattr(signal, "dist_ema20_1h_pct", None),
-            "dist_ema20_4h_pct": getattr(signal, "dist_ema20_4h_pct", None),
-            
+                        
             # ==========================
             # RECENT MOVE CONTEXT - 15m
             # ==========================
@@ -534,37 +533,7 @@ class EntryEngine:
 
             "green_candles_last_10": getattr(signal, "green_candles_last_10", None),
             "red_candles_last_10": getattr(signal, "red_candles_last_10", None),
-            
-            # ==========================
-            # HTF SWING CONTEXT
-            # ==========================
-            "dist_swing_low_15m_pct": getattr(signal, "dist_swing_low_15m_pct", None),
-            "dist_swing_high_15m_pct": getattr(signal, "dist_swing_high_15m_pct", None),
-
-            "dist_swing_low_1h_pct": getattr(signal, "dist_swing_low_1h_pct", None),
-            "dist_swing_high_1h_pct": getattr(signal, "dist_swing_high_1h_pct", None),
-
-            "dist_swing_low_4h_pct": getattr(signal, "dist_swing_low_4h_pct", None),
-            "dist_swing_high_4h_pct": getattr(signal, "dist_swing_high_4h_pct", None),
-
-            "near_swing_low_15m": getattr(signal, "near_swing_low_15m", None),
-            "near_swing_high_15m": getattr(signal, "near_swing_high_15m", None),
-
-            "near_swing_low_1h": getattr(signal, "near_swing_low_1h", None),
-            "near_swing_high_1h": getattr(signal, "near_swing_high_1h", None),
-
-            "near_swing_low_4h": getattr(signal, "near_swing_low_4h", None),
-            "near_swing_high_4h": getattr(signal, "near_swing_high_4h", None),
-            
-            "swing_low_15m": getattr(signal, "swing_low_15m", None),
-            "swing_high_15m": getattr(signal, "swing_high_15m", None),
-
-            "swing_low_1h": getattr(signal, "swing_low_1h", None),
-            "swing_high_1h": getattr(signal, "swing_high_1h", None),
-
-            "swing_low_4h": getattr(signal, "swing_low_4h", None),
-            "swing_high_4h": getattr(signal, "swing_high_4h", None),
-            
+             
             # ==========================
             # BTC SWING CONTEXT
             # ==========================
@@ -584,6 +553,82 @@ class EntryEngine:
             "btc_near_swing_high_1d": getattr(signal, "btc_near_swing_high_1d", None),
         }
         
+        # ==========================
+        # MULTI-TIMEFRAME EMA CONTEXT
+        # ==========================
+        for timeframe in (
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "4h",
+        ):
+            for ema_period in (20, 50, 99):
+                field_name = (
+                    f"ema{ema_period}_{timeframe}"
+                )
+                distance_field_name = (
+                    f"dist_ema{ema_period}_"
+                    f"{timeframe}_pct"
+                )
+
+                signal_context[field_name] = getattr(
+                    signal,
+                    field_name,
+                    None,
+                )
+
+                signal_context[
+                    distance_field_name
+                ] = getattr(
+                    signal,
+                    distance_field_name,
+                    None,
+                )
+
+        # EMA100 de 5m pertenece a la lógica
+        # histórica de tendencia.
+        signal_context["ema100_5m"] = getattr(
+            signal,
+            "ema100_5m",
+            None,
+        )
+
+        # ==========================
+        # MULTI-TIMEFRAME SWING CONTEXT
+        # ==========================
+        for timeframe in (
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "4h",
+        ):
+            for field_prefix in (
+                "swing_low",
+                "swing_high",
+                "dist_swing_low",
+                "dist_swing_high",
+                "near_swing_low",
+                "near_swing_high",
+            ):
+                suffix = (
+                    "_pct"
+                    if field_prefix.startswith("dist_")
+                    else ""
+                )
+
+                field_name = (
+                    f"{field_prefix}_"
+                    f"{timeframe}"
+                    f"{suffix}"
+                )
+
+                signal_context[field_name] = getattr(
+                    signal,
+                    field_name,
+                    None,
+                )
         
         # ==========================
         # LIQUIDITY CONTEXT
