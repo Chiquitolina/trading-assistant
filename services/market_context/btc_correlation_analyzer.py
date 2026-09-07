@@ -16,16 +16,39 @@ class BTCCorrelationAnalyzer:
     """
 
     DEFAULT_CONFIG = {
-        "15m": {
+        "5m": {
+            # 96 retornos de 5m = 8 horas
             "correlation_lookback": 96,
+
+            # 12 velas de 5m = movimiento de 1 hora
+            "move_lookback": 12,
+        },
+        "15m": {
+            # 96 retornos de 15m = 24 horas
+            "correlation_lookback": 96,
+
+            # 4 velas de 15m = movimiento de 1 hora
+            "move_lookback": 4,
+        },
+        "30m": {
+            # 96 retornos de 30m = 48 horas
+            "correlation_lookback": 96,
+
+            # 4 velas de 30m = movimiento de 2 horas
             "move_lookback": 4,
         },
         "1h": {
+            # 72 retornos de 1h = 3 días
             "correlation_lookback": 72,
+
+            # Movimiento de 3 horas
             "move_lookback": 3,
         },
         "4h": {
+            # 42 retornos de 4h = 7 días
             "correlation_lookback": 42,
+
+            # Movimiento de 8 horas
             "move_lookback": 2,
         },
     }

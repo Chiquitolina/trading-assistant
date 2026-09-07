@@ -4753,7 +4753,27 @@ def build_btc_direction_pivot(matrix: pd.DataFrame) -> pd.DataFrame:
 # BTC CORRELATION ANALYTICS
 # =========================================================
 
-BTC_CORRELATION_TIMEFRAMES = ["15m", "1h", "4h"]
+BTC_CORRELATION_TIMEFRAMES = [
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "4h",
+]
+
+CONTEXT_TIMEFRAMES = [
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "4h",
+]
+
+EMA_CONTEXT_PERIODS = [
+    20,
+    50,
+    99,
+]
 
 
 def btc_factor_profit_factor(series: pd.Series):
@@ -5903,6 +5923,38 @@ for timeframe in BTC_CORRELATION_TIMEFRAMES:
     ])
 
 for col in btc_correlation_numeric_cols:
+    if col in df_raw.columns:
+        df_raw[col] = pd.to_numeric(
+            df_raw[col],
+            errors="coerce",
+        )
+        
+# =========================
+# MULTI-TIMEFRAME CONTEXT NUMERIC
+# =========================
+
+context_numeric_cols = []
+
+for timeframe in CONTEXT_TIMEFRAMES:
+    for ema_period in EMA_CONTEXT_PERIODS:
+        context_numeric_cols.extend([
+            f"ema{ema_period}_{timeframe}",
+            f"dist_ema{ema_period}_{timeframe}_pct",
+        ])
+
+    context_numeric_cols.extend([
+        f"swing_low_{timeframe}",
+        f"swing_high_{timeframe}",
+        f"dist_swing_low_{timeframe}_pct",
+        f"dist_swing_high_{timeframe}_pct",
+    ])
+
+context_numeric_cols.extend([
+    "ema100_5m",
+    "swing_lookback",
+])
+
+for col in context_numeric_cols:
     if col in df_raw.columns:
         df_raw[col] = pd.to_numeric(
             df_raw[col],
@@ -10335,8 +10387,20 @@ with tab_btc_alignment_edge:
                 "btc_edge_breakout_volume_bucket"
             ),
 
+            "Near Swing High 5m": (
+                "near_swing_high_5m"
+            ),
+            "Near Swing Low 5m": (
+                "near_swing_low_5m"
+            ),
             "Near Swing High 15m": "near_swing_high_15m",
             "Near Swing Low 15m": "near_swing_low_15m",
+            "Near Swing High 30m": (
+                "near_swing_high_30m"
+            ),
+            "Near Swing Low 30m": (
+                "near_swing_low_30m"
+            ),
             "Near Swing High 1h": "near_swing_high_1h",
             "Near Swing Low 1h": "near_swing_low_1h",
             "Near Swing High 4h": "near_swing_high_4h",
@@ -10632,8 +10696,29 @@ with tab_btc_alignment_edge:
                 "breakout_extension_atr",
                 "breakout_volume_ratio",
 
+                # Identidad temporal
+                "main_tf",
+                "signal_context_tf",
+                "swing_lookback",
+
+                # Swing context 5m
+                "near_swing_low_5m",
+                "near_swing_high_5m",
+
+                # Swing context 15m
+                "near_swing_low_15m",
                 "near_swing_high_15m",
+
+                # Swing context 30m
+                "near_swing_low_30m",
+                "near_swing_high_30m",
+
+                # Swing context 1h
+                "near_swing_low_1h",
                 "near_swing_high_1h",
+
+                # Swing context 4h
+                "near_swing_low_4h",
                 "near_swing_high_4h",
             ]
 
@@ -11142,7 +11227,7 @@ with tab_swings:
 
         near_results = []
 
-        for tf in ["15m", "1h", "4h"]:
+        for tf in CONTEXT_TIMEFRAMES:
             for side in ["LONG", "SHORT"]:
                 for ref in ["low", "high"]:
                     col = f"near_swing_{ref}_{tf}"
@@ -11184,97 +11269,6 @@ with tab_swings:
 
         st.markdown("### Distance Bucket Stats")
 
-        BUCKETS = [-999, -4, -2, -1, 0, 1, 2, 4, 8, 999]
-
-        LABELS = [
-            "< -4%",
-            "-4% to -2%",
-            "-2% to -1%",
-            "-1% to 0%",
-            "0% to 1%",
-            "1% to 2%",
-            "2% to 4%",
-            "4% to 8%",
-            "> 8%",
-        ]
-
-        distance_results = []
-
-        for tf in ["15m", "1h", "4h"]:
-            for side in ["LONG", "SHORT"]:
-                for ref in ["low", "high"]:
-                    col = f"dist_swing_{ref}_{tf}_pct"
-
-                    if col not in swing_df.columns:
-                        continue
-
-                    temp = swing_df[swing_df["side"] == side].copy()
-                    temp[col] = pd.to_numeric(temp[col], errors="coerce")
-                    temp = temp.dropna(subset=[col, "pnl"])
-
-                    if temp.empty:
-                        continue
-
-                    temp["bucket"] = pd.cut(
-                        temp[col],
-                        bins=BUCKETS,
-                        labels=LABELS,
-                        include_lowest=True,
-                    )
-
-                    for bucket, group in temp.groupby("bucket", observed=False):
-                        if len(group) == 0:
-                            continue
-
-                        row = swing_stats(
-                            f"{side} dist swing {ref} {tf} {bucket}",
-                            group
-                        )
-
-                        if row:
-                            row["side"] = side
-                            row["tf"] = tf
-                            row["reference"] = ref
-                            row["bucket"] = str(bucket)
-                            distance_results.append(row)
-
-        distance_df = pd.DataFrame(distance_results)
-
-        if distance_df.empty:
-            st.info("No distance bucket data available.")
-        else:
-            distance_filtered = distance_df[
-                distance_df["trades"] >= min_trades_swings
-            ]
-
-            best_distance = distance_filtered.sort_values(
-                ["profit_factor", "trades"],
-                ascending=[False, False],
-                na_position="last",
-            )
-
-            worst_distance = distance_filtered.sort_values(
-                ["profit_factor", "avg_return"],
-                ascending=[True, True],
-                na_position="last",
-            )
-
-            col_a, col_b = st.columns(2)
-
-            with col_a:
-                st.markdown("#### Best Swing Buckets")
-                st.dataframe(best_distance, use_container_width=True)
-
-            with col_b:
-                st.markdown("#### Worst Swing Buckets")
-                st.dataframe(worst_distance, use_container_width=True)
-
-        # =========================
-        # DISTANCE BUCKETS
-        # =========================
-
-        st.markdown("### Distance Bucket Stats")
-
         BUCKETS = [
             -999,
             -4,
@@ -11302,7 +11296,7 @@ with tab_swings:
 
         distance_results = []
 
-        for tf in ["15m", "1h", "4h"]:
+        for tf in CONTEXT_TIMEFRAMES:
             for side in ["LONG", "SHORT"]:
                 for ref in ["low", "high"]:
                     distance_col = (
@@ -11837,14 +11831,26 @@ with tab_swings:
                                 "entry_vs_compression_pct",
                                 "entry_vs_breakout_pct",
 
-                                "btc_dependency_15m",
-                                "btc_corr_15m",
-                                "btc_beta_15m",
-                                "btc_r2_15m",
-
                                 (
-                                    "btc_directional_"
-                                    "residual_15m_pct"
+                                    f"btc_dependency_"
+                                    f"{selected_tf}"
+                                ),
+                                (
+                                    f"btc_corr_"
+                                    f"{selected_tf}"
+                                ),
+                                (
+                                    f"btc_beta_"
+                                    f"{selected_tf}"
+                                ),
+                                (
+                                    f"btc_r2_"
+                                    f"{selected_tf}"
+                                ),
+                                (
+                                    f"btc_directional_"
+                                    f"residual_"
+                                    f"{selected_tf}_pct"
                                 ),
 
                                 "max_favorable_pct",
@@ -12052,7 +12058,7 @@ with tab_swings:
 
             for reason in router_reasons:
                 for side in ["LONG", "SHORT"]:
-                    for tf in ["15m", "1h", "4h"]:
+                    for tf in CONTEXT_TIMEFRAMES:
                         for ref in ["low", "high"]:
                             distance_col = (
                                 f"dist_swing_"
@@ -12536,14 +12542,26 @@ with tab_swings:
                                 "entry_vs_compression_pct",
                                 "entry_vs_breakout_pct",
 
-                                "btc_dependency_15m",
-                                "btc_corr_15m",
-                                "btc_beta_15m",
-                                "btc_r2_15m",
-
                                 (
-                                    "btc_directional_"
-                                    "residual_15m_pct"
+                                    f"btc_dependency_"
+                                    f"{selected_router_tf}"
+                                ),
+                                (
+                                    f"btc_corr_"
+                                    f"{selected_router_tf}"
+                                ),
+                                (
+                                    f"btc_beta_"
+                                    f"{selected_router_tf}"
+                                ),
+                                (
+                                    f"btc_r2_"
+                                    f"{selected_router_tf}"
+                                ),
+                                (
+                                    f"btc_directional_"
+                                    f"residual_"
+                                    f"{selected_router_tf}_pct"
                                 ),
 
                                 "max_favorable_pct",
@@ -12732,17 +12750,42 @@ with tab_swings:
 
         cross_results = []
 
-        swing_cross_pairs = [
-            # LONG: soporte cercano/medio vs espacio a resistencia
-            ("LONG", "low", "15m", "high", "4h"),
-            ("LONG", "low", "1h", "high", "4h"),
-            ("LONG", "low", "15m", "high", "1h"),
-
-            # SHORT: resistencia vs espacio a soporte
-            ("SHORT", "high", "15m", "low", "4h"),
-            ("SHORT", "high", "1h", "low", "4h"),
-            ("SHORT", "high", "15m", "low", "1h"),
+        swing_cross_timeframe_pairs = [
+            ("5m", "15m"),
+            ("5m", "30m"),
+            ("15m", "30m"),
+            ("15m", "1h"),
+            ("30m", "1h"),
+            ("30m", "4h"),
+            ("1h", "4h"),
         ]
+
+        swing_cross_pairs = []
+
+        for lower_tf, higher_tf in (
+            swing_cross_timeframe_pairs
+        ):
+            # LONG:
+            # soporte del TF menor contra
+            # resistencia del TF mayor.
+            swing_cross_pairs.append((
+                "LONG",
+                "low",
+                lower_tf,
+                "high",
+                higher_tf,
+            ))
+
+            # SHORT:
+            # resistencia del TF menor contra
+            # soporte del TF mayor.
+            swing_cross_pairs.append((
+                "SHORT",
+                "high",
+                lower_tf,
+                "low",
+                higher_tf,
+            ))
 
         for side, ref_a, tf_a, ref_b, tf_b in swing_cross_pairs:
             col_a = f"dist_swing_{ref_a}_{tf_a}_pct"
@@ -13097,7 +13140,7 @@ with tab_swings:
         space_results = []
         router_space_results = []
 
-        for tf in ["15m", "1h", "4h"]:
+        for tf in CONTEXT_TIMEFRAMES:
             low_col = f"dist_swing_low_{tf}_pct"
             high_col = f"dist_swing_high_{tf}_pct"
 
@@ -14130,9 +14173,12 @@ with tab_bad_decisions:
         st.markdown("### 📈 EMA Extension Risk")
 
         ema_cols = [
-            "dist_ema20_15m_pct",
-            "dist_ema20_1h_pct",
-            "dist_ema20_4h_pct",
+            (
+                f"dist_ema{ema_period}_"
+                f"{timeframe}_pct"
+            )
+            for timeframe in CONTEXT_TIMEFRAMES
+            for ema_period in EMA_CONTEXT_PERIODS
         ]
 
         available_ema_cols = [c for c in ema_cols if c in bad_df.columns]
@@ -14205,7 +14251,7 @@ with tab_bad_decisions:
         
         swing_analysis = []
 
-        for tf in ["15m", "1h", "4h"]:
+        for tf in CONTEXT_TIMEFRAMES:
 
             high_col = f"near_swing_high_{tf}"
             low_col = f"near_swing_low_{tf}"
@@ -16463,33 +16509,44 @@ with tab_compression_analytics:
                 "btc_direction_1h",
                 "btc_context_state",
                 "btc_context_reason",
-
+                
                 # =========================
-                # ORIGINAL BTC CORRELATION
+                # STANDARD BTC CORRELATION
                 # =========================
-                "btc_corr_15m",
-                "btc_beta_15m",
-                "btc_r2_15m",
-                "symbol_move_15m_pct",
-                "btc_move_15m_pct",
-                "btc_expected_move_15m_pct",
-                "btc_residual_move_15m_pct",
-
-                "btc_corr_1h",
-                "btc_beta_1h",
-                "btc_r2_1h",
-                "symbol_move_1h_pct",
-                "btc_move_1h_pct",
-                "btc_expected_move_1h_pct",
-                "btc_residual_move_1h_pct",
-
-                "btc_corr_4h",
-                "btc_beta_4h",
-                "btc_r2_4h",
-                "symbol_move_4h_pct",
-                "btc_move_4h_pct",
-                "btc_expected_move_4h_pct",
-                "btc_residual_move_4h_pct",
+                *[
+                    field_name
+                    for timeframe
+                    in BTC_CORRELATION_TIMEFRAMES
+                    for field_name in [
+                        f"btc_corr_{timeframe}",
+                        f"btc_beta_{timeframe}",
+                        f"btc_r2_{timeframe}",
+                        (
+                            f"symbol_move_"
+                            f"{timeframe}_pct"
+                        ),
+                        (
+                            f"btc_move_"
+                            f"{timeframe}_pct"
+                        ),
+                        (
+                            f"btc_expected_move_"
+                            f"{timeframe}_pct"
+                        ),
+                        (
+                            f"btc_residual_move_"
+                            f"{timeframe}_pct"
+                        ),
+                        (
+                            f"btc_corr_available_"
+                            f"{timeframe}"
+                        ),
+                        (
+                            f"btc_corr_reason_"
+                            f"{timeframe}"
+                        ),
+                    ]
+                ],
 
                 # =========================
                 # FAST BTC CORRELATION
