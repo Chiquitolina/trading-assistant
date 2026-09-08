@@ -8,7 +8,6 @@ import plotly.graph_objects as go
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from streamlit_autorefresh import st_autorefresh
 
 import requests
 import plotly.graph_objects as go
@@ -126,25 +125,27 @@ st.set_page_config(
 )
 
 st.title("📊 Trade Journal Dashboard")
-REFRESH_SECONDS = st.sidebar.slider(
-    "Auto refresh seconds",
-    min_value=2,
-    max_value=60,
-    value=10,
-    step=1,
+
+st.sidebar.button(
+    "🔄 Actualizar dashboard",
+    use_container_width=True,
+    on_click=st.cache_data.clear,
 )
 
-st_autorefresh(
-    interval=REFRESH_SECONDS * 1000,
-    key="dashboard_refresh",
-)
-
-@st.cache_data(ttl=10)
-def load_csv_cached(path):
+@st.cache_data(show_spinner=False)
+def load_csv_cached(
+    path,
+    modified_ns,
+):
     path = Path(path)
 
     if not path.exists():
         return pd.DataFrame()
+    
+    print(
+        f"[DASHBOARD CSV] reading {path} "
+        f"mtime={modified_ns}"
+    )
 
     return pd.read_csv(path)
 
@@ -5752,446 +5753,475 @@ def load_status():
 # =========================
 # LOAD DATA
 # =========================
-df = load_csv_cached(TRADES_FILE)
-paper_df = load_csv_cached(PAPER_SIGNALS_FILE)
+df = load_csv_cached(
+    TRADES_FILE,
+    get_file_modified_ns(TRADES_FILE),
+)
 
-# =========================
-# CLEAN NUMERIC COLUMNS
-# =========================
-numeric_cols = [
-    "pnl",
-    "pnl_gross",
-    "pnl_usd",
-    "fees",
-    "signal_price",
-    "entry",
-    "real_entry",
-    "exit",
-    "real_exit",
-    "tp",
-    "sl",
-]
+paper_df = load_csv_cached(
+    PAPER_SIGNALS_FILE,
+    get_file_modified_ns(PAPER_SIGNALS_FILE),
+)
 
-for col in numeric_cols:
-    if col in df.columns:
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce",
+@st.cache_data(show_spinner=False)
+def prepare_trade_data_cached(
+    _source_df,
+    source_modified_ns,
+    timezone,
+    candle_minutes,
+    btc_correlation_timeframes,
+    context_timeframes,
+    ema_context_periods,
+):
+    df = _source_df.copy()
+
+    # =========================
+    # CLEAN NUMERIC COLUMNS
+    # =========================
+    numeric_cols = [
+        "pnl",
+        "pnl_gross",
+        "pnl_usd",
+        "fees",
+        "signal_price",
+        "entry",
+        "real_entry",
+        "exit",
+        "real_exit",
+        "tp",
+        "sl",
+    ]
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce",
+            )
+
+
+    # =========================
+    # ESTIMATED NET PNL USD
+    # =========================
+
+    df["pnl_net_usd"] = np.nan
+    df["fees_usd_est"] = np.nan
+
+    required_usd_columns = {
+        "pnl",
+        "pnl_gross",
+        "pnl_usd",
+    }
+
+    if required_usd_columns.issubset(df.columns):
+        valid_usd_mask = (
+            df["pnl"].notna()
+            & df["pnl_gross"].notna()
+            & df["pnl_usd"].notna()
+            & df["pnl_gross"].abs().gt(1e-12)
         )
 
-
-# =========================
-# ESTIMATED NET PNL USD
-# =========================
-
-df["pnl_net_usd"] = np.nan
-df["fees_usd_est"] = np.nan
-
-required_usd_columns = {
-    "pnl",
-    "pnl_gross",
-    "pnl_usd",
-}
-
-if required_usd_columns.issubset(df.columns):
-    valid_usd_mask = (
-        df["pnl"].notna()
-        & df["pnl_gross"].notna()
-        & df["pnl_usd"].notna()
-        & df["pnl_gross"].abs().gt(1e-12)
-    )
-
-    # pnl_usd representa el PnL bruto monetario.
-    # Aplicamos el retorno neto sobre el mismo notional.
-    df.loc[
-        valid_usd_mask,
-        "pnl_net_usd",
-    ] = (
-        df.loc[
-            valid_usd_mask,
-            "pnl_usd",
-        ]
-        *
-        (
-            df.loc[
-                valid_usd_mask,
-                "pnl",
-            ]
-            /
-            df.loc[
-                valid_usd_mask,
-                "pnl_gross",
-            ]
-        )
-    )
-
-    df.loc[
-        valid_usd_mask,
-        "fees_usd_est",
-    ] = (
-        df.loc[
-            valid_usd_mask,
-            "pnl_usd",
-        ]
-        -
+        # pnl_usd representa el PnL bruto monetario.
+        # Aplicamos el retorno neto sobre el mismo notional.
         df.loc[
             valid_usd_mask,
             "pnl_net_usd",
-        ]
-    )
-        
-
-# =========================
-# CALCULATE ENTRY DISTANCE
-# =========================
-if "signal_price" in df.columns and "entry" in df.columns:
-    df["entry_distance_pct"] = (
-        (df["entry"] - df["signal_price"]) / df["signal_price"] * 100
-    ).round(5)
-else:
-    df["entry_distance_pct"] = 0
-
-
-# =========================
-# RAW DF FOR CALCS / CHARTS
-# =========================
-df_raw = df.copy()
-
-compression_numeric_cols = [
-    # Prices / execution
-    "real_entry",
-    "entry_ready_price",
-    "compression_high",
-    "compression_low",
-    "breakout_price",
-
-    # Breakout
-    "breakout_extension_pct",
-    "breakout_extension_atr",
-    "breakout_volume_ratio",
-
-    # Existing scores
-    "compression_score",
-    "trend_score",
-
-    # Compression structure
-    "compression_height",
-    "compression_height_pct",
-    "compression_duration",
-    "upper_slope",
-    "lower_slope",
-    "slope_difference",
-    "touches_high",
-    "touches_low",
-    "inside_ratio",
-
-    # Entry location
-    "entry_distance_pct",
-    "entry_vs_compression_pct",
-    "entry_vs_breakout_pct",
-    "entry_to_compression_low_pct",
-    "sl_to_compression_low_pct",
-
-    # Trade result
-    "pnl",
-    "pnl_usd",
-    "max_favorable_pct",
-    "max_adverse_pct",
-]
-
-for col in compression_numeric_cols:
-    if col in df_raw.columns:
-        df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
-        
-# =========================
-# BTC CORRELATION NUMERIC
-# =========================
-
-btc_correlation_numeric_cols = []
-
-for timeframe in BTC_CORRELATION_TIMEFRAMES:
-    btc_correlation_numeric_cols.extend([
-        f"btc_corr_{timeframe}",
-        f"btc_beta_{timeframe}",
-        f"btc_r2_{timeframe}",
-
-        f"symbol_move_{timeframe}_pct",
-        f"btc_move_{timeframe}_pct",
-
-        f"btc_expected_move_{timeframe}_pct",
-        f"btc_residual_move_{timeframe}_pct",
-    ])
-
-for col in btc_correlation_numeric_cols:
-    if col in df_raw.columns:
-        df_raw[col] = pd.to_numeric(
-            df_raw[col],
-            errors="coerce",
+        ] = (
+            df.loc[
+                valid_usd_mask,
+                "pnl_usd",
+            ]
+            *
+            (
+                df.loc[
+                    valid_usd_mask,
+                    "pnl",
+                ]
+                /
+                df.loc[
+                    valid_usd_mask,
+                    "pnl_gross",
+                ]
+            )
         )
-        
-# =========================
-# MULTI-TIMEFRAME CONTEXT NUMERIC
-# =========================
 
-context_numeric_cols = []
+        df.loc[
+            valid_usd_mask,
+            "fees_usd_est",
+        ] = (
+            df.loc[
+                valid_usd_mask,
+                "pnl_usd",
+            ]
+            -
+            df.loc[
+                valid_usd_mask,
+                "pnl_net_usd",
+            ]
+        )
+            
 
-for timeframe in CONTEXT_TIMEFRAMES:
-    for ema_period in EMA_CONTEXT_PERIODS:
+    # =========================
+    # CALCULATE ENTRY DISTANCE
+    # =========================
+    if "signal_price" in df.columns and "entry" in df.columns:
+        df["entry_distance_pct"] = (
+            (df["entry"] - df["signal_price"]) / df["signal_price"] * 100
+        ).round(5)
+    else:
+        df["entry_distance_pct"] = 0
+
+
+    # =========================
+    # RAW DF FOR CALCS / CHARTS
+    # =========================
+    df_raw = df.copy()
+
+    compression_numeric_cols = [
+        # Prices / execution
+        "real_entry",
+        "entry_ready_price",
+        "compression_high",
+        "compression_low",
+        "breakout_price",
+
+        # Breakout
+        "breakout_extension_pct",
+        "breakout_extension_atr",
+        "breakout_volume_ratio",
+
+        # Existing scores
+        "compression_score",
+        "trend_score",
+
+        # Compression structure
+        "compression_height",
+        "compression_height_pct",
+        "compression_duration",
+        "upper_slope",
+        "lower_slope",
+        "slope_difference",
+        "touches_high",
+        "touches_low",
+        "inside_ratio",
+
+        # Entry location
+        "entry_distance_pct",
+        "entry_vs_compression_pct",
+        "entry_vs_breakout_pct",
+        "entry_to_compression_low_pct",
+        "sl_to_compression_low_pct",
+
+        # Trade result
+        "pnl",
+        "pnl_usd",
+        "max_favorable_pct",
+        "max_adverse_pct",
+    ]
+
+    for col in compression_numeric_cols:
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
+            
+    # =========================
+    # BTC CORRELATION NUMERIC
+    # =========================
+
+    btc_correlation_numeric_cols = []
+
+    for timeframe in btc_correlation_timeframes:
+        btc_correlation_numeric_cols.extend([
+            f"btc_corr_{timeframe}",
+            f"btc_beta_{timeframe}",
+            f"btc_r2_{timeframe}",
+
+            f"symbol_move_{timeframe}_pct",
+            f"btc_move_{timeframe}_pct",
+
+            f"btc_expected_move_{timeframe}_pct",
+            f"btc_residual_move_{timeframe}_pct",
+        ])
+
+    for col in btc_correlation_numeric_cols:
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_numeric(
+                df_raw[col],
+                errors="coerce",
+            )
+            
+    # =========================
+    # MULTI-TIMEFRAME CONTEXT NUMERIC
+    # =========================
+
+    context_numeric_cols = []
+
+    for timeframe in context_timeframes:
+        for ema_period in ema_context_periods:
+            context_numeric_cols.extend([
+                f"ema{ema_period}_{timeframe}",
+                f"dist_ema{ema_period}_{timeframe}_pct",
+            ])
+
         context_numeric_cols.extend([
-            f"ema{ema_period}_{timeframe}",
-            f"dist_ema{ema_period}_{timeframe}_pct",
+            f"swing_low_{timeframe}",
+            f"swing_high_{timeframe}",
+            f"dist_swing_low_{timeframe}_pct",
+            f"dist_swing_high_{timeframe}_pct",
         ])
 
     context_numeric_cols.extend([
-        f"swing_low_{timeframe}",
-        f"swing_high_{timeframe}",
-        f"dist_swing_low_{timeframe}_pct",
-        f"dist_swing_high_{timeframe}_pct",
+        "ema100_5m",
+        "swing_lookback",
     ])
 
-context_numeric_cols.extend([
-    "ema100_5m",
-    "swing_lookback",
-])
+    for col in context_numeric_cols:
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_numeric(
+                df_raw[col],
+                errors="coerce",
+            )
 
-for col in context_numeric_cols:
-    if col in df_raw.columns:
-        df_raw[col] = pd.to_numeric(
-            df_raw[col],
-            errors="coerce",
-        )
-
-required_compression_cols = [
-    "side",
-    "real_entry",
-    "compression_high",
-    "compression_low",
-    "breakout_price",
-]
-
-if all(col in df_raw.columns for col in required_compression_cols):
-
-    df_raw["entry_vs_compression_pct"] = np.where(
-        df_raw["side"].astype(str).str.upper() == "LONG",
-        (
-            (df_raw["real_entry"] - df_raw["compression_high"])
-            / df_raw["compression_high"]
-            * 100
-        ),
-        (
-            (df_raw["compression_low"] - df_raw["real_entry"])
-            / df_raw["compression_low"]
-            * 100
-        )
-    )
-
-    df_raw["entry_vs_breakout_pct"] = np.where(
-        df_raw["side"].astype(str).str.upper() == "LONG",
-        (
-            (df_raw["real_entry"] - df_raw["breakout_price"])
-            / df_raw["breakout_price"]
-            * 100
-        ),
-        (
-            (df_raw["breakout_price"] - df_raw["real_entry"])
-            / df_raw["breakout_price"]
-            * 100
-        )
-    )
-
-    df_raw["entry_vs_compression_pct"] = df_raw["entry_vs_compression_pct"].round(4)
-    df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
-    
-    df_raw["entry_vs_compression_pct"] = df_raw[
-        "entry_vs_compression_pct"
-    ].round(4)
-
-    df_raw["entry_vs_breakout_pct"] = df_raw[
-        "entry_vs_breakout_pct"
-    ].round(4)
-
-    # =========================
-    # FORWARD-SAFE ENTRY LOCATION
-    # =========================
-
-    required_forward_cols = [
+    required_compression_cols = [
         "side",
-        "entry_ready_price",
+        "real_entry",
+        "compression_high",
+        "compression_low",
         "breakout_price",
     ]
 
-    if all(
-        col in df_raw.columns
-        for col in required_forward_cols
-    ):
-        valid_forward_prices = (
-            df_raw["entry_ready_price"].notna()
-            & df_raw["breakout_price"].notna()
-            & df_raw["entry_ready_price"].gt(0)
-            & df_raw["breakout_price"].gt(0)
-        )
+    if all(col in df_raw.columns for col in required_compression_cols):
 
-        df_raw["entry_ready_vs_breakout_pct"] = np.nan
-
-        long_mask = (
-            valid_forward_prices
-            & df_raw["side"]
-            .astype(str)
-            .str.upper()
-            .eq("LONG")
-        )
-
-        short_mask = (
-            valid_forward_prices
-            & df_raw["side"]
-            .astype(str)
-            .str.upper()
-            .eq("SHORT")
-        )
-
-        df_raw.loc[
-            long_mask,
-            "entry_ready_vs_breakout_pct",
-        ] = (
+        df_raw["entry_vs_compression_pct"] = np.where(
+            df_raw["side"].astype(str).str.upper() == "LONG",
             (
-                df_raw.loc[
-                    long_mask,
-                    "entry_ready_price",
-                ]
-                - df_raw.loc[
-                    long_mask,
-                    "breakout_price",
-                ]
+                (df_raw["real_entry"] - df_raw["compression_high"])
+                / df_raw["compression_high"]
+                * 100
+            ),
+            (
+                (df_raw["compression_low"] - df_raw["real_entry"])
+                / df_raw["compression_low"]
+                * 100
             )
-            / df_raw.loc[
+        )
+
+        df_raw["entry_vs_breakout_pct"] = np.where(
+            df_raw["side"].astype(str).str.upper() == "LONG",
+            (
+                (df_raw["real_entry"] - df_raw["breakout_price"])
+                / df_raw["breakout_price"]
+                * 100
+            ),
+            (
+                (df_raw["breakout_price"] - df_raw["real_entry"])
+                / df_raw["breakout_price"]
+                * 100
+            )
+        )
+
+        df_raw["entry_vs_compression_pct"] = df_raw["entry_vs_compression_pct"].round(4)
+        df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
+
+        # =========================
+        # FORWARD-SAFE ENTRY LOCATION
+        # =========================
+
+        required_forward_cols = [
+            "side",
+            "entry_ready_price",
+            "breakout_price",
+        ]
+
+        if all(
+            col in df_raw.columns
+            for col in required_forward_cols
+        ):
+            valid_forward_prices = (
+                df_raw["entry_ready_price"].notna()
+                & df_raw["breakout_price"].notna()
+                & df_raw["entry_ready_price"].gt(0)
+                & df_raw["breakout_price"].gt(0)
+            )
+
+            df_raw["entry_ready_vs_breakout_pct"] = np.nan
+
+            long_mask = (
+                valid_forward_prices
+                & df_raw["side"]
+                .astype(str)
+                .str.upper()
+                .eq("LONG")
+            )
+
+            short_mask = (
+                valid_forward_prices
+                & df_raw["side"]
+                .astype(str)
+                .str.upper()
+                .eq("SHORT")
+            )
+
+            df_raw.loc[
                 long_mask,
-                "breakout_price",
-            ]
-            * 100
-        )
+                "entry_ready_vs_breakout_pct",
+            ] = (
+                (
+                    df_raw.loc[
+                        long_mask,
+                        "entry_ready_price",
+                    ]
+                    - df_raw.loc[
+                        long_mask,
+                        "breakout_price",
+                    ]
+                )
+                / df_raw.loc[
+                    long_mask,
+                    "breakout_price",
+                ]
+                * 100
+            )
 
-        df_raw.loc[
-            short_mask,
-            "entry_ready_vs_breakout_pct",
-        ] = (
-            (
-                df_raw.loc[
+            df_raw.loc[
+                short_mask,
+                "entry_ready_vs_breakout_pct",
+            ] = (
+                (
+                    df_raw.loc[
+                        short_mask,
+                        "breakout_price",
+                    ]
+                    - df_raw.loc[
+                        short_mask,
+                        "entry_ready_price",
+                    ]
+                )
+                / df_raw.loc[
                     short_mask,
                     "breakout_price",
                 ]
-                - df_raw.loc[
-                    short_mask,
-                    "entry_ready_price",
-                ]
+                * 100
             )
-            / df_raw.loc[
-                short_mask,
-                "breakout_price",
-            ]
-            * 100
+
+            df_raw["entry_ready_vs_breakout_pct"] = (
+                df_raw[
+                    "entry_ready_vs_breakout_pct"
+                ].round(4)
+            )
+
+        else:
+            df_raw["entry_ready_vs_breakout_pct"] = np.nan
+
+        df_raw["late_entry"] = (
+            df_raw["entry_vs_compression_pct"] > 1.0
         )
-
-        df_raw["entry_ready_vs_breakout_pct"] = (
-            df_raw[
-                "entry_ready_vs_breakout_pct"
-            ].round(4)
-        )
-
-    else:
-        df_raw["entry_ready_vs_breakout_pct"] = np.nan
-
-    df_raw["late_entry"] = (
-        df_raw["entry_vs_compression_pct"] > 1.0
-    )
-
-    df_raw["late_entry"] = df_raw["entry_vs_compression_pct"] > 1.0
-    
-    # =========================
-    # COMPRESSION STOP ANALYSIS
-    # =========================
-
-    df_raw["compression_height"] = (
-        df_raw["compression_high"] - df_raw["compression_low"]
-    )
-
-    df_raw["entry_to_compression_low_pct"] = np.where(
-        df_raw["side"].str.upper() == "LONG",
-
-        (
-            (df_raw["real_entry"] - df_raw["compression_low"])
-            / df_raw["compression_low"]
-            * 100
-        ),
-
-        (
-            (df_raw["compression_high"] - df_raw["real_entry"])
-            / df_raw["compression_high"]
-            * 100
-        )
-    )
-
-    df_raw["sl_to_compression_low_pct"] = np.where(
-        df_raw["side"].str.upper() == "LONG",
-
-        (
-            (df_raw["compression_low"] - df_raw["sl"])
-            / df_raw["compression_low"]
-            * 100
-        ),
-
-        (
-            (df_raw["sl"] - df_raw["compression_high"])
-            / df_raw["compression_high"]
-            * 100
-        )
-    )
-else:
-    df_raw["entry_vs_compression_pct"] = np.nan
-    df_raw["entry_vs_breakout_pct"] = np.nan
-    df_raw["late_entry"] = False
-
-for col in ["signal_ts", "entry_ts", "exit_ts"]:
-    if col in df_raw.columns:
-        df_raw[f"{col}_dt"] = pd.to_datetime(df_raw[col], utc=True, errors="coerce")
-
-        try:
-            df_raw[f"{col}_dt"] = df_raw[f"{col}_dt"].dt.tz_convert(TZ)
-        except Exception:
-            pass
         
-# =========================
-# TRADE DURATION
-# =========================
-if "entry_ts_dt" in df_raw.columns and "exit_ts_dt" in df_raw.columns:
-    duration_minutes = (
-        (df_raw["exit_ts_dt"] - df_raw["entry_ts_dt"]).dt.total_seconds() / 60
-    )
+        # =========================
+        # COMPRESSION STOP ANALYSIS
+        # =========================
 
-    df_raw["trade_duration_min"] = duration_minutes.round(2)
-    df_raw["trade_duration_bars"] = (
-        duration_minutes / CANDLE_MINUTES
-    ).round().astype("Int64")
-else:
-    df_raw["trade_duration_min"] = None
-    df_raw["trade_duration_bars"] = None
-    
-# =========================
-# SIGNAL DELAY
-# =========================
+        df_raw["compression_height"] = (
+            df_raw["compression_high"] - df_raw["compression_low"]
+        )
 
-if (
-    "signal_ts_dt" in df_raw.columns
-    and "entry_ts_dt" in df_raw.columns
-):
-    df_raw["signal_delay_min"] = (
-        (
-            df_raw["entry_ts_dt"]
-            - df_raw["signal_ts_dt"]
-        ).dt.total_seconds()
-        / 60
-    ).round(2)
-else:
-    df_raw["signal_delay_min"] = None
+        df_raw["entry_to_compression_low_pct"] = np.where(
+            df_raw["side"].str.upper() == "LONG",
+
+            (
+                (df_raw["real_entry"] - df_raw["compression_low"])
+                / df_raw["compression_low"]
+                * 100
+            ),
+
+            (
+                (df_raw["compression_high"] - df_raw["real_entry"])
+                / df_raw["compression_high"]
+                * 100
+            )
+        )
+
+        df_raw["sl_to_compression_low_pct"] = np.where(
+            df_raw["side"].str.upper() == "LONG",
+
+            (
+                (df_raw["compression_low"] - df_raw["sl"])
+                / df_raw["compression_low"]
+                * 100
+            ),
+
+            (
+                (df_raw["sl"] - df_raw["compression_high"])
+                / df_raw["compression_high"]
+                * 100
+            )
+        )
+    else:
+        df_raw["entry_vs_compression_pct"] = np.nan
+        df_raw["entry_vs_breakout_pct"] = np.nan
+        df_raw["late_entry"] = False
+
+    for col in ["signal_ts", "entry_ts", "exit_ts"]:
+        if col in df_raw.columns:
+            df_raw[f"{col}_dt"] = pd.to_datetime(df_raw[col], utc=True, errors="coerce")
+
+            try:
+                df_raw[f"{col}_dt"] = df_raw[f"{col}_dt"].dt.tz_convert(timezone)
+            except Exception:
+                pass
+            
+    # =========================
+    # TRADE DURATION
+    # =========================
+    if "entry_ts_dt" in df_raw.columns and "exit_ts_dt" in df_raw.columns:
+        duration_minutes = (
+            (df_raw["exit_ts_dt"] - df_raw["entry_ts_dt"]).dt.total_seconds() / 60
+        )
+
+        df_raw["trade_duration_min"] = duration_minutes.round(2)
+        df_raw["trade_duration_bars"] = (
+            duration_minutes / candle_minutes
+        ).round().astype("Int64")
+    else:
+        df_raw["trade_duration_min"] = None
+        df_raw["trade_duration_bars"] = None
+        
+    # =========================
+    # SIGNAL DELAY
+    # =========================
+
+    if (
+        "signal_ts_dt" in df_raw.columns
+        and "entry_ts_dt" in df_raw.columns
+    ):
+        df_raw["signal_delay_min"] = (
+            (
+                df_raw["entry_ts_dt"]
+                - df_raw["signal_ts_dt"]
+            ).dt.total_seconds()
+            / 60
+        ).round(2)
+    else:
+        df_raw["signal_delay_min"] = None
+        
+    return df_raw
+
+df_raw = prepare_trade_data_cached(
+    _source_df=df,
+    source_modified_ns=get_file_modified_ns(
+        TRADES_FILE
+    ),
+    timezone=TZ,
+    candle_minutes=CANDLE_MINUTES,
+    btc_correlation_timeframes=tuple(
+        BTC_CORRELATION_TIMEFRAMES
+    ),
+    context_timeframes=tuple(
+        CONTEXT_TIMEFRAMES
+    ),
+    ema_context_periods=tuple(
+        EMA_CONTEXT_PERIODS
+    ),
+)
 
 # =========================
 # GLOBAL VIEW (NO FILTER YET)
@@ -6231,48 +6261,6 @@ st.sidebar.caption(f"Filtered trades: {len(df_view)}")
 @st.cache_data(ttl=30)
 def build_mfe_mae_report_cached(df):
     return build_mfe_mae_report(df)
-
-mfe_report = build_mfe_mae_report_cached(df_view)
-
-# =========================
-# STATUS PANEL DATA
-# =========================
-status = load_status()
-
-engine_online = status["engine_online"]
-ws_online = status["ws_online"]
-balance = status["balance"]
-symbol_from_status = status["symbol"] or SYMBOL
-position_side = status["position_side"]
-position_qty = status["position_qty"]
-entry_price = status["entry_price"]
-unpnl = status["unpnl"]
-open_positions = status.get("open_positions", [])
-
-last_signal = status["last_signal"]
-signal_trend = status["signal_trend"]
-signal_direction = status["signal_direction"]
-signal_momentum = status["signal_momentum"]
-
-last_plan_status = status["last_plan_status"]
-last_plan_reason = status["last_plan_reason"]
-last_plan_side = status["last_plan_side"]
-last_plan_entry = status["last_plan_entry"]
-last_plan_tp = status["last_plan_tp"]
-last_plan_sl = status["last_plan_sl"]
-
-strategy_mode = status["strategy_mode"]
-last_router_reason = status["last_router_reason"]
-
-trigger_tf = status.get("trigger_tf", "N/A")
-
-updated_at = status["updated_at"]
-
-if last_signal in (None, "", "N/A"):
-    last_signal = get_last_signal(df_raw)
-
-pnl_today = get_today_pnl(df_raw, TZ)
-pnl_today_usd = get_today_pnl_usd(df_raw, TZ)
 
 # =========================
 # SYSTEM STATUS
@@ -6360,230 +6348,306 @@ if save_description:
             f"{exc}"
         )
 
-with st.container(border=True):
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+@st.fragment(run_every="5s")
+def render_live_system_status():
+    status = load_status()
 
-    with c1:
-        render_status_dot("ENGINE", engine_online)
+    engine_online = status["engine_online"]
+    ws_online = status["ws_online"]
+    balance = status["balance"]
+    symbol_from_status = (
+        status["symbol"] or SYMBOL
+    )
+    position_side = status["position_side"]
+    unpnl = status["unpnl"]
 
-    with c2:
-        render_status_dot("WS", ws_online)
+    open_positions = status.get(
+        "open_positions",
+        [],
+    )
 
-    c3.metric("POSITION", position_side)
-    c4.metric("uPnL", round(unpnl, 2))
-    c5.metric("BALANCE", f"{balance} USDT")
-    #c6.metric("PNL TODAY %", pnl_today)
-    #c6.metric("PNL TODAY USD", f"{pnl_today_usd} USDT")
+    last_signal = status["last_signal"]
+    signal_trend = status["signal_trend"]
+    signal_direction = status["signal_direction"]
+    signal_momentum = status["signal_momentum"]
 
-    c8, c9, c10, c11= st.columns(4)
-    
-    with c8:
-        st.metric(
-            "STRATEGY / TF",
-            f"{strategy_mode} / {trigger_tf}"
+    last_plan_status = status["last_plan_status"]
+    last_plan_reason = status["last_plan_reason"]
+    last_plan_side = status["last_plan_side"]
+    last_plan_entry = status["last_plan_entry"]
+    last_plan_tp = status["last_plan_tp"]
+    last_plan_sl = status["last_plan_sl"]
+
+    strategy_mode = status["strategy_mode"]
+    last_router_reason = status[
+        "last_router_reason"
+    ]
+
+    trigger_tf = status.get(
+        "trigger_tf",
+        "N/A",
+    )
+
+    updated_at = status["updated_at"]
+
+    if last_signal in (None, "", "N/A"):
+        last_signal = get_last_signal(df_raw)
+
+    with st.container(border=True):
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+
+        with c1:
+            render_status_dot(
+                "ENGINE",
+                engine_online,
+            )
+
+        with c2:
+            render_status_dot(
+                "WS",
+                ws_online,
+            )
+
+        c3.metric(
+            "POSITION",
+            position_side,
         )
 
-    with c9:
-        render_signal_text(
-            signal=last_signal,
-            trend=signal_trend,
-            direction=signal_direction,
-            momentum=signal_momentum,
-            reason=last_router_reason
+        c4.metric(
+            "uPnL",
+            round(unpnl, 2),
         )
 
-    with c10:
-        render_plan_text(
-            status=last_plan_status,
-            reason=last_plan_reason,
-            side=last_plan_side,
-            entry=last_plan_entry,
-            tp=last_plan_tp,
-            sl=last_plan_sl,
+        c5.metric(
+            "BALANCE",
+            f"{balance} USDT",
         )
         
-    with c11:
-        st.metric("SYMBOL", symbol_from_status)
+        #c6.metric("PNL TODAY %", pnl_today)
+        #c6.metric("PNL TODAY USD", f"{pnl_today_usd} USDT")
 
-    # =========================
-    # ENGINE HEALTH
-    # =========================
-    if status["error"]:
-        st.error(f"❌ Status file error: {status['error']}")
-    elif status["is_stale"]:
-        st.warning("⚠️ Bot heartbeat stale or stopped")
-
-    if updated_at:
-        st.caption(f"Last heartbeat: {updated_at}")
-
-    if open_positions:
-
-        st.success(
-            f"🟢 {len(open_positions)} "
-            "open position(s) on exchange"
-        )
-
-        open_inspector_source_df = (
-            build_open_position_inspector_df(
-                open_positions=open_positions,
-                snapshots_dir=(
-                    POSITION_SNAPSHOTS_DIR
-                ),
-                default_trigger_tf=(
-                    trigger_tf
-                    if trigger_tf not in (
-                        None,
-                        "",
-                        "N/A",
-                    )
-                    else "30m"
-                ),
-            )
-        )
-
-        open_display_cols = [
-            "symbol",
-            "side",
-            "quantity",
-            "entry_price",
-            "mark_price",
-            "unrealized_pnl",
-            "tp",
-            "sl",
-            "compression_high",
-            "compression_low",
-            "breakout_price",
-            "entry_ready_price",
-            "compression_score",
-            "compression_shape",
-            "compression_quality_label",
-            "trigger_tf",
-        ]
-
-        available_open_cols = [
-            col
-            for col in open_display_cols
-            if col in open_inspector_source_df.columns
-        ]
-
-        open_positions_display_df = (
-            open_inspector_source_df[
-                available_open_cols
-            ]
-            .copy()
-        )
-
-        open_numeric_cols = [
-            "quantity",
-            "entry_price",
-            "mark_price",
-            "unrealized_pnl",
-            "tp",
-            "sl",
-            "compression_high",
-            "compression_low",
-            "breakout_price",
-            "entry_ready_price",
-            "compression_score",
-        ]
-
-        for col in open_numeric_cols:
-            if col in open_positions_display_df.columns:
-                open_positions_display_df[col] = (
-                    pd.to_numeric(
-                        open_positions_display_df[col],
-                        errors="coerce",
-                    ).round(8)
-                )
-
-        st.caption(
-            "Seleccioná una posición abierta para "
-            "inspeccionar su compresión."
-        )
-
-        open_positions_event = st.dataframe(
-            open_positions_display_df,
-            use_container_width=True,
-            hide_index=True,
-            key="open_positions_inspector_table",
-            on_select="rerun",
-            selection_mode="single-row",
-        )
-
-        selected_open_rows = (
-            open_positions_event
-            .selection
-            .rows
-        )
-
-        if selected_open_rows:
-            selected_open_position = (
-                selected_open_rows[0]
+        c8, c9, c10, c11= st.columns(4)
+    
+        with c8:
+            st.metric(
+                "STRATEGY / TF",
+                f"{strategy_mode} / {trigger_tf}"
             )
 
-            selected_open_row = (
-                open_inspector_source_df.iloc[
-                    selected_open_position
-                ]
+        with c9:
+            render_signal_text(
+                signal=last_signal,
+                trend=signal_trend,
+                direction=signal_direction,
+                momentum=signal_momentum,
+                reason=last_router_reason
             )
 
-            snapshot_available = bool(
-                selected_open_row.get(
-                    "_snapshot_available",
-                    False,
-                )
+        with c10:
+            render_plan_text(
+                status=last_plan_status,
+                reason=last_plan_reason,
+                side=last_plan_side,
+                entry=last_plan_entry,
+                tp=last_plan_tp,
+                sl=last_plan_sl,
+            )
+            
+        with c11:
+            st.metric("SYMBOL", symbol_from_status)
+
+        # =========================
+        # ENGINE HEALTH
+        # =========================
+        if status["error"]:
+            st.error(f"❌ Status file error: {status['error']}")
+        elif status["is_stale"]:
+            st.warning("⚠️ Bot heartbeat stale or stopped")
+
+        if updated_at:
+            st.caption(f"Last heartbeat: {updated_at}")
+
+        if open_positions:
+
+            st.success(
+                f"🟢 {len(open_positions)} "
+                "open position(s) on exchange"
             )
 
-            required_compression_values = [
-                selected_open_row.get(
-                    "compression_high"
-                ),
-                selected_open_row.get(
-                    "compression_low"
-                ),
-                selected_open_row.get(
-                    "compression_created_ts"
-                ),
-            ]
-
-            has_compression_context = any(
-                pd.notna(value)
-                for value in required_compression_values
-            )
-
-            if not snapshot_available:
-                st.warning(
-                    "No position snapshot was found for "
-                    f"{selected_open_row.get('symbol')}. "
-                    "Only exchange data is available."
-                )
-
-            elif not has_compression_context:
-                st.info(
-                    "The selected position has a snapshot, "
-                    "but no compression context."
-                )
-
-            else:
-                render_trade_inspector_for_row(
-                    row=selected_open_row,
-                    status="OPEN",
-                    key_prefix=(
-                        "open_trade_inspector_"
-                        + str(
-                            selected_open_row.get(
-                                "symbol",
-                                selected_open_position,
-                            )
+            open_inspector_source_df = (
+                build_open_position_inspector_df(
+                    open_positions=open_positions,
+                    snapshots_dir=(
+                        POSITION_SNAPSHOTS_DIR
+                    ),
+                    default_trigger_tf=(
+                        trigger_tf
+                        if trigger_tf not in (
+                            None,
+                            "",
+                            "N/A",
                         )
+                        else "30m"
                     ),
                 )
+            )
 
-    else:
-        st.info(
-            "⚪ No open positions on exchange"
-        )
+            open_display_cols = [
+                "symbol",
+                "side",
+                "quantity",
+                "entry_price",
+                "mark_price",
+                "unrealized_pnl",
+                "tp",
+                "sl",
+                "compression_high",
+                "compression_low",
+                "breakout_price",
+                "entry_ready_price",
+                "compression_score",
+                "compression_shape",
+                "compression_quality_label",
+                "trigger_tf",
+            ]
+
+            available_open_cols = [
+                col
+                for col in open_display_cols
+                if col in open_inspector_source_df.columns
+            ]
+
+            open_positions_display_df = (
+                open_inspector_source_df[
+                    available_open_cols
+                ]
+                .copy()
+            )
+
+            open_numeric_cols = [
+                "quantity",
+                "entry_price",
+                "mark_price",
+                "unrealized_pnl",
+                "tp",
+                "sl",
+                "compression_high",
+                "compression_low",
+                "breakout_price",
+                "entry_ready_price",
+                "compression_score",
+            ]
+
+            for col in open_numeric_cols:
+                if col in open_positions_display_df.columns:
+                    open_positions_display_df[col] = (
+                        pd.to_numeric(
+                            open_positions_display_df[col],
+                            errors="coerce",
+                        ).round(8)
+                    )
+
+            st.caption(
+                "Seleccioná una posición abierta para "
+                "inspeccionar su compresión."
+            )
+
+            open_positions_event = st.dataframe(
+                open_positions_display_df,
+                use_container_width=True,
+                hide_index=True,
+                key="open_positions_inspector_table",
+                on_select="rerun",
+                selection_mode="single-row",
+            )
+
+            selected_open_rows = (
+                open_positions_event
+                .selection
+                .rows
+            )
+
+            if selected_open_rows:
+                selected_open_position = (
+                    selected_open_rows[0]
+                )
+
+                selected_open_row = (
+                    open_inspector_source_df.iloc[
+                        selected_open_position
+                    ]
+                )
+
+                snapshot_available = bool(
+                    selected_open_row.get(
+                        "_snapshot_available",
+                        False,
+                    )
+                )
+
+                required_compression_values = [
+                    selected_open_row.get(
+                        "compression_high"
+                    ),
+                    selected_open_row.get(
+                        "compression_low"
+                    ),
+                    selected_open_row.get(
+                        "compression_created_ts"
+                    ),
+                ]
+
+                has_compression_context = any(
+                    pd.notna(value)
+                    for value in required_compression_values
+                )
+
+                if not snapshot_available:
+                    st.warning(
+                        "No position snapshot was found for "
+                        f"{selected_open_row.get('symbol')}. "
+                        "Only exchange data is available."
+                    )
+
+                elif not has_compression_context:
+                    st.info(
+                        "The selected position has a snapshot, "
+                        "but no compression context."
+                    )
+
+                else:
+                    render_trade_inspector_for_row(
+                        row=selected_open_row,
+                        status="OPEN",
+                        key_prefix=(
+                            "open_trade_inspector_"
+                            + str(
+                                selected_open_row.get(
+                                    "symbol",
+                                    selected_open_position,
+                                )
+                            )
+                        ),
+                    )
+
+        else:
+            st.info(
+                "⚪ No open positions on exchange"
+            )
+
+render_live_system_status()
+
+page_status = load_status()
+
+trigger_tf = page_status.get(
+    "trigger_tf",
+    "30m",
+)
+
+if trigger_tf in (None, "", "N/A"):
+    trigger_tf = "30m"
 
 # =========================
 # NO TRADES YET
@@ -6593,41 +6657,48 @@ if df_raw.empty:
     st.info("📭 No trades yet")
     st.stop()
     
-(
-    tab_overview,
-    tab_btc_correlation,
-    tab_btc_alignment_edge,
-    tab_mfe_mae,
-    tab_setups,
-    tab_swings,
-    tab_bad_decisions,
-    tab_execution,
-    tab_compression_quality,
-    tab_compression_analytics,
-    tab_compression_duration,
-    tab_compression_outcomes,
-    tab_compression_pipeline,
-    tab_experiment_comparator,
-    tab_tp_sl_replay,
-) = st.tabs([
-    "📊 Overview",
-    "₿ BTC Correlation",
-    "🧭 BTC Alignment Edge",
-    "📐 MFE / MAE",
-    "🧠 Setups",
-    "🎯 Swings",
-    "❌ Bad Decisions x",
-    "⏱️ Execution Analysis",
-    "🎯 Compression Entry Quality",
-    "🔬 Compression Analytics",
-    "⏱️ Compression Duration",
-    "🧬 Compression Outcomes",
-    "Compression Pipeline",
-    "🧪 Experiment Comparator",
-    "🧪 TP / SL Replay",
-])
+# =========================
+# LAZY DASHBOARD NAVIGATION
+# =========================
 
-with tab_overview:
+DASHBOARD_SECTIONS = {
+    "overview": "📊 Overview",
+    "btc_correlation": "₿ BTC Correlation",
+    "btc_alignment": "🧭 BTC Alignment Edge",
+    "mfe_mae": "📐 MFE / MAE",
+    "setups": "🧠 Setups",
+    "swings": "🎯 Swings",
+    "bad_decisions": "❌ Bad Decisions",
+    "execution": "⏱️ Execution Analysis",
+    "compression_quality": (
+        "🎯 Compression Entry Quality"
+    ),
+    "compression_analytics": (
+        "🔬 Compression Analytics"
+    ),
+    "compression_duration": (
+        "⏱️ Compression Duration"
+    ),
+    "compression_outcomes": (
+        "🧬 Compression Outcomes"
+    ),
+    "compression_pipeline": (
+        "🔄 Compression Pipeline"
+    ),
+    "experiment_comparator": (
+        "🧪 Experiment Comparator"
+    ),
+    "tp_sl_replay": "🧪 TP / SL Replay",
+}
+
+selected_section = st.sidebar.radio(
+    "Dashboard section",
+    options=list(DASHBOARD_SECTIONS),
+    format_func=DASHBOARD_SECTIONS.get,
+    key="dashboard_section",
+)
+
+if selected_section == "overview":
 # =========================
 # QUICK METRICS
 # =========================
@@ -8959,7 +9030,7 @@ with tab_overview:
 # BTC CORRELATION TAB
 # =========================================================
 
-with tab_btc_correlation:
+if selected_section == "btc_correlation":
 
     st.markdown("## ₿ BTC Correlation Analytics")
 
@@ -9529,7 +9600,7 @@ with tab_btc_correlation:
 # BTC ALIGNMENT EDGE TAB
 # =========================================================
 
-with tab_btc_alignment_edge:
+if selected_section == "btc_alignment":
 
     st.markdown("## 🧭 BTC Alignment Edge")
 
@@ -10739,9 +10810,18 @@ with tab_btc_alignment_edge:
                 hide_index=True,
             )
         
-with tab_mfe_mae:
+if selected_section == "mfe_mae":
     st.markdown("---")
     st.subheader("📐 MFE / MAE Analytics")
+    
+    with st.spinner(
+        "Calculating MFE / MAE report..."
+    ):
+        mfe_report = (
+            build_mfe_mae_report_cached(
+                df_view
+            )
+        )
 
     if not mfe_report:
         st.info("No MFE/MAE data available yet.")
@@ -10952,7 +11032,7 @@ with tab_mfe_mae:
             use_container_width=True
         )
         
-with tab_setups:
+if selected_section == "setups":
 
     st.markdown("---")
     st.subheader("🧠 Setups: Direction + Momentum")
@@ -11146,7 +11226,7 @@ with tab_setups:
 
             st.dataframe(mom_seq_df, use_container_width=True)
         
-with tab_swings:
+if selected_section == "swings":
 
     st.markdown("---")
     st.subheader("🎯 Swing Context Analytics")
@@ -13987,7 +14067,7 @@ with tab_swings:
                     use_container_width=True
                 )
                 
-with tab_bad_decisions:
+if selected_section == "bad_decisions":
 
     st.markdown("---")
     st.subheader("❌ Bad Decisions Explorer")
@@ -14292,7 +14372,7 @@ with tab_bad_decisions:
             )
             
             
-with tab_execution:
+if selected_section == "execution":
 
     try:
 
@@ -15008,7 +15088,7 @@ def render_watch_history_card(history_df, symbol):
 
     return
 
-with tab_compression_quality:
+if selected_section == "compression_quality":
 
     st.markdown("---")
     st.subheader("🎯 Compression Entry Quality")
@@ -16277,7 +16357,7 @@ with tab_compression_quality:
 
             st.plotly_chart(fig, use_container_width=True)
             
-with tab_compression_analytics:
+if selected_section == "compression_analytics":
 
     st.markdown("---")
     st.subheader("🔬 Compression Analytics")
@@ -17478,7 +17558,7 @@ with tab_compression_analytics:
                     hide_index=True,
                 )
                 
-with tab_compression_duration:
+if selected_section == "compression_duration":
 
     st.markdown("---")
     st.subheader("⏱️ Compression Duration Analysis")
@@ -18233,7 +18313,7 @@ with tab_compression_duration:
                         "para inspeccionar esa duración."
                     )
     
-with tab_compression_pipeline:
+if selected_section == "compression_pipeline":
     st.subheader("Compression Pipeline")
 
     pipeline_df = load_compression_pipeline()
@@ -18624,7 +18704,7 @@ with tab_compression_pipeline:
                 hide_index=True,
             )
             
-with tab_compression_outcomes:
+if selected_section == "compression_outcomes":
 
     st.markdown("---")
     st.subheader("🧬 Compression Outcome Analysis")
@@ -20392,7 +20472,7 @@ with tab_compression_outcomes:
 # ==========================================================
 # TP / SL POST-TRADE REPLAY
 # ==========================================================
-with tab_experiment_comparator:
+if selected_section == "experiment_comparator":
 
     st.markdown("## 🧪 Strategy Experiment Comparator")
     st.caption(
@@ -20422,7 +20502,11 @@ with tab_experiment_comparator:
         )
 
     else:
-        dynamic_raw_df = load_csv_cached(comparator_file)
+        dynamic_raw_df = load_csv_cached(
+            comparator_file,
+            get_file_modified_ns(comparator_file),
+        )
+        
         original_comparison_df = normalize_experiment_trades(
             df_raw,
             source="ORIGINAL",
@@ -20908,19 +20992,28 @@ with tab_experiment_comparator:
                                 )
 
 
-with tab_tp_sl_replay:
+if selected_section == "tp_sl_replay":
     st.subheader("🧪 TP / SL Post-Trade Replay")
 
     replay_df = load_csv_cached(
-        POST_TRADE_REPLAY_FILE
+        POST_TRADE_REPLAY_FILE,
+        get_file_modified_ns(
+            POST_TRADE_REPLAY_FILE
+        ),
     )
 
     scenario_df = load_csv_cached(
-        TP_SL_SCENARIOS_FILE
+        TP_SL_SCENARIOS_FILE,
+        get_file_modified_ns(
+            TP_SL_SCENARIOS_FILE
+        ),
     )
 
     partial_df = load_csv_cached(
-        PARTIAL_TP_SCENARIOS_FILE
+        PARTIAL_TP_SCENARIOS_FILE,
+        get_file_modified_ns(
+            PARTIAL_TP_SCENARIOS_FILE
+        ),
     )
 
     missing_reports = []
