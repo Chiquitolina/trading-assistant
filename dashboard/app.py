@@ -6637,41 +6637,48 @@ if df_raw.empty:
     st.info("📭 No trades yet")
     st.stop()
     
-(
-    tab_overview,
-    tab_btc_correlation,
-    tab_btc_alignment_edge,
-    tab_mfe_mae,
-    tab_setups,
-    tab_swings,
-    tab_bad_decisions,
-    tab_execution,
-    tab_compression_quality,
-    tab_compression_analytics,
-    tab_compression_duration,
-    tab_compression_outcomes,
-    tab_compression_pipeline,
-    tab_experiment_comparator,
-    tab_tp_sl_replay,
-) = st.tabs([
-    "📊 Overview",
-    "₿ BTC Correlation",
-    "🧭 BTC Alignment Edge",
-    "📐 MFE / MAE",
-    "🧠 Setups",
-    "🎯 Swings",
-    "❌ Bad Decisions x",
-    "⏱️ Execution Analysis",
-    "🎯 Compression Entry Quality",
-    "🔬 Compression Analytics",
-    "⏱️ Compression Duration",
-    "🧬 Compression Outcomes",
-    "Compression Pipeline",
-    "🧪 Experiment Comparator",
-    "🧪 TP / SL Replay",
-])
+# =========================
+# LAZY DASHBOARD NAVIGATION
+# =========================
 
-with tab_overview:
+DASHBOARD_SECTIONS = {
+    "overview": "📊 Overview",
+    "btc_correlation": "₿ BTC Correlation",
+    "btc_alignment": "🧭 BTC Alignment Edge",
+    "mfe_mae": "📐 MFE / MAE",
+    "setups": "🧠 Setups",
+    "swings": "🎯 Swings",
+    "bad_decisions": "❌ Bad Decisions",
+    "execution": "⏱️ Execution Analysis",
+    "compression_quality": (
+        "🎯 Compression Entry Quality"
+    ),
+    "compression_analytics": (
+        "🔬 Compression Analytics"
+    ),
+    "compression_duration": (
+        "⏱️ Compression Duration"
+    ),
+    "compression_outcomes": (
+        "🧬 Compression Outcomes"
+    ),
+    "compression_pipeline": (
+        "🔄 Compression Pipeline"
+    ),
+    "experiment_comparator": (
+        "🧪 Experiment Comparator"
+    ),
+    "tp_sl_replay": "🧪 TP / SL Replay",
+}
+
+selected_section = st.sidebar.radio(
+    "Dashboard section",
+    options=list(DASHBOARD_SECTIONS),
+    format_func=DASHBOARD_SECTIONS.get,
+    key="dashboard_section",
+)
+
+if selected_section == "overview":
 # =========================
 # QUICK METRICS
 # =========================
@@ -9003,7 +9010,7 @@ with tab_overview:
 # BTC CORRELATION TAB
 # =========================================================
 
-with tab_btc_correlation:
+if selected_section == "btc_correlation":
 
     st.markdown("## ₿ BTC Correlation Analytics")
 
@@ -9573,7 +9580,7 @@ with tab_btc_correlation:
 # BTC ALIGNMENT EDGE TAB
 # =========================================================
 
-with tab_btc_alignment_edge:
+if selected_section == "btc_alignment":
 
     st.markdown("## 🧭 BTC Alignment Edge")
 
@@ -10783,7 +10790,7 @@ with tab_btc_alignment_edge:
                 hide_index=True,
             )
         
-with tab_mfe_mae:
+if selected_section == "mfe_mae":
     st.markdown("---")
     st.subheader("📐 MFE / MAE Analytics")
 
@@ -10996,7 +11003,7 @@ with tab_mfe_mae:
             use_container_width=True
         )
         
-with tab_setups:
+if selected_section == "setups":
 
     st.markdown("---")
     st.subheader("🧠 Setups: Direction + Momentum")
@@ -11190,7 +11197,7 @@ with tab_setups:
 
             st.dataframe(mom_seq_df, use_container_width=True)
         
-with tab_swings:
+if selected_section == "swings":
 
     st.markdown("---")
     st.subheader("🎯 Swing Context Analytics")
@@ -14031,7 +14038,7 @@ with tab_swings:
                     use_container_width=True
                 )
                 
-with tab_bad_decisions:
+if selected_section == "bad_decisions":
 
     st.markdown("---")
     st.subheader("❌ Bad Decisions Explorer")
@@ -14336,7 +14343,7 @@ with tab_bad_decisions:
             )
             
             
-with tab_execution:
+if selected_section == "execution":
 
     try:
 
@@ -15052,7 +15059,7 @@ def render_watch_history_card(history_df, symbol):
 
     return
 
-with tab_compression_quality:
+if selected_section == "compression_quality":
 
     st.markdown("---")
     st.subheader("🎯 Compression Entry Quality")
@@ -16321,7 +16328,7 @@ with tab_compression_quality:
 
             st.plotly_chart(fig, use_container_width=True)
             
-with tab_compression_analytics:
+if selected_section == "compression_analytics":
 
     st.markdown("---")
     st.subheader("🔬 Compression Analytics")
@@ -17522,7 +17529,7 @@ with tab_compression_analytics:
                     hide_index=True,
                 )
                 
-with tab_compression_duration:
+if selected_section == "compression_duration":
 
     st.markdown("---")
     st.subheader("⏱️ Compression Duration Analysis")
@@ -18277,7 +18284,7 @@ with tab_compression_duration:
                         "para inspeccionar esa duración."
                     )
     
-with tab_compression_pipeline:
+if selected_section == "compression_pipeline":
     st.subheader("Compression Pipeline")
 
     pipeline_df = load_compression_pipeline()
@@ -18668,7 +18675,7 @@ with tab_compression_pipeline:
                 hide_index=True,
             )
             
-with tab_compression_outcomes:
+if selected_section == "compression_outcomes":
 
     st.markdown("---")
     st.subheader("🧬 Compression Outcome Analysis")
@@ -20436,7 +20443,7 @@ with tab_compression_outcomes:
 # ==========================================================
 # TP / SL POST-TRADE REPLAY
 # ==========================================================
-with tab_experiment_comparator:
+if selected_section == "experiment_comparator":
 
     st.markdown("## 🧪 Strategy Experiment Comparator")
     st.caption(
@@ -20956,7 +20963,7 @@ with tab_experiment_comparator:
                                 )
 
 
-with tab_tp_sl_replay:
+if selected_section == "tp_sl_replay":
     st.subheader("🧪 TP / SL Post-Trade Replay")
 
     replay_df = load_csv_cached(
