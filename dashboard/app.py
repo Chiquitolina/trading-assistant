@@ -8,7 +8,6 @@ import plotly.graph_objects as go
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from streamlit_autorefresh import st_autorefresh
 
 import requests
 import plotly.graph_objects as go
@@ -126,17 +125,11 @@ st.set_page_config(
 )
 
 st.title("📊 Trade Journal Dashboard")
-REFRESH_SECONDS = st.sidebar.slider(
-    "Auto refresh seconds",
-    min_value=2,
-    max_value=60,
-    value=10,
-    step=1,
-)
 
-st_autorefresh(
-    interval=REFRESH_SECONDS * 1000,
-    key="dashboard_refresh",
+st.sidebar.button(
+    "🔄 Actualizar dashboard",
+    use_container_width=True,
+    on_click=st.cache_data.clear,
 )
 
 @st.cache_data(ttl=10)
@@ -6235,46 +6228,6 @@ def build_mfe_mae_report_cached(df):
 mfe_report = build_mfe_mae_report_cached(df_view)
 
 # =========================
-# STATUS PANEL DATA
-# =========================
-status = load_status()
-
-engine_online = status["engine_online"]
-ws_online = status["ws_online"]
-balance = status["balance"]
-symbol_from_status = status["symbol"] or SYMBOL
-position_side = status["position_side"]
-position_qty = status["position_qty"]
-entry_price = status["entry_price"]
-unpnl = status["unpnl"]
-open_positions = status.get("open_positions", [])
-
-last_signal = status["last_signal"]
-signal_trend = status["signal_trend"]
-signal_direction = status["signal_direction"]
-signal_momentum = status["signal_momentum"]
-
-last_plan_status = status["last_plan_status"]
-last_plan_reason = status["last_plan_reason"]
-last_plan_side = status["last_plan_side"]
-last_plan_entry = status["last_plan_entry"]
-last_plan_tp = status["last_plan_tp"]
-last_plan_sl = status["last_plan_sl"]
-
-strategy_mode = status["strategy_mode"]
-last_router_reason = status["last_router_reason"]
-
-trigger_tf = status.get("trigger_tf", "N/A")
-
-updated_at = status["updated_at"]
-
-if last_signal in (None, "", "N/A"):
-    last_signal = get_last_signal(df_raw)
-
-pnl_today = get_today_pnl(df_raw, TZ)
-pnl_today_usd = get_today_pnl_usd(df_raw, TZ)
-
-# =========================
 # SYSTEM STATUS
 # =========================
 st.markdown("## 🧠 System Status")
@@ -6360,230 +6313,306 @@ if save_description:
             f"{exc}"
         )
 
-with st.container(border=True):
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+@st.fragment(run_every="5s")
+def render_live_system_status():
+    status = load_status()
 
-    with c1:
-        render_status_dot("ENGINE", engine_online)
+    engine_online = status["engine_online"]
+    ws_online = status["ws_online"]
+    balance = status["balance"]
+    symbol_from_status = (
+        status["symbol"] or SYMBOL
+    )
+    position_side = status["position_side"]
+    unpnl = status["unpnl"]
 
-    with c2:
-        render_status_dot("WS", ws_online)
+    open_positions = status.get(
+        "open_positions",
+        [],
+    )
 
-    c3.metric("POSITION", position_side)
-    c4.metric("uPnL", round(unpnl, 2))
-    c5.metric("BALANCE", f"{balance} USDT")
-    #c6.metric("PNL TODAY %", pnl_today)
-    #c6.metric("PNL TODAY USD", f"{pnl_today_usd} USDT")
+    last_signal = status["last_signal"]
+    signal_trend = status["signal_trend"]
+    signal_direction = status["signal_direction"]
+    signal_momentum = status["signal_momentum"]
 
-    c8, c9, c10, c11= st.columns(4)
-    
-    with c8:
-        st.metric(
-            "STRATEGY / TF",
-            f"{strategy_mode} / {trigger_tf}"
+    last_plan_status = status["last_plan_status"]
+    last_plan_reason = status["last_plan_reason"]
+    last_plan_side = status["last_plan_side"]
+    last_plan_entry = status["last_plan_entry"]
+    last_plan_tp = status["last_plan_tp"]
+    last_plan_sl = status["last_plan_sl"]
+
+    strategy_mode = status["strategy_mode"]
+    last_router_reason = status[
+        "last_router_reason"
+    ]
+
+    trigger_tf = status.get(
+        "trigger_tf",
+        "N/A",
+    )
+
+    updated_at = status["updated_at"]
+
+    if last_signal in (None, "", "N/A"):
+        last_signal = get_last_signal(df_raw)
+
+    with st.container(border=True):
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+
+        with c1:
+            render_status_dot(
+                "ENGINE",
+                engine_online,
+            )
+
+        with c2:
+            render_status_dot(
+                "WS",
+                ws_online,
+            )
+
+        c3.metric(
+            "POSITION",
+            position_side,
         )
 
-    with c9:
-        render_signal_text(
-            signal=last_signal,
-            trend=signal_trend,
-            direction=signal_direction,
-            momentum=signal_momentum,
-            reason=last_router_reason
+        c4.metric(
+            "uPnL",
+            round(unpnl, 2),
         )
 
-    with c10:
-        render_plan_text(
-            status=last_plan_status,
-            reason=last_plan_reason,
-            side=last_plan_side,
-            entry=last_plan_entry,
-            tp=last_plan_tp,
-            sl=last_plan_sl,
+        c5.metric(
+            "BALANCE",
+            f"{balance} USDT",
         )
         
-    with c11:
-        st.metric("SYMBOL", symbol_from_status)
+        #c6.metric("PNL TODAY %", pnl_today)
+        #c6.metric("PNL TODAY USD", f"{pnl_today_usd} USDT")
 
-    # =========================
-    # ENGINE HEALTH
-    # =========================
-    if status["error"]:
-        st.error(f"❌ Status file error: {status['error']}")
-    elif status["is_stale"]:
-        st.warning("⚠️ Bot heartbeat stale or stopped")
-
-    if updated_at:
-        st.caption(f"Last heartbeat: {updated_at}")
-
-    if open_positions:
-
-        st.success(
-            f"🟢 {len(open_positions)} "
-            "open position(s) on exchange"
-        )
-
-        open_inspector_source_df = (
-            build_open_position_inspector_df(
-                open_positions=open_positions,
-                snapshots_dir=(
-                    POSITION_SNAPSHOTS_DIR
-                ),
-                default_trigger_tf=(
-                    trigger_tf
-                    if trigger_tf not in (
-                        None,
-                        "",
-                        "N/A",
-                    )
-                    else "30m"
-                ),
-            )
-        )
-
-        open_display_cols = [
-            "symbol",
-            "side",
-            "quantity",
-            "entry_price",
-            "mark_price",
-            "unrealized_pnl",
-            "tp",
-            "sl",
-            "compression_high",
-            "compression_low",
-            "breakout_price",
-            "entry_ready_price",
-            "compression_score",
-            "compression_shape",
-            "compression_quality_label",
-            "trigger_tf",
-        ]
-
-        available_open_cols = [
-            col
-            for col in open_display_cols
-            if col in open_inspector_source_df.columns
-        ]
-
-        open_positions_display_df = (
-            open_inspector_source_df[
-                available_open_cols
-            ]
-            .copy()
-        )
-
-        open_numeric_cols = [
-            "quantity",
-            "entry_price",
-            "mark_price",
-            "unrealized_pnl",
-            "tp",
-            "sl",
-            "compression_high",
-            "compression_low",
-            "breakout_price",
-            "entry_ready_price",
-            "compression_score",
-        ]
-
-        for col in open_numeric_cols:
-            if col in open_positions_display_df.columns:
-                open_positions_display_df[col] = (
-                    pd.to_numeric(
-                        open_positions_display_df[col],
-                        errors="coerce",
-                    ).round(8)
-                )
-
-        st.caption(
-            "Seleccioná una posición abierta para "
-            "inspeccionar su compresión."
-        )
-
-        open_positions_event = st.dataframe(
-            open_positions_display_df,
-            use_container_width=True,
-            hide_index=True,
-            key="open_positions_inspector_table",
-            on_select="rerun",
-            selection_mode="single-row",
-        )
-
-        selected_open_rows = (
-            open_positions_event
-            .selection
-            .rows
-        )
-
-        if selected_open_rows:
-            selected_open_position = (
-                selected_open_rows[0]
+        c8, c9, c10, c11= st.columns(4)
+    
+        with c8:
+            st.metric(
+                "STRATEGY / TF",
+                f"{strategy_mode} / {trigger_tf}"
             )
 
-            selected_open_row = (
-                open_inspector_source_df.iloc[
-                    selected_open_position
-                ]
+        with c9:
+            render_signal_text(
+                signal=last_signal,
+                trend=signal_trend,
+                direction=signal_direction,
+                momentum=signal_momentum,
+                reason=last_router_reason
             )
 
-            snapshot_available = bool(
-                selected_open_row.get(
-                    "_snapshot_available",
-                    False,
-                )
+        with c10:
+            render_plan_text(
+                status=last_plan_status,
+                reason=last_plan_reason,
+                side=last_plan_side,
+                entry=last_plan_entry,
+                tp=last_plan_tp,
+                sl=last_plan_sl,
+            )
+            
+        with c11:
+            st.metric("SYMBOL", symbol_from_status)
+
+        # =========================
+        # ENGINE HEALTH
+        # =========================
+        if status["error"]:
+            st.error(f"❌ Status file error: {status['error']}")
+        elif status["is_stale"]:
+            st.warning("⚠️ Bot heartbeat stale or stopped")
+
+        if updated_at:
+            st.caption(f"Last heartbeat: {updated_at}")
+
+        if open_positions:
+
+            st.success(
+                f"🟢 {len(open_positions)} "
+                "open position(s) on exchange"
             )
 
-            required_compression_values = [
-                selected_open_row.get(
-                    "compression_high"
-                ),
-                selected_open_row.get(
-                    "compression_low"
-                ),
-                selected_open_row.get(
-                    "compression_created_ts"
-                ),
-            ]
-
-            has_compression_context = any(
-                pd.notna(value)
-                for value in required_compression_values
-            )
-
-            if not snapshot_available:
-                st.warning(
-                    "No position snapshot was found for "
-                    f"{selected_open_row.get('symbol')}. "
-                    "Only exchange data is available."
-                )
-
-            elif not has_compression_context:
-                st.info(
-                    "The selected position has a snapshot, "
-                    "but no compression context."
-                )
-
-            else:
-                render_trade_inspector_for_row(
-                    row=selected_open_row,
-                    status="OPEN",
-                    key_prefix=(
-                        "open_trade_inspector_"
-                        + str(
-                            selected_open_row.get(
-                                "symbol",
-                                selected_open_position,
-                            )
+            open_inspector_source_df = (
+                build_open_position_inspector_df(
+                    open_positions=open_positions,
+                    snapshots_dir=(
+                        POSITION_SNAPSHOTS_DIR
+                    ),
+                    default_trigger_tf=(
+                        trigger_tf
+                        if trigger_tf not in (
+                            None,
+                            "",
+                            "N/A",
                         )
+                        else "30m"
                     ),
                 )
+            )
 
-    else:
-        st.info(
-            "⚪ No open positions on exchange"
-        )
+            open_display_cols = [
+                "symbol",
+                "side",
+                "quantity",
+                "entry_price",
+                "mark_price",
+                "unrealized_pnl",
+                "tp",
+                "sl",
+                "compression_high",
+                "compression_low",
+                "breakout_price",
+                "entry_ready_price",
+                "compression_score",
+                "compression_shape",
+                "compression_quality_label",
+                "trigger_tf",
+            ]
+
+            available_open_cols = [
+                col
+                for col in open_display_cols
+                if col in open_inspector_source_df.columns
+            ]
+
+            open_positions_display_df = (
+                open_inspector_source_df[
+                    available_open_cols
+                ]
+                .copy()
+            )
+
+            open_numeric_cols = [
+                "quantity",
+                "entry_price",
+                "mark_price",
+                "unrealized_pnl",
+                "tp",
+                "sl",
+                "compression_high",
+                "compression_low",
+                "breakout_price",
+                "entry_ready_price",
+                "compression_score",
+            ]
+
+            for col in open_numeric_cols:
+                if col in open_positions_display_df.columns:
+                    open_positions_display_df[col] = (
+                        pd.to_numeric(
+                            open_positions_display_df[col],
+                            errors="coerce",
+                        ).round(8)
+                    )
+
+            st.caption(
+                "Seleccioná una posición abierta para "
+                "inspeccionar su compresión."
+            )
+
+            open_positions_event = st.dataframe(
+                open_positions_display_df,
+                use_container_width=True,
+                hide_index=True,
+                key="open_positions_inspector_table",
+                on_select="rerun",
+                selection_mode="single-row",
+            )
+
+            selected_open_rows = (
+                open_positions_event
+                .selection
+                .rows
+            )
+
+            if selected_open_rows:
+                selected_open_position = (
+                    selected_open_rows[0]
+                )
+
+                selected_open_row = (
+                    open_inspector_source_df.iloc[
+                        selected_open_position
+                    ]
+                )
+
+                snapshot_available = bool(
+                    selected_open_row.get(
+                        "_snapshot_available",
+                        False,
+                    )
+                )
+
+                required_compression_values = [
+                    selected_open_row.get(
+                        "compression_high"
+                    ),
+                    selected_open_row.get(
+                        "compression_low"
+                    ),
+                    selected_open_row.get(
+                        "compression_created_ts"
+                    ),
+                ]
+
+                has_compression_context = any(
+                    pd.notna(value)
+                    for value in required_compression_values
+                )
+
+                if not snapshot_available:
+                    st.warning(
+                        "No position snapshot was found for "
+                        f"{selected_open_row.get('symbol')}. "
+                        "Only exchange data is available."
+                    )
+
+                elif not has_compression_context:
+                    st.info(
+                        "The selected position has a snapshot, "
+                        "but no compression context."
+                    )
+
+                else:
+                    render_trade_inspector_for_row(
+                        row=selected_open_row,
+                        status="OPEN",
+                        key_prefix=(
+                            "open_trade_inspector_"
+                            + str(
+                                selected_open_row.get(
+                                    "symbol",
+                                    selected_open_position,
+                                )
+                            )
+                        ),
+                    )
+
+        else:
+            st.info(
+                "⚪ No open positions on exchange"
+            )
+
+render_live_system_status()
+
+page_status = load_status()
+
+trigger_tf = page_status.get(
+    "trigger_tf",
+    "30m",
+)
+
+if trigger_tf in (None, "", "N/A"):
+    trigger_tf = "30m"
 
 # =========================
 # NO TRADES YET
