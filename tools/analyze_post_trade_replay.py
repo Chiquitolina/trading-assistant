@@ -48,6 +48,22 @@ FIXED_SL_PCTS = [
     2.00,
 ]
 
+FIXED_MATRIX_TP_PCTS = [
+    0.20,
+    0.25,
+    0.30,
+    0.40,
+    0.50,
+]
+
+FIXED_MATRIX_SL_PCTS = [
+    0.30,
+    0.40,
+    0.50,
+    0.60,
+    0.80,
+]
+
 PARTIAL_TARGETS_PCT = [
     1.00,
     2.50,
@@ -1084,6 +1100,26 @@ def analyze_trade(
                     original_tp_pct
                 ],
             )
+            
+    # ==========================================
+    # FIXED TP × FIXED SL MATRIX
+    # ==========================================
+
+    for fixed_sl_pct in FIXED_MATRIX_SL_PCTS:
+
+        fixed_sl_price = price_from_stop_pct(
+            entry=entry,
+            stop_pct=fixed_sl_pct,
+            side=side,
+        )
+
+        append_tp_scenarios_for_sl(
+            sl_mode="FIXED_MATRIX",
+            scenario_sl=fixed_sl_price,
+            scenario_risk_pct=fixed_sl_pct,
+            fixed_sl_pct=fixed_sl_pct,
+            target_pcts=FIXED_MATRIX_TP_PCTS,
+        )
             
     partial_rows = []
 
