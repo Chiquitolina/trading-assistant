@@ -5763,443 +5763,465 @@ paper_df = load_csv_cached(
     get_file_modified_ns(PAPER_SIGNALS_FILE),
 )
 
-# =========================
-# CLEAN NUMERIC COLUMNS
-# =========================
-numeric_cols = [
-    "pnl",
-    "pnl_gross",
-    "pnl_usd",
-    "fees",
-    "signal_price",
-    "entry",
-    "real_entry",
-    "exit",
-    "real_exit",
-    "tp",
-    "sl",
-]
+@st.cache_data(show_spinner=False)
+def prepare_trade_data_cached(
+    _source_df,
+    source_modified_ns,
+    timezone,
+    candle_minutes,
+    btc_correlation_timeframes,
+    context_timeframes,
+    ema_context_periods,
+):
+    df = _source_df.copy()
 
-for col in numeric_cols:
-    if col in df.columns:
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce",
+    # =========================
+    # CLEAN NUMERIC COLUMNS
+    # =========================
+    numeric_cols = [
+        "pnl",
+        "pnl_gross",
+        "pnl_usd",
+        "fees",
+        "signal_price",
+        "entry",
+        "real_entry",
+        "exit",
+        "real_exit",
+        "tp",
+        "sl",
+    ]
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce",
+            )
+
+
+    # =========================
+    # ESTIMATED NET PNL USD
+    # =========================
+
+    df["pnl_net_usd"] = np.nan
+    df["fees_usd_est"] = np.nan
+
+    required_usd_columns = {
+        "pnl",
+        "pnl_gross",
+        "pnl_usd",
+    }
+
+    if required_usd_columns.issubset(df.columns):
+        valid_usd_mask = (
+            df["pnl"].notna()
+            & df["pnl_gross"].notna()
+            & df["pnl_usd"].notna()
+            & df["pnl_gross"].abs().gt(1e-12)
         )
 
-
-# =========================
-# ESTIMATED NET PNL USD
-# =========================
-
-df["pnl_net_usd"] = np.nan
-df["fees_usd_est"] = np.nan
-
-required_usd_columns = {
-    "pnl",
-    "pnl_gross",
-    "pnl_usd",
-}
-
-if required_usd_columns.issubset(df.columns):
-    valid_usd_mask = (
-        df["pnl"].notna()
-        & df["pnl_gross"].notna()
-        & df["pnl_usd"].notna()
-        & df["pnl_gross"].abs().gt(1e-12)
-    )
-
-    # pnl_usd representa el PnL bruto monetario.
-    # Aplicamos el retorno neto sobre el mismo notional.
-    df.loc[
-        valid_usd_mask,
-        "pnl_net_usd",
-    ] = (
-        df.loc[
-            valid_usd_mask,
-            "pnl_usd",
-        ]
-        *
-        (
-            df.loc[
-                valid_usd_mask,
-                "pnl",
-            ]
-            /
-            df.loc[
-                valid_usd_mask,
-                "pnl_gross",
-            ]
-        )
-    )
-
-    df.loc[
-        valid_usd_mask,
-        "fees_usd_est",
-    ] = (
-        df.loc[
-            valid_usd_mask,
-            "pnl_usd",
-        ]
-        -
+        # pnl_usd representa el PnL bruto monetario.
+        # Aplicamos el retorno neto sobre el mismo notional.
         df.loc[
             valid_usd_mask,
             "pnl_net_usd",
-        ]
-    )
-        
-
-# =========================
-# CALCULATE ENTRY DISTANCE
-# =========================
-if "signal_price" in df.columns and "entry" in df.columns:
-    df["entry_distance_pct"] = (
-        (df["entry"] - df["signal_price"]) / df["signal_price"] * 100
-    ).round(5)
-else:
-    df["entry_distance_pct"] = 0
-
-
-# =========================
-# RAW DF FOR CALCS / CHARTS
-# =========================
-df_raw = df.copy()
-
-compression_numeric_cols = [
-    # Prices / execution
-    "real_entry",
-    "entry_ready_price",
-    "compression_high",
-    "compression_low",
-    "breakout_price",
-
-    # Breakout
-    "breakout_extension_pct",
-    "breakout_extension_atr",
-    "breakout_volume_ratio",
-
-    # Existing scores
-    "compression_score",
-    "trend_score",
-
-    # Compression structure
-    "compression_height",
-    "compression_height_pct",
-    "compression_duration",
-    "upper_slope",
-    "lower_slope",
-    "slope_difference",
-    "touches_high",
-    "touches_low",
-    "inside_ratio",
-
-    # Entry location
-    "entry_distance_pct",
-    "entry_vs_compression_pct",
-    "entry_vs_breakout_pct",
-    "entry_to_compression_low_pct",
-    "sl_to_compression_low_pct",
-
-    # Trade result
-    "pnl",
-    "pnl_usd",
-    "max_favorable_pct",
-    "max_adverse_pct",
-]
-
-for col in compression_numeric_cols:
-    if col in df_raw.columns:
-        df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
-        
-# =========================
-# BTC CORRELATION NUMERIC
-# =========================
-
-btc_correlation_numeric_cols = []
-
-for timeframe in BTC_CORRELATION_TIMEFRAMES:
-    btc_correlation_numeric_cols.extend([
-        f"btc_corr_{timeframe}",
-        f"btc_beta_{timeframe}",
-        f"btc_r2_{timeframe}",
-
-        f"symbol_move_{timeframe}_pct",
-        f"btc_move_{timeframe}_pct",
-
-        f"btc_expected_move_{timeframe}_pct",
-        f"btc_residual_move_{timeframe}_pct",
-    ])
-
-for col in btc_correlation_numeric_cols:
-    if col in df_raw.columns:
-        df_raw[col] = pd.to_numeric(
-            df_raw[col],
-            errors="coerce",
+        ] = (
+            df.loc[
+                valid_usd_mask,
+                "pnl_usd",
+            ]
+            *
+            (
+                df.loc[
+                    valid_usd_mask,
+                    "pnl",
+                ]
+                /
+                df.loc[
+                    valid_usd_mask,
+                    "pnl_gross",
+                ]
+            )
         )
-        
-# =========================
-# MULTI-TIMEFRAME CONTEXT NUMERIC
-# =========================
 
-context_numeric_cols = []
+        df.loc[
+            valid_usd_mask,
+            "fees_usd_est",
+        ] = (
+            df.loc[
+                valid_usd_mask,
+                "pnl_usd",
+            ]
+            -
+            df.loc[
+                valid_usd_mask,
+                "pnl_net_usd",
+            ]
+        )
+            
 
-for timeframe in CONTEXT_TIMEFRAMES:
-    for ema_period in EMA_CONTEXT_PERIODS:
+    # =========================
+    # CALCULATE ENTRY DISTANCE
+    # =========================
+    if "signal_price" in df.columns and "entry" in df.columns:
+        df["entry_distance_pct"] = (
+            (df["entry"] - df["signal_price"]) / df["signal_price"] * 100
+        ).round(5)
+    else:
+        df["entry_distance_pct"] = 0
+
+
+    # =========================
+    # RAW DF FOR CALCS / CHARTS
+    # =========================
+    df_raw = df.copy()
+
+    compression_numeric_cols = [
+        # Prices / execution
+        "real_entry",
+        "entry_ready_price",
+        "compression_high",
+        "compression_low",
+        "breakout_price",
+
+        # Breakout
+        "breakout_extension_pct",
+        "breakout_extension_atr",
+        "breakout_volume_ratio",
+
+        # Existing scores
+        "compression_score",
+        "trend_score",
+
+        # Compression structure
+        "compression_height",
+        "compression_height_pct",
+        "compression_duration",
+        "upper_slope",
+        "lower_slope",
+        "slope_difference",
+        "touches_high",
+        "touches_low",
+        "inside_ratio",
+
+        # Entry location
+        "entry_distance_pct",
+        "entry_vs_compression_pct",
+        "entry_vs_breakout_pct",
+        "entry_to_compression_low_pct",
+        "sl_to_compression_low_pct",
+
+        # Trade result
+        "pnl",
+        "pnl_usd",
+        "max_favorable_pct",
+        "max_adverse_pct",
+    ]
+
+    for col in compression_numeric_cols:
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
+            
+    # =========================
+    # BTC CORRELATION NUMERIC
+    # =========================
+
+    btc_correlation_numeric_cols = []
+
+    for timeframe in btc_correlation_timeframes:
+        btc_correlation_numeric_cols.extend([
+            f"btc_corr_{timeframe}",
+            f"btc_beta_{timeframe}",
+            f"btc_r2_{timeframe}",
+
+            f"symbol_move_{timeframe}_pct",
+            f"btc_move_{timeframe}_pct",
+
+            f"btc_expected_move_{timeframe}_pct",
+            f"btc_residual_move_{timeframe}_pct",
+        ])
+
+    for col in btc_correlation_numeric_cols:
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_numeric(
+                df_raw[col],
+                errors="coerce",
+            )
+            
+    # =========================
+    # MULTI-TIMEFRAME CONTEXT NUMERIC
+    # =========================
+
+    context_numeric_cols = []
+
+    for timeframe in context_timeframes:
+        for ema_period in ema_context_periods:
+            context_numeric_cols.extend([
+                f"ema{ema_period}_{timeframe}",
+                f"dist_ema{ema_period}_{timeframe}_pct",
+            ])
+
         context_numeric_cols.extend([
-            f"ema{ema_period}_{timeframe}",
-            f"dist_ema{ema_period}_{timeframe}_pct",
+            f"swing_low_{timeframe}",
+            f"swing_high_{timeframe}",
+            f"dist_swing_low_{timeframe}_pct",
+            f"dist_swing_high_{timeframe}_pct",
         ])
 
     context_numeric_cols.extend([
-        f"swing_low_{timeframe}",
-        f"swing_high_{timeframe}",
-        f"dist_swing_low_{timeframe}_pct",
-        f"dist_swing_high_{timeframe}_pct",
+        "ema100_5m",
+        "swing_lookback",
     ])
 
-context_numeric_cols.extend([
-    "ema100_5m",
-    "swing_lookback",
-])
+    for col in context_numeric_cols:
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_numeric(
+                df_raw[col],
+                errors="coerce",
+            )
 
-for col in context_numeric_cols:
-    if col in df_raw.columns:
-        df_raw[col] = pd.to_numeric(
-            df_raw[col],
-            errors="coerce",
-        )
-
-required_compression_cols = [
-    "side",
-    "real_entry",
-    "compression_high",
-    "compression_low",
-    "breakout_price",
-]
-
-if all(col in df_raw.columns for col in required_compression_cols):
-
-    df_raw["entry_vs_compression_pct"] = np.where(
-        df_raw["side"].astype(str).str.upper() == "LONG",
-        (
-            (df_raw["real_entry"] - df_raw["compression_high"])
-            / df_raw["compression_high"]
-            * 100
-        ),
-        (
-            (df_raw["compression_low"] - df_raw["real_entry"])
-            / df_raw["compression_low"]
-            * 100
-        )
-    )
-
-    df_raw["entry_vs_breakout_pct"] = np.where(
-        df_raw["side"].astype(str).str.upper() == "LONG",
-        (
-            (df_raw["real_entry"] - df_raw["breakout_price"])
-            / df_raw["breakout_price"]
-            * 100
-        ),
-        (
-            (df_raw["breakout_price"] - df_raw["real_entry"])
-            / df_raw["breakout_price"]
-            * 100
-        )
-    )
-
-    df_raw["entry_vs_compression_pct"] = df_raw["entry_vs_compression_pct"].round(4)
-    df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
-    
-    df_raw["entry_vs_compression_pct"] = df_raw[
-        "entry_vs_compression_pct"
-    ].round(4)
-
-    df_raw["entry_vs_breakout_pct"] = df_raw[
-        "entry_vs_breakout_pct"
-    ].round(4)
-
-    # =========================
-    # FORWARD-SAFE ENTRY LOCATION
-    # =========================
-
-    required_forward_cols = [
+    required_compression_cols = [
         "side",
-        "entry_ready_price",
+        "real_entry",
+        "compression_high",
+        "compression_low",
         "breakout_price",
     ]
 
-    if all(
-        col in df_raw.columns
-        for col in required_forward_cols
-    ):
-        valid_forward_prices = (
-            df_raw["entry_ready_price"].notna()
-            & df_raw["breakout_price"].notna()
-            & df_raw["entry_ready_price"].gt(0)
-            & df_raw["breakout_price"].gt(0)
-        )
+    if all(col in df_raw.columns for col in required_compression_cols):
 
-        df_raw["entry_ready_vs_breakout_pct"] = np.nan
-
-        long_mask = (
-            valid_forward_prices
-            & df_raw["side"]
-            .astype(str)
-            .str.upper()
-            .eq("LONG")
-        )
-
-        short_mask = (
-            valid_forward_prices
-            & df_raw["side"]
-            .astype(str)
-            .str.upper()
-            .eq("SHORT")
-        )
-
-        df_raw.loc[
-            long_mask,
-            "entry_ready_vs_breakout_pct",
-        ] = (
+        df_raw["entry_vs_compression_pct"] = np.where(
+            df_raw["side"].astype(str).str.upper() == "LONG",
             (
-                df_raw.loc[
-                    long_mask,
-                    "entry_ready_price",
-                ]
-                - df_raw.loc[
-                    long_mask,
-                    "breakout_price",
-                ]
+                (df_raw["real_entry"] - df_raw["compression_high"])
+                / df_raw["compression_high"]
+                * 100
+            ),
+            (
+                (df_raw["compression_low"] - df_raw["real_entry"])
+                / df_raw["compression_low"]
+                * 100
             )
-            / df_raw.loc[
+        )
+
+        df_raw["entry_vs_breakout_pct"] = np.where(
+            df_raw["side"].astype(str).str.upper() == "LONG",
+            (
+                (df_raw["real_entry"] - df_raw["breakout_price"])
+                / df_raw["breakout_price"]
+                * 100
+            ),
+            (
+                (df_raw["breakout_price"] - df_raw["real_entry"])
+                / df_raw["breakout_price"]
+                * 100
+            )
+        )
+
+        df_raw["entry_vs_compression_pct"] = df_raw["entry_vs_compression_pct"].round(4)
+        df_raw["entry_vs_breakout_pct"] = df_raw["entry_vs_breakout_pct"].round(4)
+
+        # =========================
+        # FORWARD-SAFE ENTRY LOCATION
+        # =========================
+
+        required_forward_cols = [
+            "side",
+            "entry_ready_price",
+            "breakout_price",
+        ]
+
+        if all(
+            col in df_raw.columns
+            for col in required_forward_cols
+        ):
+            valid_forward_prices = (
+                df_raw["entry_ready_price"].notna()
+                & df_raw["breakout_price"].notna()
+                & df_raw["entry_ready_price"].gt(0)
+                & df_raw["breakout_price"].gt(0)
+            )
+
+            df_raw["entry_ready_vs_breakout_pct"] = np.nan
+
+            long_mask = (
+                valid_forward_prices
+                & df_raw["side"]
+                .astype(str)
+                .str.upper()
+                .eq("LONG")
+            )
+
+            short_mask = (
+                valid_forward_prices
+                & df_raw["side"]
+                .astype(str)
+                .str.upper()
+                .eq("SHORT")
+            )
+
+            df_raw.loc[
                 long_mask,
-                "breakout_price",
-            ]
-            * 100
-        )
+                "entry_ready_vs_breakout_pct",
+            ] = (
+                (
+                    df_raw.loc[
+                        long_mask,
+                        "entry_ready_price",
+                    ]
+                    - df_raw.loc[
+                        long_mask,
+                        "breakout_price",
+                    ]
+                )
+                / df_raw.loc[
+                    long_mask,
+                    "breakout_price",
+                ]
+                * 100
+            )
 
-        df_raw.loc[
-            short_mask,
-            "entry_ready_vs_breakout_pct",
-        ] = (
-            (
-                df_raw.loc[
+            df_raw.loc[
+                short_mask,
+                "entry_ready_vs_breakout_pct",
+            ] = (
+                (
+                    df_raw.loc[
+                        short_mask,
+                        "breakout_price",
+                    ]
+                    - df_raw.loc[
+                        short_mask,
+                        "entry_ready_price",
+                    ]
+                )
+                / df_raw.loc[
                     short_mask,
                     "breakout_price",
                 ]
-                - df_raw.loc[
-                    short_mask,
-                    "entry_ready_price",
-                ]
+                * 100
             )
-            / df_raw.loc[
-                short_mask,
-                "breakout_price",
-            ]
-            * 100
+
+            df_raw["entry_ready_vs_breakout_pct"] = (
+                df_raw[
+                    "entry_ready_vs_breakout_pct"
+                ].round(4)
+            )
+
+        else:
+            df_raw["entry_ready_vs_breakout_pct"] = np.nan
+
+        df_raw["late_entry"] = (
+            df_raw["entry_vs_compression_pct"] > 1.0
         )
-
-        df_raw["entry_ready_vs_breakout_pct"] = (
-            df_raw[
-                "entry_ready_vs_breakout_pct"
-            ].round(4)
-        )
-
-    else:
-        df_raw["entry_ready_vs_breakout_pct"] = np.nan
-
-    df_raw["late_entry"] = (
-        df_raw["entry_vs_compression_pct"] > 1.0
-    )
-
-    df_raw["late_entry"] = df_raw["entry_vs_compression_pct"] > 1.0
-    
-    # =========================
-    # COMPRESSION STOP ANALYSIS
-    # =========================
-
-    df_raw["compression_height"] = (
-        df_raw["compression_high"] - df_raw["compression_low"]
-    )
-
-    df_raw["entry_to_compression_low_pct"] = np.where(
-        df_raw["side"].str.upper() == "LONG",
-
-        (
-            (df_raw["real_entry"] - df_raw["compression_low"])
-            / df_raw["compression_low"]
-            * 100
-        ),
-
-        (
-            (df_raw["compression_high"] - df_raw["real_entry"])
-            / df_raw["compression_high"]
-            * 100
-        )
-    )
-
-    df_raw["sl_to_compression_low_pct"] = np.where(
-        df_raw["side"].str.upper() == "LONG",
-
-        (
-            (df_raw["compression_low"] - df_raw["sl"])
-            / df_raw["compression_low"]
-            * 100
-        ),
-
-        (
-            (df_raw["sl"] - df_raw["compression_high"])
-            / df_raw["compression_high"]
-            * 100
-        )
-    )
-else:
-    df_raw["entry_vs_compression_pct"] = np.nan
-    df_raw["entry_vs_breakout_pct"] = np.nan
-    df_raw["late_entry"] = False
-
-for col in ["signal_ts", "entry_ts", "exit_ts"]:
-    if col in df_raw.columns:
-        df_raw[f"{col}_dt"] = pd.to_datetime(df_raw[col], utc=True, errors="coerce")
-
-        try:
-            df_raw[f"{col}_dt"] = df_raw[f"{col}_dt"].dt.tz_convert(TZ)
-        except Exception:
-            pass
         
-# =========================
-# TRADE DURATION
-# =========================
-if "entry_ts_dt" in df_raw.columns and "exit_ts_dt" in df_raw.columns:
-    duration_minutes = (
-        (df_raw["exit_ts_dt"] - df_raw["entry_ts_dt"]).dt.total_seconds() / 60
-    )
+        # =========================
+        # COMPRESSION STOP ANALYSIS
+        # =========================
 
-    df_raw["trade_duration_min"] = duration_minutes.round(2)
-    df_raw["trade_duration_bars"] = (
-        duration_minutes / CANDLE_MINUTES
-    ).round().astype("Int64")
-else:
-    df_raw["trade_duration_min"] = None
-    df_raw["trade_duration_bars"] = None
-    
-# =========================
-# SIGNAL DELAY
-# =========================
+        df_raw["compression_height"] = (
+            df_raw["compression_high"] - df_raw["compression_low"]
+        )
 
-if (
-    "signal_ts_dt" in df_raw.columns
-    and "entry_ts_dt" in df_raw.columns
-):
-    df_raw["signal_delay_min"] = (
-        (
-            df_raw["entry_ts_dt"]
-            - df_raw["signal_ts_dt"]
-        ).dt.total_seconds()
-        / 60
-    ).round(2)
-else:
-    df_raw["signal_delay_min"] = None
+        df_raw["entry_to_compression_low_pct"] = np.where(
+            df_raw["side"].str.upper() == "LONG",
+
+            (
+                (df_raw["real_entry"] - df_raw["compression_low"])
+                / df_raw["compression_low"]
+                * 100
+            ),
+
+            (
+                (df_raw["compression_high"] - df_raw["real_entry"])
+                / df_raw["compression_high"]
+                * 100
+            )
+        )
+
+        df_raw["sl_to_compression_low_pct"] = np.where(
+            df_raw["side"].str.upper() == "LONG",
+
+            (
+                (df_raw["compression_low"] - df_raw["sl"])
+                / df_raw["compression_low"]
+                * 100
+            ),
+
+            (
+                (df_raw["sl"] - df_raw["compression_high"])
+                / df_raw["compression_high"]
+                * 100
+            )
+        )
+    else:
+        df_raw["entry_vs_compression_pct"] = np.nan
+        df_raw["entry_vs_breakout_pct"] = np.nan
+        df_raw["late_entry"] = False
+
+    for col in ["signal_ts", "entry_ts", "exit_ts"]:
+        if col in df_raw.columns:
+            df_raw[f"{col}_dt"] = pd.to_datetime(df_raw[col], utc=True, errors="coerce")
+
+            try:
+                df_raw[f"{col}_dt"] = df_raw[f"{col}_dt"].dt.tz_convert(timezone)
+            except Exception:
+                pass
+            
+    # =========================
+    # TRADE DURATION
+    # =========================
+    if "entry_ts_dt" in df_raw.columns and "exit_ts_dt" in df_raw.columns:
+        duration_minutes = (
+            (df_raw["exit_ts_dt"] - df_raw["entry_ts_dt"]).dt.total_seconds() / 60
+        )
+
+        df_raw["trade_duration_min"] = duration_minutes.round(2)
+        df_raw["trade_duration_bars"] = (
+            duration_minutes / candle_minutes
+        ).round().astype("Int64")
+    else:
+        df_raw["trade_duration_min"] = None
+        df_raw["trade_duration_bars"] = None
+        
+    # =========================
+    # SIGNAL DELAY
+    # =========================
+
+    if (
+        "signal_ts_dt" in df_raw.columns
+        and "entry_ts_dt" in df_raw.columns
+    ):
+        df_raw["signal_delay_min"] = (
+            (
+                df_raw["entry_ts_dt"]
+                - df_raw["signal_ts_dt"]
+            ).dt.total_seconds()
+            / 60
+        ).round(2)
+    else:
+        df_raw["signal_delay_min"] = None
+        
+    return df_raw
+
+df_raw = prepare_trade_data_cached(
+    _source_df=df,
+    source_modified_ns=get_file_modified_ns(
+        TRADES_FILE
+    ),
+    timezone=TZ,
+    candle_minutes=CANDLE_MINUTES,
+    btc_correlation_timeframes=tuple(
+        BTC_CORRELATION_TIMEFRAMES
+    ),
+    context_timeframes=tuple(
+        CONTEXT_TIMEFRAMES
+    ),
+    ema_context_periods=tuple(
+        EMA_CONTEXT_PERIODS
+    ),
+)
 
 # =========================
 # GLOBAL VIEW (NO FILTER YET)
