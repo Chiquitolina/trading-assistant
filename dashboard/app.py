@@ -6224,36 +6224,83 @@ df_raw = prepare_trade_data_cached(
 )
 
 # =========================
-# GLOBAL VIEW (NO FILTER YET)
-# =========================
-df_view = df_raw.copy()
-
-# =========================
 # GLOBAL DATE FILTER
 # =========================
-if "entry_ts_dt" in df_view.columns and not df_view.empty:
+df_view = df_raw
 
-    st.sidebar.markdown("## 📅 Trade Filter")
-
-    start_date = st.sidebar.date_input(
-        "Start Date",
-        value=df_view["entry_ts_dt"].min().date(),
-        key="global_start_date"
+if (
+    not df_raw.empty
+    and "entry_ts_dt" in df_raw.columns
+):
+    valid_entry_times = (
+        df_raw["entry_ts_dt"]
+        .dropna()
     )
 
-    end_date = st.sidebar.date_input(
-        "End Date",
-        value=df_view["entry_ts_dt"].max().date(),
-        key="global_end_date"
-    )
+    if not valid_entry_times.empty:
+        st.sidebar.markdown(
+            "## 📅 Trade Filter"
+        )
 
-    df_view = df_view[
-        (df_view["entry_ts_dt"].dt.date >= start_date)
-        &
-        (df_view["entry_ts_dt"].dt.date <= end_date)
-    ].copy()
-    
-st.sidebar.caption(f"Filtered trades: {len(df_view)}")
+        min_entry_date = (
+            valid_entry_times.min().date()
+        )
+
+        max_entry_date = (
+            valid_entry_times.max().date()
+        )
+
+        start_date = st.sidebar.date_input(
+            "Start Date",
+            value=min_entry_date,
+            min_value=min_entry_date,
+            max_value=max_entry_date,
+            key="global_start_date",
+        )
+
+        end_date = st.sidebar.date_input(
+            "End Date",
+            value=max_entry_date,
+            min_value=min_entry_date,
+            max_value=max_entry_date,
+            key="global_end_date",
+        )
+
+        if start_date > end_date:
+            st.sidebar.error(
+                "Start Date must be before End Date."
+            )
+
+            df_view = df_raw.iloc[0:0]
+
+        else:
+            start_ts = (
+                pd.Timestamp(start_date)
+                .tz_localize(TZ)
+            )
+
+            end_ts_exclusive = (
+                pd.Timestamp(end_date)
+                .tz_localize(TZ)
+                + pd.Timedelta(days=1)
+            )
+
+            date_mask = (
+                df_raw["entry_ts_dt"].ge(
+                    start_ts
+                )
+                & df_raw["entry_ts_dt"].lt(
+                    end_ts_exclusive
+                )
+            )
+
+            df_view = df_raw.loc[
+                date_mask
+            ]
+
+st.sidebar.caption(
+    f"Filtered trades: {len(df_view)}"
+)
 
 # =========================
 # MFE / MAE REPORT
