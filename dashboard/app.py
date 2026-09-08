@@ -437,32 +437,44 @@ def normalize_epoch_ms(value):
     return int(timestamp.timestamp() * 1000)
 
 
-def load_watch_history(
-    symbol,
-    compression_created_ts=None,
-    base_dir="compression_watch_journal",
+@st.cache_data(show_spinner=False)
+def load_watch_history_cached(
+    path,
+    modified_ns,
+    compression_created_ts,
+    limit,
+    timezone,
 ):
-    path = (
-        Path(base_dir)
-        / f"{str(symbol).upper()}.jsonl"
-    )
+    path = Path(path)
 
     if not path.exists():
         return pd.DataFrame()
 
     rows = []
 
-    with path.open("r", encoding="utf-8") as file:
-        for line in file:
-            line = line.strip()
+    try:
+        with path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            for line in file:
+                line = line.strip()
 
-            if not line:
-                continue
+                if not line:
+                    continue
 
-            try:
-                rows.append(json.loads(line))
-            except (json.JSONDecodeError, TypeError):
-                continue
+                try:
+                    rows.append(
+                        json.loads(line)
+                    )
+                except (
+                    json.JSONDecodeError,
+                    TypeError,
+                ):
+                    continue
+
+    except OSError:
+        return pd.DataFrame()
 
     if not rows:
         return pd.DataFrame()
@@ -480,19 +492,34 @@ def load_watch_history(
         in history_df.columns
     ):
         journal_created_ts = pd.to_numeric(
-            history_df["compression_created_ts"],
+            history_df[
+                "compression_created_ts"
+            ],
             errors="coerce",
         )
 
-        history_df = history_df[
-            journal_created_ts == created_ts_ms
+        history_df = history_df.loc[
+            journal_created_ts.eq(
+                created_ts_ms
+            )
         ].copy()
 
     if history_df.empty:
         return history_df
 
-    # Extraer OHLCV guardado dentro de last_candle.
+    # Extraer OHLCV guardado en last_candle.
     if "last_candle" in history_df.columns:
+        candle_data = (
+            history_df["last_candle"]
+            .apply(
+                lambda value: (
+                    value
+                    if isinstance(value, dict)
+                    else {}
+                )
+            )
+        )
+
         for field in [
             "timestamp",
             "open",
@@ -502,40 +529,78 @@ def load_watch_history(
             "volume",
             "atr",
         ]:
-            history_df[f"candle_{field}"] = (
-                history_df["last_candle"].apply(
-                    lambda candle: (
-                        candle.get(field)
-                        if isinstance(candle, dict)
-                        else None
-                    )
-                )
+            history_df[
+                f"candle_{field}"
+            ] = candle_data.apply(
+                lambda candle: candle.get(field)
             )
 
-    if "compression_updated_ts" in history_df.columns:
+    if (
+        "compression_updated_ts"
+        in history_df.columns
+    ):
+        numeric_updated_ts = pd.to_numeric(
+            history_df[
+                "compression_updated_ts"
+            ],
+            errors="coerce",
+        )
+
         history_df["timestamp"] = (
             pd.to_datetime(
-                pd.to_numeric(
-                    history_df[
-                        "compression_updated_ts"
-                    ],
-                    errors="coerce",
-                ),
+                numeric_updated_ts,
                 unit="ms",
                 utc=True,
                 errors="coerce",
             )
-            .dt.tz_convert(
-                "America/Argentina/Cordoba"
+            .dt.tz_convert(timezone)
+        )
+
+        history_df = (
+            history_df.sort_values(
+                "compression_updated_ts",
+                ascending=True,
             )
         )
 
-        history_df = history_df.sort_values(
-            "compression_updated_ts",
-            ascending=True,
-        )
+    if limit is not None:
+        try:
+            normalized_limit = int(limit)
+        except (TypeError, ValueError):
+            normalized_limit = 0
 
-    return history_df.reset_index(drop=True)
+        if normalized_limit > 0:
+            history_df = history_df.tail(
+                normalized_limit
+            )
+
+    return history_df.reset_index(
+        drop=True
+    )
+
+
+def load_watch_history(
+    symbol,
+    compression_created_ts=None,
+    base_dir="compression_watch_journal",
+    limit=None,
+):
+    path = (
+        Path(base_dir)
+        / f"{str(symbol).upper()}.jsonl"
+    )
+
+    return load_watch_history_cached(
+        path=path,
+        modified_ns=get_file_modified_ns(
+            path
+        ),
+        compression_created_ts=(
+            compression_created_ts
+        ),
+        limit=limit,
+        timezone=TZ,
+    )
 
 def load_all_entry_ready_events():
     modified_ns = get_file_modified_ns(
