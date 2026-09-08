@@ -132,12 +132,20 @@ st.sidebar.button(
     on_click=st.cache_data.clear,
 )
 
-@st.cache_data(ttl=10)
-def load_csv_cached(path):
+@st.cache_data(show_spinner=False)
+def load_csv_cached(
+    path,
+    modified_ns,
+):
     path = Path(path)
 
     if not path.exists():
         return pd.DataFrame()
+    
+    print(
+        f"[DASHBOARD CSV] reading {path} "
+        f"mtime={modified_ns}"
+    )
 
     return pd.read_csv(path)
 
@@ -5745,8 +5753,15 @@ def load_status():
 # =========================
 # LOAD DATA
 # =========================
-df = load_csv_cached(TRADES_FILE)
-paper_df = load_csv_cached(PAPER_SIGNALS_FILE)
+df = load_csv_cached(
+    TRADES_FILE,
+    get_file_modified_ns(TRADES_FILE),
+)
+
+paper_df = load_csv_cached(
+    PAPER_SIGNALS_FILE,
+    get_file_modified_ns(PAPER_SIGNALS_FILE),
+)
 
 # =========================
 # CLEAN NUMERIC COLUMNS
@@ -20451,7 +20466,11 @@ with tab_experiment_comparator:
         )
 
     else:
-        dynamic_raw_df = load_csv_cached(comparator_file)
+        dynamic_raw_df = load_csv_cached(
+            comparator_file,
+            get_file_modified_ns(comparator_file),
+        )
+        
         original_comparison_df = normalize_experiment_trades(
             df_raw,
             source="ORIGINAL",
@@ -20941,15 +20960,24 @@ with tab_tp_sl_replay:
     st.subheader("🧪 TP / SL Post-Trade Replay")
 
     replay_df = load_csv_cached(
-        POST_TRADE_REPLAY_FILE
+        POST_TRADE_REPLAY_FILE,
+        get_file_modified_ns(
+            POST_TRADE_REPLAY_FILE
+        ),
     )
 
     scenario_df = load_csv_cached(
-        TP_SL_SCENARIOS_FILE
+        TP_SL_SCENARIOS_FILE,
+        get_file_modified_ns(
+            TP_SL_SCENARIOS_FILE
+        ),
     )
 
     partial_df = load_csv_cached(
-        PARTIAL_TP_SCENARIOS_FILE
+        PARTIAL_TP_SCENARIOS_FILE,
+        get_file_modified_ns(
+            PARTIAL_TP_SCENARIOS_FILE
+        ),
     )
 
     missing_reports = []
