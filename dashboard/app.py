@@ -6240,8 +6240,6 @@ st.sidebar.caption(f"Filtered trades: {len(df_view)}")
 def build_mfe_mae_report_cached(df):
     return build_mfe_mae_report(df)
 
-mfe_report = build_mfe_mae_report_cached(df_view)
-
 # =========================
 # SYSTEM STATUS
 # =========================
@@ -10793,6 +10791,15 @@ if selected_section == "btc_alignment":
 if selected_section == "mfe_mae":
     st.markdown("---")
     st.subheader("📐 MFE / MAE Analytics")
+    
+    with st.spinner(
+        "Calculating MFE / MAE report..."
+    ):
+        mfe_report = (
+            build_mfe_mae_report_cached(
+                df_view
+            )
+        )
 
     if not mfe_report:
         st.info("No MFE/MAE data available yet.")
