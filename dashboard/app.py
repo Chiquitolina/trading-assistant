@@ -265,8 +265,32 @@ def fmt_price_for_display(x, decimals=10):
         return f"{float(x):.{decimals}f}".rstrip("0").rstrip(".")
     except Exception:
         return str(x)
+
+@st.cache_data(show_spinner=False)
+def load_position_snapshot_cached(
+    snapshot_path,
+    modified_ns,
+):
+    snapshot_path = Path(snapshot_path)
+
+    if not snapshot_path.exists():
+        return None
+
+    try:
+        with open(
+            snapshot_path,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            return json.load(file)
+
+    except (
+        OSError,
+        json.JSONDecodeError,
+        TypeError,
+    ):
+        return None
     
-@st.cache_data(ttl=2)
 def build_open_position_inspector_df(
     open_positions,
     snapshots_dir,
@@ -297,33 +321,28 @@ def build_open_position_inspector_df(
                 / f"{symbol}.json"
             )
 
-            if snapshot_path.exists():
-                try:
-                    with open(
-                        snapshot_path,
-                        "r",
-                        encoding="utf-8",
-                    ) as file:
-                        snapshot = json.load(file)
+            snapshot = load_position_snapshot_cached(
+                snapshot_path,
+                get_file_modified_ns(
+                    snapshot_path
+                ),
+            )
 
-                    position_data = (
-                        snapshot.get("position")
-                        or {}
+            if isinstance(snapshot, dict):
+                position_data = (
+                    snapshot.get("position")
+                    or {}
+                )
+
+                context_data = (
+                    snapshot.get("context")
+                    or position_data.get(
+                        "signal_context"
                     )
+                    or {}
+                )
 
-                    context_data = (
-                        snapshot.get("context")
-                        or position_data.get(
-                            "signal_context"
-                        )
-                        or {}
-                    )
-
-                    snapshot_available = True
-
-                except Exception:
-                    position_data = {}
-                    context_data = {}
+                snapshot_available = True
 
         # El exchange prevalece para mark price,
         # quantity y PnL actuales.
