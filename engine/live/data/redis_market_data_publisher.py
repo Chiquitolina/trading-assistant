@@ -1,5 +1,4 @@
 import json
-import time
 
 import redis
 
@@ -153,12 +152,7 @@ class RedisMarketDataPublisher:
         timeframe = normalize_timeframe(
             kline.get("i")
         )
-
-        event_timestamp = int(
-            msg.get("E")
-            or int(time.time() * 1000)
-        )
-
+        
         if timeframe == "1m":
             self._publish_price(
                 symbol=symbol,
