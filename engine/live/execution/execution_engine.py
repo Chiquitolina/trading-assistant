@@ -15,6 +15,141 @@ from engine.live.state.snapshot_manager import SnapshotManager
 from config.strategies.v1 import SYMBOLS, MAX_GLOBAL_POSITIONS
 
 class ExecutionEngine:
+    
+    @staticmethod
+    def _multitimeframe_journal_context(ctx):
+        ctx = ctx if isinstance(ctx, dict) else {}
+
+        journal_context = {
+            "main_tf": ctx.get("main_tf"),
+            "signal_context_tf": ctx.get(
+                "signal_context_tf"
+            ),
+            "swing_lookback": ctx.get(
+                "swing_lookback"
+            ),
+            "ema100_5m": ctx.get("ema100_5m"),
+        }
+
+        # Valores absolutos de EMA para todos los TF.
+        for timeframe in (
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "4h",
+        ):
+            for ema_period in (20, 50, 99):
+                field_name = (
+                    f"ema{ema_period}_{timeframe}"
+                )
+
+                journal_context[field_name] = ctx.get(
+                    field_name
+                )
+
+        # Las distancias 15m/1h/4h ya se escriben
+        # explícitamente en el journal actual.
+        # Aquí agregamos las nuevas de 5m y 30m.
+        for timeframe in ("5m", "30m"):
+            for ema_period in (20, 50, 99):
+                field_name = (
+                    f"dist_ema{ema_period}_"
+                    f"{timeframe}_pct"
+                )
+
+                journal_context[field_name] = ctx.get(
+                    field_name
+                )
+
+        # Los swings 15m/1h/4h ya se escriben
+        # explícitamente. Agregamos 5m y 30m.
+        for timeframe in ("5m", "30m"):
+            for field_prefix in (
+                "swing_low",
+                "swing_high",
+                "dist_swing_low",
+                "dist_swing_high",
+                "near_swing_low",
+                "near_swing_high",
+            ):
+                suffix = (
+                    "_pct"
+                    if field_prefix.startswith("dist_")
+                    else ""
+                )
+
+                field_name = (
+                    f"{field_prefix}_"
+                    f"{timeframe}"
+                    f"{suffix}"
+                )
+
+                journal_context[field_name] = ctx.get(
+                    field_name
+                )
+
+        return journal_context
+    
+    @staticmethod
+    def _btc_timeframe_journal_context(ctx):
+        ctx = ctx if isinstance(ctx, dict) else {}
+
+        journal_context = {}
+
+        # Las métricas principales de 15m, 1h y 4h
+        # ya se escriben explícitamente en log_trade().
+        # Aquí agregamos las nuevas de 5m y 30m.
+        for timeframe in (
+            "5m",
+            "30m",
+        ):
+            field_names = [
+                f"btc_corr_{timeframe}",
+                f"btc_beta_{timeframe}",
+                f"btc_r2_{timeframe}",
+                f"symbol_move_{timeframe}_pct",
+                f"btc_move_{timeframe}_pct",
+                (
+                    f"btc_expected_move_"
+                    f"{timeframe}_pct"
+                ),
+                (
+                    f"btc_residual_move_"
+                    f"{timeframe}_pct"
+                ),
+            ]
+
+            for field_name in field_names:
+                journal_context[field_name] = ctx.get(
+                    field_name
+                )
+
+        # Guarda si el cálculo estuvo disponible
+        # y, si no, la causa.
+        for timeframe in (
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "4h",
+        ):
+            available_field = (
+                f"btc_corr_available_{timeframe}"
+            )
+            reason_field = (
+                f"btc_corr_reason_{timeframe}"
+            )
+
+            journal_context[
+                available_field
+            ] = ctx.get(available_field)
+
+            journal_context[
+                reason_field
+            ] = ctx.get(reason_field)
+
+        return journal_context
 
     def __init__(self, exchange, position_manager, strategy, symbol):
         self.exchange = exchange
@@ -599,6 +734,14 @@ class ExecutionEngine:
 
             compression_shape=ctx.get("compression_shape"),
             compression_quality_label=ctx.get("compression_quality_label"),
+            
+            **self._multitimeframe_journal_context(
+                ctx
+            ),
+            
+            **self._btc_timeframe_journal_context(
+                ctx
+            ),
         )
 
         try:
@@ -2026,6 +2169,14 @@ class ExecutionEngine:
 
             compression_shape=ctx.get("compression_shape"),
             compression_quality_label=ctx.get("compression_quality_label"),
+            
+            **self._multitimeframe_journal_context(
+                ctx
+            ),
+            
+            **self._btc_timeframe_journal_context(
+                ctx
+            ),
         )
         
         try:

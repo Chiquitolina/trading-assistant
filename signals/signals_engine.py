@@ -726,6 +726,10 @@ class SignalEngine:
         candles_1m = self.buffer.get_candles(symbol, "1m")
         candles_5m = self.buffer.get_candles(symbol, "5m")
         candles_trigger = self.buffer.get_candles(symbol, self.trigger_tf)
+        candles_30m = self.buffer.get_candles(
+            symbol,
+            "30m",
+        )
         candles_1h = self.buffer.get_candles(symbol, "1h")
         candles_4h = self.buffer.get_candles(symbol, "4h")
 
@@ -755,6 +759,9 @@ class SignalEngine:
         
         df_trigger = pd.DataFrame(candles_trigger) if candles_trigger else pd.DataFrame()
         df_15m = pd.DataFrame(self.buffer.get_candles(symbol, "15m") or [])
+        df_30m = pd.DataFrame(
+            candles_30m
+        ) if candles_30m else pd.DataFrame()
         quote_volume_24h = quote_volume_24h_from_15m(df_15m)
         df_1h = pd.DataFrame(candles_1h) if candles_1h else pd.DataFrame()
         df_4h = pd.DataFrame(candles_4h) if candles_4h else pd.DataFrame()
@@ -764,6 +771,12 @@ class SignalEngine:
 
         if not df_15m.empty:
             df_15m = add_atr(df_15m, period=14)
+            
+        if not df_30m.empty:
+            df_30m = add_atr(
+                df_30m,
+                period=14,
+            )
 
         if not df_1h.empty:
             df_1h = add_atr(df_1h, period=14)
@@ -775,10 +788,10 @@ class SignalEngine:
             df_5m["close"],
             window=100
         ).ema_indicator()
-
+        
         df_5m["ema20"] = EMAIndicator(
             df_5m["close"],
-            window=20
+            window=20,
         ).ema_indicator()
 
         for n in [20, 34, 50]:
@@ -836,6 +849,13 @@ class SignalEngine:
             if not df_15m.empty and "atr" in df_15m.columns
             else None
         )
+        
+        atr_30m = (
+            df_30m.iloc[-1]["atr"]
+            if not df_30m.empty
+            and "atr" in df_30m.columns
+            else None
+        )
 
         atr_1h = (
             df_1h.iloc[-1]["atr"]
@@ -861,12 +881,26 @@ class SignalEngine:
             return None
 
         atr_5m_pct = (atr_5m / signal_price) * 100
+        
+        swing_ctx_5m = build_swing_context(
+            df=df_5m,
+            price=signal_price,
+            atr=atr_5m,
+            near_mult=1.2,
+        )
 
         swing_ctx_15m = build_swing_context(
             df=df_15m,
             price=signal_price,
             atr=atr_15m,
             near_mult=1.2,
+        )
+        
+        swing_ctx_30m = build_swing_context(
+            df=df_30m,
+            price=signal_price,
+            atr=atr_30m,
+            near_mult=1.1,
         )
 
         swing_ctx_1h = build_swing_context(
@@ -892,9 +926,25 @@ class SignalEngine:
 
         green_candles_last_10, red_candles_last_10 = count_candle_colors(df_15m, 10)
         
-        ema20_15m, ema50_15m, ema99_15m = add_htf_emas(df_15m)
-        ema20_1h, ema50_1h, ema99_1h = add_htf_emas(df_1h)
-        ema20_4h, ema50_4h, ema99_4h = add_htf_emas(df_4h)
+        ema20_5m_ctx, ema50_5m, ema99_5m = add_htf_emas(
+            df_5m
+        )
+
+        ema20_15m, ema50_15m, ema99_15m = add_htf_emas(
+            df_15m
+        )
+
+        ema20_30m, ema50_30m, ema99_30m = add_htf_emas(
+            df_30m
+        )
+
+        ema20_1h, ema50_1h, ema99_1h = add_htf_emas(
+            df_1h
+        )
+
+        ema20_4h, ema50_4h, ema99_4h = add_htf_emas(
+            df_4h
+        )
 
         dist_ema50_15m_pct = ema_distance_pct(signal_price, ema50_15m)
         dist_ema99_15m_pct = ema_distance_pct(signal_price, ema99_15m)
@@ -908,6 +958,32 @@ class SignalEngine:
         dist_ema20_15m_pct = ema_distance_pct(signal_price, ema20_15m)
         dist_ema20_1h_pct = ema_distance_pct(signal_price, ema20_1h)
         dist_ema20_4h_pct = ema_distance_pct(signal_price, ema20_4h)
+        
+        dist_ema20_5m_pct = ema_distance_pct(
+            signal_price,
+            ema20_5m_ctx,
+        )
+        dist_ema50_5m_pct = ema_distance_pct(
+            signal_price,
+            ema50_5m,
+        )
+        dist_ema99_5m_pct = ema_distance_pct(
+            signal_price,
+            ema99_5m,
+        )
+
+        dist_ema20_30m_pct = ema_distance_pct(
+            signal_price,
+            ema20_30m,
+        )
+        dist_ema50_30m_pct = ema_distance_pct(
+            signal_price,
+            ema50_30m,
+        )
+        dist_ema99_30m_pct = ema_distance_pct(
+            signal_price,
+            ema99_30m,
+        )
         
         #if self.debug:
         #    print(
@@ -1014,6 +1090,9 @@ class SignalEngine:
             symbol=symbol,
             signal_price=float(signal_price),
             signal_ts=signal_ts,
+            main_tf=self.trigger_tf,
+            signal_context_tf=self.trigger_tf,
+            swing_lookback=SWING_LOOKBACK,
 
             # =========================
             # CORE SIGNAL
@@ -1052,30 +1131,62 @@ class SignalEngine:
             # =========================
             # 5m EMA CONTEXT
             # =========================
-            ema20_5m=ema20_now,
+            ema20_5m=ema20_5m_ctx,
+            ema50_5m=ema50_5m,
+            ema99_5m=ema99_5m,
             ema100_5m=ema100,
 
+            dist_ema20_5m_pct=dist_ema20_5m_pct,
+            dist_ema50_5m_pct=dist_ema50_5m_pct,
+            dist_ema99_5m_pct=dist_ema99_5m_pct,
+
             # =========================
-            # HTF EMA CONTEXT
+            # 15m EMA CONTEXT
             # =========================
+            ema20_15m=ema20_15m,
             ema50_15m=ema50_15m,
             ema99_15m=ema99_15m,
+
+            dist_ema20_15m_pct=dist_ema20_15m_pct,
             dist_ema50_15m_pct=dist_ema50_15m_pct,
             dist_ema99_15m_pct=dist_ema99_15m_pct,
 
+            # =========================
+            # 30m EMA CONTEXT
+            # =========================
+            ema20_30m=ema20_30m,
+            ema50_30m=ema50_30m,
+            ema99_30m=ema99_30m,
+
+            dist_ema20_30m_pct=dist_ema20_30m_pct,
+            dist_ema50_30m_pct=dist_ema50_30m_pct,
+            dist_ema99_30m_pct=dist_ema99_30m_pct,
+
+            # =========================
+            # 1h EMA CONTEXT
+            # =========================
+            ema20_1h=ema20_1h,
             ema50_1h=ema50_1h,
             ema99_1h=ema99_1h,
+
+            dist_ema20_1h_pct=dist_ema20_1h_pct,
             dist_ema50_1h_pct=dist_ema50_1h_pct,
             dist_ema99_1h_pct=dist_ema99_1h_pct,
 
+            # =========================
+            # 4h EMA CONTEXT
+            # =========================
+            ema20_4h=ema20_4h,
             ema50_4h=ema50_4h,
             ema99_4h=ema99_4h,
+
+            dist_ema20_4h_pct=dist_ema20_4h_pct,
             dist_ema50_4h_pct=dist_ema50_4h_pct,
             dist_ema99_4h_pct=dist_ema99_4h_pct,
 
             htf_bullish=htf_bullish,
             htf_bearish=htf_bearish,
-
+            
             # =========================
             # LEGACY 1m SWING CONTEXT
             # =========================
@@ -1083,6 +1194,24 @@ class SignalEngine:
             swing_high=swing_high,
             near_swing_low=near_swing_low,
             near_swing_high=near_swing_high,
+            
+            # =========================
+            # 5m SWING CONTEXT
+            # =========================
+            swing_low_5m=swing_ctx_5m["swing_low"],
+            swing_high_5m=swing_ctx_5m["swing_high"],
+            dist_swing_low_5m_pct=(
+                swing_ctx_5m["dist_swing_low_pct"]
+            ),
+            dist_swing_high_5m_pct=(
+                swing_ctx_5m["dist_swing_high_pct"]
+            ),
+            near_swing_low_5m=(
+                swing_ctx_5m["near_swing_low"]
+            ),
+            near_swing_high_5m=(
+                swing_ctx_5m["near_swing_high"]
+            ),
 
             # =========================
             # 15m SWING CONTEXT
@@ -1093,6 +1222,24 @@ class SignalEngine:
             dist_swing_high_15m_pct=swing_ctx_15m["dist_swing_high_pct"],
             near_swing_low_15m=swing_ctx_15m["near_swing_low"],
             near_swing_high_15m=swing_ctx_15m["near_swing_high"],
+            
+            # =========================
+            # 30m SWING CONTEXT
+            # =========================
+            swing_low_30m=swing_ctx_30m["swing_low"],
+            swing_high_30m=swing_ctx_30m["swing_high"],
+            dist_swing_low_30m_pct=(
+                swing_ctx_30m["dist_swing_low_pct"]
+            ),
+            dist_swing_high_30m_pct=(
+                swing_ctx_30m["dist_swing_high_pct"]
+            ),
+            near_swing_low_30m=(
+                swing_ctx_30m["near_swing_low"]
+            ),
+            near_swing_high_30m=(
+                swing_ctx_30m["near_swing_high"]
+            ),
 
             # =========================
             # 1h SWING CONTEXT
@@ -1113,10 +1260,6 @@ class SignalEngine:
             dist_swing_high_4h_pct=swing_ctx_4h["dist_swing_high_pct"],
             near_swing_low_4h=swing_ctx_4h["near_swing_low"],
             near_swing_high_4h=swing_ctx_4h["near_swing_high"],
-            
-            dist_ema20_15m_pct=dist_ema20_15m_pct,
-            dist_ema20_1h_pct=dist_ema20_1h_pct,
-            dist_ema20_4h_pct=dist_ema20_4h_pct,
             
             move_5_bars_pct=move_5_bars_pct,
             move_10_bars_pct=move_10_bars_pct,
