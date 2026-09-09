@@ -218,7 +218,7 @@ class WSClient:
                 self._group_last_message[group_id] = 0.0
                 self._group_message_count[group_id] = 0
 
-                socket_key = self.twm.start_multiplex_socket(
+                socket_key = self.twm.start_futures_multiplex_socket(
                     streams=streams,
                     callback=lambda msg, gid=group_id: self._handle_message(
                         msg,
