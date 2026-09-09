@@ -12,6 +12,7 @@ from engine.live.data.redis_market_data_protocol import (
     STATUS_KEY,
     consumer_cursor_key,
     history_key,
+    market_flow_key,
 )
 
 
@@ -60,6 +61,16 @@ class RedisMarketDataProvider:
         self.pubsub = None
 
         self.stop_event = threading.Event()
+        
+        self.market_flow_cache = {}
+
+        self.market_flow_cache_lock = (
+            threading.Lock()
+        )
+
+        self.market_flow_cache_ttl_seconds = 5
+
+        self.market_flow_last_error = None
 
     @property
     def is_connected(self):
@@ -102,6 +113,313 @@ class RedisMarketDataProvider:
 
         except Exception:
             return False
+        
+    def get_market_flow_snapshot(
+        self,
+        timeframe="4h",
+        min_coverage_pct=80.0,
+        max_age_seconds=18_000,
+        force_refresh=False,
+    ):
+        timeframe = str(
+            timeframe
+        ).strip().lower()
+
+        timeframe_ms = {
+            "4h": 4 * 60 * 60 * 1000,
+        }.get(timeframe)
+
+        if timeframe_ms is None:
+            return self._reject_market_flow(
+                f"unsupported_timeframe:{timeframe}"
+            )
+
+        now_monotonic = time.monotonic()
+
+        with self.market_flow_cache_lock:
+            cached = (
+                self.market_flow_cache.get(
+                    timeframe
+                )
+            )
+
+            if (
+                not force_refresh
+                and cached is not None
+                and (
+                    now_monotonic
+                    - cached["loaded_at"]
+                    < self.market_flow_cache_ttl_seconds
+                )
+            ):
+                return cached["snapshot"]
+
+        try:
+            raw_snapshot = self.redis.get(
+                market_flow_key(
+                    timeframe
+                )
+            )
+        except Exception as exc:
+            return self._reject_market_flow(
+                f"redis_error:{exc}"
+            )
+
+        if not raw_snapshot:
+            return self._reject_market_flow(
+                "snapshot_missing"
+            )
+
+        try:
+            snapshot = json.loads(
+                raw_snapshot
+            )
+        except (
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            return self._reject_market_flow(
+                "invalid_json"
+            )
+
+        if not isinstance(snapshot, dict):
+            return self._reject_market_flow(
+                "snapshot_not_dict"
+            )
+
+        if (
+            snapshot.get("type")
+            != "market_flow_snapshot"
+        ):
+            return self._reject_market_flow(
+                "invalid_snapshot_type"
+            )
+
+        snapshot_timeframe = str(
+            snapshot.get(
+                "timeframe",
+                "",
+            )
+        ).lower()
+
+        if snapshot_timeframe != timeframe:
+            return self._reject_market_flow(
+                "timeframe_mismatch"
+            )
+
+        try:
+            candle_timestamp = int(
+                snapshot["candle_timestamp"]
+            )
+
+            calculated_at = int(
+                snapshot["calculated_at"]
+            )
+
+            coverage_pct = float(
+                snapshot["coverage_pct"]
+            )
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            return self._reject_market_flow(
+                "invalid_required_fields"
+            )
+
+        if coverage_pct < min_coverage_pct:
+            return self._reject_market_flow(
+                "coverage_below_minimum"
+            )
+
+        candle_close_timestamp = (
+            candle_timestamp
+            + timeframe_ms
+        )
+
+        now_ms = int(
+            time.time() * 1000
+        )
+
+        # Un pequeño margen tolera diferencias
+        # mínimas de reloj entre procesos.
+        if (
+            candle_close_timestamp
+            > now_ms + 5_000
+        ):
+            return self._reject_market_flow(
+                "candle_not_closed"
+            )
+
+        snapshot_age_seconds = max(
+            0.0,
+            (
+                now_ms
+                - candle_close_timestamp
+            ) / 1000,
+        )
+
+        if (
+            snapshot_age_seconds
+            > max_age_seconds
+        ):
+            return self._reject_market_flow(
+                "snapshot_stale"
+            )
+
+        if calculated_at > now_ms + 5_000:
+            return self._reject_market_flow(
+                "calculated_at_in_future"
+            )
+
+        symbols = snapshot.get(
+            "symbols"
+        )
+
+        if not isinstance(symbols, dict):
+            return self._reject_market_flow(
+                "invalid_symbols_payload"
+            )
+
+        validated_snapshot = dict(
+            snapshot
+        )
+
+        validated_snapshot[
+            "candle_close_timestamp"
+        ] = candle_close_timestamp
+
+        validated_snapshot[
+            "snapshot_age_seconds"
+        ] = round(
+            snapshot_age_seconds,
+            4,
+        )
+
+        with self.market_flow_cache_lock:
+            self.market_flow_cache[
+                timeframe
+            ] = {
+                "loaded_at": (
+                    now_monotonic
+                ),
+                "snapshot": (
+                    validated_snapshot
+                ),
+            }
+
+        self.market_flow_last_error = None
+
+        return validated_snapshot
+
+    def get_symbol_market_flow(
+        self,
+        symbol,
+        timeframe="4h",
+        min_coverage_pct=80.0,
+        max_age_seconds=18_000,
+    ):
+        if not symbol:
+            return self._reject_market_flow(
+                "symbol_required"
+            )
+
+        symbol = str(
+            symbol
+        ).strip().upper()
+
+        snapshot = (
+            self.get_market_flow_snapshot(
+                timeframe=timeframe,
+                min_coverage_pct=(
+                    min_coverage_pct
+                ),
+                max_age_seconds=(
+                    max_age_seconds
+                ),
+            )
+        )
+
+        if snapshot is None:
+            return None
+
+        symbol_metrics = (
+            snapshot["symbols"].get(
+                symbol
+            )
+        )
+
+        if not isinstance(
+            symbol_metrics,
+            dict,
+        ):
+            return self._reject_market_flow(
+                f"symbol_unavailable:{symbol}"
+            )
+
+        result = dict(
+            symbol_metrics
+        )
+
+        result.update({
+            "market_breadth_4h": (
+                snapshot.get(
+                    "market_breadth_4h"
+                )
+            ),
+            "btc_return_pct_4h": (
+                snapshot.get(
+                    "btc_return_pct_4h"
+                )
+            ),
+            "market_flow_timestamp": (
+                snapshot.get(
+                    "candle_timestamp"
+                )
+            ),
+            "market_flow_close_timestamp": (
+                snapshot.get(
+                    "candle_close_timestamp"
+                )
+            ),
+            "market_flow_calculated_at": (
+                snapshot.get(
+                    "calculated_at"
+                )
+            ),
+            "market_flow_age_seconds": (
+                snapshot.get(
+                    "snapshot_age_seconds"
+                )
+            ),
+            "market_flow_coverage_pct": (
+                snapshot.get(
+                    "coverage_pct"
+                )
+            ),
+            "market_flow_universe_size": (
+                snapshot.get(
+                    "valid_universe_size"
+                )
+            ),
+        })
+
+        self.market_flow_last_error = None
+
+        return result
+
+    def _reject_market_flow(
+        self,
+        reason,
+    ):
+        self.market_flow_last_error = str(
+            reason
+        )
+
+        return None
 
     def load_history(self):
         self._wait_until_ready()
