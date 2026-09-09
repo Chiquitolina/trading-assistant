@@ -10,10 +10,10 @@ from engine.live.data.redis_market_data_protocol import (
     PRICE_CHANNEL,
     history_key,
     last_closed_key,
+    market_flow_key,
     normalize_symbol,
     normalize_timeframe,
 )
-
 
 class RedisMarketDataPublisher:
     def __init__(
@@ -32,6 +32,51 @@ class RedisMarketDataPublisher:
 
     def ping(self):
         return self.redis.ping()
+    
+    def publish_market_flow_snapshot(
+        self,
+        timeframe: str,
+        snapshot: dict,
+    ):
+        timeframe = normalize_timeframe(
+            timeframe
+        )
+
+        if not isinstance(snapshot, dict):
+            raise TypeError(
+                "snapshot must be a dict"
+            )
+
+        target_key = market_flow_key(
+            timeframe
+        )
+
+        serialized = self._serialize(
+            snapshot
+        )
+
+        self.redis.set(
+            target_key,
+            serialized,
+        )
+
+        return {
+            "key": target_key,
+            "timeframe": timeframe,
+            "candle_timestamp": (
+                snapshot.get(
+                    "candle_timestamp"
+                )
+            ),
+            "valid_universe_size": (
+                snapshot.get(
+                    "valid_universe_size"
+                )
+            ),
+            "coverage_pct": snapshot.get(
+                "coverage_pct"
+            ),
+        }
 
     def replace_history(
         self,

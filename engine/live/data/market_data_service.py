@@ -14,10 +14,16 @@ from engine.live.data.redis_market_data_protocol import (
     PRODUCER_LOCK_KEY,
     PRODUCER_LOCK_TTL_SECONDS,
     STATUS_KEY,
+    history_key,
 )
 from engine.live.data.redis_market_data_publisher import (
     RedisMarketDataPublisher,
 )
+
+from engine.live.data.market_flow_analyzer import (
+    MarketFlowAnalyzer,
+)
+
 from engine.live.ws.ws_client import WSClient
 
 
@@ -31,6 +37,23 @@ DAYS_BY_TF = {
     "1d": 180,
 }
 
+MARKET_FLOW_TIMEFRAME = "4h"
+
+MARKET_FLOW_TIMEFRAME_MS = (
+    4 * 60 * 60 * 1000
+)
+
+# Esperamos que termine de llegar el batch
+# antes de calcular el ranking global.
+MARKET_FLOW_SETTLE_SECONDS = 15
+
+# Evita publicar rankings construidos sobre
+# una porción demasiado pequeña del universo.
+MARKET_FLOW_MIN_COVERAGE_PCT = 80.0
+
+# Tiempo máximo que conservamos un batch
+# incompleto esperando nuevos cierres.
+MARKET_FLOW_MAX_WAIT_SECONDS = 60
 
 class MarketDataService:
     def __init__(
@@ -53,6 +76,23 @@ class MarketDataService:
             port=redis_port,
             db=redis_db,
         )
+        
+        self.market_flow_analyzer = (
+            MarketFlowAnalyzer(
+                redis_client=(
+                    self.publisher.redis
+                ),
+                baseline_candles=42,
+            )
+        )
+
+        self.market_flow_lock = (
+            threading.Lock()
+        )
+
+        self.market_flow_batches = {}
+
+        self.last_market_flow_timestamp = None
 
         self.chunk_size = chunk_size
         self.stale_after = stale_after
@@ -92,6 +132,8 @@ class MarketDataService:
             self._write_status()
 
             self._load_all_history()
+            
+            self._publish_initial_market_flow()
 
             self.phase = "CONNECTING_WS"
             self._write_status()
@@ -117,6 +159,8 @@ class MarketDataService:
                     self.phase = "READY"
                 else:
                     self.phase = "CONNECTING_WS"
+                    
+                self._maybe_publish_market_flow()
 
                 self.stop_event.wait(1)
 
@@ -254,10 +298,403 @@ class MarketDataService:
             f"History unavailable: "
             f"{symbol} {timeframe}"
         )
+        
+    def _publish_initial_market_flow(
+        self,
+    ):
+        print(
+            "[MARKET FLOW] "
+            "building initial snapshot"
+        )
+
+        raw_btc_history = (
+            self.publisher.redis.lrange(
+                history_key(
+                    "BTCUSDT",
+                    MARKET_FLOW_TIMEFRAME,
+                ),
+                -3,
+                -1,
+            )
+        )
+
+        if not raw_btc_history:
+            print(
+                "[MARKET FLOW] "
+                "initial snapshot skipped: "
+                "BTC 4h history unavailable"
+            )
+            return
+
+        now_ms = int(
+            time.time() * 1000
+        )
+
+        candle_timestamp = None
+
+        for raw_candle in reversed(
+            raw_btc_history
+        ):
+            try:
+                candle = json.loads(
+                    raw_candle
+                )
+
+                candidate_timestamp = int(
+                    candle["timestamp"]
+                )
+
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
+                continue
+
+            candidate_close_timestamp = (
+                candidate_timestamp
+                + MARKET_FLOW_TIMEFRAME_MS
+            )
+
+            if (
+                candidate_close_timestamp
+                <= now_ms
+            ):
+                candle_timestamp = (
+                    candidate_timestamp
+                )
+                break
+
+        if candle_timestamp is None:
+            print(
+                "[MARKET FLOW] "
+                "initial snapshot skipped: "
+                "no fully closed BTC 4h candle"
+            )
+            return
+
+        try:
+            snapshot = (
+                self.market_flow_analyzer.calculate(
+                    symbols=self.symbols,
+                    timeframe=(
+                        MARKET_FLOW_TIMEFRAME
+                    ),
+                    candle_timestamp=(
+                        candle_timestamp
+                    ),
+                )
+            )
+
+        except Exception as exc:
+            print(
+                "[MARKET FLOW] "
+                "initial calculation failed "
+                f"error={exc}"
+            )
+            return
+
+        coverage_pct = float(
+            snapshot.get(
+                "coverage_pct",
+                0.0,
+            )
+        )
+
+        if (
+            coverage_pct
+            < MARKET_FLOW_MIN_COVERAGE_PCT
+        ):
+            print(
+                "[MARKET FLOW] "
+                "initial snapshot rejected "
+                f"timestamp={candle_timestamp} "
+                f"coverage={coverage_pct:.2f}% "
+                f"minimum="
+                f"{MARKET_FLOW_MIN_COVERAGE_PCT:.2f}%"
+            )
+            return
+
+        publication = (
+            self.publisher
+            .publish_market_flow_snapshot(
+                timeframe=(
+                    MARKET_FLOW_TIMEFRAME
+                ),
+                snapshot=snapshot,
+            )
+        )
+
+        self.last_market_flow_timestamp = (
+            candle_timestamp
+        )
+
+        print(
+            "[MARKET FLOW] "
+            "initial snapshot published "
+            f"key={publication['key']} "
+            f"timestamp={candle_timestamp} "
+            f"valid="
+            f"{snapshot['valid_universe_size']}/"
+            f"{snapshot['configured_universe_size']} "
+            f"coverage={coverage_pct:.2f}% "
+            f"breadth="
+            f"{snapshot['market_breadth_4h']}"
+        )
+        
+    def _on_ws_message(self, message):
+        result = (
+            self.publisher.publish_ws_message(
+                message
+            )
+        )
+
+        if not isinstance(result, dict):
+            return result
+
+        if (
+            result.get("type")
+            != "closed_candle"
+        ):
+            return result
+
+        timeframe = result.get(
+            "timeframe"
+        )
+
+        if (
+            timeframe
+            != MARKET_FLOW_TIMEFRAME
+        ):
+            return result
+
+        symbol = result.get("symbol")
+        candle_timestamp = result.get(
+            "timestamp"
+        )
+
+        if (
+            not symbol
+            or candle_timestamp is None
+        ):
+            return result
+
+        self._register_market_flow_close(
+            symbol=symbol,
+            candle_timestamp=(
+                candle_timestamp
+            ),
+        )
+
+        return result
+    
+    def _register_market_flow_close(
+        self,
+        symbol,
+        candle_timestamp,
+    ):
+        candle_timestamp = int(
+            candle_timestamp
+        )
+
+        now = time.monotonic()
+
+        with self.market_flow_lock:
+            batch = (
+                self.market_flow_batches.setdefault(
+                    candle_timestamp,
+                    {
+                        "symbols": set(),
+                        "first_seen_at": now,
+                        "last_seen_at": now,
+                    },
+                )
+            )
+
+            batch["symbols"].add(
+                symbol
+            )
+
+            batch["last_seen_at"] = now
+
+    def _maybe_publish_market_flow(
+        self,
+    ):
+        now = time.monotonic()
+
+        expected_symbols = len(
+            set(self.symbols)
+        )
+
+        batch_to_process = None
+
+        with self.market_flow_lock:
+            for candle_timestamp in sorted(
+                self.market_flow_batches
+            ):
+                batch = (
+                    self.market_flow_batches[
+                        candle_timestamp
+                    ]
+                )
+
+                received_symbols = len(
+                    batch["symbols"]
+                )
+
+                age_seconds = (
+                    now
+                    - batch["first_seen_at"]
+                )
+
+                quiet_seconds = (
+                    now
+                    - batch["last_seen_at"]
+                )
+
+                complete = (
+                    received_symbols
+                    >= expected_symbols
+                )
+
+                settled = (
+                    age_seconds
+                    >= MARKET_FLOW_SETTLE_SECONDS
+                    and quiet_seconds >= 3
+                )
+
+                timed_out = (
+                    age_seconds
+                    >= MARKET_FLOW_MAX_WAIT_SECONDS
+                )
+
+                if (
+                    complete
+                    or settled
+                    or timed_out
+                ):
+                    batch_to_process = {
+                        "candle_timestamp": (
+                            candle_timestamp
+                        ),
+                        "received_symbols": (
+                            received_symbols
+                        ),
+                        "expected_symbols": (
+                            expected_symbols
+                        ),
+                        "age_seconds": (
+                            age_seconds
+                        ),
+                    }
+
+                    del self.market_flow_batches[
+                        candle_timestamp
+                    ]
+
+                    break
+
+        if batch_to_process is None:
+            return
+
+        candle_timestamp = (
+            batch_to_process[
+                "candle_timestamp"
+            ]
+        )
+
+        if (
+            self.last_market_flow_timestamp
+            == candle_timestamp
+        ):
+            return
+
+        print(
+            "[MARKET FLOW] "
+            f"calculating tf="
+            f"{MARKET_FLOW_TIMEFRAME} "
+            f"timestamp={candle_timestamp} "
+            f"received="
+            f"{batch_to_process['received_symbols']}/"
+            f"{batch_to_process['expected_symbols']} "
+            f"waited="
+            f"{batch_to_process['age_seconds']:.1f}s"
+        )
+
+        try:
+            snapshot = (
+                self.market_flow_analyzer.calculate(
+                    symbols=self.symbols,
+                    timeframe=(
+                        MARKET_FLOW_TIMEFRAME
+                    ),
+                    candle_timestamp=(
+                        candle_timestamp
+                    ),
+                )
+            )
+
+        except Exception as exc:
+            print(
+                "[MARKET FLOW] "
+                f"calculation failed "
+                f"timestamp={candle_timestamp} "
+                f"error={exc}"
+            )
+            return
+
+        coverage_pct = float(
+            snapshot.get(
+                "coverage_pct",
+                0.0,
+            )
+        )
+
+        if (
+            coverage_pct
+            < MARKET_FLOW_MIN_COVERAGE_PCT
+        ):
+            print(
+                "[MARKET FLOW] "
+                "snapshot rejected "
+                f"timestamp={candle_timestamp} "
+                f"coverage={coverage_pct:.2f}% "
+                f"minimum="
+                f"{MARKET_FLOW_MIN_COVERAGE_PCT:.2f}%"
+            )
+            return
+
+        publication = (
+            self.publisher
+            .publish_market_flow_snapshot(
+                timeframe=(
+                    MARKET_FLOW_TIMEFRAME
+                ),
+                snapshot=snapshot,
+            )
+        )
+
+        self.last_market_flow_timestamp = (
+            candle_timestamp
+        )
+
+        print(
+            "[MARKET FLOW] "
+            "published "
+            f"key={publication['key']} "
+            f"timestamp={candle_timestamp} "
+            f"valid="
+            f"{snapshot['valid_universe_size']}/"
+            f"{snapshot['configured_universe_size']} "
+            f"coverage={coverage_pct:.2f}% "
+            f"breadth="
+            f"{snapshot['market_breadth_4h']}"
+        )
 
     def _start_websocket(self):
         self.ws = WSClient(
-            self.publisher.publish_ws_message,
+            self._on_ws_message,
             timeframes=self.timeframes,
             symbols=self.symbols,
             chunk_size=self.chunk_size,

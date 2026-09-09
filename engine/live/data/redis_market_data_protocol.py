@@ -14,6 +14,9 @@ PRICE_CHANNEL = f"{KEY_PREFIX}:price"
 # Los cierres deben poder recuperarse si un consumidor se desconecta
 CLOSED_CANDLES_STREAM = f"{KEY_PREFIX}:closed-candles"
 
+# Último snapshot cross-sectional del mercado
+MARKET_FLOW_KEY_PREFIX = f"{KEY_PREFIX}:market-flow"
+
 # Configuración inicial
 HISTORY_MAXLEN = 400
 CLOSED_STREAM_MAXLEN = 200_000
@@ -52,6 +55,14 @@ def last_closed_key(symbol: str, timeframe: str) -> str:
     return (
         f"{KEY_PREFIX}:last-closed:"
         f"{symbol}:{timeframe}"
+    )
+    
+def market_flow_key(timeframe: str) -> str:
+    timeframe = normalize_timeframe(timeframe)
+
+    return (
+        f"{MARKET_FLOW_KEY_PREFIX}:"
+        f"{timeframe}"
     )
 
 
