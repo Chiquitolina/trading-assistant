@@ -20,6 +20,7 @@ class CompressionStrategy:
         self,
         buffer,
         journal=None,
+        market_flow_provider=None,
         max_watch_candles=8,
         max_pullback_candles=5,
         pullback_max_pct=1.2,
@@ -28,6 +29,7 @@ class CompressionStrategy:
         self.stats = {}
         self.buffer = buffer
         self.journal = journal
+        self.market_flow_provider = market_flow_provider
 
         self.machine = CompressionStateMachine(
             max_watch_candles=max_watch_candles,
@@ -286,6 +288,113 @@ class CompressionStrategy:
 
     def _count_state(self, state):
         self.stats[state] = self.stats.get(state, 0) + 1
+            
+    def _get_market_flow_context(
+        self,
+        symbol: str,
+    ):
+        context = {
+            "market_flow_available": False,
+            "market_flow_error": None,
+
+            "market_flow_timestamp": None,
+            "market_flow_close_timestamp": None,
+            "market_flow_calculated_at": None,
+            "market_flow_age_seconds": None,
+            "market_flow_coverage_pct": None,
+            "market_flow_universe_size": None,
+
+            "market_breadth_4h": None,
+            "btc_return_pct_4h": None,
+
+            "return_pct_4h": None,
+            "return_rank_pct_4h": None,
+            "relative_volume_4h": None,
+            "volume_rank_pct_4h": None,
+        }
+
+        if self.market_flow_provider is None:
+            context["market_flow_error"] = (
+                "market_flow_provider_unavailable"
+            )
+            return context
+
+        getter = getattr(
+            self.market_flow_provider,
+            "get_symbol_market_flow",
+            None,
+        )
+
+        if not callable(getter):
+            context["market_flow_error"] = (
+                "market_flow_not_supported"
+            )
+            return context
+
+        try:
+            metrics = getter(
+                symbol,
+                "4h",
+            )
+        except Exception as exc:
+            context["market_flow_error"] = (
+                f"market_flow_read_failed:{exc}"
+            )
+            return context
+
+        if not isinstance(metrics, dict):
+            context["market_flow_error"] = getattr(
+                self.market_flow_provider,
+                "market_flow_last_error",
+                "market_flow_symbol_unavailable",
+            )
+            return context
+
+        context.update({
+            "market_flow_available": True,
+            "market_flow_error": None,
+
+            "market_flow_timestamp": metrics.get(
+                "market_flow_timestamp"
+            ),
+            "market_flow_close_timestamp": metrics.get(
+                "market_flow_close_timestamp"
+            ),
+            "market_flow_calculated_at": metrics.get(
+                "market_flow_calculated_at"
+            ),
+            "market_flow_age_seconds": metrics.get(
+                "market_flow_age_seconds"
+            ),
+            "market_flow_coverage_pct": metrics.get(
+                "market_flow_coverage_pct"
+            ),
+            "market_flow_universe_size": metrics.get(
+                "market_flow_universe_size"
+            ),
+
+            "market_breadth_4h": metrics.get(
+                "market_breadth_4h"
+            ),
+            "btc_return_pct_4h": metrics.get(
+                "btc_return_pct_4h"
+            ),
+
+            "return_pct_4h": metrics.get(
+                "return_pct_4h"
+            ),
+            "return_rank_pct_4h": metrics.get(
+                "return_rank_pct_4h"
+            ),
+            "relative_volume_4h": metrics.get(
+                "relative_volume_4h"
+            ),
+            "volume_rank_pct_4h": metrics.get(
+                "volume_rank_pct_4h"
+            ),
+        })
+
+        return context
 
     def _log(
         self,
@@ -302,6 +411,13 @@ class CompressionStrategy:
 
         if compression_state["state"] == "IDLE":
             return
+        
+        market_flow_context = {}
+
+        if compression_state["state"] == "WATCH_CREATED":
+            market_flow_context = (
+                self._get_market_flow_context(symbol)
+            )
 
         self.journal.log(
             symbol=symbol,
@@ -376,6 +492,7 @@ class CompressionStrategy:
                 "last_10_candles": prev_df[
                     ["open", "high", "low", "close", "volume"]
                 ].tail(10).to_dict("records"),
+                **market_flow_context,
             }
         )
 

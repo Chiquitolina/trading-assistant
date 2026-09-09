@@ -363,6 +363,7 @@ compression_watch_journal = CompressionWatchJournal()
 compression_strategy = CompressionStrategy(
     buffer=buffer,
     journal=compression_watch_journal,
+    market_flow_provider=market_data,
     max_watch_candles=8,
     max_pullback_candles=5,
     pullback_max_pct=1.2,
