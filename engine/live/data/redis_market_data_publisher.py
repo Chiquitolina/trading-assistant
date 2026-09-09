@@ -163,7 +163,7 @@ class RedisMarketDataPublisher:
             self._publish_price(
                 symbol=symbol,
                 price=float(kline["c"]),
-                timestamp=event_timestamp,
+                timestamp=int(kline["t"]),
             )
 
         if not kline.get("x"):
