@@ -35,7 +35,7 @@ class MarketFlowDashboardService:
     def get_snapshot(
         self,
         timeframe="4h",
-        min_coverage_pct=80.0,
+        min_coverage_pct=95.0,
         max_age_seconds=18_000,
     ):
         self.last_error = None

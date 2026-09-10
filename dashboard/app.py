@@ -42,6 +42,10 @@ from dashboard.services.trade_inspector_service import (
     TradeInspectorService,
 )
 
+from dashboard.services.market_flow_dashboard_service import (
+    MarketFlowDashboardService,
+)
+
 from dashboard.charts.trade_inspector_chart import (
     build_trade_inspector_chart,
 )
@@ -78,6 +82,25 @@ DYNAMIC_X4_TRADES_FILE = Path(
 ).expanduser().resolve()
 PAPER_SIGNALS_FILE = BASE_DIR / "paper_signals.csv"
 STATUS_FILE = BASE_DIR / "status.json"
+
+DASHBOARD_REDIS_HOST = os.getenv(
+    "REDIS_HOST",
+    "127.0.0.1",
+)
+
+DASHBOARD_REDIS_PORT = int(
+    os.getenv(
+        "REDIS_PORT",
+        "6379",
+    )
+)
+
+DASHBOARD_REDIS_DB = int(
+    os.getenv(
+        "REDIS_DB",
+        "0",
+    )
+)
 
 SYSTEM_DESCRIPTION_FILE = (
     BASE_DIR
@@ -118,6 +141,14 @@ STATUS_TTL_SECONDS = 10
 CANDLE_MINUTES = 15
 
 trade_inspector_service = TradeInspectorService()
+
+market_flow_dashboard_service = (
+    MarketFlowDashboardService(
+        host=DASHBOARD_REDIS_HOST,
+        port=DASHBOARD_REDIS_PORT,
+        db=DASHBOARD_REDIS_DB,
+    )
+)
 
 st.set_page_config(
     page_title="Trade Journal",
@@ -6875,6 +6906,480 @@ if selected_section == "overview":
             "Incluye trades reales + señales paper bloqueadas. "
             "Sirve para detectar si el sistema está recibiendo más señales en contexto BTC bullish o bearish."
         )
+        
+    # ==========================================
+    # MARKET FLOW 4H
+    # ==========================================
+
+    st.markdown("---")
+    st.subheader("🌊 Market Flow 4h")
+
+    st.caption(
+        "Lectura cross-sectional del mercado. "
+        "Combina fortaleza relativa, actividad de volumen "
+        "y participación general. Es contexto de research, "
+        "no una señal de entrada."
+    )
+
+    market_flow_snapshot = (
+        market_flow_dashboard_service
+        .get_snapshot("4h")
+    )
+
+    if market_flow_snapshot is None:
+        market_flow_error = (
+            market_flow_dashboard_service
+            .last_error
+        )
+
+        st.warning(
+            "Market Flow no disponible o no confiable. "
+            f"Motivo: {market_flow_error}"
+        )
+
+    else:
+        market_flow_df = (
+            market_flow_dashboard_service
+            .build_symbol_table(
+                market_flow_snapshot
+            )
+        )
+
+        if market_flow_df.empty:
+            st.warning(
+                "El snapshot está disponible, pero no "
+                "contiene métricas válidas por símbolo. "
+                f"Motivo: "
+                f"{market_flow_dashboard_service.last_error}"
+            )
+
+        else:
+            breadth = float(
+                market_flow_snapshot.get(
+                    "market_breadth_4h",
+                    0.0,
+                )
+            )
+
+            coverage = float(
+                market_flow_snapshot.get(
+                    "coverage_pct",
+                    0.0,
+                )
+            )
+
+            valid_universe = int(
+                market_flow_snapshot.get(
+                    "valid_universe_size",
+                    len(market_flow_df),
+                )
+            )
+
+            configured_universe = int(
+                market_flow_snapshot.get(
+                    "configured_universe_size",
+                    valid_universe,
+                )
+            )
+
+            positive_symbols = int(
+                market_flow_snapshot.get(
+                    "positive_symbols",
+                    0,
+                )
+            )
+
+            btc_return_4h = float(
+                market_flow_snapshot.get(
+                    "btc_return_pct_4h",
+                    0.0,
+                )
+            )
+
+            snapshot_age_seconds = float(
+                market_flow_snapshot.get(
+                    "market_flow_age_seconds",
+                    0.0,
+                )
+            )
+
+            snapshot_age_hours = (
+                snapshot_age_seconds / 3600
+            )
+
+            breadth_regime = (
+                market_flow_dashboard_service
+                .classify_market_breadth(
+                    breadth
+                )
+            )
+
+            snapshot_close_timestamp = (
+                market_flow_snapshot.get(
+                    "market_flow_close_timestamp"
+                )
+            )
+
+            snapshot_close_label = "Unknown"
+
+            if snapshot_close_timestamp:
+                snapshot_close_label = (
+                    pd.to_datetime(
+                        snapshot_close_timestamp,
+                        unit="ms",
+                        utc=True,
+                    )
+                    .tz_convert(TZ)
+                    .strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                )
+
+            mf1, mf2, mf3, mf4, mf5, mf6 = (
+                st.columns(6)
+            )
+
+            mf1.metric(
+                "Market Breadth 4h",
+                f"{breadth:.2f}%",
+            )
+
+            mf2.metric(
+                "Market Regime",
+                breadth_regime,
+            )
+
+            mf3.metric(
+                "Positive Symbols",
+                (
+                    f"{positive_symbols}"
+                    f" / {valid_universe}"
+                ),
+            )
+
+            mf4.metric(
+                "BTC Return 4h",
+                f"{btc_return_4h:+.2f}%",
+            )
+
+            mf5.metric(
+                "Coverage",
+                (
+                    f"{coverage:.2f}% "
+                    f"({valid_universe}/"
+                    f"{configured_universe})"
+                ),
+            )
+
+            mf6.metric(
+                "Snapshot Age",
+                f"{snapshot_age_hours:.2f}h",
+            )
+
+            if breadth < 30:
+                st.error(
+                    "Debilidad amplia: menos del 30% del "
+                    "universo terminó positivo en la última "
+                    "ventana de 4 horas."
+                )
+
+            elif breadth < 50:
+                st.warning(
+                    "Mercado débil o mixto: predominan los "
+                    "símbolos negativos, aunque existe "
+                    "participación alcista parcial."
+                )
+
+            elif breadth < 70:
+                st.success(
+                    "Participación saludable: la mayoría "
+                    "del universo acompaña el movimiento."
+                )
+
+            elif breadth < 85:
+                st.success(
+                    "Expansión amplia: existe participación "
+                    "positiva fuerte en gran parte del mercado."
+                )
+
+            else:
+                st.warning(
+                    "Participación extremadamente elevada: "
+                    "puede representar expansión fuerte, pero "
+                    "también un mercado sobreextendido."
+                )
+
+            st.caption(
+                f"Snapshot correspondiente al cierre "
+                f"{snapshot_close_label} ({TZ})."
+            )
+
+            # ======================================
+            # FLOW GROUP COUNTS
+            # ======================================
+
+            group_counts = (
+                market_flow_df[
+                    "flow_group"
+                ]
+                .value_counts()
+                .to_dict()
+            )
+
+            confirmed_group = (
+                "Confirmed leadership"
+            )
+
+            no_confirmation_group = (
+                "Rise without volume confirmation"
+            )
+
+            emerging_group = (
+                "Emerging activity"
+            )
+
+            weakness_group = (
+                "High-volume weakness"
+            )
+
+            gc1, gc2, gc3, gc4 = st.columns(4)
+
+            gc1.metric(
+                "Confirmed Leadership",
+                group_counts.get(
+                    confirmed_group,
+                    0,
+                ),
+                help=(
+                    "Return rank ≥ 80 and "
+                    "volume rank ≥ 80."
+                ),
+            )
+
+            gc2.metric(
+                "Strong / Low Volume Rank",
+                group_counts.get(
+                    no_confirmation_group,
+                    0,
+                ),
+                help=(
+                    "Return rank ≥ 80 and "
+                    "volume rank < 50."
+                ),
+            )
+
+            gc3.metric(
+                "Emerging Activity",
+                group_counts.get(
+                    emerging_group,
+                    0,
+                ),
+                help=(
+                    "Volume rank ≥ 80 and "
+                    "return rank between 40 and 80."
+                ),
+            )
+
+            gc4.metric(
+                "High-Volume Weakness",
+                group_counts.get(
+                    weakness_group,
+                    0,
+                ),
+                help=(
+                    "Volume rank ≥ 80 and "
+                    "return rank ≤ 20."
+                ),
+            )
+
+            # ======================================
+            # FILTERABLE SYMBOL TABLE
+            # ======================================
+
+            st.markdown(
+                "#### Cross-sectional symbol explorer"
+            )
+
+            flow_group_labels = {
+                "All symbols": None,
+                "Confirmed leadership": (
+                    confirmed_group
+                ),
+                "Strong return / low volume rank": (
+                    no_confirmation_group
+                ),
+                "Emerging activity": (
+                    emerging_group
+                ),
+                "High-volume weakness": (
+                    weakness_group
+                ),
+                "Neutral / unclassified": (
+                    "Neutral / unclassified"
+                ),
+            }
+
+            filter_col, search_col = st.columns(
+                [2, 1]
+            )
+
+            with filter_col:
+                selected_flow_label = st.selectbox(
+                    "Flow group",
+                    options=list(
+                        flow_group_labels
+                    ),
+                    key="overview_market_flow_group",
+                )
+
+            with search_col:
+                market_flow_symbol_search = (
+                    st.text_input(
+                        "Search symbol",
+                        key=(
+                            "overview_market_flow_symbol"
+                        ),
+                        placeholder="Example: BTCUSDT",
+                    )
+                    .strip()
+                    .upper()
+                )
+
+            selected_flow_group = (
+                flow_group_labels[
+                    selected_flow_label
+                ]
+            )
+
+            filtered_market_flow_df = (
+                market_flow_df.copy()
+            )
+
+            if selected_flow_group is not None:
+                filtered_market_flow_df = (
+                    filtered_market_flow_df[
+                        filtered_market_flow_df[
+                            "flow_group"
+                        ]
+                        == selected_flow_group
+                    ]
+                )
+
+            if market_flow_symbol_search:
+                filtered_market_flow_df = (
+                    filtered_market_flow_df[
+                        filtered_market_flow_df[
+                            "symbol"
+                        ]
+                        .str.contains(
+                            market_flow_symbol_search,
+                            case=False,
+                            na=False,
+                            regex=False,
+                        )
+                    ]
+                )
+
+            filtered_market_flow_df = (
+                filtered_market_flow_df.sort_values(
+                    [
+                        "return_rank_pct_4h",
+                        "volume_rank_pct_4h",
+                    ],
+                    ascending=[False, False],
+                )
+            )
+
+            display_market_flow_df = (
+                filtered_market_flow_df.rename(
+                    columns={
+                        "symbol": "Symbol",
+                        "return_pct_4h": (
+                            "Return 4h %"
+                        ),
+                        "return_rank_pct_4h": (
+                            "Return Rank %"
+                        ),
+                        "relative_volume_4h": (
+                            "Relative Volume"
+                        ),
+                        "volume_rank_pct_4h": (
+                            "Volume Rank %"
+                        ),
+                        "flow_group": (
+                            "Flow Group"
+                        ),
+                    }
+                )
+            )
+
+            numeric_market_flow_columns = [
+                "Return 4h %",
+                "Return Rank %",
+                "Relative Volume",
+                "Volume Rank %",
+            ]
+
+            display_market_flow_df[
+                numeric_market_flow_columns
+            ] = display_market_flow_df[
+                numeric_market_flow_columns
+            ].round(4)
+
+            st.dataframe(
+                display_market_flow_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Return 4h %": (
+                        st.column_config.NumberColumn(
+                            format="%.4f%%",
+                        )
+                    ),
+                    "Return Rank %": (
+                        st.column_config.ProgressColumn(
+                            min_value=0,
+                            max_value=100,
+                            format="%.2f",
+                        )
+                    ),
+                    "Relative Volume": (
+                        st.column_config.NumberColumn(
+                            format="%.4fx",
+                        )
+                    ),
+                    "Volume Rank %": (
+                        st.column_config.ProgressColumn(
+                            min_value=0,
+                            max_value=100,
+                            format="%.2f",
+                        )
+                    ),
+                },
+            )
+
+            st.caption(
+                f"Showing "
+                f"{len(filtered_market_flow_df)} "
+                f"of {len(market_flow_df)} "
+                "valid symbols."
+            )
+
+            st.download_button(
+                "⬇️ Download current Market Flow snapshot",
+                data=(
+                    display_market_flow_df
+                    .to_csv(index=False)
+                    .encode("utf-8")
+                ),
+                file_name=(
+                    "market_flow_4h_"
+                    f"{snapshot_close_label[:10]}"
+                    ".csv"
+                ),
+                mime="text/csv",
+                key="download_market_flow_snapshot",
+            )
 
     overview_metrics = calculate_metrics(df_view.to_dict("records"))
 
