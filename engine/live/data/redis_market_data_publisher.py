@@ -77,6 +77,55 @@ class RedisMarketDataPublisher:
             ),
         }
 
+    def publish_recovered_candle(
+        self,
+        symbol: str,
+        timeframe: str,
+        candle: dict,
+    ):
+        symbol = normalize_symbol(symbol)
+        timeframe = normalize_timeframe(timeframe)
+
+        if not isinstance(candle, dict):
+            raise TypeError(
+                "candle must be a dict"
+            )
+
+        normalized = (
+            self._normalize_history_candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                candle=candle,
+            )
+        )
+
+        close_timestamp = (
+            candle.get("close_timestamp")
+            or candle.get("closeTimestamp")
+        )
+
+        if close_timestamp is not None:
+            normalized["close_timestamp"] = int(
+                close_timestamp
+            )
+
+        normalized["source"] = "rest_repair"
+
+        self._publish_closed_candle(
+            normalized
+        )
+
+        return {
+            "type": "closed_candle",
+            "source": "rest_repair",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": normalized["timestamp"],
+            "close_timestamp": normalized.get(
+                "close_timestamp"
+            ),
+        }
+
     def replace_history(
         self,
         symbol: str,
