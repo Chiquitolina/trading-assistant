@@ -7,7 +7,10 @@ import uuid
 
 from config.strategies.v1 import SYMBOLS
 from config.timeframes import MODE_CONFIG
-from data.market_data import fetch_history
+from data.market_data import (
+    fetch_closed_futures_candle,
+    fetch_history,
+)
 from engine.live.data.redis_market_data_protocol import (
     HEARTBEAT_KEY,
     HEARTBEAT_TTL_SECONDS,
@@ -49,7 +52,7 @@ MARKET_FLOW_SETTLE_SECONDS = 15
 
 # Evita publicar rankings construidos sobre
 # una porción demasiado pequeña del universo.
-MARKET_FLOW_MIN_COVERAGE_PCT = 80.0
+MARKET_FLOW_MIN_COVERAGE_PCT = 95.0
 
 # Tiempo máximo que conservamos un batch
 # incompleto esperando nuevos cierres.
@@ -517,6 +520,146 @@ class MarketDataService:
             )
 
             batch["last_seen_at"] = now
+            
+    def _repair_market_flow_candles(
+        self,
+        candle_timestamp,
+        missing_symbols,
+    ):
+        candle_timestamp = int(
+            candle_timestamp
+        )
+
+        missing_symbols = sorted(
+            set(missing_symbols)
+        )
+
+        recovered_symbols = []
+        failed_symbols = {}
+
+        print(
+            "[MARKET FLOW REPAIR] "
+            f"starting timestamp={candle_timestamp} "
+            f"missing={len(missing_symbols)}"
+        )
+
+        for symbol in missing_symbols:
+            if not self.running:
+                failed_symbols[symbol] = (
+                    "service_stopping"
+                )
+                continue
+
+            candle = None
+            last_error = None
+
+            for attempt in range(1, 4):
+                try:
+                    candle = (
+                        fetch_closed_futures_candle(
+                            symbol=symbol,
+                            timeframe=(
+                                MARKET_FLOW_TIMEFRAME
+                            ),
+                            candle_timestamp=(
+                                candle_timestamp
+                            ),
+                        )
+                    )
+
+                    if candle is None:
+                        last_error = (
+                            "candle_unavailable"
+                        )
+                    else:
+                        break
+
+                except Exception as exc:
+                    last_error = str(exc)
+
+                if attempt < 3:
+                    if self.stop_event.wait(1):
+                        last_error = (
+                            "service_stopping"
+                        )
+                        break
+
+            if candle is None:
+                failed_symbols[symbol] = (
+                    last_error
+                    or "candle_unavailable"
+                )
+
+                print(
+                    "[MARKET FLOW REPAIR] "
+                    f"failed symbol={symbol} "
+                    f"timestamp={candle_timestamp} "
+                    f"error={failed_symbols[symbol]}"
+                )
+
+                continue
+
+            try:
+                publication = (
+                    self.publisher
+                    .publish_recovered_candle(
+                        symbol=symbol,
+                        timeframe=(
+                            MARKET_FLOW_TIMEFRAME
+                        ),
+                        candle=candle,
+                    )
+                )
+
+            except Exception as exc:
+                failed_symbols[symbol] = (
+                    f"publish_failed:{exc}"
+                )
+
+                print(
+                    "[MARKET FLOW REPAIR] "
+                    f"failed symbol={symbol} "
+                    f"timestamp={candle_timestamp} "
+                    f"error={failed_symbols[symbol]}"
+                )
+
+                continue
+
+            recovered_symbols.append(
+                symbol
+            )
+
+            if (
+                int(publication["timestamp"])
+                != candle_timestamp
+            ):
+                failed_symbols[symbol] = (
+                    "published_timestamp_mismatch"
+                )
+
+                recovered_symbols.remove(
+                    symbol
+                )
+
+        print(
+            "[MARKET FLOW REPAIR] "
+            f"completed timestamp={candle_timestamp} "
+            f"requested={len(missing_symbols)} "
+            f"recovered={len(recovered_symbols)} "
+            f"failed={len(failed_symbols)}"
+        )
+
+        return {
+            "requested": len(missing_symbols),
+            "recovered": len(recovered_symbols),
+            "failed": len(failed_symbols),
+            "recovered_symbols": (
+                recovered_symbols
+            ),
+            "failed_symbols": (
+                failed_symbols
+            ),
+        }
 
     def _maybe_publish_market_flow(
         self,
@@ -643,6 +786,52 @@ class MarketDataService:
                 f"error={exc}"
             )
             return
+        
+        missing_symbols = [
+            symbol
+            for symbol, reason
+            in snapshot.get(
+                "excluded_symbols",
+                {},
+            ).items()
+            if reason == "missing_batch_candle"
+        ]
+
+        if missing_symbols:
+            repair_result = (
+                self._repair_market_flow_candles(
+                    candle_timestamp=(
+                        candle_timestamp
+                    ),
+                    missing_symbols=(
+                        missing_symbols
+                    ),
+                )
+            )
+
+            if repair_result["recovered"] > 0:
+                try:
+                    snapshot = (
+                        self.market_flow_analyzer
+                        .calculate(
+                            symbols=self.symbols,
+                            timeframe=(
+                                MARKET_FLOW_TIMEFRAME
+                            ),
+                            candle_timestamp=(
+                                candle_timestamp
+                            ),
+                        )
+                    )
+
+                except Exception as exc:
+                    print(
+                        "[MARKET FLOW] "
+                        "recalculation failed "
+                        f"timestamp={candle_timestamp} "
+                        f"error={exc}"
+                    )
+                    return
 
         coverage_pct = float(
             snapshot.get(
