@@ -150,6 +150,38 @@ class ExecutionEngine:
             ] = ctx.get(reason_field)
 
         return journal_context
+        
+    @staticmethod
+    def _market_flow_journal_context(ctx):
+        ctx = (
+            ctx
+            if isinstance(ctx, dict)
+            else {}
+        )
+
+        field_names = (
+            "market_flow_available",
+            "market_flow_error",
+            "market_flow_timestamp",
+            "market_flow_close_timestamp",
+            "market_flow_calculated_at",
+            "market_flow_age_seconds",
+            "market_flow_coverage_pct",
+            "market_flow_universe_size",
+            "market_flow_capture_event",
+            "market_flow_watch_created_ts",
+            "market_breadth_4h",
+            "market_flow_btc_return_pct_4h",
+            "market_flow_return_pct_4h",
+            "market_flow_return_rank_pct_4h",
+            "market_flow_relative_volume_4h",
+            "market_flow_volume_rank_pct_4h",
+        )
+
+        return {
+            field_name: ctx.get(field_name)
+            for field_name in field_names
+        }
 
     def __init__(self, exchange, position_manager, strategy, symbol):
         self.exchange = exchange
@@ -740,6 +772,9 @@ class ExecutionEngine:
             ),
             
             **self._btc_timeframe_journal_context(
+                ctx
+            ),
+            **self._market_flow_journal_context(
                 ctx
             ),
         )
@@ -1608,7 +1643,10 @@ class ExecutionEngine:
                     "red_candles_last_10": plan.signal_context.get("red_candles_last_10"),
 
                     "strategy_mode": plan.signal_context.get("strategy_name"),
-                    "router_reason": plan.signal_context.get("router_reason")
+                    "router_reason": plan.signal_context.get("router_reason"),
+                    **self._market_flow_journal_context(
+                        plan.signal_context
+                    ),
                 },
 
                 "post_entry_analysis": {},
@@ -2175,6 +2213,9 @@ class ExecutionEngine:
             ),
             
             **self._btc_timeframe_journal_context(
+                ctx
+            ),
+            **self._market_flow_journal_context(
                 ctx
             ),
         )

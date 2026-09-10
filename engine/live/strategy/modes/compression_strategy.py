@@ -40,6 +40,8 @@ class CompressionStrategy:
 
         self.last_context_by_symbol = {}
         
+        self.market_flow_context_by_symbol = {}
+        
     def _build_signal_context(
         self,
         signal,
@@ -48,6 +50,7 @@ class CompressionStrategy:
         compression,
         breakout,
         btc_context=None,
+        market_flow_context=None,
     ):
         return {
             "trend": signal.trend.value,
@@ -128,6 +131,14 @@ class CompressionStrategy:
             "btc_direction_1h": getattr(btc_context, "direction_1h", None),
             "btc_context_state": getattr(btc_context, "state", None),
             "btc_context_reason": getattr(btc_context, "reason", None),
+            **(
+                market_flow_context
+                if isinstance(
+                    market_flow_context,
+                    dict,
+                )
+                else {}
+            ),
         }
 
     def evaluate(
@@ -215,6 +226,15 @@ class CompressionStrategy:
             atr=atr,
         )
         
+        market_flow_context = (
+            self._resolve_frozen_market_flow_context(
+                symbol=symbol,
+                compression_state=(
+                    compression_state
+                ),
+            )
+        )
+        
         self._count_state(compression_state["state"])
 
         self.last_context_by_symbol[symbol] = {
@@ -222,11 +242,15 @@ class CompressionStrategy:
             "compression": compression,
             "breakout": breakout,
             "compression_state": compression_state,
+            "market_flow_context": (
+                market_flow_context
+            ),
         }
 
         self._log(
             symbol=symbol,
             compression_state=compression_state,
+            market_flow_context=market_flow_context,
             trend=trend,
             compression=compression,
             breakout=breakout,
@@ -248,7 +272,8 @@ class CompressionStrategy:
             trend=trend,
             compression=compression,
             breakout=breakout,
-            btc_context=btc_context
+            btc_context=btc_context,
+            market_flow_context=market_flow_context,
         )
 
         if compression_state["state"] == "ENTRY_READY":
@@ -305,12 +330,12 @@ class CompressionStrategy:
             "market_flow_universe_size": None,
 
             "market_breadth_4h": None,
-            "btc_return_pct_4h": None,
+            "market_flow_btc_return_pct_4h": None,
 
-            "return_pct_4h": None,
-            "return_rank_pct_4h": None,
-            "relative_volume_4h": None,
-            "volume_rank_pct_4h": None,
+            "market_flow_return_pct_4h": None,
+            "market_flow_return_rank_pct_4h": None,
+            "market_flow_relative_volume_4h": None,
+            "market_flow_volume_rank_pct_4h": None,
         }
 
         if self.market_flow_provider is None:
@@ -376,25 +401,87 @@ class CompressionStrategy:
             "market_breadth_4h": metrics.get(
                 "market_breadth_4h"
             ),
-            "btc_return_pct_4h": metrics.get(
-                "btc_return_pct_4h"
+            "market_flow_btc_return_pct_4h": (
+                metrics.get(
+                    "btc_return_pct_4h"
+                )
             ),
 
-            "return_pct_4h": metrics.get(
-                "return_pct_4h"
+            "market_flow_return_pct_4h": (
+                metrics.get(
+                    "return_pct_4h"
+                )
             ),
-            "return_rank_pct_4h": metrics.get(
-                "return_rank_pct_4h"
+            "market_flow_return_rank_pct_4h": (
+                metrics.get(
+                    "return_rank_pct_4h"
+                )
             ),
-            "relative_volume_4h": metrics.get(
-                "relative_volume_4h"
+            "market_flow_relative_volume_4h": (
+                metrics.get(
+                    "relative_volume_4h"
+                )
             ),
-            "volume_rank_pct_4h": metrics.get(
-                "volume_rank_pct_4h"
+            "market_flow_volume_rank_pct_4h": (
+                metrics.get(
+                    "volume_rank_pct_4h"
+                )
             ),
         })
 
         return context
+        
+    def _resolve_frozen_market_flow_context(
+        self,
+        symbol,
+        compression_state,
+    ):
+        state = compression_state.get(
+            "state"
+        )
+
+        if state == "WATCH_CREATED":
+            context = (
+                self._get_market_flow_context(
+                    symbol
+                )
+            )
+
+            context = dict(context)
+
+            context[
+                "market_flow_capture_event"
+            ] = "WATCH_CREATED"
+
+            context[
+                "market_flow_watch_created_ts"
+            ] = compression_state.get(
+                "created_ts"
+            )
+
+            self.market_flow_context_by_symbol[
+                symbol
+            ] = context
+
+            return dict(context)
+
+        if state == "IDLE":
+            self.market_flow_context_by_symbol.pop(
+                symbol,
+                None,
+            )
+
+            return {}
+
+        context = (
+            self.market_flow_context_by_symbol
+            .get(symbol)
+        )
+
+        if not isinstance(context, dict):
+            return {}
+
+        return dict(context)
 
     def _log(
         self,
@@ -405,6 +492,7 @@ class CompressionStrategy:
         breakout,
         df_tf,
         prev_df,
+        market_flow_context,
     ):
         if not self.journal:
             return
@@ -412,11 +500,18 @@ class CompressionStrategy:
         if compression_state["state"] == "IDLE":
             return
         
-        market_flow_context = {}
+        journal_market_flow_context = {}
 
-        if compression_state["state"] == "WATCH_CREATED":
-            market_flow_context = (
-                self._get_market_flow_context(symbol)
+        if (
+            compression_state["state"]
+            == "WATCH_CREATED"
+            and isinstance(
+                market_flow_context,
+                dict,
+            )
+        ):
+            journal_market_flow_context = (
+                market_flow_context
             )
 
         self.journal.log(
@@ -492,7 +587,7 @@ class CompressionStrategy:
                 "last_10_candles": prev_df[
                     ["open", "high", "low", "close", "volume"]
                 ].tail(10).to_dict("records"),
-                **market_flow_context,
+                **journal_market_flow_context,
             }
         )
 
