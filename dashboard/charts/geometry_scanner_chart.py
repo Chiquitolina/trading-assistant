@@ -23,6 +23,46 @@ def build_geometry_scanner_chart(
         candidate = candidate.to_dict()
     else:
         candidate = dict(candidate)
+        
+    chart_symbol = candidate.get(
+        "symbol"
+    )
+
+    if (
+        chart_symbol is None
+        or pd.isna(chart_symbol)
+    ):
+        if "symbol" in candles.columns:
+            chart_symbol = str(
+                candles[
+                    "symbol"
+                ].iloc[0]
+            )
+        else:
+            chart_symbol = "UNKNOWN"
+
+    raw_status = candidate.get(
+        "status"
+    )
+
+    if (
+        raw_status is not None
+        and pd.notna(raw_status)
+    ):
+        chart_status = str(
+            raw_status
+        ).upper()
+    else:
+        chart_status = (
+            "BREAKOUT"
+            if bool(
+                candidate.get(
+                    "breakout_detected",
+                    False,
+                )
+            )
+            else "FORMING"
+        )
 
     start_index = int(
         candidate["start_index"]

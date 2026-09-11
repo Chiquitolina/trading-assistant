@@ -7739,6 +7739,23 @@ if selected_section == "geometry_scanner":
                 table_candidates = (
                     filtered_candidates.copy()
                 )
+                
+                table_candidates[
+                    "symbol"
+                ] = geometry_symbol
+
+                table_candidates[
+                    "status"
+                ] = (
+                    table_candidates[
+                        "breakout_detected"
+                    ]
+                    .fillna(False)
+                    .map({
+                        True: "BREAKOUT",
+                        False: "FORMING",
+                    })
+                )
 
                 table_candidates[
                     "start_time"
@@ -7773,6 +7790,8 @@ if selected_section == "geometry_scanner":
                 )
 
                 visible_columns = [
+                    "symbol",
+                    "status",
                     "geometry",
                     "confidence",
                     "window_size",
@@ -7856,7 +7875,9 @@ if selected_section == "geometry_scanner":
                         options=candidate_indexes,
                         format_func=lambda index: (
                             f"#{index + 1} · "
+                            f"{geometry_symbol} · "
                             f"{filtered_candidates.iloc[index]['geometry']} · "
+                            f"{'BREAKOUT' if filtered_candidates.iloc[index]['breakout_detected'] else 'FORMING'} · "
                             f"confidence "
                             f"{filtered_candidates.iloc[index]['confidence']:.2f} · "
                             f"window "
@@ -7872,6 +7893,26 @@ if selected_section == "geometry_scanner":
                     filtered_candidates.iloc[
                         selected_candidate_index
                     ]
+                )
+                
+                selected_candidate = (
+                    selected_candidate.copy()
+                )
+
+                selected_candidate[
+                    "symbol"
+                ] = geometry_symbol
+
+                selected_candidate[
+                    "status"
+                ] = (
+                    "BREAKOUT"
+                    if bool(
+                        selected_candidate[
+                            "breakout_detected"
+                        ]
+                    )
+                    else "FORMING"
                 )
 
                 metric_1, metric_2, metric_3, metric_4 = (
