@@ -1,0 +1,5137 @@
+{
+  "type": "market_sector_catalog",
+  "version": 1,
+  "generated_at": 1789097744144,
+  "source": "coingecko",
+  "configured_symbols": 297,
+  "unique_symbols": 290,
+  "selected_category_ids": [
+    "artificial-intelligence",
+    "decentralized-finance-defi",
+    "gaming",
+    "layer-1",
+    "layer-2",
+    "meme-token",
+    "payment-solutions",
+    "privacy-coins",
+    "real-world-assets-rwa",
+    "socialfi",
+    "centralized-exchange-token-cex",
+    "decentralized-exchange",
+    "liquid-staking-tokens"
+  ],
+  "resolution_status_counts": {
+    "resolved_binance_futures": 290
+  },
+  "primary_sector_counts": {
+    "AI": 48,
+    "DeFi": 43,
+    "Exchange": 23,
+    "Gaming": 19,
+    "Layer 1": 24,
+    "Layer 2": 10,
+    "Liquid Staking": 1,
+    "Meme": 35,
+    "Other": 65,
+    "Payments": 2,
+    "Privacy": 2,
+    "RWA": 15,
+    "SocialFi": 3
+  },
+  "symbols": {
+    "BTCUSDT": {
+      "binance_symbol": "BTCUSDT",
+      "base_symbol": "BTC",
+      "coingecko_id": "bitcoin",
+      "coingecko_name": "Bitcoin",
+      "coingecko_market_cap": 1541590309265.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bitcoin"
+      ]
+    },
+    "TRXUSDT": {
+      "binance_symbol": "TRXUSDT",
+      "base_symbol": "TRX",
+      "coingecko_id": "tron",
+      "coingecko_name": "TRON",
+      "coingecko_market_cap": 32266268775.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "tron"
+      ]
+    },
+    "ETCUSDT": {
+      "binance_symbol": "ETCUSDT",
+      "base_symbol": "ETC",
+      "coingecko_id": "ethereum-classic",
+      "coingecko_name": "Ethereum Classic",
+      "coingecko_market_cap": 1192875562.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ethereum-classic"
+      ]
+    },
+    "LINKUSDT": {
+      "binance_symbol": "LINKUSDT",
+      "base_symbol": "LINK",
+      "coingecko_id": "chainlink",
+      "coingecko_name": "Chainlink",
+      "coingecko_market_cap": 8587750588.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "chainlink"
+      ]
+    },
+    "XLMUSDT": {
+      "binance_symbol": "XLMUSDT",
+      "base_symbol": "XLM",
+      "coingecko_id": "stellar",
+      "coingecko_name": "Stellar",
+      "coingecko_market_cap": 6103674478.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "stellar"
+      ]
+    },
+    "ADAUSDT": {
+      "binance_symbol": "ADAUSDT",
+      "base_symbol": "ADA",
+      "coingecko_id": "cardano",
+      "coingecko_name": "Cardano",
+      "coingecko_market_cap": 7734662647.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "cardano"
+      ]
+    },
+    "SYRUPUSDT": {
+      "binance_symbol": "SYRUPUSDT",
+      "base_symbol": "SYRUP",
+      "coingecko_id": "syrup",
+      "coingecko_name": "Maple Finance",
+      "coingecko_market_cap": 251207112.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "syrup"
+      ]
+    },
+    "ALGOUSDT": {
+      "binance_symbol": "ALGOUSDT",
+      "base_symbol": "ALGO",
+      "coingecko_id": "algorand",
+      "coingecko_name": "Algorand",
+      "coingecko_market_cap": 817677850.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "algorand"
+      ]
+    },
+    "XMRUSDT": {
+      "binance_symbol": "XMRUSDT",
+      "base_symbol": "XMR",
+      "coingecko_id": "monero",
+      "coingecko_name": "Monero",
+      "coingecko_market_cap": 9534942755.0,
+      "primary_sector": "Privacy",
+      "all_sectors": [
+        "Privacy",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1",
+        "privacy-coins"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "monero"
+      ]
+    },
+    "DASHUSDT": {
+      "binance_symbol": "DASHUSDT",
+      "base_symbol": "DASH",
+      "coingecko_id": "dash",
+      "coingecko_name": "Dash",
+      "coingecko_market_cap": 704337084.0,
+      "primary_sector": "Payments",
+      "all_sectors": [
+        "Payments"
+      ],
+      "coingecko_category_ids": [
+        "payment-solutions"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "dash"
+      ]
+    },
+    "ZECUSDT": {
+      "binance_symbol": "ZECUSDT",
+      "base_symbol": "ZEC",
+      "coingecko_id": "zcash",
+      "coingecko_name": "Zcash",
+      "coingecko_market_cap": 17984630233.0,
+      "primary_sector": "Privacy",
+      "all_sectors": [
+        "Privacy",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1",
+        "privacy-coins"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "zcash"
+      ]
+    },
+    "XTZUSDT": {
+      "binance_symbol": "XTZUSDT",
+      "base_symbol": "XTZ",
+      "coingecko_id": "tezos",
+      "coingecko_name": "Tezos",
+      "coingecko_market_cap": 290109111.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "tezos"
+      ]
+    },
+    "BNBUSDT": {
+      "binance_symbol": "BNBUSDT",
+      "base_symbol": "BNB",
+      "coingecko_id": "binancecoin",
+      "coingecko_name": "BNB",
+      "coingecko_market_cap": 94656633845.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "centralized-exchange-token-cex",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "binancecoin"
+      ]
+    },
+    "BTRUSDT": {
+      "binance_symbol": "BTRUSDT",
+      "base_symbol": "BTR",
+      "coingecko_id": "bitlayer-bitvm",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bitlayer-bitvm"
+      ]
+    },
+    "ONTUSDT": {
+      "binance_symbol": "ONTUSDT",
+      "base_symbol": "ONT",
+      "coingecko_id": "ontology",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ontology"
+      ]
+    },
+    "JTOUSDT": {
+      "binance_symbol": "JTOUSDT",
+      "base_symbol": "JTO",
+      "coingecko_id": "jito-governance-token",
+      "coingecko_name": "Jito",
+      "coingecko_market_cap": 214427074.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "jito-governance-token"
+      ]
+    },
+    "JOEUSDT": {
+      "binance_symbol": "JOEUSDT",
+      "base_symbol": "JOE",
+      "coingecko_id": "joe",
+      "coingecko_name": "JOE",
+      "coingecko_market_cap": 13450640.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "joe"
+      ]
+    },
+    "KGENUSDT": {
+      "binance_symbol": "KGENUSDT",
+      "base_symbol": "KGEN",
+      "coingecko_id": "kgen",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "kgen"
+      ]
+    },
+    "IOTAUSDT": {
+      "binance_symbol": "IOTAUSDT",
+      "base_symbol": "IOTA",
+      "coingecko_id": "iota",
+      "coingecko_name": "IOTA",
+      "coingecko_market_cap": 184076031.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "iota"
+      ]
+    },
+    "ZEREBROUSDT": {
+      "binance_symbol": "ZEREBROUSDT",
+      "base_symbol": "ZEREBRO",
+      "coingecko_id": "zerebro",
+      "coingecko_name": "Zerebro",
+      "coingecko_market_cap": 33366090.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "zerebro"
+      ]
+    },
+    "INJUSDT": {
+      "binance_symbol": "INJUSDT",
+      "base_symbol": "INJ",
+      "coingecko_id": "injective-protocol",
+      "coingecko_name": "Injective",
+      "coingecko_market_cap": 594875029.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "DeFi",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "layer-1",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "injective-protocol"
+      ]
+    },
+    "JASMYUSDT": {
+      "binance_symbol": "JASMYUSDT",
+      "base_symbol": "JASMY",
+      "coingecko_id": "jasmycoin",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "jasmycoin"
+      ]
+    },
+    "FETUSDT": {
+      "binance_symbol": "FETUSDT",
+      "base_symbol": "FET",
+      "coingecko_id": "fetch-ai",
+      "coingecko_name": "Artificial Superintelligence Alliance",
+      "coingecko_market_cap": 381359342.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "fetch-ai"
+      ]
+    },
+    "TIAUSDT": {
+      "binance_symbol": "TIAUSDT",
+      "base_symbol": "TIA",
+      "coingecko_id": "celestia",
+      "coingecko_name": "Celestia",
+      "coingecko_market_cap": 357593031.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "celestia"
+      ]
+    },
+    "NEARUSDT": {
+      "binance_symbol": "NEARUSDT",
+      "base_symbol": "NEAR",
+      "coingecko_id": "near",
+      "coingecko_name": "NEAR Protocol",
+      "coingecko_market_cap": 3124692732.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "near"
+      ]
+    },
+    "ARBUSDT": {
+      "binance_symbol": "ARBUSDT",
+      "base_symbol": "ARB",
+      "coingecko_id": "arbitrum",
+      "coingecko_name": "Arbitrum",
+      "coingecko_market_cap": 968540766.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "arbitrum"
+      ]
+    },
+    "APTUSDT": {
+      "binance_symbol": "APTUSDT",
+      "base_symbol": "APT",
+      "coingecko_id": "aptos",
+      "coingecko_name": "Aptos",
+      "coingecko_market_cap": 556358897.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "aptos"
+      ]
+    },
+    "APRUSDT": {
+      "binance_symbol": "APRUSDT",
+      "base_symbol": "APR",
+      "coingecko_id": "apriori",
+      "coingecko_name": "Capricorn",
+      "coingecko_market_cap": 41207567.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "apriori"
+      ]
+    },
+    "XPLUSDT": {
+      "binance_symbol": "XPLUSDT",
+      "base_symbol": "XPL",
+      "coingecko_id": "plasma",
+      "coingecko_name": "Plasma",
+      "coingecko_market_cap": 233720086.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "plasma"
+      ]
+    },
+    "SUIUSDT": {
+      "binance_symbol": "SUIUSDT",
+      "base_symbol": "SUI",
+      "coingecko_id": "sui",
+      "coingecko_name": "Sui",
+      "coingecko_market_cap": 3000608049.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "sui"
+      ]
+    },
+    "SEIUSDT": {
+      "binance_symbol": "SEIUSDT",
+      "base_symbol": "SEI",
+      "coingecko_id": "sei-network",
+      "coingecko_name": "Sei",
+      "coingecko_market_cap": 298317929.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "sei-network"
+      ]
+    },
+    "OPUSDT": {
+      "binance_symbol": "OPUSDT",
+      "base_symbol": "OP",
+      "coingecko_id": "optimism",
+      "coingecko_name": "Optimism",
+      "coingecko_market_cap": 218866215.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "optimism"
+      ]
+    },
+    "SOLUSDT": {
+      "binance_symbol": "SOLUSDT",
+      "base_symbol": "SOL",
+      "coingecko_id": "solana",
+      "coingecko_name": "Solana",
+      "coingecko_market_cap": 58083906899.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "solana"
+      ]
+    },
+    "RAYSOLUSDT": {
+      "binance_symbol": "RAYSOLUSDT",
+      "base_symbol": "RAYSOL",
+      "coingecko_id": "raydium",
+      "coingecko_name": "Raydium",
+      "coingecko_market_cap": 425476937.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "raydium"
+      ]
+    },
+    "PUNDIXUSDT": {
+      "binance_symbol": "PUNDIXUSDT",
+      "base_symbol": "PUNDIX",
+      "coingecko_id": "pundi-x-2",
+      "coingecko_name": "Pundi X",
+      "coingecko_market_cap": 23677543.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pundi-x-2"
+      ]
+    },
+    "WIFUSDT": {
+      "binance_symbol": "WIFUSDT",
+      "base_symbol": "WIF",
+      "coingecko_id": "dogwifcoin",
+      "coingecko_name": "dogwifhat",
+      "coingecko_market_cap": 191294913.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "dogwifcoin"
+      ]
+    },
+    "ENAUSDT": {
+      "binance_symbol": "ENAUSDT",
+      "base_symbol": "ENA",
+      "coingecko_id": "ethena",
+      "coingecko_name": "Ethena",
+      "coingecko_market_cap": 1467224324.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ethena"
+      ]
+    },
+    "JUPUSDT": {
+      "binance_symbol": "JUPUSDT",
+      "base_symbol": "JUP",
+      "coingecko_id": "jupiter-exchange-solana",
+      "coingecko_name": "Jupiter",
+      "coingecko_market_cap": 760517458.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "jupiter-exchange-solana"
+      ]
+    },
+    "RENDERUSDT": {
+      "binance_symbol": "RENDERUSDT",
+      "base_symbol": "RENDER",
+      "coingecko_id": "render-token",
+      "coingecko_name": "Render",
+      "coingecko_market_cap": 724025801.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "render-token"
+      ]
+    },
+    "TAOUSDT": {
+      "binance_symbol": "TAOUSDT",
+      "base_symbol": "TAO",
+      "coingecko_id": "bittensor",
+      "coingecko_name": "Bittensor",
+      "coingecko_market_cap": 2249932866.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bittensor"
+      ]
+    },
+    "PENDLEUSDT": {
+      "binance_symbol": "PENDLEUSDT",
+      "base_symbol": "PENDLE",
+      "coingecko_id": "pendle",
+      "coingecko_name": "Pendle",
+      "coingecko_market_cap": 345675649.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pendle"
+      ]
+    },
+    "1000BONKUSDT": {
+      "binance_symbol": "1000BONKUSDT",
+      "base_symbol": "BONK",
+      "coingecko_id": "1000bonk",
+      "coingecko_name": "1000BONK",
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "1000bonk"
+      ]
+    },
+    "ATOMUSDT": {
+      "binance_symbol": "ATOMUSDT",
+      "base_symbol": "ATOM",
+      "coingecko_id": "cosmos",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "cosmos"
+      ]
+    },
+    "FILUSDT": {
+      "binance_symbol": "FILUSDT",
+      "base_symbol": "FIL",
+      "coingecko_id": "filecoin",
+      "coingecko_name": "Filecoin",
+      "coingecko_market_cap": 648697167.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "filecoin"
+      ]
+    },
+    "UNIUSDT": {
+      "binance_symbol": "UNIUSDT",
+      "base_symbol": "UNI",
+      "coingecko_id": "uniswap",
+      "coingecko_name": "Uniswap",
+      "coingecko_market_cap": 3728065392.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "uniswap"
+      ]
+    },
+    "AAVEUSDT": {
+      "binance_symbol": "AAVEUSDT",
+      "base_symbol": "AAVE",
+      "coingecko_id": "aave",
+      "coingecko_name": "Aave",
+      "coingecko_market_cap": 1874205507.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "aave"
+      ]
+    },
+    "HBARUSDT": {
+      "binance_symbol": "HBARUSDT",
+      "base_symbol": "HBAR",
+      "coingecko_id": "hedera-hashgraph",
+      "coingecko_name": "Hedera",
+      "coingecko_market_cap": 3284302868.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "hedera-hashgraph"
+      ]
+    },
+    "HYPEUSDT": {
+      "binance_symbol": "HYPEUSDT",
+      "base_symbol": "HYPE",
+      "coingecko_id": "hyperliquid",
+      "coingecko_name": "Hyperliquid",
+      "coingecko_market_cap": 17495855872.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "hyperliquid"
+      ]
+    },
+    "SKLUSDT": {
+      "binance_symbol": "SKLUSDT",
+      "base_symbol": "SKL",
+      "coingecko_id": "skale",
+      "coingecko_name": "SKALE",
+      "coingecko_market_cap": 22051173.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "gaming",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "skale"
+      ]
+    },
+    "GRTUSDT": {
+      "binance_symbol": "GRTUSDT",
+      "base_symbol": "GRT",
+      "coingecko_id": "the-graph",
+      "coingecko_name": "The Graph",
+      "coingecko_market_cap": 192560168.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "the-graph"
+      ]
+    },
+    "1INCHUSDT": {
+      "binance_symbol": "1INCHUSDT",
+      "base_symbol": "1INCH",
+      "coingecko_id": "1inch",
+      "coingecko_name": "1INCH",
+      "coingecko_market_cap": 124526333.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "1inch"
+      ]
+    },
+    "CHZUSDT": {
+      "binance_symbol": "CHZUSDT",
+      "base_symbol": "CHZ",
+      "coingecko_id": "chiliz",
+      "coingecko_name": "Chiliz",
+      "coingecko_market_cap": 142439073.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "chiliz"
+      ]
+    },
+    "SANDUSDT": {
+      "binance_symbol": "SANDUSDT",
+      "base_symbol": "SAND",
+      "coingecko_id": "the-sandbox",
+      "coingecko_name": "The Sandbox",
+      "coingecko_market_cap": 103262837.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "the-sandbox"
+      ]
+    },
+    "ANKRUSDT": {
+      "binance_symbol": "ANKRUSDT",
+      "base_symbol": "ANKR",
+      "coingecko_id": "ankr",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ankr"
+      ]
+    },
+    "RVNUSDT": {
+      "binance_symbol": "RVNUSDT",
+      "base_symbol": "RVN",
+      "coingecko_id": "ravencoin",
+      "coingecko_name": "Ravencoin",
+      "coingecko_market_cap": 37190588.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA"
+      ],
+      "coingecko_category_ids": [
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ravencoin"
+      ]
+    },
+    "SFPUSDT": {
+      "binance_symbol": "SFPUSDT",
+      "base_symbol": "SFP",
+      "coingecko_id": "safepal",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "safepal"
+      ]
+    },
+    "COTIUSDT": {
+      "binance_symbol": "COTIUSDT",
+      "base_symbol": "COTI",
+      "coingecko_id": "coti",
+      "coingecko_name": "COTI",
+      "coingecko_market_cap": 54744253.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "coti"
+      ]
+    },
+    "CHRUSDT": {
+      "binance_symbol": "CHRUSDT",
+      "base_symbol": "CHR",
+      "coingecko_id": "chromaway",
+      "coingecko_name": "Chromia",
+      "coingecko_market_cap": 14863282.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "RWA",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "layer-1",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "chromaway"
+      ]
+    },
+    "MANAUSDT": {
+      "binance_symbol": "MANAUSDT",
+      "base_symbol": "MANA",
+      "coingecko_id": "decentraland",
+      "coingecko_name": "Decentraland",
+      "coingecko_market_cap": 138431921.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "decentraland"
+      ]
+    },
+    "ALICEUSDT": {
+      "binance_symbol": "ALICEUSDT",
+      "base_symbol": "ALICE",
+      "coingecko_id": "my-neighbor-alice",
+      "coingecko_name": "My Neighbor Alice",
+      "coingecko_market_cap": 12450749.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "my-neighbor-alice"
+      ]
+    },
+    "ONDOUSDT": {
+      "binance_symbol": "ONDOUSDT",
+      "base_symbol": "ONDO",
+      "coingecko_id": "ondo-finance",
+      "coingecko_name": "Ondo",
+      "coingecko_market_cap": 1686827728.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ondo-finance"
+      ]
+    },
+    "AGLDUSDT": {
+      "binance_symbol": "AGLDUSDT",
+      "base_symbol": "AGLD",
+      "coingecko_id": "adventure-gold",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "adventure-gold"
+      ]
+    },
+    "APEUSDT": {
+      "binance_symbol": "APEUSDT",
+      "base_symbol": "APE",
+      "coingecko_id": "apecoin",
+      "coingecko_name": "ApeCoin",
+      "coingecko_market_cap": 131576436.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "apecoin"
+      ]
+    },
+    "ARCUSDT": {
+      "binance_symbol": "ARCUSDT",
+      "base_symbol": "ARC",
+      "coingecko_id": "ai-rig-complex",
+      "coingecko_name": "AI Rig Complex",
+      "coingecko_market_cap": 74821595.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ai-rig-complex"
+      ]
+    },
+    "COLLECTUSDT": {
+      "binance_symbol": "COLLECTUSDT",
+      "base_symbol": "COLLECT",
+      "coingecko_id": "collect-on-fanable",
+      "coingecko_name": "Collect on Fanable",
+      "coingecko_market_cap": 9754482.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA"
+      ],
+      "coingecko_category_ids": [
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "collect-on-fanable"
+      ]
+    },
+    "BICOUSDT": {
+      "binance_symbol": "BICOUSDT",
+      "base_symbol": "BICO",
+      "coingecko_id": "biconomy",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "biconomy"
+      ]
+    },
+    "CTSIUSDT": {
+      "binance_symbol": "CTSIUSDT",
+      "base_symbol": "CTSI",
+      "coingecko_id": "cartesi",
+      "coingecko_name": "Cartesi",
+      "coingecko_market_cap": 22329176.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "cartesi"
+      ]
+    },
+    "BIGTIMEUSDT": {
+      "binance_symbol": "BIGTIMEUSDT",
+      "base_symbol": "BIGTIME",
+      "coingecko_id": "big-time",
+      "coingecko_name": "Big Time",
+      "coingecko_market_cap": 18968108.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "big-time"
+      ]
+    },
+    "WAXPUSDT": {
+      "binance_symbol": "WAXPUSDT",
+      "base_symbol": "WAXP",
+      "coingecko_id": "wax",
+      "coingecko_name": "WAX",
+      "coingecko_market_cap": 20668658.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "gaming",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "wax"
+      ]
+    },
+    "BSVUSDT": {
+      "binance_symbol": "BSVUSDT",
+      "base_symbol": "BSV",
+      "coingecko_id": "bitcoin-cash-sv",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bitcoin-cash-sv"
+      ]
+    },
+    "AXLUSDT": {
+      "binance_symbol": "AXLUSDT",
+      "base_symbol": "AXL",
+      "coingecko_id": "axelar",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "axelar"
+      ]
+    },
+    "BIRBUSDT": {
+      "binance_symbol": "BIRBUSDT",
+      "base_symbol": "BIRB",
+      "coingecko_id": "moonbirds",
+      "coingecko_name": "Moonbirds",
+      "coingecko_market_cap": 18469466.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "moonbirds"
+      ]
+    },
+    "RIFUSDT": {
+      "binance_symbol": "RIFUSDT",
+      "base_symbol": "RIF",
+      "coingecko_id": "rif-token",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "rif-token"
+      ]
+    },
+    "POLYXUSDT": {
+      "binance_symbol": "POLYXUSDT",
+      "base_symbol": "POLYX",
+      "coingecko_id": "polymesh",
+      "coingecko_name": "Polymesh",
+      "coingecko_market_cap": 46436376.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "polymesh"
+      ]
+    },
+    "GASUSDT": {
+      "binance_symbol": "GASUSDT",
+      "base_symbol": "GAS",
+      "coingecko_id": "gas",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "gas"
+      ]
+    },
+    "ASTERUSDT": {
+      "binance_symbol": "ASTERUSDT",
+      "base_symbol": "ASTER",
+      "coingecko_id": "aster-2",
+      "coingecko_name": "Aster",
+      "coingecko_market_cap": 1894286529.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "aster-2"
+      ]
+    },
+    "TOSHIUSDT": {
+      "binance_symbol": "TOSHIUSDT",
+      "base_symbol": "TOSHI",
+      "coingecko_id": "toshi",
+      "coingecko_name": "Toshi",
+      "coingecko_market_cap": 46677179.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "toshi"
+      ]
+    },
+    "GRIFFAINUSDT": {
+      "binance_symbol": "GRIFFAINUSDT",
+      "base_symbol": "GRIFFAIN",
+      "coingecko_id": "griffain",
+      "coingecko_name": "GRIFFAIN",
+      "coingecko_market_cap": 10918531.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme",
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "griffain"
+      ]
+    },
+    "SWARMSUSDT": {
+      "binance_symbol": "SWARMSUSDT",
+      "base_symbol": "SWARMS",
+      "coingecko_id": "swarms",
+      "coingecko_name": "Swarms",
+      "coingecko_market_cap": 6915929.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "swarms"
+      ]
+    },
+    "STOUSDT": {
+      "binance_symbol": "STOUSDT",
+      "base_symbol": "STO",
+      "coingecko_id": "stakestone",
+      "coingecko_name": "StakeStone",
+      "coingecko_market_cap": 8511938.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "stakestone"
+      ]
+    },
+    "AINUSDT": {
+      "binance_symbol": "AINUSDT",
+      "base_symbol": "AIN",
+      "coingecko_id": "infinity-ground",
+      "coingecko_name": "Infinity Ground",
+      "coingecko_market_cap": 12785726.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "infinity-ground"
+      ]
+    },
+    "UAIUSDT": {
+      "binance_symbol": "UAIUSDT",
+      "base_symbol": "UAI",
+      "coingecko_id": "unifai-network",
+      "coingecko_name": "UnifAI Network",
+      "coingecko_market_cap": 142309938.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "unifai-network"
+      ]
+    },
+    "TRADOORUSDT": {
+      "binance_symbol": "TRADOORUSDT",
+      "base_symbol": "TRADOOR",
+      "coingecko_id": "tradoor",
+      "coingecko_name": "Tradoor",
+      "coingecko_market_cap": 8851497.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "tradoor"
+      ]
+    },
+    "DOODUSDT": {
+      "binance_symbol": "DOODUSDT",
+      "base_symbol": "DOOD",
+      "coingecko_id": "doodles",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "doodles"
+      ]
+    },
+    "HMSTRUSDT": {
+      "binance_symbol": "HMSTRUSDT",
+      "base_symbol": "HMSTR",
+      "coingecko_id": "hamster-kombat",
+      "coingecko_name": "Hamster Kombat",
+      "coingecko_market_cap": 10258014.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "hamster-kombat"
+      ]
+    },
+    "BLESSUSDT": {
+      "binance_symbol": "BLESSUSDT",
+      "base_symbol": "BLESS",
+      "coingecko_id": "bless-2",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bless-2"
+      ]
+    },
+    "FLUIDUSDT": {
+      "binance_symbol": "FLUIDUSDT",
+      "base_symbol": "FLUID",
+      "coingecko_id": "instadapp",
+      "coingecko_name": "Fluid",
+      "coingecko_market_cap": 96051019.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "instadapp"
+      ]
+    },
+    "COAIUSDT": {
+      "binance_symbol": "COAIUSDT",
+      "base_symbol": "COAI",
+      "coingecko_id": "chainopera-ai",
+      "coingecko_name": "ChainOpera AI",
+      "coingecko_market_cap": 53505720.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "chainopera-ai"
+      ]
+    },
+    "HANAUSDT": {
+      "binance_symbol": "HANAUSDT",
+      "base_symbol": "HANA",
+      "coingecko_id": "hana-network",
+      "coingecko_name": "Hana Network",
+      "coingecko_market_cap": 4063527.0,
+      "primary_sector": "SocialFi",
+      "all_sectors": [
+        "SocialFi"
+      ],
+      "coingecko_category_ids": [
+        "socialfi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "hana-network"
+      ]
+    },
+    "MIRAUSDT": {
+      "binance_symbol": "MIRAUSDT",
+      "base_symbol": "MIRA",
+      "coingecko_id": "mira-3",
+      "coingecko_name": "Mira",
+      "coingecko_market_cap": 15181350.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "mira-3"
+      ]
+    },
+    "AKEUSDT": {
+      "binance_symbol": "AKEUSDT",
+      "base_symbol": "AKE",
+      "coingecko_id": "akedo",
+      "coingecko_name": "Akedo",
+      "coingecko_market_cap": 346365074.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "akedo"
+      ]
+    },
+    "ORDERUSDT": {
+      "binance_symbol": "ORDERUSDT",
+      "base_symbol": "ORDER",
+      "coingecko_id": "orderly-network",
+      "coingecko_name": "Orderly",
+      "coingecko_market_cap": 14046195.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi",
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "orderly-network"
+      ]
+    },
+    "LIGHTUSDT": {
+      "binance_symbol": "LIGHTUSDT",
+      "base_symbol": "LIGHT",
+      "coingecko_id": "bitlight",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bitlight"
+      ]
+    },
+    "XANUSDT": {
+      "binance_symbol": "XANUSDT",
+      "base_symbol": "XAN",
+      "coingecko_id": "anoma",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "anoma"
+      ]
+    },
+    "POWRUSDT": {
+      "binance_symbol": "POWRUSDT",
+      "base_symbol": "POWR",
+      "coingecko_id": "power-ledger",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "power-ledger"
+      ]
+    },
+    "HUMAUSDT": {
+      "binance_symbol": "HUMAUSDT",
+      "base_symbol": "HUMA",
+      "coingecko_id": "huma-finance",
+      "coingecko_name": "Huma Finance",
+      "coingecko_market_cap": 37101306.0,
+      "primary_sector": "Payments",
+      "all_sectors": [
+        "Payments",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "payment-solutions"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "huma-finance"
+      ]
+    },
+    "JSTUSDT": {
+      "binance_symbol": "JSTUSDT",
+      "base_symbol": "JST",
+      "coingecko_id": "just",
+      "coingecko_name": "JUST",
+      "coingecko_market_cap": 851297032.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "just"
+      ]
+    },
+    "KITEUSDT": {
+      "binance_symbol": "KITEUSDT",
+      "base_symbol": "KITE",
+      "coingecko_id": "kite",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "kite"
+      ]
+    },
+    "PAXGUSDT": {
+      "binance_symbol": "PAXGUSDT",
+      "base_symbol": "PAXG",
+      "coingecko_id": "pax-gold",
+      "coingecko_name": "PAX Gold",
+      "coingecko_market_cap": 1866985151.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA"
+      ],
+      "coingecko_category_ids": [
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pax-gold"
+      ]
+    },
+    "QNTUSDT": {
+      "binance_symbol": "QNTUSDT",
+      "base_symbol": "QNT",
+      "coingecko_id": "quant-network",
+      "coingecko_name": "Quant",
+      "coingecko_market_cap": 935883614.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA"
+      ],
+      "coingecko_category_ids": [
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "quant-network"
+      ]
+    },
+    "SYNUSDT": {
+      "binance_symbol": "SYNUSDT",
+      "base_symbol": "SYN",
+      "coingecko_id": "synapse-2",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "synapse-2"
+      ]
+    },
+    "DRIFTUSDT": {
+      "binance_symbol": "DRIFTUSDT",
+      "base_symbol": "DRIFT",
+      "coingecko_id": "drift-protocol",
+      "coingecko_name": "Drift Protocol",
+      "coingecko_market_cap": 8157571.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "drift-protocol"
+      ]
+    },
+    "EDUUSDT": {
+      "binance_symbol": "EDUUSDT",
+      "base_symbol": "EDU",
+      "coingecko_id": "edu-coin",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "edu-coin"
+      ]
+    },
+    "VETUSDT": {
+      "binance_symbol": "VETUSDT",
+      "base_symbol": "VET",
+      "coingecko_id": "vechain",
+      "coingecko_name": "VeChain",
+      "coingecko_market_cap": 640085516.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "vechain"
+      ]
+    },
+    "VELVETUSDT": {
+      "binance_symbol": "VELVETUSDT",
+      "base_symbol": "VELVET",
+      "coingecko_id": "velvet",
+      "coingecko_name": "Velvet",
+      "coingecko_market_cap": 23808954.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "velvet"
+      ]
+    },
+    "WLFIUSDT": {
+      "binance_symbol": "WLFIUSDT",
+      "base_symbol": "WLFI",
+      "coingecko_id": "world-liberty-financial",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "world-liberty-financial"
+      ]
+    },
+    "ATUSDT": {
+      "binance_symbol": "ATUSDT",
+      "base_symbol": "AT",
+      "coingecko_id": "apro",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "apro"
+      ]
+    },
+    "AWEUSDT": {
+      "binance_symbol": "AWEUSDT",
+      "base_symbol": "AWE",
+      "coingecko_id": "stp-network",
+      "coingecko_name": "AWE Network",
+      "coingecko_market_cap": 114036490.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "stp-network"
+      ]
+    },
+    "JELLYJELLYUSDT": {
+      "binance_symbol": "JELLYJELLYUSDT",
+      "base_symbol": "JELLYJELLY",
+      "coingecko_id": "jelly-my-jelly",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "jelly-my-jelly"
+      ]
+    },
+    "KOMAUSDT": {
+      "binance_symbol": "KOMAUSDT",
+      "base_symbol": "KOMA",
+      "coingecko_id": "koma-inu",
+      "coingecko_name": "Koma Inu",
+      "coingecko_market_cap": 8067699.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "koma-inu"
+      ]
+    },
+    "MAGMAUSDT": {
+      "binance_symbol": "MAGMAUSDT",
+      "base_symbol": "MAGMA",
+      "coingecko_id": "magma-finance",
+      "coingecko_name": "Magma Finance",
+      "coingecko_market_cap": 45181203.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "magma-finance"
+      ]
+    },
+    "MAGICUSDT": {
+      "binance_symbol": "MAGICUSDT",
+      "base_symbol": "MAGIC",
+      "coingecko_id": "magic",
+      "coingecko_name": "Treasure",
+      "coingecko_market_cap": 14582306.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "magic"
+      ]
+    },
+    "BULLAUSDT": {
+      "binance_symbol": "BULLAUSDT",
+      "base_symbol": "BULLA",
+      "coingecko_id": "bulla-3",
+      "coingecko_name": "BULLA",
+      "coingecko_market_cap": 76308020.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bulla-3"
+      ]
+    },
+    "BMTUSDT": {
+      "binance_symbol": "BMTUSDT",
+      "base_symbol": "BMT",
+      "coingecko_id": "bubblemaps",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bubblemaps"
+      ]
+    },
+    "SAGAUSDT": {
+      "binance_symbol": "SAGAUSDT",
+      "base_symbol": "SAGA",
+      "coingecko_id": "saga-2",
+      "coingecko_name": "Saga",
+      "coingecko_market_cap": 6725623.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "saga-2"
+      ]
+    },
+    "SAHARAUSDT": {
+      "binance_symbol": "SAHARAUSDT",
+      "base_symbol": "SAHARA",
+      "coingecko_id": "sahara-ai",
+      "coingecko_name": "Sahara AI",
+      "coingecko_market_cap": 33283869.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "sahara-ai"
+      ]
+    },
+    "XNYUSDT": {
+      "binance_symbol": "XNYUSDT",
+      "base_symbol": "XNY",
+      "coingecko_id": "codatta",
+      "coingecko_name": "Codatta",
+      "coingecko_market_cap": 15182117.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "codatta"
+      ]
+    },
+    "QUSDT": {
+      "binance_symbol": "QUSDT",
+      "base_symbol": "Q",
+      "coingecko_id": "quack-ai",
+      "coingecko_name": "Quack AI",
+      "coingecko_market_cap": 113963199.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "quack-ai"
+      ]
+    },
+    "ARIAUSDT": {
+      "binance_symbol": "ARIAUSDT",
+      "base_symbol": "ARIA",
+      "coingecko_id": "aria-ai",
+      "coingecko_name": "Aria.AI",
+      "coingecko_market_cap": 5387652.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "aria-ai"
+      ]
+    },
+    "BSBUSDT": {
+      "binance_symbol": "BSBUSDT",
+      "base_symbol": "BSB",
+      "coingecko_id": "block-street",
+      "coingecko_name": "Block Street",
+      "coingecko_market_cap": 20907682.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "block-street"
+      ]
+    },
+    "NILUSDT": {
+      "binance_symbol": "NILUSDT",
+      "base_symbol": "NIL",
+      "coingecko_id": "nillion",
+      "coingecko_name": "Nillion",
+      "coingecko_market_cap": 21321507.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "nillion"
+      ]
+    },
+    "USUALUSDT": {
+      "binance_symbol": "USUALUSDT",
+      "base_symbol": "USUAL",
+      "coingecko_id": "usual",
+      "coingecko_name": "Usual",
+      "coingecko_market_cap": 21442573.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "usual"
+      ]
+    },
+    "TAKEUSDT": {
+      "binance_symbol": "TAKEUSDT",
+      "base_symbol": "TAKE",
+      "coingecko_id": "overtake",
+      "coingecko_name": "OVERTAKE",
+      "coingecko_market_cap": 21016756.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "overtake"
+      ]
+    },
+    "CHILLGUYUSDT": {
+      "binance_symbol": "CHILLGUYUSDT",
+      "base_symbol": "CHILLGUY",
+      "coingecko_id": "chill-guy",
+      "coingecko_name": "Just a chill guy",
+      "coingecko_market_cap": 11778232.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "chill-guy"
+      ]
+    },
+    "YFIUSDT": {
+      "binance_symbol": "YFIUSDT",
+      "base_symbol": "YFI",
+      "coingecko_id": "yearn-finance",
+      "coingecko_name": "yearn.finance",
+      "coingecko_market_cap": 76912717.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "yearn-finance"
+      ]
+    },
+    "BEATUSDT": {
+      "binance_symbol": "BEATUSDT",
+      "base_symbol": "BEAT",
+      "coingecko_id": "audiera",
+      "coingecko_name": "Audiera",
+      "coingecko_market_cap": 25768941.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "audiera"
+      ]
+    },
+    "PIEVERSEUSDT": {
+      "binance_symbol": "PIEVERSEUSDT",
+      "base_symbol": "PIEVERSE",
+      "coingecko_id": "pieverse",
+      "coingecko_name": "Pieverse",
+      "coingecko_market_cap": 329293219.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pieverse"
+      ]
+    },
+    "SENTUSDT": {
+      "binance_symbol": "SENTUSDT",
+      "base_symbol": "SENT",
+      "coingecko_id": "sentient",
+      "coingecko_name": "Sentient",
+      "coingecko_market_cap": 101318149.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "sentient"
+      ]
+    },
+    "POWERUSDT": {
+      "binance_symbol": "POWERUSDT",
+      "base_symbol": "POWER",
+      "coingecko_id": "power-protocol",
+      "coingecko_name": "Power Protocol",
+      "coingecko_market_cap": 18563091.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "power-protocol"
+      ]
+    },
+    "WETUSDT": {
+      "binance_symbol": "WETUSDT",
+      "base_symbol": "WET",
+      "coingecko_id": "humidifi",
+      "coingecko_name": "HumidiFi",
+      "coingecko_market_cap": 13743192.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "humidifi"
+      ]
+    },
+    "NIGHTUSDT": {
+      "binance_symbol": "NIGHTUSDT",
+      "base_symbol": "NIGHT",
+      "coingecko_id": "midnight-3",
+      "coingecko_name": "Midnight",
+      "coingecko_market_cap": 344698226.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "midnight-3"
+      ]
+    },
+    "USUSDT": {
+      "binance_symbol": "USUSDT",
+      "base_symbol": "US",
+      "coingecko_id": "talus",
+      "coingecko_name": "Talus",
+      "coingecko_market_cap": 45910370.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "talus"
+      ]
+    },
+    "CYSUSDT": {
+      "binance_symbol": "CYSUSDT",
+      "base_symbol": "CYS",
+      "coingecko_id": "cysic",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "cysic"
+      ]
+    },
+    "RAVEUSDT": {
+      "binance_symbol": "RAVEUSDT",
+      "base_symbol": "RAVE",
+      "coingecko_id": "ravedao",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ravedao"
+      ]
+    },
+    "ZKPUSDT": {
+      "binance_symbol": "ZKPUSDT",
+      "base_symbol": "ZKP",
+      "coingecko_id": "zkpass",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "zkpass"
+      ]
+    },
+    "GUAUSDT": {
+      "binance_symbol": "GUAUSDT",
+      "base_symbol": "GUA",
+      "coingecko_id": "superfortune",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "superfortune"
+      ]
+    },
+    "LITUSDT": {
+      "binance_symbol": "LITUSDT",
+      "base_symbol": "LIT",
+      "coingecko_id": "lighter",
+      "coingecko_name": "Lighter",
+      "coingecko_market_cap": 1084899859.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "lighter"
+      ]
+    },
+    "TRUMPUSDT": {
+      "binance_symbol": "TRUMPUSDT",
+      "base_symbol": "TRUMP",
+      "coingecko_id": "official-trump",
+      "coingecko_name": "Official Trump",
+      "coingecko_market_cap": 537326128.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "official-trump"
+      ]
+    },
+    "MELANIAUSDT": {
+      "binance_symbol": "MELANIAUSDT",
+      "base_symbol": "MELANIA",
+      "coingecko_id": "melania-meme",
+      "coingecko_name": "Melania Meme",
+      "coingecko_market_cap": 100351428.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "melania-meme"
+      ]
+    },
+    "MEMEUSDT": {
+      "binance_symbol": "MEMEUSDT",
+      "base_symbol": "MEME",
+      "coingecko_id": "memecoin-2",
+      "coingecko_name": "Memecoin",
+      "coingecko_market_cap": 32605211.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "memecoin-2"
+      ]
+    },
+    "VTHOUSDT": {
+      "binance_symbol": "VTHOUSDT",
+      "base_symbol": "VTHO",
+      "coingecko_id": "vethor-token",
+      "coingecko_name": "VeThor",
+      "coingecko_market_cap": 52460204.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "vethor-token"
+      ]
+    },
+    "ANIMEUSDT": {
+      "binance_symbol": "ANIMEUSDT",
+      "base_symbol": "ANIME",
+      "coingecko_id": "anime",
+      "coingecko_name": "Animecoin",
+      "coingecko_market_cap": 15997915.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "anime"
+      ]
+    },
+    "PIPPINUSDT": {
+      "binance_symbol": "PIPPINUSDT",
+      "base_symbol": "PIPPIN",
+      "coingecko_id": "pippin",
+      "coingecko_name": "pippin",
+      "coingecko_market_cap": 17420335.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme",
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pippin"
+      ]
+    },
+    "VVVUSDT": {
+      "binance_symbol": "VVVUSDT",
+      "base_symbol": "VVV",
+      "coingecko_id": "venice-token",
+      "coingecko_name": "Venice Token",
+      "coingecko_market_cap": 1133677322.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "venice-token"
+      ]
+    },
+    "BERAUSDT": {
+      "binance_symbol": "BERAUSDT",
+      "base_symbol": "BERA",
+      "coingecko_id": "berachain-bera",
+      "coingecko_name": "Berachain",
+      "coingecko_market_cap": 56632719.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "berachain-bera"
+      ]
+    },
+    "TSTUSDT": {
+      "binance_symbol": "TSTUSDT",
+      "base_symbol": "TST",
+      "coingecko_id": "test-3",
+      "coingecko_name": "Test",
+      "coingecko_market_cap": 14066475.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "test-3"
+      ]
+    },
+    "LAYERUSDT": {
+      "binance_symbol": "LAYERUSDT",
+      "base_symbol": "LAYER",
+      "coingecko_id": "solayer",
+      "coingecko_name": "Solayer",
+      "coingecko_market_cap": 14152559.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "solayer"
+      ]
+    },
+    "HEIUSDT": {
+      "binance_symbol": "HEIUSDT",
+      "base_symbol": "HEI",
+      "coingecko_id": "heima",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "heima"
+      ]
+    },
+    "GPSUSDT": {
+      "binance_symbol": "GPSUSDT",
+      "base_symbol": "GPS",
+      "coingecko_id": "goplus-security",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "goplus-security"
+      ]
+    },
+    "SHELLUSDT": {
+      "binance_symbol": "SHELLUSDT",
+      "base_symbol": "SHELL",
+      "coingecko_id": "myshell",
+      "coingecko_name": "MyShell",
+      "coingecko_market_cap": 5448937.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "myshell"
+      ]
+    },
+    "KAITOUSDT": {
+      "binance_symbol": "KAITOUSDT",
+      "base_symbol": "KAITO",
+      "coingecko_id": "kaito",
+      "coingecko_name": "KAITO",
+      "coingecko_market_cap": 71705802.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "kaito"
+      ]
+    },
+    "KATUSDT": {
+      "binance_symbol": "KATUSDT",
+      "base_symbol": "KAT",
+      "coingecko_id": "katana-network-token",
+      "coingecko_name": "Katana",
+      "coingecko_market_cap": 16328171.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi",
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "katana-network-token"
+      ]
+    },
+    "REDUSDT": {
+      "binance_symbol": "REDUSDT",
+      "base_symbol": "RED",
+      "coingecko_id": "redstone-oracles",
+      "coingecko_name": "RedStone",
+      "coingecko_market_cap": 61781619.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA"
+      ],
+      "coingecko_category_ids": [
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "redstone-oracles"
+      ]
+    },
+    "VIRTUALUSDT": {
+      "binance_symbol": "VIRTUALUSDT",
+      "base_symbol": "VIRTUAL",
+      "coingecko_id": "virtual-protocol",
+      "coingecko_name": "Virtuals Protocol",
+      "coingecko_market_cap": 414965103.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "virtual-protocol"
+      ]
+    },
+    "STBLUSDT": {
+      "binance_symbol": "STBLUSDT",
+      "base_symbol": "STBL",
+      "coingecko_id": "stbl",
+      "coingecko_name": "STBL",
+      "coingecko_market_cap": 12343503.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "stbl"
+      ]
+    },
+    "BREVUSDT": {
+      "binance_symbol": "BREVUSDT",
+      "base_symbol": "BREV",
+      "coingecko_id": "brevis",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "brevis"
+      ]
+    },
+    "ICNTUSDT": {
+      "binance_symbol": "ICNTUSDT",
+      "base_symbol": "ICNT",
+      "coingecko_id": "impossible-cloud-network-token",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "impossible-cloud-network-token"
+      ]
+    },
+    "PTBUSDT": {
+      "binance_symbol": "PTBUSDT",
+      "base_symbol": "PTB",
+      "coingecko_id": "portal-to-bitcoin",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "portal-to-bitcoin"
+      ]
+    },
+    "FLOCKUSDT": {
+      "binance_symbol": "FLOCKUSDT",
+      "base_symbol": "FLOCK",
+      "coingecko_id": "flock-2",
+      "coingecko_name": "FLOCK",
+      "coingecko_market_cap": 27594137.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "flock-2"
+      ]
+    },
+    "SKYUSDT": {
+      "binance_symbol": "SKYUSDT",
+      "base_symbol": "SKY",
+      "coingecko_id": "sky",
+      "coingecko_name": "Sky",
+      "coingecko_market_cap": 1399019784.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "sky"
+      ]
+    },
+    "AVNTUSDT": {
+      "binance_symbol": "AVNTUSDT",
+      "base_symbol": "AVNT",
+      "coingecko_id": "avantis",
+      "coingecko_name": "Avantis",
+      "coingecko_market_cap": 34504752.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "avantis"
+      ]
+    },
+    "HOLOUSDT": {
+      "binance_symbol": "HOLOUSDT",
+      "base_symbol": "HOLO",
+      "coingecko_id": "holoworld",
+      "coingecko_name": "Holoworld",
+      "coingecko_market_cap": 46280611.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "holoworld"
+      ]
+    },
+    "XPINUSDT": {
+      "binance_symbol": "XPINUSDT",
+      "base_symbol": "XPIN",
+      "coingecko_id": "xpin-network",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "xpin-network"
+      ]
+    },
+    "ZAMAUSDT": {
+      "binance_symbol": "ZAMAUSDT",
+      "base_symbol": "ZAMA",
+      "coingecko_id": "zama",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "zama"
+      ]
+    },
+    "FOGOUSDT": {
+      "binance_symbol": "FOGOUSDT",
+      "base_symbol": "FOGO",
+      "coingecko_id": "fogo",
+      "coingecko_name": "Fogo",
+      "coingecko_market_cap": 22589279.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "fogo"
+      ]
+    },
+    "FRAXUSDT": {
+      "binance_symbol": "FRAXUSDT",
+      "base_symbol": "FRAX",
+      "coingecko_id": "frax-share",
+      "coingecko_name": "Frax (prev. FXS)",
+      "coingecko_market_cap": 25257981.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "frax-share"
+      ]
+    },
+    "SPORTFUNUSDT": {
+      "binance_symbol": "SPORTFUNUSDT",
+      "base_symbol": "SPORTFUN",
+      "coingecko_id": "football-fun",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "football-fun"
+      ]
+    },
+    "AIAUSDT": {
+      "binance_symbol": "AIAUSDT",
+      "base_symbol": "AIA",
+      "coingecko_id": "aia",
+      "coingecko_name": "DeAgentAI",
+      "coingecko_market_cap": 7294896.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "aia"
+      ]
+    },
+    "ACUUSDT": {
+      "binance_symbol": "ACUUSDT",
+      "base_symbol": "ACU",
+      "coingecko_id": "acurast",
+      "coingecko_name": "Acurast",
+      "coingecko_market_cap": 44944969.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "acurast"
+      ]
+    },
+    "我踏马来了USDT": {
+      "binance_symbol": "我踏马来了USDT",
+      "base_symbol": "我踏马来了",
+      "coingecko_id": "wo-ta-ma-laile",
+      "coingecko_name": "我踏马来了",
+      "coingecko_market_cap": 12488412.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "wo-ta-ma-laile"
+      ]
+    },
+    "ELSAUSDT": {
+      "binance_symbol": "ELSAUSDT",
+      "base_symbol": "ELSA",
+      "coingecko_id": "elsa",
+      "coingecko_name": "Elsa",
+      "coingecko_market_cap": 10825776.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "elsa"
+      ]
+    },
+    "LSKUSDT": {
+      "binance_symbol": "LSKUSDT",
+      "base_symbol": "LSK",
+      "coingecko_id": "lisk",
+      "coingecko_name": "Lisk",
+      "coingecko_market_cap": 28824660.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "lisk"
+      ]
+    },
+    "SKRUSDT": {
+      "binance_symbol": "SKRUSDT",
+      "base_symbol": "SKR",
+      "coingecko_id": "seeker",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "seeker"
+      ]
+    },
+    "CLOUSDT": {
+      "binance_symbol": "CLOUSDT",
+      "base_symbol": "CLO",
+      "coingecko_id": "yei-finance",
+      "coingecko_name": "Yei Finance",
+      "coingecko_market_cap": 11548424.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "yei-finance"
+      ]
+    },
+    "RECALLUSDT": {
+      "binance_symbol": "RECALLUSDT",
+      "base_symbol": "RECALL",
+      "coingecko_id": "recall",
+      "coingecko_name": "Recall",
+      "coingecko_market_cap": 13415969.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "recall"
+      ]
+    },
+    "ZBTUSDT": {
+      "binance_symbol": "ZBTUSDT",
+      "base_symbol": "ZBT",
+      "coingecko_id": "zerobase",
+      "coingecko_name": "ZEROBASE",
+      "coingecko_market_cap": 24472949.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "zerobase"
+      ]
+    },
+    "LABUSDT": {
+      "binance_symbol": "LABUSDT",
+      "base_symbol": "LAB",
+      "coingecko_id": "lab",
+      "coingecko_name": "LAB",
+      "coingecko_market_cap": 36134982.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "lab"
+      ]
+    },
+    "RIVERUSDT": {
+      "binance_symbol": "RIVERUSDT",
+      "base_symbol": "RIVER",
+      "coingecko_id": "river",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "river"
+      ]
+    },
+    "币安人生USDT": {
+      "binance_symbol": "币安人生USDT",
+      "base_symbol": "币安人生",
+      "coingecko_id": "bianrensheng",
+      "coingecko_name": "币安人生 (BinanceLife)",
+      "coingecko_market_cap": 465603800.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bianrensheng"
+      ]
+    },
+    "BLUAIUSDT": {
+      "binance_symbol": "BLUAIUSDT",
+      "base_symbol": "BLUAI",
+      "coingecko_id": "bluwhale",
+      "coingecko_name": "Bluwhale",
+      "coingecko_market_cap": 13516163.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "bluwhale"
+      ]
+    },
+    "ONGUSDT": {
+      "binance_symbol": "ONGUSDT",
+      "base_symbol": "ONG",
+      "coingecko_id": "ong",
+      "coingecko_name": "Ontology Gas",
+      "coingecko_market_cap": 39957488.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ong"
+      ]
+    },
+    "FFUSDT": {
+      "binance_symbol": "FFUSDT",
+      "base_symbol": "FF",
+      "coingecko_id": "falcon-finance-ff",
+      "coingecko_name": "Falcon Finance",
+      "coingecko_market_cap": 530517889.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "falcon-finance-ff"
+      ]
+    },
+    "EDENUSDT": {
+      "binance_symbol": "EDENUSDT",
+      "base_symbol": "EDEN",
+      "coingecko_id": "openeden",
+      "coingecko_name": "OpenEden",
+      "coingecko_market_cap": 20650651.0,
+      "primary_sector": "RWA",
+      "all_sectors": [
+        "RWA"
+      ],
+      "coingecko_category_ids": [
+        "real-world-assets-rwa"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "openeden"
+      ]
+    },
+    "NOMUSDT": {
+      "binance_symbol": "NOMUSDT",
+      "base_symbol": "NOM",
+      "coingecko_id": "nomina",
+      "coingecko_name": "Nomina",
+      "coingecko_market_cap": 4506643.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "nomina"
+      ]
+    },
+    "TRUTHUSDT": {
+      "binance_symbol": "TRUTHUSDT",
+      "base_symbol": "TRUTH",
+      "coingecko_id": "swarm-network",
+      "coingecko_name": "Swarm Network",
+      "coingecko_market_cap": 26772125.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "swarm-network"
+      ]
+    },
+    "2ZUSDT": {
+      "binance_symbol": "2ZUSDT",
+      "base_symbol": "2Z",
+      "coingecko_id": "doublezero",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "doublezero"
+      ]
+    },
+    "EVAAUSDT": {
+      "binance_symbol": "EVAAUSDT",
+      "base_symbol": "EVAA",
+      "coingecko_id": "evaa-protocol",
+      "coingecko_name": "EVAA Protocol",
+      "coingecko_market_cap": 3318427.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "evaa-protocol"
+      ]
+    },
+    "LYNUSDT": {
+      "binance_symbol": "LYNUSDT",
+      "base_symbol": "LYN",
+      "coingecko_id": "everlyn",
+      "coingecko_name": "Everlyn",
+      "coingecko_market_cap": 7360212.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "everlyn"
+      ]
+    },
+    "4USDT": {
+      "binance_symbol": "4USDT",
+      "base_symbol": "4",
+      "coingecko_id": "4-2",
+      "coingecko_name": "4",
+      "coingecko_market_cap": 18533567.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "4-2"
+      ]
+    },
+    "GIGGLEUSDT": {
+      "binance_symbol": "GIGGLEUSDT",
+      "base_symbol": "GIGGLE",
+      "coingecko_id": "giggle-fund",
+      "coingecko_name": "Giggle Fund",
+      "coingecko_market_cap": 34043534.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "giggle-fund"
+      ]
+    },
+    "MONUSDT": {
+      "binance_symbol": "MONUSDT",
+      "base_symbol": "MON",
+      "coingecko_id": "monad",
+      "coingecko_name": "Monad",
+      "coingecko_market_cap": 270112661.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "monad"
+      ]
+    },
+    "YBUSDT": {
+      "binance_symbol": "YBUSDT",
+      "base_symbol": "YB",
+      "coingecko_id": "yield-basis",
+      "coingecko_name": "Yield Basis",
+      "coingecko_market_cap": 23383642.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "yield-basis"
+      ]
+    },
+    "METUSDT": {
+      "binance_symbol": "METUSDT",
+      "base_symbol": "MET",
+      "coingecko_id": "meteora",
+      "coingecko_name": "Meteora",
+      "coingecko_market_cap": 117809562.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "meteora"
+      ]
+    },
+    "EULUSDT": {
+      "binance_symbol": "EULUSDT",
+      "base_symbol": "EUL",
+      "coingecko_id": "euler",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "euler"
+      ]
+    },
+    "TACUSDT": {
+      "binance_symbol": "TACUSDT",
+      "base_symbol": "TAC",
+      "coingecko_id": "tac",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "tac"
+      ]
+    },
+    "CRVUSDT": {
+      "binance_symbol": "CRVUSDT",
+      "base_symbol": "CRV",
+      "coingecko_id": "curve-dao-token",
+      "coingecko_name": "Curve DAO",
+      "coingecko_market_cap": 535422328.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "curve-dao-token"
+      ]
+    },
+    "ERAUSDT": {
+      "binance_symbol": "ERAUSDT",
+      "base_symbol": "ERA",
+      "coingecko_id": "caldera",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "caldera"
+      ]
+    },
+    "TAUSDT": {
+      "binance_symbol": "TAUSDT",
+      "base_symbol": "TA",
+      "coingecko_id": "trusta-ai",
+      "coingecko_name": "Trusta AI",
+      "coingecko_market_cap": 8894049.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "trusta-ai"
+      ]
+    },
+    "CVXUSDT": {
+      "binance_symbol": "CVXUSDT",
+      "base_symbol": "CVX",
+      "coingecko_id": "convex-finance",
+      "coingecko_name": "Convex Finance",
+      "coingecko_market_cap": 192758098.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "convex-finance"
+      ]
+    },
+    "SLPUSDT": {
+      "binance_symbol": "SLPUSDT",
+      "base_symbol": "SLP",
+      "coingecko_id": "smooth-love-potion",
+      "coingecko_name": "Smooth Love Potion",
+      "coingecko_market_cap": 22356803.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "smooth-love-potion"
+      ]
+    },
+    "ZORAUSDT": {
+      "binance_symbol": "ZORAUSDT",
+      "base_symbol": "ZORA",
+      "coingecko_id": "zora",
+      "coingecko_name": "Zora",
+      "coingecko_market_cap": 35977077.0,
+      "primary_sector": "SocialFi",
+      "all_sectors": [
+        "SocialFi",
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2",
+        "socialfi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "zora"
+      ]
+    },
+    "TAGUSDT": {
+      "binance_symbol": "TAGUSDT",
+      "base_symbol": "TAG",
+      "coingecko_id": "tagger",
+      "coingecko_name": "TAGGER",
+      "coingecko_market_cap": 63827338.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "tagger"
+      ]
+    },
+    "ESPORTSUSDT": {
+      "binance_symbol": "ESPORTSUSDT",
+      "base_symbol": "ESPORTS",
+      "coingecko_id": "yooldo-games",
+      "coingecko_name": "Yooldo Games",
+      "coingecko_market_cap": 1619726.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "yooldo-games"
+      ]
+    },
+    "TREEUSDT": {
+      "binance_symbol": "TREEUSDT",
+      "base_symbol": "TREE",
+      "coingecko_id": "treehouse",
+      "coingecko_name": "Treehouse",
+      "coingecko_market_cap": 6058667.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "treehouse"
+      ]
+    },
+    "PLAYUSDT": {
+      "binance_symbol": "PLAYUSDT",
+      "base_symbol": "PLAY",
+      "coingecko_id": "playsout",
+      "coingecko_name": "PlaysOut",
+      "coingecko_market_cap": 11819138.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "playsout"
+      ]
+    },
+    "NAORISUSDT": {
+      "binance_symbol": "NAORISUSDT",
+      "base_symbol": "NAORIS",
+      "coingecko_id": "naoris",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "naoris"
+      ]
+    },
+    "TOWNSUSDT": {
+      "binance_symbol": "TOWNSUSDT",
+      "base_symbol": "TOWNS",
+      "coingecko_id": "towns",
+      "coingecko_name": "Towns",
+      "coingecko_market_cap": 3872525.0,
+      "primary_sector": "SocialFi",
+      "all_sectors": [
+        "SocialFi",
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2",
+        "socialfi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "towns"
+      ]
+    },
+    "PROVEUSDT": {
+      "binance_symbol": "PROVEUSDT",
+      "base_symbol": "PROVE",
+      "coingecko_id": "succinct",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "succinct"
+      ]
+    },
+    "INUSDT": {
+      "binance_symbol": "INUSDT",
+      "base_symbol": "IN",
+      "coingecko_id": "infinit",
+      "coingecko_name": "INFINIT",
+      "coingecko_market_cap": 10754925.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "infinit"
+      ]
+    },
+    "CARVUSDT": {
+      "binance_symbol": "CARVUSDT",
+      "base_symbol": "CARV",
+      "coingecko_id": "carv",
+      "coingecko_name": "CARV",
+      "coingecko_market_cap": 22469010.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "carv"
+      ]
+    },
+    "SUSHIUSDT": {
+      "binance_symbol": "SUSHIUSDT",
+      "base_symbol": "SUSHI",
+      "coingecko_id": "sushi",
+      "coingecko_name": "Sushi",
+      "coingecko_market_cap": 61394503.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "sushi"
+      ]
+    },
+    "RUNEUSDT": {
+      "binance_symbol": "RUNEUSDT",
+      "base_symbol": "RUNE",
+      "coingecko_id": "thorchain",
+      "coingecko_name": "THORChain",
+      "coingecko_market_cap": 169028188.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi",
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "thorchain"
+      ]
+    },
+    "CAKEUSDT": {
+      "binance_symbol": "CAKEUSDT",
+      "base_symbol": "CAKE",
+      "coingecko_id": "pancakeswap-token",
+      "coingecko_name": "PancakeSwap",
+      "coingecko_market_cap": 680219400.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pancakeswap-token"
+      ]
+    },
+    "GMXUSDT": {
+      "binance_symbol": "GMXUSDT",
+      "base_symbol": "GMX",
+      "coingecko_id": "gmx",
+      "coingecko_name": "GMX",
+      "coingecko_market_cap": 77631818.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "gmx"
+      ]
+    },
+    "DYDXUSDT": {
+      "binance_symbol": "DYDXUSDT",
+      "base_symbol": "DYDX",
+      "coingecko_id": "dydx",
+      "coingecko_name": "dYdX",
+      "coingecko_market_cap": 5519583.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "dydx"
+      ]
+    },
+    "LDOUSDT": {
+      "binance_symbol": "LDOUSDT",
+      "base_symbol": "LDO",
+      "coingecko_id": "lido-dao",
+      "coingecko_name": "Lido DAO",
+      "coingecko_market_cap": 308822665.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "lido-dao"
+      ]
+    },
+    "IMXUSDT": {
+      "binance_symbol": "IMXUSDT",
+      "base_symbol": "IMX",
+      "coingecko_id": "immutable-x",
+      "coingecko_name": "Immutable",
+      "coingecko_market_cap": 104534641.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming",
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "gaming",
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "immutable-x"
+      ]
+    },
+    "ARKMUSDT": {
+      "binance_symbol": "ARKMUSDT",
+      "base_symbol": "ARKM",
+      "coingecko_id": "arkham",
+      "coingecko_name": "Arkham",
+      "coingecko_market_cap": 67408002.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "Exchange"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "centralized-exchange-token-cex"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "arkham"
+      ]
+    },
+    "AIOTUSDT": {
+      "binance_symbol": "AIOTUSDT",
+      "base_symbol": "AIOT",
+      "coingecko_id": "okzoo",
+      "coingecko_name": "OKZOO",
+      "coingecko_market_cap": 22054480.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "okzoo"
+      ]
+    },
+    "IOUSDT": {
+      "binance_symbol": "IOUSDT",
+      "base_symbol": "IO",
+      "coingecko_id": "io",
+      "coingecko_name": "io.net",
+      "coingecko_market_cap": 50681431.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "io"
+      ]
+    },
+    "CGPTUSDT": {
+      "binance_symbol": "CGPTUSDT",
+      "base_symbol": "CGPT",
+      "coingecko_id": "chaingpt",
+      "coingecko_name": "ChainGPT",
+      "coingecko_market_cap": 19444024.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "chaingpt"
+      ]
+    },
+    "1000PEPEUSDT": {
+      "binance_symbol": "1000PEPEUSDT",
+      "base_symbol": "PEPE",
+      "coingecko_id": "pepe",
+      "coingecko_name": "Pepe",
+      "coingecko_market_cap": 1379610205.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pepe"
+      ]
+    },
+    "1000FLOKIUSDT": {
+      "binance_symbol": "1000FLOKIUSDT",
+      "base_symbol": "FLOKI",
+      "coingecko_id": "floki",
+      "coingecko_name": "FLOKI",
+      "coingecko_market_cap": 231212856.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme",
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming",
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "floki"
+      ]
+    },
+    "CATIUSDT": {
+      "binance_symbol": "CATIUSDT",
+      "base_symbol": "CATI",
+      "coingecko_id": "catizen",
+      "coingecko_name": "Catizen",
+      "coingecko_market_cap": 40533600.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "catizen"
+      ]
+    },
+    "PYTHUSDT": {
+      "binance_symbol": "PYTHUSDT",
+      "base_symbol": "PYTH",
+      "coingecko_id": "pyth-network",
+      "coingecko_name": "Pyth Network",
+      "coingecko_market_cap": 400849524.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pyth-network"
+      ]
+    },
+    "BRETTUSDT": {
+      "binance_symbol": "BRETTUSDT",
+      "base_symbol": "BRETT",
+      "coingecko_id": "based-brett",
+      "coingecko_name": "Brett",
+      "coingecko_market_cap": 46196646.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "based-brett"
+      ]
+    },
+    "POPCATUSDT": {
+      "binance_symbol": "POPCATUSDT",
+      "base_symbol": "POPCAT",
+      "coingecko_id": "popcat",
+      "coingecko_name": "Popcat",
+      "coingecko_market_cap": 46708990.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "popcat"
+      ]
+    },
+    "DOGSUSDT": {
+      "binance_symbol": "DOGSUSDT",
+      "base_symbol": "DOGS",
+      "coingecko_id": "dogs-2",
+      "coingecko_name": "Dogs",
+      "coingecko_market_cap": 25088324.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "dogs-2"
+      ]
+    },
+    "NEIROUSDT": {
+      "binance_symbol": "NEIROUSDT",
+      "base_symbol": "NEIRO",
+      "coingecko_id": "neiro",
+      "coingecko_name": "Neiro",
+      "coingecko_market_cap": 82040.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "neiro"
+      ]
+    },
+    "GOATUSDT": {
+      "binance_symbol": "GOATUSDT",
+      "base_symbol": "GOAT",
+      "coingecko_id": "goatseus-maximus",
+      "coingecko_name": "Goatseus Maximus",
+      "coingecko_market_cap": 14593006.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "goatseus-maximus"
+      ]
+    },
+    "MOODENGUSDT": {
+      "binance_symbol": "MOODENGUSDT",
+      "base_symbol": "MOODENG",
+      "coingecko_id": "moo-deng",
+      "coingecko_name": "Moo Deng",
+      "coingecko_market_cap": 38720982.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "moo-deng"
+      ]
+    },
+    "DEXEUSDT": {
+      "binance_symbol": "DEXEUSDT",
+      "base_symbol": "DEXE",
+      "coingecko_id": "dexe",
+      "coingecko_name": "DeXe",
+      "coingecko_market_cap": 67765470.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "dexe"
+      ]
+    },
+    "1000XECUSDT": {
+      "binance_symbol": "1000XECUSDT",
+      "base_symbol": "XEC",
+      "coingecko_id": "ecash",
+      "coingecko_name": "eCash",
+      "coingecko_market_cap": 146208729.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ecash"
+      ]
+    },
+    "PNUTUSDT": {
+      "binance_symbol": "PNUTUSDT",
+      "base_symbol": "PNUT",
+      "coingecko_id": "peanut-the-squirrel",
+      "coingecko_name": "Peanut the Squirrel",
+      "coingecko_market_cap": 45852927.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "peanut-the-squirrel"
+      ]
+    },
+    "FARTCOINUSDT": {
+      "binance_symbol": "FARTCOINUSDT",
+      "base_symbol": "FARTCOIN",
+      "coingecko_id": "fartcoin",
+      "coingecko_name": "Fartcoin",
+      "coingecko_market_cap": 140103550.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "fartcoin"
+      ]
+    },
+    "TURBOUSDT": {
+      "binance_symbol": "TURBOUSDT",
+      "base_symbol": "TURBO",
+      "coingecko_id": "turbo",
+      "coingecko_name": "Turbo",
+      "coingecko_market_cap": 63293767.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "turbo"
+      ]
+    },
+    "MANTAUSDT": {
+      "binance_symbol": "MANTAUSDT",
+      "base_symbol": "MANTA",
+      "coingecko_id": "manta-network",
+      "coingecko_name": "Manta Network",
+      "coingecko_market_cap": 27849984.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "manta-network"
+      ]
+    },
+    "AEVOUSDT": {
+      "binance_symbol": "AEVOUSDT",
+      "base_symbol": "AEVO",
+      "coingecko_id": "aevo-exchange",
+      "coingecko_name": "Aevo",
+      "coingecko_market_cap": 19875708.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi",
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "aevo-exchange"
+      ]
+    },
+    "ARXUSDT": {
+      "binance_symbol": "ARXUSDT",
+      "base_symbol": "ARX",
+      "coingecko_id": "arcium",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "arcium"
+      ]
+    },
+    "ETHFIUSDT": {
+      "binance_symbol": "ETHFIUSDT",
+      "base_symbol": "ETHFI",
+      "coingecko_id": "ether-fi",
+      "coingecko_name": "Ether.fi",
+      "coingecko_market_cap": 647449990.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ether-fi"
+      ]
+    },
+    "REZUSDT": {
+      "binance_symbol": "REZUSDT",
+      "base_symbol": "REZ",
+      "coingecko_id": "renzo",
+      "coingecko_name": "Renzo",
+      "coingecko_market_cap": 26827856.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "renzo"
+      ]
+    },
+    "LISTAUSDT": {
+      "binance_symbol": "LISTAUSDT",
+      "base_symbol": "LISTA",
+      "coingecko_id": "lista",
+      "coingecko_name": "Lista DAO",
+      "coingecko_market_cap": 31315096.0,
+      "primary_sector": "Liquid Staking",
+      "all_sectors": [
+        "Liquid Staking",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi",
+        "liquid-staking-tokens"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "lista"
+      ]
+    },
+    "ZROUSDT": {
+      "binance_symbol": "ZROUSDT",
+      "base_symbol": "ZRO",
+      "coingecko_id": "layerzero",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "layerzero"
+      ]
+    },
+    "ALTUSDT": {
+      "binance_symbol": "ALTUSDT",
+      "base_symbol": "ALT",
+      "coingecko_id": "altlayer",
+      "coingecko_name": "AltLayer",
+      "coingecko_market_cap": 43275324.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "altlayer"
+      ]
+    },
+    "STRKUSDT": {
+      "binance_symbol": "STRKUSDT",
+      "base_symbol": "STRK",
+      "coingecko_id": "starknet",
+      "coingecko_name": "Starknet",
+      "coingecko_market_cap": 201943545.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "starknet"
+      ]
+    },
+    "PORTALUSDT": {
+      "binance_symbol": "PORTALUSDT",
+      "base_symbol": "PORTAL",
+      "coingecko_id": "portal-2",
+      "coingecko_name": "Portal",
+      "coingecko_market_cap": 14792868.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "portal-2"
+      ]
+    },
+    "METISUSDT": {
+      "binance_symbol": "METISUSDT",
+      "base_symbol": "METIS",
+      "coingecko_id": "metis-token",
+      "coingecko_name": "Metis",
+      "coingecko_market_cap": 22299315.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "metis-token"
+      ]
+    },
+    "DYMUSDT": {
+      "binance_symbol": "DYMUSDT",
+      "base_symbol": "DYM",
+      "coingecko_id": "dymension",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "dymension"
+      ]
+    },
+    "PIXELUSDT": {
+      "binance_symbol": "PIXELUSDT",
+      "base_symbol": "PIXEL",
+      "coingecko_id": "pixels",
+      "coingecko_name": "Pixels",
+      "coingecko_market_cap": 3575662.0,
+      "primary_sector": "Gaming",
+      "all_sectors": [
+        "Gaming"
+      ],
+      "coingecko_category_ids": [
+        "gaming"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pixels"
+      ]
+    },
+    "PUMPUSDT": {
+      "binance_symbol": "PUMPUSDT",
+      "base_symbol": "PUMP",
+      "coingecko_id": "pumpbtc-2",
+      "coingecko_name": "PumpBTC",
+      "coingecko_market_cap": 3296307.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "pumpbtc-2"
+      ]
+    },
+    "TUSDT": {
+      "binance_symbol": "TUSDT",
+      "base_symbol": "T",
+      "coingecko_id": "threshold-network-token",
+      "coingecko_name": "Threshold Network",
+      "coingecko_market_cap": 46836413.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "threshold-network-token"
+      ]
+    },
+    "AGTUSDT": {
+      "binance_symbol": "AGTUSDT",
+      "base_symbol": "AGT",
+      "coingecko_id": "alaya-ai",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "alaya-ai"
+      ]
+    },
+    "WUSDT": {
+      "binance_symbol": "WUSDT",
+      "base_symbol": "W",
+      "coingecko_id": "wormhole",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "wormhole"
+      ]
+    },
+    "GUSDT": {
+      "binance_symbol": "GUSDT",
+      "base_symbol": "G",
+      "coingecko_id": "g-token",
+      "coingecko_name": "Gravity (by Galxe)",
+      "coingecko_market_cap": 25995212.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "g-token"
+      ]
+    },
+    "SUSDT": {
+      "binance_symbol": "SUSDT",
+      "base_symbol": "S",
+      "coingecko_id": "sonic-3",
+      "coingecko_name": "Sonic",
+      "coingecko_market_cap": 103731377.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "sonic-3"
+      ]
+    },
+    "BUSDT": {
+      "binance_symbol": "BUSDT",
+      "base_symbol": "B",
+      "coingecko_id": "build-on",
+      "coingecko_name": "BUILDon",
+      "coingecko_market_cap": 193951094.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "build-on"
+      ]
+    },
+    "AUSDT": {
+      "binance_symbol": "AUSDT",
+      "base_symbol": "A",
+      "coingecko_id": "vaulta",
+      "coingecko_name": "Vaulta",
+      "coingecko_market_cap": 129877839.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "vaulta"
+      ]
+    },
+    "FUSDT": {
+      "binance_symbol": "FUSDT",
+      "base_symbol": "F",
+      "coingecko_id": "synfutures",
+      "coingecko_name": "SynFutures",
+      "coingecko_market_cap": 15573396.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "synfutures"
+      ]
+    },
+    "HUSDT": {
+      "binance_symbol": "HUSDT",
+      "base_symbol": "H",
+      "coingecko_id": "humanity",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "humanity"
+      ]
+    },
+    "MUSDT": {
+      "binance_symbol": "MUSDT",
+      "base_symbol": "M",
+      "coingecko_id": "memecore",
+      "coingecko_name": "MemeCore",
+      "coingecko_market_cap": 2582089839.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme",
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1",
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "memecore"
+      ]
+    },
+    "IRYSUSDT": {
+      "binance_symbol": "IRYSUSDT",
+      "base_symbol": "IRYS",
+      "coingecko_id": "irys",
+      "coingecko_name": "Irys",
+      "coingecko_market_cap": 27177955.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "irys"
+      ]
+    },
+    "SANTOSUSDT": {
+      "binance_symbol": "SANTOSUSDT",
+      "base_symbol": "SANTOS",
+      "coingecko_id": "santos-fc-fan-token",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "santos-fc-fan-token"
+      ]
+    },
+    "SAFEUSDT": {
+      "binance_symbol": "SAFEUSDT",
+      "base_symbol": "SAFE",
+      "coingecko_id": "safe",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "safe"
+      ]
+    },
+    "ALPINEUSDT": {
+      "binance_symbol": "ALPINEUSDT",
+      "base_symbol": "ALPINE",
+      "coingecko_id": "alpine-f1-team-fan-token",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "alpine-f1-team-fan-token"
+      ]
+    },
+    "ASRUSDT": {
+      "binance_symbol": "ASRUSDT",
+      "base_symbol": "ASR",
+      "coingecko_id": "as-roma-fan-token",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "as-roma-fan-token"
+      ]
+    },
+    "CELOUSDT": {
+      "binance_symbol": "CELOUSDT",
+      "base_symbol": "CELO",
+      "coingecko_id": "celo",
+      "coingecko_name": "Celo",
+      "coingecko_market_cap": 44664371.0,
+      "primary_sector": "Layer 2",
+      "all_sectors": [
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "layer-2"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "celo"
+      ]
+    },
+    "MASKUSDT": {
+      "binance_symbol": "MASKUSDT",
+      "base_symbol": "MASK",
+      "coingecko_id": "mask-network",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "mask-network"
+      ]
+    },
+    "OGUSDT": {
+      "binance_symbol": "OGUSDT",
+      "base_symbol": "OG",
+      "coingecko_id": "og-fan-token",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "og-fan-token"
+      ]
+    },
+    "COOKIEUSDT": {
+      "binance_symbol": "COOKIEUSDT",
+      "base_symbol": "COOKIE",
+      "coingecko_id": "cookie",
+      "coingecko_name": "Cookie DAO",
+      "coingecko_market_cap": 8251432.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "cookie"
+      ]
+    },
+    "SLXUSDT": {
+      "binance_symbol": "SLXUSDT",
+      "base_symbol": "SLX",
+      "coingecko_id": "solstice",
+      "coingecko_name": "Solstice",
+      "coingecko_market_cap": 16220865.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "solstice"
+      ]
+    },
+    "BANKUSDT": {
+      "binance_symbol": "BANKUSDT",
+      "base_symbol": "BANK",
+      "coingecko_id": "lorenzo-protocol",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "lorenzo-protocol"
+      ]
+    },
+    "BANANAUSDT": {
+      "binance_symbol": "BANANAUSDT",
+      "base_symbol": "BANANA",
+      "coingecko_id": "banana-gun",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "banana-gun"
+      ]
+    },
+    "BANDUSDT": {
+      "binance_symbol": "BANDUSDT",
+      "base_symbol": "BAND",
+      "coingecko_id": "band-protocol",
+      "coingecko_name": "Band",
+      "coingecko_market_cap": 32533206.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "band-protocol"
+      ]
+    },
+    "BANUSDT": {
+      "binance_symbol": "BANUSDT",
+      "base_symbol": "BAN",
+      "coingecko_id": "comedian",
+      "coingecko_name": "Comedian",
+      "coingecko_market_cap": 66663118.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "comedian"
+      ]
+    },
+    "KAIAUSDT": {
+      "binance_symbol": "KAIAUSDT",
+      "base_symbol": "KAIA",
+      "coingecko_id": "kaia",
+      "coingecko_name": "Kaia",
+      "coingecko_market_cap": 182377958.0,
+      "primary_sector": "Layer 1",
+      "all_sectors": [
+        "Layer 1"
+      ],
+      "coingecko_category_ids": [
+        "layer-1"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "kaia"
+      ]
+    },
+    "FIGHTUSDT": {
+      "binance_symbol": "FIGHTUSDT",
+      "base_symbol": "FIGHT",
+      "coingecko_id": "fight-2",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "fight-2"
+      ]
+    },
+    "DOLOUSDT": {
+      "binance_symbol": "DOLOUSDT",
+      "base_symbol": "DOLO",
+      "coingecko_id": "dolomite",
+      "coingecko_name": "Dolomite",
+      "coingecko_market_cap": 12217957.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "dolomite"
+      ]
+    },
+    "TUTUSDT": {
+      "binance_symbol": "TUTUSDT",
+      "base_symbol": "TUT",
+      "coingecko_id": "tutorial",
+      "coingecko_name": "Tutorial",
+      "coingecko_market_cap": 16449452.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "tutorial"
+      ]
+    },
+    "OPNUSDT": {
+      "binance_symbol": "OPNUSDT",
+      "base_symbol": "OPN",
+      "coingecko_id": "opinion",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "opinion"
+      ]
+    },
+    "OPGUSDT": {
+      "binance_symbol": "OPGUSDT",
+      "base_symbol": "OPG",
+      "coingecko_id": "opengradient",
+      "coingecko_name": "OpenGradient",
+      "coingecko_market_cap": 21804244.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "opengradient"
+      ]
+    },
+    "ONUSDT": {
+      "binance_symbol": "ONUSDT",
+      "base_symbol": "ON",
+      "coingecko_id": "orochi-network",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "orochi-network"
+      ]
+    },
+    "GWEIUSDT": {
+      "binance_symbol": "GWEIUSDT",
+      "base_symbol": "GWEI",
+      "coingecko_id": "ethgas-2",
+      "coingecko_name": "ETHGas",
+      "coingecko_market_cap": 43403475.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ethgas-2"
+      ]
+    },
+    "SSVUSDT": {
+      "binance_symbol": "SSVUSDT",
+      "base_symbol": "SSV",
+      "coingecko_id": "ssv-network",
+      "coingecko_name": "SSV Network",
+      "coingecko_market_cap": 39060371.0,
+      "primary_sector": "DeFi",
+      "all_sectors": [
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "ssv-network"
+      ]
+    },
+    "DODOXUSDT": {
+      "binance_symbol": "DODOXUSDT",
+      "base_symbol": "DODOX",
+      "coingecko_id": "dodo",
+      "coingecko_name": "DODO",
+      "coingecko_market_cap": 17614034.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "dodo"
+      ]
+    },
+    "MMTUSDT": {
+      "binance_symbol": "MMTUSDT",
+      "base_symbol": "MMT",
+      "coingecko_id": "momentum-3",
+      "coingecko_name": "Momentum",
+      "coingecko_market_cap": 30742860.0,
+      "primary_sector": "Exchange",
+      "all_sectors": [
+        "Exchange",
+        "DeFi"
+      ],
+      "coingecko_category_ids": [
+        "decentralized-exchange",
+        "decentralized-finance-defi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "momentum-3"
+      ]
+    },
+    "CYBERUSDT": {
+      "binance_symbol": "CYBERUSDT",
+      "base_symbol": "CYBER",
+      "coingecko_id": "cyberconnect",
+      "coingecko_name": "CYBER",
+      "coingecko_market_cap": 17986760.0,
+      "primary_sector": "AI",
+      "all_sectors": [
+        "AI",
+        "SocialFi",
+        "Layer 2"
+      ],
+      "coingecko_category_ids": [
+        "artificial-intelligence",
+        "layer-2",
+        "socialfi"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "cyberconnect"
+      ]
+    },
+    "ENSOUSDT": {
+      "binance_symbol": "ENSOUSDT",
+      "base_symbol": "ENSO",
+      "coingecko_id": "enso",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "enso"
+      ]
+    },
+    "HEMIUSDT": {
+      "binance_symbol": "HEMIUSDT",
+      "base_symbol": "HEMI",
+      "coingecko_id": "hemi",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "hemi"
+      ]
+    },
+    "MUBARAKUSDT": {
+      "binance_symbol": "MUBARAKUSDT",
+      "base_symbol": "MUBARAK",
+      "coingecko_id": "mubarak",
+      "coingecko_name": "Mubarak",
+      "coingecko_market_cap": 28987680.0,
+      "primary_sector": "Meme",
+      "all_sectors": [
+        "Meme"
+      ],
+      "coingecko_category_ids": [
+        "meme-token"
+      ],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "mubarak"
+      ]
+    },
+    "KSMUSDT": {
+      "binance_symbol": "KSMUSDT",
+      "base_symbol": "KSM",
+      "coingecko_id": "kusama",
+      "coingecko_name": null,
+      "coingecko_market_cap": 0.0,
+      "primary_sector": "Other",
+      "all_sectors": [],
+      "coingecko_category_ids": [],
+      "resolution_status": "resolved_binance_futures",
+      "candidate_ids": [
+        "kusama"
+      ]
+    }
+  }
+}
