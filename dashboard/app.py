@@ -7045,7 +7045,7 @@ if selected_section == "geometry_scanner":
                         "Flat slope maximum (%/bar)",
                         min_value=0.001,
                         max_value=1.0,
-                        value=0.03,
+                        value=0.02,
                         step=0.01,
                         format="%.3f",
                         key=(
@@ -7059,7 +7059,7 @@ if selected_section == "geometry_scanner":
                         "Minimum directional slope (%/bar)",
                         min_value=0.001,
                         max_value=1.0,
-                        value=0.02,
+                        value=0.03,
                         step=0.01,
                         format="%.3f",
                         key=(
