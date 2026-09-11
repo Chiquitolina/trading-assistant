@@ -236,9 +236,14 @@ class MarketFlowDashboardService:
                 "return_rank_pct_4h": return_rank,
                 "relative_volume_4h": relative_volume,
                 "volume_rank_pct_4h": volume_rank,
-                "flow_group": self._classify_flow(
-                    return_rank=return_rank,
-                    volume_rank=volume_rank,
+                "flow_group": (
+                    metrics.get(
+                        "flow_group"
+                    )
+                    or self._classify_flow(
+                        return_rank=return_rank,
+                        volume_rank=volume_rank,
+                    )
                 ),
                 "primary_sector": (
                     metrics.get(

@@ -359,6 +359,57 @@ class RedisMarketDataProvider:
             return self._reject_market_flow(
                 f"symbol_unavailable:{symbol}"
             )
+            
+        primary_sector = (
+            symbol_metrics.get(
+                "primary_sector"
+            )
+        )
+
+        sector_metrics_available = bool(
+            snapshot.get(
+                "sector_context_available"
+            )
+            and symbol_metrics.get(
+                "sector_return_pct_4h"
+            )
+            is not None
+        )
+
+        sector_context_error = None
+
+        if not snapshot.get(
+            "sector_context_available"
+        ):
+            sector_context_error = (
+                snapshot.get(
+                    "sector_context_error"
+                )
+                or "sector_context_unavailable"
+            )
+
+        elif primary_sector == "Other":
+            sector_context_error = (
+                "sector_unclassified"
+            )
+
+        elif not sector_metrics_available:
+            excluded_sector = (
+                snapshot.get(
+                    "excluded_sectors",
+                    {},
+                ).get(
+                    primary_sector,
+                    {},
+                )
+            )
+
+            sector_context_error = (
+                excluded_sector.get(
+                    "reason"
+                )
+                or "sector_metrics_unavailable"
+            )
 
         result = dict(
             symbol_metrics
@@ -403,6 +454,27 @@ class RedisMarketDataProvider:
             "market_flow_universe_size": (
                 snapshot.get(
                     "valid_universe_size"
+                )
+            ),
+            "sector_context_available": (
+                sector_metrics_available
+            ),
+            "sector_context_error": (
+                sector_context_error
+            ),
+            "sector_catalog_generated_at": (
+                snapshot.get(
+                    "sector_catalog_generated_at"
+                )
+            ),
+            "sector_assignment_method": (
+                snapshot.get(
+                    "sector_assignment_method"
+                )
+            ),
+            "sector_return_aggregation": (
+                snapshot.get(
+                    "sector_return_aggregation"
                 )
             ),
         })

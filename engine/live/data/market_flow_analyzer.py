@@ -128,6 +128,17 @@ class MarketFlowAnalyzer:
             symbol_metrics[symbol][
                 "volume_rank_pct_4h"
             ] = volume_ranks[index]
+            
+            symbol_metrics[symbol][
+                "flow_group"
+            ] = self._classify_flow(
+                return_rank=(
+                    return_ranks[index]
+                ),
+                volume_rank=(
+                    volume_ranks[index]
+                ),
+            )
 
         valid_universe_size = len(
             symbol_metrics
@@ -215,6 +226,39 @@ class MarketFlowAnalyzer:
                 excluded_symbols
             ),
         }
+        
+    def _classify_flow(
+        self,
+        return_rank,
+        volume_rank,
+    ):
+        if (
+            return_rank >= 80
+            and volume_rank >= 80
+        ):
+            return "Confirmed leadership"
+
+        if (
+            return_rank >= 80
+            and volume_rank < 50
+        ):
+            return (
+                "Rise without volume confirmation"
+            )
+
+        if (
+            volume_rank >= 80
+            and 40 <= return_rank < 80
+        ):
+            return "Emerging activity"
+
+        if (
+            volume_rank >= 80
+            and return_rank <= 20
+        ):
+            return "High-volume weakness"
+
+        return "Neutral / unclassified"
 
     def _calculate_symbol_metrics(
         self,

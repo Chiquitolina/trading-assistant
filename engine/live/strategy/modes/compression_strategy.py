@@ -336,6 +336,28 @@ class CompressionStrategy:
             "market_flow_return_rank_pct_4h": None,
             "market_flow_relative_volume_4h": None,
             "market_flow_volume_rank_pct_4h": None,
+            "market_flow_sector_context_available": False,
+            
+            "market_flow_sector_context_error": None,
+            "market_flow_sector_catalog_generated_at": None,
+            "market_flow_sector_assignment_method": None,
+            "market_flow_sector_return_aggregation": None,
+
+            "market_flow_primary_sector": None,
+            "market_flow_all_sectors": None,
+
+            "market_flow_sector_configured_symbols": None,
+            "market_flow_sector_valid_symbols": None,
+            "market_flow_sector_coverage_pct": None,
+            
+            "market_flow_group": None,
+
+            "market_flow_sector_return_pct_4h": None,
+            "market_flow_sector_return_rank_pct_4h": None,
+            "market_flow_sector_breadth_4h": None,
+            "market_flow_sector_relative_volume_4h": None,
+            "market_flow_sector_strength_vs_btc_4h": None,
+            "market_flow_symbol_strength_vs_sector_4h": None,
         }
 
         if self.market_flow_provider is None:
@@ -425,6 +447,96 @@ class CompressionStrategy:
             "market_flow_volume_rank_pct_4h": (
                 metrics.get(
                     "volume_rank_pct_4h"
+                )
+            ),
+            
+            "market_flow_group": (
+                metrics.get(
+                    "flow_group"
+                )
+            ),
+            "market_flow_sector_context_available": (
+                metrics.get(
+                    "sector_context_available",
+                    False,
+                )
+            ),
+            "market_flow_sector_context_error": (
+                metrics.get(
+                    "sector_context_error"
+                )
+            ),
+            "market_flow_sector_catalog_generated_at": (
+                metrics.get(
+                    "sector_catalog_generated_at"
+                )
+            ),
+            "market_flow_sector_assignment_method": (
+                metrics.get(
+                    "sector_assignment_method"
+                )
+            ),
+            "market_flow_sector_return_aggregation": (
+                metrics.get(
+                    "sector_return_aggregation"
+                )
+            ),
+
+            "market_flow_primary_sector": (
+                metrics.get(
+                    "primary_sector"
+                )
+            ),
+            "market_flow_all_sectors": (
+                metrics.get(
+                    "all_sectors"
+                )
+            ),
+
+            "market_flow_sector_configured_symbols": (
+                metrics.get(
+                    "sector_configured_symbols"
+                )
+            ),
+            "market_flow_sector_valid_symbols": (
+                metrics.get(
+                    "sector_valid_symbols"
+                )
+            ),
+            "market_flow_sector_coverage_pct": (
+                metrics.get(
+                    "sector_coverage_pct"
+                )
+            ),
+
+            "market_flow_sector_return_pct_4h": (
+                metrics.get(
+                    "sector_return_pct_4h"
+                )
+            ),
+            "market_flow_sector_return_rank_pct_4h": (
+                metrics.get(
+                    "sector_return_rank_pct_4h"
+                )
+            ),
+            "market_flow_sector_breadth_4h": (
+                metrics.get(
+                    "sector_breadth_4h"
+                )
+            ),
+            "market_flow_sector_relative_volume_4h": (
+                metrics.get(
+                    "sector_relative_volume_4h"
+                )
+            ),
+            "market_flow_sector_strength_vs_btc_4h": (
+                metrics.get(
+                    "sector_strength_vs_btc_4h"
+                )
+            ),
+            "market_flow_symbol_strength_vs_sector_4h": (
+                metrics.get(
+                    "symbol_strength_vs_sector_4h"
                 )
             ),
         })

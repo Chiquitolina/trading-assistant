@@ -412,6 +412,21 @@ class MarketSectorFlowAnalyzer:
             )
 
             metrics.update({
+                "sector_configured_symbols": (
+                    sector_metrics[
+                        "configured_symbols"
+                    ]
+                ),
+                "sector_valid_symbols": (
+                    sector_metrics[
+                        "valid_symbols"
+                    ]
+                ),
+                "sector_coverage_pct": (
+                    sector_metrics[
+                        "coverage_pct"
+                    ]
+                ),
                 "sector_return_pct_4h": (
                     sector_return
                 ),
@@ -612,6 +627,9 @@ class MarketSectorFlowAnalyzer:
             "symbol_strength_vs_sector_4h": (
                 None
             ),
+            "sector_configured_symbols": None,
+            "sector_valid_symbols": None,
+            "sector_coverage_pct": None,
         }
 
     def _to_finite_float(

@@ -174,8 +174,29 @@ class ExecutionEngine:
             "market_flow_btc_return_pct_4h",
             "market_flow_return_pct_4h",
             "market_flow_return_rank_pct_4h",
+            "market_flow_group",
             "market_flow_relative_volume_4h",
             "market_flow_volume_rank_pct_4h",
+            
+            "market_flow_sector_context_available",
+            "market_flow_sector_context_error",
+            "market_flow_sector_catalog_generated_at",
+            "market_flow_sector_assignment_method",
+            "market_flow_sector_return_aggregation",
+
+            "market_flow_primary_sector",
+            "market_flow_all_sectors",
+
+            "market_flow_sector_configured_symbols",
+            "market_flow_sector_valid_symbols",
+            "market_flow_sector_coverage_pct",
+
+            "market_flow_sector_return_pct_4h",
+            "market_flow_sector_return_rank_pct_4h",
+            "market_flow_sector_breadth_4h",
+            "market_flow_sector_relative_volume_4h",
+            "market_flow_sector_strength_vs_btc_4h",
+            "market_flow_symbol_strength_vs_sector_4h",
         )
 
         return {
