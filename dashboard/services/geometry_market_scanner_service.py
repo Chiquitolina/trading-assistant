@@ -14,6 +14,8 @@ from dashboard.analytics.geometry_scanner import (
 class GeometryMarketScannerService:
     TARGET_GEOMETRIES = {
         "ascending_triangle",
+        "descending_triangle",
+        "ascending_wedge",
         "descending_wedge",
     }
 

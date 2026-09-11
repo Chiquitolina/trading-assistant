@@ -459,6 +459,7 @@ class GeometryScanner:
                 reference_price
             ),
             upper_line=upper_line,
+            lower_line=lower_line,
             pattern_window_size=(
                 len(window)
             ),
@@ -600,6 +601,19 @@ class GeometryScanner:
                 if breakout
                 else None
             ),
+            "breakout_direction": (
+                breakout["direction"]
+                if breakout
+                else None
+            ),
+            "breakout_boundary_price": (
+                breakout[
+                    "boundary_price"
+                ]
+                if breakout
+                else None
+            ),
+            
             "reasons": reasons,
         }
 
@@ -802,6 +816,8 @@ class GeometryScanner:
                 reasons,
             )
 
+        # Resistencia horizontal y mínimos
+        # progresivamente más altos.
         if (
             upper_flat
             and lower_up
@@ -809,6 +825,18 @@ class GeometryScanner:
         ):
             return (
                 "ascending_triangle",
+                reasons,
+            )
+
+        # Máximos progresivamente más bajos
+        # y soporte aproximadamente horizontal.
+        if (
+            upper_down
+            and lower_flat
+            and contracts
+        ):
+            return (
+                "descending_triangle",
                 reasons,
             )
 
@@ -836,16 +864,29 @@ class GeometryScanner:
                 reasons,
             )
 
+        # Ambas fronteras descienden, pero
+        # la superior cae más rápidamente.
         if (
             upper_down
-            and lower_slope <= 0
+            and lower_down
             and upper_slope < lower_slope
             and contracts
-            and bullish_flagpole
-            and controlled_retracement
         ):
             return (
                 "descending_wedge",
+                reasons,
+            )
+
+        # Ambas fronteras ascienden, pero
+        # la inferior sube más rápidamente.
+        if (
+            upper_up
+            and lower_up
+            and lower_slope > upper_slope
+            and contracts
+        ):
+            return (
+                "ascending_wedge",
                 reasons,
             )
 
@@ -922,6 +963,7 @@ class GeometryScanner:
         end_index,
         reference_price,
         upper_line,
+        lower_line,
         pattern_window_size,
     ):
         first_future_index = (
@@ -955,9 +997,22 @@ class GeometryScanner:
                 * projected_x
             )
 
+            projected_lower_pct = (
+                lower_line["intercept"]
+                + lower_line["slope"]
+                * projected_x
+            )
+
             projected_upper_price = (
                 self._pct_to_price(
                     projected_upper_pct,
+                    reference_price,
+                )
+            )
+
+            projected_lower_price = (
+                self._pct_to_price(
+                    projected_lower_pct,
                     reference_price,
                 )
             )
@@ -968,20 +1023,36 @@ class GeometryScanner:
                 ].iloc[future_index]
             )
 
-            if (
-                close_price
-                > projected_upper_price
-            ):
+            timestamp = int(
+                candles[
+                    "timestamp"
+                ].iloc[future_index]
+            )
+
+            if close_price > projected_upper_price:
                 return {
-                    "timestamp": int(
-                        candles[
-                            "timestamp"
-                        ].iloc[
-                            future_index
-                        ]
-                    ),
+                    "timestamp": timestamp,
                     "price": round(
                         close_price,
+                        10,
+                    ),
+                    "direction": "UP",
+                    "boundary_price": round(
+                        projected_upper_price,
+                        10,
+                    ),
+                }
+
+            if close_price < projected_lower_price:
+                return {
+                    "timestamp": timestamp,
+                    "price": round(
+                        close_price,
+                        10,
+                    ),
+                    "direction": "DOWN",
+                    "boundary_price": round(
+                        projected_lower_price,
                         10,
                     ),
                 }

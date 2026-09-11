@@ -6942,9 +6942,9 @@ if selected_section == "geometry_scanner":
     )
 
     st.caption(
-        "Ascending triangles and descending "
-        "wedges currently forming or with a "
-        "recent observed breakout."
+        "Ascending and descending triangles "
+        "and wedges currently forming or with "
+        "a recent observed breakout."
     )
 
     with st.spinner(
@@ -6961,8 +6961,8 @@ if selected_section == "geometry_scanner":
 
     if market_geometry_candidates.empty:
         st.info(
-            "No current ascending triangles or "
-            "descending wedges were detected."
+            "No current triangles or wedges "
+            "were detected."
         )
 
         if market_geometry_error:
@@ -6995,7 +6995,7 @@ if selected_section == "geometry_scanner":
             ).sum()
         )
 
-        triangle_count = int(
+        ascending_triangle_count = int(
             (
                 market_geometry_candidates[
                     "geometry"
@@ -7004,7 +7004,25 @@ if selected_section == "geometry_scanner":
             ).sum()
         )
 
-        wedge_count = int(
+        descending_triangle_count = int(
+            (
+                market_geometry_candidates[
+                    "geometry"
+                ]
+                == "descending_triangle"
+            ).sum()
+        )
+
+        ascending_wedge_count = int(
+            (
+                market_geometry_candidates[
+                    "geometry"
+                ]
+                == "ascending_wedge"
+            ).sum()
+        )
+
+        descending_wedge_count = int(
             (
                 market_geometry_candidates[
                     "geometry"
@@ -7013,9 +7031,14 @@ if selected_section == "geometry_scanner":
             ).sum()
         )
 
-        summary_1, summary_2, summary_3, summary_4 = (
-            st.columns(4)
-        )
+        (
+            summary_1,
+            summary_2,
+            summary_3,
+            summary_4,
+            summary_5,
+            summary_6,
+        ) = st.columns(6)
 
         summary_1.metric(
             "Forming",
@@ -7029,12 +7052,22 @@ if selected_section == "geometry_scanner":
 
         summary_3.metric(
             "Ascending triangles",
-            triangle_count,
+            ascending_triangle_count,
         )
 
         summary_4.metric(
+            "Descending triangles",
+            descending_triangle_count,
+        )
+
+        summary_5.metric(
+            "Ascending wedges",
+            ascending_wedge_count,
+        )
+
+        summary_6.metric(
             "Descending wedges",
-            wedge_count,
+            descending_wedge_count,
         )
 
         market_filter_1, market_filter_2 = (
@@ -7065,10 +7098,14 @@ if selected_section == "geometry_scanner":
                     "Geometry",
                     options=[
                         "ascending_triangle",
+                        "descending_triangle",
+                        "ascending_wedge",
                         "descending_wedge",
                     ],
                     default=[
                         "ascending_triangle",
+                        "descending_triangle",
+                        "ascending_wedge",
                         "descending_wedge",
                     ],
                     key=(
@@ -7133,6 +7170,7 @@ if selected_section == "geometry_scanner":
                 "flag_retracement_pct",
                 "touches_high",
                 "touches_low",
+                "breakout_direction",
                 "breakout_age_bars",
                 "pattern_end",
             ]
@@ -7170,6 +7208,9 @@ if selected_section == "geometry_scanner":
                     ),
                     "touches_low": (
                         "Low touches"
+                    ),
+                    "breakout_direction": (
+                        "Breakout direction"
                     ),
                     "breakout_age_bars": (
                         "Breakout age"
