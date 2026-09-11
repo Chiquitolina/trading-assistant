@@ -7,6 +7,7 @@ import redis
 
 from engine.live.data.redis_market_data_protocol import (
     HISTORY_MAXLEN,
+    KEY_PREFIX,
     history_key,
     normalize_symbol,
     normalize_timeframe,
@@ -40,6 +41,7 @@ class GeometryScannerDataService:
 
         self.last_error = None
         self.last_diagnostics = {}
+        self.last_market_diagnostics = {}
 
     def get_closed_candles(
         self,
@@ -232,6 +234,306 @@ class GeometryScannerDataService:
         }
 
         return dataframe
+    
+    def get_available_symbols(
+        self,
+        timeframe="30m",
+    ):
+        self.last_error = None
+
+        try:
+            timeframe = normalize_timeframe(
+                timeframe
+            )
+        except (TypeError, ValueError) as exc:
+            self.last_error = (
+                f"invalid_timeframe:{exc}"
+            )
+            return []
+
+        if timeframe not in self.TIMEFRAME_MS:
+            self.last_error = (
+                f"unsupported_timeframe:{timeframe}"
+            )
+            return []
+
+        key_prefix = (
+            f"{KEY_PREFIX}:history:"
+        )
+
+        key_suffix = (
+            f":{timeframe}"
+        )
+
+        key_pattern = (
+            f"{key_prefix}*{key_suffix}"
+        )
+
+        symbols = set()
+
+        try:
+            for redis_key in self.redis.scan_iter(
+                match=key_pattern,
+                count=500,
+            ):
+                if (
+                    not redis_key.startswith(
+                        key_prefix
+                    )
+                    or not redis_key.endswith(
+                        key_suffix
+                    )
+                ):
+                    continue
+
+                symbol = redis_key[
+                    len(key_prefix):
+                    -len(key_suffix)
+                ]
+
+                if symbol:
+                    symbols.add(
+                        normalize_symbol(symbol)
+                    )
+
+        except (
+            redis.RedisError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            self.last_error = (
+                f"symbol_scan_error:{exc}"
+            )
+            return []
+
+        return sorted(symbols)
+    
+    def get_market_candles(
+        self,
+        timeframe="30m",
+        limit=160,
+        symbols=None,
+    ):
+        self.last_error = None
+        self.last_market_diagnostics = {}
+
+        try:
+            timeframe = normalize_timeframe(
+                timeframe
+            )
+        except (TypeError, ValueError) as exc:
+            self.last_error = (
+                f"invalid_timeframe:{exc}"
+            )
+            return {}
+
+        timeframe_ms = self.TIMEFRAME_MS.get(
+            timeframe
+        )
+
+        if timeframe_ms is None:
+            self.last_error = (
+                f"unsupported_timeframe:{timeframe}"
+            )
+            return {}
+
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            self.last_error = "invalid_limit"
+            return {}
+
+        limit = max(
+            1,
+            min(
+                limit,
+                HISTORY_MAXLEN,
+            ),
+        )
+
+        if symbols is None:
+            symbols = self.get_available_symbols(
+                timeframe=timeframe
+            )
+
+            if not symbols:
+                return {}
+
+        normalized_symbols = []
+
+        for symbol in symbols:
+            try:
+                normalized_symbols.append(
+                    normalize_symbol(symbol)
+                )
+            except (TypeError, ValueError):
+                continue
+
+        normalized_symbols = sorted(
+            set(normalized_symbols)
+        )
+
+        if not normalized_symbols:
+            self.last_error = (
+                "no_available_symbols"
+            )
+            return {}
+
+        pipeline = self.redis.pipeline(
+            transaction=False
+        )
+
+        for symbol in normalized_symbols:
+            pipeline.lrange(
+                history_key(
+                    symbol,
+                    timeframe,
+                ),
+                -limit,
+                -1,
+            )
+
+        try:
+            market_histories = (
+                pipeline.execute()
+            )
+        except redis.RedisError as exc:
+            self.last_error = (
+                f"redis_pipeline_error:{exc}"
+            )
+            return {}
+
+        now_ms = int(
+            time.time() * 1000
+        )
+
+        result = {}
+        excluded_symbols = {}
+
+        for symbol, raw_candles in zip(
+            normalized_symbols,
+            market_histories,
+        ):
+            dataframe = (
+                self._build_dataframe(
+                    raw_candles=raw_candles,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    timeframe_ms=timeframe_ms,
+                    now_ms=now_ms,
+                )
+            )
+
+            if dataframe.empty:
+                excluded_symbols[symbol] = (
+                    "no_valid_closed_candles"
+                )
+                continue
+
+            result[symbol] = dataframe
+
+        self.last_market_diagnostics = {
+            "timeframe": timeframe,
+            "requested_limit": limit,
+            "available_symbols": len(
+                normalized_symbols
+            ),
+            "loaded_symbols": len(result),
+            "excluded_symbols_count": len(
+                excluded_symbols
+            ),
+            "excluded_symbols": (
+                excluded_symbols
+            ),
+        }
+
+        if not result:
+            self.last_error = (
+                "no_market_histories_available"
+            )
+
+        return result
+
+    def _build_dataframe(
+        self,
+        raw_candles,
+        symbol,
+        timeframe,
+        timeframe_ms,
+        now_ms,
+    ):
+        candles_by_timestamp = {}
+
+        for raw_candle in (
+            raw_candles or []
+        ):
+            try:
+                candle = json.loads(
+                    raw_candle
+                )
+            except (
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
+                continue
+
+            normalized = self._normalize_candle(
+                candle=candle,
+                requested_symbol=symbol,
+                requested_timeframe=timeframe,
+                timeframe_ms=timeframe_ms,
+                now_ms=now_ms,
+            )
+
+            if normalized is None:
+                continue
+
+            if normalized.pop(
+                "_still_open",
+                False,
+            ):
+                continue
+
+            candles_by_timestamp[
+                normalized["timestamp"]
+            ] = normalized
+
+        candles = sorted(
+            candles_by_timestamp.values(),
+            key=lambda item: (
+                item["timestamp"]
+            ),
+        )
+
+        if not candles:
+            return pd.DataFrame()
+
+        dataframe = pd.DataFrame(candles)
+
+        dataframe["datetime"] = (
+            pd.to_datetime(
+                dataframe["timestamp"],
+                unit="ms",
+                utc=True,
+            )
+        )
+
+        return dataframe[
+            [
+                "symbol",
+                "timeframe",
+                "timestamp",
+                "close_timestamp",
+                "datetime",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quoteVolume",
+            ]
+        ].reset_index(drop=True)
 
     def _normalize_candle(
         self,
