@@ -240,6 +240,33 @@ class MarketFlowDashboardService:
                     return_rank=return_rank,
                     volume_rank=volume_rank,
                 ),
+                "primary_sector": (
+                    metrics.get(
+                        "primary_sector"
+                    )
+                    or "Other"
+                ),
+                "sector_return_rank_pct_4h": (
+                    self._optional_finite_float(
+                        metrics.get(
+                            "sector_return_rank_pct_4h"
+                        )
+                    )
+                ),
+                "sector_strength_vs_btc_4h": (
+                    self._optional_finite_float(
+                        metrics.get(
+                            "sector_strength_vs_btc_4h"
+                        )
+                    )
+                ),
+                "symbol_strength_vs_sector_4h": (
+                    self._optional_finite_float(
+                        metrics.get(
+                            "symbol_strength_vs_sector_4h"
+                        )
+                    )
+                ),
             })
 
         if not rows:
@@ -254,6 +281,175 @@ class MarketFlowDashboardService:
             [
                 "return_rank_pct_4h",
                 "volume_rank_pct_4h",
+            ],
+            ascending=[False, False],
+        ).reset_index(drop=True)
+            
+    def build_sector_table(
+        self,
+        snapshot,
+    ):
+        if not isinstance(snapshot, dict):
+            self.last_error = (
+                "snapshot_must_be_dict"
+            )
+            return pd.DataFrame()
+
+        if not snapshot.get(
+            "sector_context_available"
+        ):
+            self.last_error = (
+                snapshot.get(
+                    "sector_context_error"
+                )
+                or "sector_context_unavailable"
+            )
+
+            return pd.DataFrame()
+
+        sectors = snapshot.get(
+            "sectors"
+        )
+
+        if not isinstance(sectors, dict):
+            self.last_error = (
+                "invalid_sectors_payload"
+            )
+            return pd.DataFrame()
+
+        rows = []
+
+        for sector, metrics in (
+            sectors.items()
+        ):
+            if not isinstance(metrics, dict):
+                continue
+
+            try:
+                configured_symbols = int(
+                    metrics[
+                        "configured_symbols"
+                    ]
+                )
+
+                valid_symbols = int(
+                    metrics[
+                        "valid_symbols"
+                    ]
+                )
+
+                coverage_pct = float(
+                    metrics[
+                        "coverage_pct"
+                    ]
+                )
+
+                return_pct = float(
+                    metrics[
+                        "sector_return_pct_4h"
+                    ]
+                )
+
+                return_rank = float(
+                    metrics[
+                        "sector_return_rank_pct_4h"
+                    ]
+                )
+
+                breadth = float(
+                    metrics[
+                        "sector_breadth_4h"
+                    ]
+                )
+
+                relative_volume = float(
+                    metrics[
+                        "sector_relative_volume_4h"
+                    ]
+                )
+
+                strength_vs_btc = float(
+                    metrics[
+                        "sector_strength_vs_btc_4h"
+                    ]
+                )
+
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            numeric_values = (
+                coverage_pct,
+                return_pct,
+                return_rank,
+                breadth,
+                relative_volume,
+                strength_vs_btc,
+            )
+
+            if not all(
+                math.isfinite(value)
+                for value in numeric_values
+            ):
+                continue
+
+            rows.append({
+                "sector": sector,
+                "configured_symbols": (
+                    configured_symbols
+                ),
+                "valid_symbols": (
+                    valid_symbols
+                ),
+                "coverage_pct": (
+                    coverage_pct
+                ),
+                "sector_return_pct_4h": (
+                    return_pct
+                ),
+                "sector_return_rank_pct_4h": (
+                    return_rank
+                ),
+                "sector_breadth_4h": (
+                    breadth
+                ),
+                "sector_relative_volume_4h": (
+                    relative_volume
+                ),
+                "sector_strength_vs_btc_4h": (
+                    strength_vs_btc
+                ),
+                "sector_flow_state": (
+                    self._classify_sector_flow(
+                        return_rank=return_rank,
+                        breadth=breadth,
+                        relative_volume=(
+                            relative_volume
+                        ),
+                        strength_vs_btc=(
+                            strength_vs_btc
+                        ),
+                    )
+                ),
+            })
+
+        if not rows:
+            self.last_error = (
+                "no_valid_sector_metrics"
+            )
+            return pd.DataFrame()
+
+        self.last_error = None
+
+        result = pd.DataFrame(rows)
+
+        return result.sort_values(
+            [
+                "sector_return_rank_pct_4h",
+                "sector_breadth_4h",
             ],
             ascending=[False, False],
         ).reset_index(drop=True)
@@ -280,6 +476,45 @@ class MarketFlowDashboardService:
             return "Broad expansion"
 
         return "Euphoria / possible extension"
+        
+    def _classify_sector_flow(
+        self,
+        return_rank,
+        breadth,
+        relative_volume,
+        strength_vs_btc,
+    ):
+        if (
+            return_rank >= 70
+            and breadth >= 60
+            and relative_volume >= 1
+            and strength_vs_btc > 0
+        ):
+            return "Confirmed rotation"
+
+        if (
+            return_rank >= 70
+            and breadth >= 60
+            and relative_volume < 1
+        ):
+            return "Broad rise / low volume"
+
+        if (
+            return_rank >= 70
+            and breadth < 60
+        ):
+            return "Concentrated leadership"
+
+        if (
+            relative_volume >= 1
+            and strength_vs_btc < 0
+        ):
+            return "High-volume weakness"
+
+        if strength_vs_btc < 0:
+            return "Lagging BTC"
+
+        return "Neutral / mixed"
 
     def _classify_flow(
         self,
@@ -311,6 +546,20 @@ class MarketFlowDashboardService:
             return "High-volume weakness"
 
         return "Neutral / unclassified"
+        
+    def _optional_finite_float(
+        self,
+        value,
+    ):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        if not math.isfinite(value):
+            return None
+
+        return value
 
     def _reject(
         self,
