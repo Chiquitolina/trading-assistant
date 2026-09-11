@@ -113,12 +113,16 @@ class CompressionStateMachine:
         max_watch_candles=8,
         max_pullback_candles=5,
         pullback_max_pct=1.2,
+        max_entry_from_compression_high_pct=1.0,
         pullback_min_hold_high=True,
     ):
         self.watches = {}
         self.max_watch_candles = max_watch_candles
         self.max_pullback_candles = max_pullback_candles
         self.pullback_max_pct = pullback_max_pct
+        self.max_entry_from_compression_high_pct = (
+            max_entry_from_compression_high_pct
+        )
         self.pullback_min_hold_high = pullback_min_hold_high
 
     def active_watches(self):
@@ -155,6 +159,16 @@ class CompressionStateMachine:
         distance_above_compression_high_pct = (
             (low - watch.compression_high) / watch.compression_high
         ) * 100
+        
+        entry_from_compression_high_pct = (
+            (close - watch.compression_high)
+            / watch.compression_high
+        ) * 100
+
+        entry_within_max_extension = (
+            entry_from_compression_high_pct
+            <= self.max_entry_from_compression_high_pct
+        )
 
         # Por ahora mantenemos el comportamiento viejo
         pullback_pct = pullback_from_breakout_pct
@@ -163,6 +177,7 @@ class CompressionStateMachine:
 
         valid_pullback = (
             pullback_pct <= self.pullback_max_pct
+            and entry_within_max_extension
             and (
                 holds_compression_high
                 if self.pullback_min_hold_high
@@ -235,8 +250,11 @@ class CompressionStateMachine:
             "\n"
             "----- EVALUATION -----\n"
             f"Pullback %          : {pullback_pct:.3f}%\n"
-            f"Pullback From BO   : {pullback_from_breakout_pct:.3f}%\n"
-            f"Distance Above Hi  : {distance_above_compression_high_pct:.3f}%\n"
+            f"Pullback From BO    : {pullback_from_breakout_pct:.3f}%\n"
+            f"Distance Above Hi   : {distance_above_compression_high_pct:.3f}%\n"
+            f"Entry From High     : {entry_from_compression_high_pct:.3f}%\n"
+            f"Max Entry Extension : {self.max_entry_from_compression_high_pct:.3f}%\n"
+            f"Entry Within Max    : {entry_within_max_extension}\n"
             f"Hold Compression    : {holds_compression_high}\n"
             f"Continuation        : {continuation}\n"
             f"Valid Pullback      : {valid_pullback}\n"
@@ -265,6 +283,8 @@ class CompressionStateMachine:
             f"low={low:.8f} "
             f"breakout_price={watch.breakout_price:.8f} "
             f"compression_high={watch.compression_high:.8f}"
+            f"entry_from_hi={entry_from_compression_high_pct:.2f} "
+            f"entry_within_max={entry_within_max_extension} "
         )
 
         if valid_pullback and continuation:
@@ -320,7 +340,11 @@ class CompressionStateMachine:
             "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
         )
 
-        watch.reason = "waiting_valid_pullback"
+        if not entry_within_max_extension:
+            watch.reason = "waiting_entry_return_to_compression_high"
+        else:
+            watch.reason = "waiting_valid_pullback"
+
         return watch.to_dict()
 
     def update(
