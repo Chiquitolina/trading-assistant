@@ -7113,6 +7113,324 @@ if selected_section == "overview":
                 f"Snapshot correspondiente al cierre "
                 f"{snapshot_close_label} ({TZ})."
             )
+            
+            # ======================================
+            # SECTOR ROTATION
+            # ======================================
+
+            st.markdown("#### 🧭 Sector Rotation 4h")
+
+            st.caption(
+                "Compara retorno mediano, participación y "
+                "actividad relativa de volumen entre sectores. "
+                "Los sectores se construyen usando "
+                "`primary_sector`, por lo que cada símbolo "
+                "participa una sola vez."
+            )
+
+            sector_flow_df = (
+                market_flow_dashboard_service
+                .build_sector_table(
+                    market_flow_snapshot
+                )
+            )
+
+            if sector_flow_df.empty:
+                st.warning(
+                    "El contexto sectorial no está "
+                    "disponible. Motivo: "
+                    f"{market_flow_dashboard_service.last_error}"
+                )
+
+            else:
+                sector_leader = (
+                    sector_flow_df.iloc[0]
+                )
+
+                confirmed_candidates = (
+                    sector_flow_df[
+                        (
+                            sector_flow_df[
+                                "sector_flow_state"
+                            ]
+                            == "Confirmed rotation"
+                        )
+                        & (
+                            sector_flow_df[
+                                "valid_symbols"
+                            ]
+                            >= 5
+                        )
+                    ]
+                    .sort_values(
+                        "sector_return_rank_pct_4h",
+                        ascending=False,
+                    )
+                )
+
+                confirmed_leader = (
+                    confirmed_candidates.iloc[0]
+                    if not confirmed_candidates.empty
+                    else None
+                )
+
+                sectors_beating_btc = int(
+                    (
+                        sector_flow_df[
+                            "sector_strength_vs_btc_4h"
+                        ]
+                        > 0
+                    ).sum()
+                )
+
+                volume_expansion_sectors = int(
+                    (
+                        sector_flow_df[
+                            "sector_relative_volume_4h"
+                        ]
+                        >= 1
+                    ).sum()
+                )
+
+                sr1, sr2, sr3, sr4 = st.columns(4)
+
+                sr1.metric(
+                    "Return Leader",
+                    sector_leader["sector"],
+                    (
+                        f"{sector_leader['sector_return_pct_4h']:+.2f}% "
+                        f"| n={int(sector_leader['valid_symbols'])}"
+                    ),
+                    help=(
+                        "Sector con mayor retorno mediano "
+                        "durante la ventana de 4 horas."
+                    ),
+                )
+
+                if confirmed_leader is not None:
+                    sr2.metric(
+                        "Confirmed Rotation",
+                        confirmed_leader["sector"],
+                        (
+                            f"{confirmed_leader['sector_return_pct_4h']:+.2f}% "
+                            f"| {confirmed_leader['sector_relative_volume_4h']:.2f}x"
+                        ),
+                        help=(
+                            "Mejor sector con retorno alto, "
+                            "breadth amplio, volumen relativo "
+                            "mayor o igual a 1x y al menos "
+                            "cinco símbolos."
+                        ),
+                    )
+
+                else:
+                    sr2.metric(
+                        "Confirmed Rotation",
+                        "None",
+                        help=(
+                            "No existe un sector con retorno, "
+                            "breadth y volumen simultáneamente "
+                            "confirmados."
+                        ),
+                    )
+
+                sr3.metric(
+                    "Sectors Beating BTC",
+                    (
+                        f"{sectors_beating_btc}"
+                        f" / {len(sector_flow_df)}"
+                    ),
+                    help=(
+                        "Cantidad de sectores cuyo retorno "
+                        "mediano superó el retorno de BTC."
+                    ),
+                )
+
+                sr4.metric(
+                    "Volume Expansion",
+                    (
+                        f"{volume_expansion_sectors}"
+                        f" / {len(sector_flow_df)}"
+                    ),
+                    help=(
+                        "Sectores cuyo volumen agregado fue "
+                        "igual o superior a su baseline."
+                    ),
+                )
+
+                display_sector_flow_df = (
+                    sector_flow_df.rename(
+                        columns={
+                            "sector": "Sector",
+                            "valid_symbols": "Symbols",
+                            "coverage_pct": "Coverage %",
+                            "sector_return_pct_4h": (
+                                "Return 4h %"
+                            ),
+                            "sector_return_rank_pct_4h": (
+                                "Return Rank %"
+                            ),
+                            "sector_breadth_4h": (
+                                "Breadth %"
+                            ),
+                            "sector_relative_volume_4h": (
+                                "Relative Volume"
+                            ),
+                            "sector_strength_vs_btc_4h": (
+                                "Strength vs BTC %"
+                            ),
+                            "sector_flow_state": (
+                                "Flow State"
+                            ),
+                        }
+                    )
+                )
+
+                display_sector_flow_df = (
+                    display_sector_flow_df[
+                        [
+                            "Sector",
+                            "Symbols",
+                            "Return 4h %",
+                            "Return Rank %",
+                            "Breadth %",
+                            "Relative Volume",
+                            "Strength vs BTC %",
+                            "Flow State",
+                        ]
+                    ]
+                )
+
+                numeric_sector_columns = [
+                    "Return 4h %",
+                    "Return Rank %",
+                    "Breadth %",
+                    "Relative Volume",
+                    "Strength vs BTC %",
+                ]
+
+                display_sector_flow_df[
+                    numeric_sector_columns
+                ] = display_sector_flow_df[
+                    numeric_sector_columns
+                ].round(4)
+
+                st.dataframe(
+                    display_sector_flow_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Sector": (
+                            st.column_config.TextColumn(
+                                width="medium",
+                            )
+                        ),
+                        "Symbols": (
+                            st.column_config.NumberColumn(
+                                format="%d",
+                                help=(
+                                    "Símbolos válidos utilizados "
+                                    "para calcular el sector."
+                                ),
+                            )
+                        ),
+                        "Return 4h %": (
+                            st.column_config.NumberColumn(
+                                format="%+.4f%%",
+                                help=(
+                                    "Mediana del retorno 4h "
+                                    "de los símbolos del sector."
+                                ),
+                            )
+                        ),
+                        "Return Rank %": (
+                            st.column_config.ProgressColumn(
+                                min_value=0,
+                                max_value=100,
+                                format="%.2f",
+                            )
+                        ),
+                        "Breadth %": (
+                            st.column_config.ProgressColumn(
+                                min_value=0,
+                                max_value=100,
+                                format="%.2f",
+                                help=(
+                                    "Porcentaje de símbolos "
+                                    "del sector con retorno positivo."
+                                ),
+                            )
+                        ),
+                        "Relative Volume": (
+                            st.column_config.NumberColumn(
+                                format="%.4fx",
+                                help=(
+                                    "Volumen agregado actual dividido "
+                                    "por el volumen baseline agregado."
+                                ),
+                            )
+                        ),
+                        "Strength vs BTC %": (
+                            st.column_config.NumberColumn(
+                                format="%+.4f%%",
+                            )
+                        ),
+                        "Flow State": (
+                            st.column_config.TextColumn(
+                                width="large",
+                            )
+                        ),
+                    },
+                )
+
+                st.caption(
+                    "Confirmed Rotation exige retorno rank ≥ 70, "
+                    "breadth ≥ 60%, volumen relativo ≥ 1x y "
+                    "fortaleza positiva contra BTC. "
+                    "El indicador superior también exige una "
+                    "muestra mínima de cinco símbolos."
+                )
+
+                excluded_sector_payload = (
+                    market_flow_snapshot.get(
+                        "excluded_sectors",
+                        {},
+                    )
+                )
+
+                if excluded_sector_payload:
+                    with st.expander(
+                        "Excluded sectors due to small sample"
+                    ):
+                        excluded_sector_rows = []
+
+                        for sector, details in (
+                            excluded_sector_payload.items()
+                        ):
+                            excluded_sector_rows.append({
+                                "Sector": sector,
+                                "Valid Symbols": (
+                                    details.get(
+                                        "valid_symbols"
+                                    )
+                                ),
+                                "Required Symbols": (
+                                    details.get(
+                                        "minimum_symbols"
+                                    )
+                                ),
+                                "Reason": details.get(
+                                    "reason"
+                                ),
+                            })
+
+                        st.dataframe(
+                            pd.DataFrame(
+                                excluded_sector_rows
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
             # ======================================
             # FLOW GROUP COUNTS
