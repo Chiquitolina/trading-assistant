@@ -15,6 +15,9 @@ class MarketSectorFlowAnalyzer:
         min_sector_symbols=(
             MIN_SECTOR_SYMBOLS
         ),
+        benchmark_symbols=(
+            "BTCUSDT",
+        ),
     ):
         if catalog is None:
             raise ValueError(
@@ -26,6 +29,11 @@ class MarketSectorFlowAnalyzer:
         self.min_sector_symbols = int(
             min_sector_symbols
         )
+        
+        self.benchmark_symbols = {
+            str(symbol).upper().strip()
+            for symbol in benchmark_symbols
+        }
 
         if self.min_sector_symbols < 1:
             raise ValueError(
@@ -157,6 +165,12 @@ class MarketSectorFlowAnalyzer:
                     )
                 )
             )
+            
+            if (
+                str(symbol).upper()
+                in self.benchmark_symbols
+            ):
+                continue
 
             if (
                 primary_sector
@@ -485,9 +499,15 @@ class MarketSectorFlowAnalyzer:
     ):
         sizes = defaultdict(int)
 
-        for item in (
-            self.catalog.symbols.values()
+        for symbol, item in (
+            self.catalog.symbols.items()
         ):
+            if (
+                symbol
+                in self.benchmark_symbols
+            ):
+                continue
+
             sector = item[
                 "primary_sector"
             ]
