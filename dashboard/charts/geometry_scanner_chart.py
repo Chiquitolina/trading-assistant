@@ -11,7 +11,9 @@ def build_geometry_scanner_chart(
     candidate,
     context_before=15,
     context_after=5,
+    flagpole_lookback=10,
 ):
+    
     if candles is None or candles.empty:
         raise ValueError(
             "candles are required"
@@ -287,7 +289,8 @@ def build_geometry_scanner_chart(
 
     flagpole_start_index = max(
         0,
-        start_index - 10,
+        start_index
+        - int(flagpole_lookback),
     )
 
     flagpole_start_time = (

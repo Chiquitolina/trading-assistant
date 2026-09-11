@@ -6986,6 +6986,599 @@ if selected_section == "geometry_scanner":
             "Candle source diagnostics"
         ):
             st.json(diagnostics)
+            
+        st.markdown("---")
+        st.subheader("Scanner parameters")
+
+        parameter_1, parameter_2, parameter_3 = (
+            st.columns(3)
+        )
+
+        with parameter_1:
+            geometry_window_range = st.slider(
+                "Pattern window",
+                min_value=5,
+                max_value=60,
+                value=(10, 30),
+                step=1,
+                key="geometry_window_range",
+                help=(
+                    "Cantidad mínima y máxima de "
+                    "velas que puede ocupar una figura."
+                ),
+            )
+
+        with parameter_2:
+            geometry_pivot_order = st.number_input(
+                "Pivot order",
+                min_value=1,
+                max_value=5,
+                value=2,
+                step=1,
+                key="geometry_pivot_order",
+                help=(
+                    "Velas a cada lado utilizadas "
+                    "para confirmar máximos y mínimos."
+                ),
+            )
+
+        with parameter_3:
+            geometry_min_touches = st.number_input(
+                "Minimum touches",
+                min_value=2,
+                max_value=6,
+                value=2,
+                step=1,
+                key="geometry_min_touches",
+            )
+
+        with st.expander(
+            "Advanced geometry parameters"
+        ):
+            advanced_1, advanced_2 = (
+                st.columns(2)
+            )
+
+            with advanced_1:
+                geometry_flat_slope_max = (
+                    st.number_input(
+                        "Flat slope maximum (%/bar)",
+                        min_value=0.001,
+                        max_value=1.0,
+                        value=0.03,
+                        step=0.01,
+                        format="%.3f",
+                        key=(
+                            "geometry_flat_slope_max"
+                        ),
+                    )
+                )
+
+                geometry_directional_slope = (
+                    st.number_input(
+                        "Minimum directional slope (%/bar)",
+                        min_value=0.001,
+                        max_value=1.0,
+                        value=0.02,
+                        step=0.01,
+                        format="%.3f",
+                        key=(
+                            "geometry_directional_slope"
+                        ),
+                    )
+                )
+
+                geometry_parallel_difference = (
+                    st.number_input(
+                        "Parallel slope difference maximum",
+                        min_value=0.001,
+                        max_value=1.0,
+                        value=0.05,
+                        step=0.01,
+                        format="%.3f",
+                        key=(
+                            "geometry_parallel_difference"
+                        ),
+                    )
+                )
+
+                geometry_minimum_contraction = (
+                    st.number_input(
+                        "Minimum contraction %",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=12.0,
+                        step=1.0,
+                        key=(
+                            "geometry_minimum_contraction"
+                        ),
+                    )
+                )
+
+            with advanced_2:
+                geometry_flagpole_lookback = (
+                    st.number_input(
+                        "Flagpole lookback",
+                        min_value=2,
+                        max_value=50,
+                        value=10,
+                        step=1,
+                        key=(
+                            "geometry_flagpole_lookback"
+                        ),
+                    )
+                )
+
+                geometry_minimum_flagpole_return = (
+                    st.number_input(
+                        "Minimum flagpole return %",
+                        min_value=0.0,
+                        max_value=50.0,
+                        value=2.0,
+                        step=0.25,
+                        key=(
+                            "geometry_minimum_flagpole_return"
+                        ),
+                    )
+                )
+
+                geometry_maximum_retracement = (
+                    st.number_input(
+                        "Maximum flag retracement %",
+                        min_value=0.0,
+                        max_value=200.0,
+                        value=70.0,
+                        step=5.0,
+                        key=(
+                            "geometry_maximum_retracement"
+                        ),
+                    )
+                )
+
+                geometry_breakout_lookahead = (
+                    st.number_input(
+                        "Breakout lookahead",
+                        min_value=0,
+                        max_value=20,
+                        value=3,
+                        step=1,
+                        key=(
+                            "geometry_breakout_lookahead"
+                        ),
+                    )
+                )
+
+        option_1, option_2 = st.columns(2)
+
+        with option_1:
+            geometry_max_candidates = (
+                st.number_input(
+                    "Maximum candidates",
+                    min_value=1,
+                    max_value=200,
+                    value=50,
+                    step=5,
+                    key="geometry_max_candidates",
+                )
+            )
+
+        with option_2:
+            geometry_include_unclassified = (
+                st.checkbox(
+                    "Include unclassified windows",
+                    value=False,
+                    key=(
+                        "geometry_include_unclassified"
+                    ),
+                )
+            )
+
+        geometry_scanner = GeometryScanner(
+            min_window=int(
+                geometry_window_range[0]
+            ),
+            max_window=int(
+                geometry_window_range[1]
+            ),
+            pivot_order=int(
+                geometry_pivot_order
+            ),
+            min_touches=int(
+                geometry_min_touches
+            ),
+            flat_slope_max=float(
+                geometry_flat_slope_max
+            ),
+            min_directional_slope=float(
+                geometry_directional_slope
+            ),
+            parallel_slope_difference_max=(
+                float(
+                    geometry_parallel_difference
+                )
+            ),
+            minimum_contraction_pct=float(
+                geometry_minimum_contraction
+            ),
+            flagpole_lookback=int(
+                geometry_flagpole_lookback
+            ),
+            minimum_flagpole_return_pct=float(
+                geometry_minimum_flagpole_return
+            ),
+            maximum_flag_retracement_pct=float(
+                geometry_maximum_retracement
+            ),
+            breakout_lookahead=int(
+                geometry_breakout_lookahead
+            ),
+        )
+
+        geometry_candidates = (
+            geometry_scanner.scan(
+                candles=geometry_candles,
+                max_candidates=int(
+                    geometry_max_candidates
+                ),
+                include_unclassified=(
+                    geometry_include_unclassified
+                ),
+            )
+        )
+
+        st.markdown("---")
+        st.subheader("Detected candidates")
+
+        if geometry_candidates.empty:
+            st.info(
+                "No se encontraron geometrías que "
+                "cumplan los parámetros actuales."
+            )
+
+            st.caption(
+                "Scanner result: "
+                f"{geometry_scanner.last_error}"
+            )
+
+        else:
+            geometry_candidates = (
+                geometry_candidates
+                .reset_index(drop=True)
+            )
+
+            available_geometries = sorted(
+                geometry_candidates[
+                    "geometry"
+                ]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+
+            filter_1, filter_2 = st.columns(
+                [2, 1]
+            )
+
+            with filter_1:
+                selected_geometries = (
+                    st.multiselect(
+                        "Geometry filter",
+                        options=(
+                            available_geometries
+                        ),
+                        default=(
+                            available_geometries
+                        ),
+                        key=(
+                            "geometry_type_filter"
+                        ),
+                    )
+                )
+
+            with filter_2:
+                only_breakouts = st.checkbox(
+                    "Only observed breakouts",
+                    value=False,
+                    key=(
+                        "geometry_only_breakouts"
+                    ),
+                )
+
+            filtered_candidates = (
+                geometry_candidates[
+                    geometry_candidates[
+                        "geometry"
+                    ].isin(
+                        selected_geometries
+                    )
+                ]
+                .copy()
+            )
+
+            if only_breakouts:
+                filtered_candidates = (
+                    filtered_candidates[
+                        filtered_candidates[
+                            "breakout_detected"
+                        ].fillna(False)
+                    ]
+                )
+
+            filtered_candidates = (
+                filtered_candidates
+                .reset_index(drop=True)
+            )
+
+            if filtered_candidates.empty:
+                st.warning(
+                    "No hay candidatos para los "
+                    "filtros seleccionados."
+                )
+
+            else:
+                table_candidates = (
+                    filtered_candidates.copy()
+                )
+
+                table_candidates[
+                    "start_time"
+                ] = (
+                    pd.to_datetime(
+                        table_candidates[
+                            "start_timestamp"
+                        ],
+                        unit="ms",
+                        utc=True,
+                    )
+                    .dt.tz_convert(TZ)
+                    .dt.strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                )
+
+                table_candidates[
+                    "end_time"
+                ] = (
+                    pd.to_datetime(
+                        table_candidates[
+                            "end_timestamp"
+                        ],
+                        unit="ms",
+                        utc=True,
+                    )
+                    .dt.tz_convert(TZ)
+                    .dt.strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                )
+
+                visible_columns = [
+                    "geometry",
+                    "confidence",
+                    "window_size",
+                    "start_time",
+                    "end_time",
+                    "upper_slope_pct_per_bar",
+                    "lower_slope_pct_per_bar",
+                    "contraction_pct",
+                    "flagpole_return_pct",
+                    "flag_retracement_pct",
+                    "touches_high",
+                    "touches_low",
+                    "breakout_detected",
+                ]
+
+                st.dataframe(
+                    table_candidates[
+                        visible_columns
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "geometry": (
+                            "Geometry"
+                        ),
+                        "confidence": (
+                            st.column_config.ProgressColumn(
+                                "Confidence",
+                                min_value=0.0,
+                                max_value=100.0,
+                                format="%.2f",
+                            )
+                        ),
+                        "window_size": (
+                            "Window"
+                        ),
+                        "start_time": (
+                            "Start"
+                        ),
+                        "end_time": (
+                            "End"
+                        ),
+                        "upper_slope_pct_per_bar": (
+                            "Upper slope"
+                        ),
+                        "lower_slope_pct_per_bar": (
+                            "Lower slope"
+                        ),
+                        "contraction_pct": (
+                            "Contraction %"
+                        ),
+                        "flagpole_return_pct": (
+                            "Flagpole %"
+                        ),
+                        "flag_retracement_pct": (
+                            "Retracement %"
+                        ),
+                        "touches_high": (
+                            "High touches"
+                        ),
+                        "touches_low": (
+                            "Low touches"
+                        ),
+                        "breakout_detected": (
+                            "Breakout"
+                        ),
+                    },
+                )
+
+                candidate_indexes = list(
+                    range(
+                        len(
+                            filtered_candidates
+                        )
+                    )
+                )
+
+                selected_candidate_index = (
+                    st.selectbox(
+                        "Candidate to inspect",
+                        options=candidate_indexes,
+                        format_func=lambda index: (
+                            f"#{index + 1} · "
+                            f"{filtered_candidates.iloc[index]['geometry']} · "
+                            f"confidence "
+                            f"{filtered_candidates.iloc[index]['confidence']:.2f} · "
+                            f"window "
+                            f"{filtered_candidates.iloc[index]['window_size']}"
+                        ),
+                        key=(
+                            "geometry_selected_candidate"
+                        ),
+                    )
+                )
+
+                selected_candidate = (
+                    filtered_candidates.iloc[
+                        selected_candidate_index
+                    ]
+                )
+
+                metric_1, metric_2, metric_3, metric_4 = (
+                    st.columns(4)
+                )
+
+                metric_1.metric(
+                    "Geometry",
+                    selected_candidate[
+                        "geometry"
+                    ],
+                )
+
+                metric_2.metric(
+                    "Confidence",
+                    (
+                        f"{selected_candidate['confidence']:.2f}"
+                    ),
+                )
+
+                metric_3.metric(
+                    "Contraction",
+                    (
+                        f"{selected_candidate['contraction_pct']:.2f}%"
+                    ),
+                )
+
+                metric_4.metric(
+                    "Breakout",
+                    (
+                        "Yes"
+                        if selected_candidate[
+                            "breakout_detected"
+                        ]
+                        else "No"
+                    ),
+                )
+
+                geometry_figure = (
+                    build_geometry_scanner_chart(
+                        candles=geometry_candles,
+                        candidate=(
+                            selected_candidate
+                        ),
+                        context_before=15,
+                        context_after=max(
+                            5,
+                            int(
+                                geometry_breakout_lookahead
+                            ),
+                        ),
+                        flagpole_lookback=int(
+                            geometry_flagpole_lookback
+                        ),
+                    )
+                )
+
+                st.plotly_chart(
+                    geometry_figure,
+                    use_container_width=True,
+                    config={
+                        "displaylogo": False,
+                        "scrollZoom": True,
+                    },
+                )
+
+                with st.expander(
+                    "Candidate diagnostics"
+                ):
+                    st.write(
+                        "**Classification reasons**"
+                    )
+
+                    for reason in (
+                        selected_candidate[
+                            "reasons"
+                        ]
+                    ):
+                        st.code(reason)
+
+                    st.json({
+                        "start_index": int(
+                            selected_candidate[
+                                "start_index"
+                            ]
+                        ),
+                        "end_index": int(
+                            selected_candidate[
+                                "end_index"
+                            ]
+                        ),
+                        "upper_r2": float(
+                            selected_candidate[
+                                "upper_r2"
+                            ]
+                        ),
+                        "lower_r2": float(
+                            selected_candidate[
+                                "lower_r2"
+                            ]
+                        ),
+                        "width_start_pct": float(
+                            selected_candidate[
+                                "width_start_pct"
+                            ]
+                        ),
+                        "width_end_pct": float(
+                            selected_candidate[
+                                "width_end_pct"
+                            ]
+                        ),
+                        "slope_difference_pct_per_bar": float(
+                            selected_candidate[
+                                "slope_difference_pct_per_bar"
+                            ]
+                        ),
+                        "breakout_timestamp": (
+                            selected_candidate[
+                                "breakout_timestamp"
+                            ]
+                        ),
+                        "breakout_price": (
+                            selected_candidate[
+                                "breakout_price"
+                            ]
+                        ),
+                    })
 
 if selected_section == "overview":
 # =========================
