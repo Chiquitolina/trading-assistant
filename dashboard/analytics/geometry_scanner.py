@@ -28,6 +28,7 @@ class GeometryScanner:
         minimum_flagpole_return_pct=2.0,
         maximum_flag_retracement_pct=70.0,
         breakout_lookahead=3,
+        boundary_tolerance_pct=0.10,
     ):
         self.min_window = int(min_window)
         self.max_window = int(max_window)
@@ -70,6 +71,10 @@ class GeometryScanner:
 
         self.breakout_lookahead = int(
             breakout_lookahead
+        )
+        
+        self.boundary_tolerance_pct = float(
+            boundary_tolerance_pct
         )
 
         self.last_error = None
@@ -332,6 +337,67 @@ class GeometryScanner:
             or width_end_pct <= 0
         ):
             return None
+        
+        window_x = np.arange(
+            len(window),
+            dtype=float,
+        )
+
+        window_close_pct = (
+            (
+                window[
+                    "close"
+                ].to_numpy(dtype=float)
+                / reference_price
+            )
+            - 1
+        ) * 100
+
+        projected_upper_pct = (
+            upper_line["intercept"]
+            + upper_line["slope"]
+            * window_x
+        )
+
+        projected_lower_pct = (
+            lower_line["intercept"]
+            + lower_line["slope"]
+            * window_x
+        )
+
+        upper_close_breaches = (
+            window_close_pct
+            - projected_upper_pct
+        )
+
+        lower_close_breaches = (
+            projected_lower_pct
+            - window_close_pct
+        )
+
+        maximum_upper_close_breach_pct = (
+            float(
+                np.max(
+                    upper_close_breaches
+                )
+            )
+        )
+
+        maximum_lower_close_breach_pct = (
+            float(
+                np.max(
+                    lower_close_breaches
+                )
+            )
+        )
+
+        if (
+            maximum_upper_close_breach_pct
+            > self.boundary_tolerance_pct
+            or maximum_lower_close_breach_pct
+            > self.boundary_tolerance_pct
+        ):
+            return None
 
         width_contraction_ratio = (
             width_end_pct
@@ -556,6 +622,24 @@ class GeometryScanner:
             "contraction_pct": round(
                 contraction_pct,
                 4,
+            ),
+            "boundary_tolerance_pct": (
+                round(
+                    self.boundary_tolerance_pct,
+                    4,
+                )
+            ),
+            "maximum_upper_close_breach_pct": (
+                round(
+                    maximum_upper_close_breach_pct,
+                    4,
+                )
+            ),
+            "maximum_lower_close_breach_pct": (
+                round(
+                    maximum_lower_close_breach_pct,
+                    4,
+                )
             ),
             "flagpole_return_pct": round(
                 flagpole_return_pct,
@@ -1166,6 +1250,12 @@ class GeometryScanner:
         if self.breakout_lookahead < 0:
             raise ValueError(
                 "breakout_lookahead cannot be negative"
+            )
+        
+        if self.boundary_tolerance_pct < 0:
+            raise ValueError(
+                "boundary_tolerance_pct "
+                "cannot be negative"
             )
 
     def _reject(

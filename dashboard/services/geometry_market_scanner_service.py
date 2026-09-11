@@ -32,6 +32,7 @@ class GeometryMarketScannerService:
         "minimum_flagpole_return_pct": 2.0,
         "maximum_flag_retracement_pct": 70.0,
         "breakout_lookahead": 3,
+        "boundary_tolerance_pct": 0.10,
     }
 
     def __init__(
@@ -48,7 +49,8 @@ class GeometryMarketScannerService:
         candle_limit=160,
         symbols=None,
         scanner_parameters=None,
-        max_candidates_per_symbol=10,
+        max_candidates_per_symbol=50,
+        breakout_visibility_bars=6,
     ):
         self.last_error = None
         self.last_diagnostics = {}
@@ -108,10 +110,27 @@ class GeometryMarketScannerService:
                 3,
             )
         )
+        
+        try:
+            breakout_visibility_bars = int(
+                breakout_visibility_bars
+            )
+        except (TypeError, ValueError):
+            return self._reject(
+                "invalid_breakout_visibility_bars"
+            )
+
+        if breakout_visibility_bars < 0:
+            return self._reject(
+                "breakout_visibility_bars "
+                "cannot be negative"
+            )
 
         recent_end_bars = max(
             1,
-            breakout_lookahead + 1,
+            breakout_lookahead
+            + breakout_visibility_bars
+            + 1,
         )
 
         rows = []
@@ -221,7 +240,7 @@ class GeometryMarketScannerService:
 
                     if (
                         breakout_age_bars
-                        > breakout_lookahead
+                        > breakout_visibility_bars
                     ):
                         continue
 
@@ -314,6 +333,9 @@ class GeometryMarketScannerService:
             "market_data": (
                 self.data_service
                 .last_market_diagnostics
+            ),
+            "breakout_visibility_bars": (
+                breakout_visibility_bars
             ),
         }
 
