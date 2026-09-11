@@ -31,6 +31,10 @@ from engine.live.data.market_sector_catalog import (
     MarketSectorCatalog,
 )
 
+from engine.live.data.market_sector_flow_analyzer import (
+    MarketSectorFlowAnalyzer,
+)
+
 from engine.live.ws.ws_client import WSClient
 
 
@@ -94,6 +98,7 @@ class MarketDataService:
         )
         
         self.market_sector_catalog = None
+        self.market_sector_flow_analyzer = None
         self.market_sector_catalog_error = None
 
         self._load_market_sector_catalog()
@@ -323,6 +328,7 @@ class MarketDataService:
 
         except Exception as exc:
             self.market_sector_catalog = None
+            self.market_sector_flow_analyzer = None
 
             self.market_sector_catalog_error = (
                 f"{type(exc).__name__}:"
@@ -340,6 +346,12 @@ class MarketDataService:
 
         self.market_sector_catalog = catalog
         self.market_sector_catalog_error = None
+        
+        self.market_sector_flow_analyzer = (
+            MarketSectorFlowAnalyzer(
+                catalog=catalog,
+            )
+        )
 
         grouped = (
             catalog
@@ -362,6 +374,82 @@ class MarketDataService:
         )
 
         return True
+        
+    def _enrich_market_flow_snapshot(
+        self,
+        snapshot,
+    ):
+        if (
+            self.market_sector_flow_analyzer
+            is None
+        ):
+            enriched_snapshot = dict(
+                snapshot
+            )
+
+            enriched_snapshot[
+                "sector_context_available"
+            ] = False
+
+            enriched_snapshot[
+                "sector_context_error"
+            ] = (
+                self.market_sector_catalog_error
+                or "sector_analyzer_unavailable"
+            )
+
+            return enriched_snapshot
+
+        try:
+            enriched_snapshot = (
+                self.market_sector_flow_analyzer
+                .enrich_snapshot(
+                    snapshot
+                )
+            )
+
+        except Exception as exc:
+            error = (
+                f"{type(exc).__name__}:"
+                f"{exc}"
+            )
+
+            print(
+                "[MARKET SECTORS] "
+                "snapshot enrichment failed "
+                f"error={error}"
+            )
+
+            enriched_snapshot = dict(
+                snapshot
+            )
+
+            enriched_snapshot[
+                "sector_context_available"
+            ] = False
+
+            enriched_snapshot[
+                "sector_context_error"
+            ] = error
+
+            return enriched_snapshot
+
+        enriched_snapshot[
+            "sector_context_error"
+        ] = None
+
+        print(
+            "[MARKET SECTORS] "
+            "snapshot enriched "
+            f"timestamp="
+            f"{enriched_snapshot.get('candle_timestamp')} "
+            f"sectors="
+            f"{enriched_snapshot.get('sector_count')} "
+            f"excluded="
+            f"{len(enriched_snapshot.get('excluded_sectors', {}))}"
+        )
+
+        return enriched_snapshot
         
     def _publish_initial_market_flow(
         self,
@@ -479,6 +567,12 @@ class MarketDataService:
                 f"{MARKET_FLOW_MIN_COVERAGE_PCT:.2f}%"
             )
             return
+        
+        snapshot = (
+            self._enrich_market_flow_snapshot(
+                snapshot
+            )
+        )
 
         publication = (
             self.publisher
@@ -914,6 +1008,12 @@ class MarketDataService:
                 f"{MARKET_FLOW_MIN_COVERAGE_PCT:.2f}%"
             )
             return
+        
+        snapshot = (
+            self._enrich_market_flow_snapshot(
+                snapshot
+            )
+        )
 
         publication = (
             self.publisher
