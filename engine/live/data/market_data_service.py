@@ -27,6 +27,10 @@ from engine.live.data.market_flow_analyzer import (
     MarketFlowAnalyzer,
 )
 
+from engine.live.data.market_sector_catalog import (
+    MarketSectorCatalog,
+)
+
 from engine.live.ws.ws_client import WSClient
 
 
@@ -88,6 +92,11 @@ class MarketDataService:
                 baseline_candles=42,
             )
         )
+        
+        self.market_sector_catalog = None
+        self.market_sector_catalog_error = None
+
+        self._load_market_sector_catalog()
 
         self.market_flow_lock = (
             threading.Lock()
@@ -301,6 +310,58 @@ class MarketDataService:
             f"History unavailable: "
             f"{symbol} {timeframe}"
         )
+            
+    def _load_market_sector_catalog(
+        self,
+    ):
+        try:
+            catalog = MarketSectorCatalog(
+                required_symbols=(
+                    self.symbols
+                ),
+            )
+
+        except Exception as exc:
+            self.market_sector_catalog = None
+
+            self.market_sector_catalog_error = (
+                f"{type(exc).__name__}:"
+                f"{exc}"
+            )
+
+            print(
+                "[MARKET SECTORS] "
+                "catalog unavailable "
+                f"error="
+                f"{self.market_sector_catalog_error}"
+            )
+
+            return False
+
+        self.market_sector_catalog = catalog
+        self.market_sector_catalog_error = None
+
+        grouped = (
+            catalog
+            .symbols_by_primary_sector()
+        )
+
+        group_summary = ",".join(
+            f"{sector}:{len(symbols)}"
+            for sector, symbols
+            in grouped.items()
+        )
+
+        print(
+            "[MARKET SECTORS] "
+            "catalog loaded "
+            f"symbols={len(catalog)} "
+            f"generated_at="
+            f"{catalog.generated_at} "
+            f"groups={group_summary}"
+        )
+
+        return True
         
     def _publish_initial_market_flow(
         self,
@@ -956,6 +1017,27 @@ class MarketDataService:
                 and self.ws.is_connected
             ),
             "symbols": len(self.symbols),
+            "market_sector_catalog_available": (
+                self.market_sector_catalog
+                is not None
+            ),
+            "market_sector_catalog_symbols": (
+                len(
+                    self.market_sector_catalog
+                )
+                if self.market_sector_catalog
+                is not None
+                else 0
+            ),
+            "market_sector_catalog_generated_at": (
+                self.market_sector_catalog.generated_at
+                if self.market_sector_catalog
+                is not None
+                else None
+            ),
+            "market_sector_catalog_error": (
+                self.market_sector_catalog_error
+            ),
             "timeframes": self.timeframes,
             "histories_loaded": (
                 self.histories_loaded
