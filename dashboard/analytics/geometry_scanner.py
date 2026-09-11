@@ -81,6 +81,7 @@ class GeometryScanner:
         candles,
         max_candidates=50,
         include_unclassified=False,
+        recent_end_bars=None,
     ):
         self.last_error = None
 
@@ -131,10 +132,32 @@ class GeometryScanner:
             - 1
         )
 
+        if recent_end_bars is not None:
+            try:
+                recent_end_bars = int(
+                    recent_end_bars
+                )
+            except (TypeError, ValueError):
+                return self._reject(
+                    "invalid_recent_end_bars"
+                )
+
+            if recent_end_bars < 1:
+                return self._reject(
+                    "recent_end_bars_must_be_positive"
+                )
+
+            first_end_index = max(
+                first_end_index,
+                len(candles)
+                - recent_end_bars,
+            )
+
         for end_index in range(
             first_end_index,
             len(candles),
         ):
+
             for window_size in range(
                 self.min_window,
                 self.max_window + 1,
