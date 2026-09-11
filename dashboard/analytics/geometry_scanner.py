@@ -499,6 +499,22 @@ class GeometryScanner:
             "touches_low": len(
                 low_pivots
             ),
+            "high_pivot_indexes": [
+                int(
+                    start_index
+                    + pivot_index
+                )
+                for pivot_index
+                in high_pivots
+            ],
+            "low_pivot_indexes": [
+                int(
+                    start_index
+                    + pivot_index
+                )
+                for pivot_index
+                in low_pivots
+            ],
             "width_start_pct": round(
                 width_start_pct,
                 4,

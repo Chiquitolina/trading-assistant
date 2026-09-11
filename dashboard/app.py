@@ -46,6 +46,18 @@ from dashboard.services.market_flow_dashboard_service import (
     MarketFlowDashboardService,
 )
 
+from dashboard.services.geometry_scanner_data_service import (
+    GeometryScannerDataService,
+)
+
+from dashboard.analytics.geometry_scanner import (
+    GeometryScanner,
+)
+
+from dashboard.charts.geometry_scanner_chart import (
+    build_geometry_scanner_chart,
+)
+
 from dashboard.charts.trade_inspector_chart import (
     build_trade_inspector_chart,
 )
@@ -144,6 +156,14 @@ trade_inspector_service = TradeInspectorService()
 
 market_flow_dashboard_service = (
     MarketFlowDashboardService(
+        host=DASHBOARD_REDIS_HOST,
+        port=DASHBOARD_REDIS_PORT,
+        db=DASHBOARD_REDIS_DB,
+    )
+)
+
+geometry_scanner_data_service = (
+    GeometryScannerDataService(
         host=DASHBOARD_REDIS_HOST,
         port=DASHBOARD_REDIS_PORT,
         db=DASHBOARD_REDIS_DB,
@@ -6811,13 +6831,6 @@ trigger_tf = page_status.get(
 if trigger_tf in (None, "", "N/A"):
     trigger_tf = "30m"
 
-# =========================
-# NO TRADES YET
-# =========================
-if df_raw.empty:
-    st.markdown("---")
-    st.info("📭 No trades yet")
-    st.stop()
     
 # =========================
 # LAZY DASHBOARD NAVIGATION
@@ -6825,6 +6838,7 @@ if df_raw.empty:
 
 DASHBOARD_SECTIONS = {
     "overview": "📊 Overview",
+    "geometry_scanner": "📐 Geometry Scanner",
     "btc_correlation": "₿ BTC Correlation",
     "btc_alignment": "🧭 BTC Alignment Edge",
     "mfe_mae": "📐 MFE / MAE",
@@ -6859,6 +6873,119 @@ selected_section = st.sidebar.radio(
     format_func=DASHBOARD_SECTIONS.get,
     key="dashboard_section",
 )
+
+if (
+    df_raw.empty
+    and selected_section != "geometry_scanner"
+):
+    st.markdown("---")
+    st.info("📭 No trades yet")
+    st.stop()
+    
+if selected_section == "geometry_scanner":
+    st.markdown("## 📐 Geometry Scanner")
+
+    st.caption(
+        "Explorador visual de geometrías sobre velas cerradas. "
+        "No modifica señales, watches ni decisiones de entrada."
+    )
+
+    control_1, control_2, control_3 = st.columns(
+        [2, 1, 1]
+    )
+
+    with control_1:
+        geometry_symbol = st.text_input(
+            "Symbol",
+            value="PUMPUSDT",
+            key="geometry_scanner_symbol",
+        ).strip().upper()
+
+    with control_2:
+        geometry_timeframe = st.selectbox(
+            "Timeframe",
+            options=[
+                "5m",
+                "15m",
+                "30m",
+                "1h",
+                "4h",
+            ],
+            index=2,
+            key="geometry_scanner_timeframe",
+        )
+
+    with control_3:
+        geometry_candle_limit = st.number_input(
+            "Candles",
+            min_value=60,
+            max_value=400,
+            value=160,
+            step=20,
+            key="geometry_scanner_candle_limit",
+        )
+
+    geometry_candles = (
+        geometry_scanner_data_service
+        .get_closed_candles(
+            symbol=geometry_symbol,
+            timeframe=geometry_timeframe,
+            limit=int(geometry_candle_limit),
+        )
+    )
+
+    if geometry_candles.empty:
+        st.error(
+            "No fue posible cargar las velas cerradas."
+        )
+
+        st.code(
+            str(
+                geometry_scanner_data_service
+                .last_error
+            )
+        )
+
+    else:
+        diagnostics = (
+            geometry_scanner_data_service
+            .last_diagnostics
+        )
+
+        d1, d2, d3, d4 = st.columns(4)
+
+        d1.metric(
+            "Closed candles",
+            len(geometry_candles),
+        )
+
+        d2.metric(
+            "Symbol",
+            geometry_symbol,
+        )
+
+        d3.metric(
+            "Timeframe",
+            geometry_timeframe,
+        )
+
+        d4.metric(
+            "Last candle",
+            pd.to_datetime(
+                geometry_candles[
+                    "timestamp"
+                ].iloc[-1],
+                unit="ms",
+                utc=True,
+            )
+            .tz_convert(TZ)
+            .strftime("%Y-%m-%d %H:%M"),
+        )
+
+        with st.expander(
+            "Candle source diagnostics"
+        ):
+            st.json(diagnostics)
 
 if selected_section == "overview":
 # =========================
