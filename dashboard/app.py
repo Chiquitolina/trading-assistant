@@ -50,6 +50,10 @@ from dashboard.services.geometry_scanner_data_service import (
     GeometryScannerDataService,
 )
 
+from dashboard.services.geometry_market_scanner_service import (
+    GeometryMarketScannerService,
+)
+
 from dashboard.analytics.geometry_scanner import (
     GeometryScanner,
 )
@@ -170,6 +174,15 @@ geometry_scanner_data_service = (
     )
 )
 
+geometry_market_scanner_service = (
+    GeometryMarketScannerService(
+        data_service=(
+            geometry_scanner_data_service
+        ),
+    )
+)
+
+
 st.set_page_config(
     page_title="Trade Journal",
     layout="wide"
@@ -182,6 +195,39 @@ st.sidebar.button(
     use_container_width=True,
     on_click=st.cache_data.clear,
 )
+
+
+@st.cache_data(
+    ttl=300,
+    show_spinner=False,
+)
+def load_geometry_market_scan(
+    timeframe,
+    candle_limit,
+):
+    result = (
+        geometry_market_scanner_service
+        .scan_market(
+            timeframe=timeframe,
+            candle_limit=candle_limit,
+        )
+    )
+
+    diagnostics = dict(
+        geometry_market_scanner_service
+        .last_diagnostics
+    )
+
+    error = (
+        geometry_market_scanner_service
+        .last_error
+    )
+
+    return (
+        result,
+        diagnostics,
+        error,
+    )
 
 @st.cache_data(show_spinner=False)
 def load_csv_cached(
@@ -6888,6 +6934,339 @@ if selected_section == "geometry_scanner":
     st.caption(
         "Explorador visual de geometrías sobre velas cerradas. "
         "No modifica señales, watches ni decisiones de entrada."
+    )
+    
+    st.markdown("---")
+    st.subheader(
+        "Current market geometries"
+    )
+
+    st.caption(
+        "Ascending triangles and descending "
+        "wedges currently forming or with a "
+        "recent observed breakout."
+    )
+
+    with st.spinner(
+        "Scanning active market geometries..."
+    ):
+        (
+            market_geometry_candidates,
+            market_geometry_diagnostics,
+            market_geometry_error,
+        ) = load_geometry_market_scan(
+            timeframe="30m",
+            candle_limit=160,
+        )
+
+    if market_geometry_candidates.empty:
+        st.info(
+            "No current ascending triangles or "
+            "descending wedges were detected."
+        )
+
+        if market_geometry_error:
+            st.caption(
+                f"Scanner result: "
+                f"{market_geometry_error}"
+            )
+
+    else:
+        market_geometry_candidates = (
+            market_geometry_candidates
+            .reset_index(drop=True)
+        )
+
+        breakout_count = int(
+            (
+                market_geometry_candidates[
+                    "status"
+                ]
+                == "BREAKOUT"
+            ).sum()
+        )
+
+        forming_count = int(
+            (
+                market_geometry_candidates[
+                    "status"
+                ]
+                == "FORMING"
+            ).sum()
+        )
+
+        triangle_count = int(
+            (
+                market_geometry_candidates[
+                    "geometry"
+                ]
+                == "ascending_triangle"
+            ).sum()
+        )
+
+        wedge_count = int(
+            (
+                market_geometry_candidates[
+                    "geometry"
+                ]
+                == "descending_wedge"
+            ).sum()
+        )
+
+        summary_1, summary_2, summary_3, summary_4 = (
+            st.columns(4)
+        )
+
+        summary_1.metric(
+            "Forming",
+            forming_count,
+        )
+
+        summary_2.metric(
+            "Recent breakouts",
+            breakout_count,
+        )
+
+        summary_3.metric(
+            "Ascending triangles",
+            triangle_count,
+        )
+
+        summary_4.metric(
+            "Descending wedges",
+            wedge_count,
+        )
+
+        market_filter_1, market_filter_2 = (
+            st.columns(2)
+        )
+
+        with market_filter_1:
+            selected_market_statuses = (
+                st.multiselect(
+                    "Pattern status",
+                    options=[
+                        "FORMING",
+                        "BREAKOUT",
+                    ],
+                    default=[
+                        "FORMING",
+                        "BREAKOUT",
+                    ],
+                    key=(
+                        "market_geometry_status_filter"
+                    ),
+                )
+            )
+
+        with market_filter_2:
+            selected_market_geometries = (
+                st.multiselect(
+                    "Geometry",
+                    options=[
+                        "ascending_triangle",
+                        "descending_wedge",
+                    ],
+                    default=[
+                        "ascending_triangle",
+                        "descending_wedge",
+                    ],
+                    key=(
+                        "market_geometry_type_filter"
+                    ),
+                )
+            )
+
+        filtered_market_geometries = (
+            market_geometry_candidates[
+                market_geometry_candidates[
+                    "status"
+                ].isin(
+                    selected_market_statuses
+                )
+                & market_geometry_candidates[
+                    "geometry"
+                ].isin(
+                    selected_market_geometries
+                )
+            ]
+            .copy()
+            .reset_index(drop=True)
+        )
+
+        if filtered_market_geometries.empty:
+            st.warning(
+                "No candidates match the "
+                "selected filters."
+            )
+
+        else:
+            market_geometry_table = (
+                filtered_market_geometries
+                .copy()
+            )
+
+            market_geometry_table[
+                "pattern_end"
+            ] = (
+                pd.to_datetime(
+                    market_geometry_table[
+                        "end_timestamp"
+                    ],
+                    unit="ms",
+                    utc=True,
+                )
+                .dt.tz_convert(TZ)
+                .dt.strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+            )
+
+            market_visible_columns = [
+                "symbol",
+                "geometry",
+                "status",
+                "confidence",
+                "window_size",
+                "contraction_pct",
+                "flagpole_return_pct",
+                "flag_retracement_pct",
+                "touches_high",
+                "touches_low",
+                "breakout_age_bars",
+                "pattern_end",
+            ]
+
+            st.dataframe(
+                market_geometry_table[
+                    market_visible_columns
+                ],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "symbol": "Symbol",
+                    "geometry": "Geometry",
+                    "status": "Status",
+                    "confidence": (
+                        st.column_config.ProgressColumn(
+                            "Confidence",
+                            min_value=0.0,
+                            max_value=100.0,
+                            format="%.2f",
+                        )
+                    ),
+                    "window_size": "Window",
+                    "contraction_pct": (
+                        "Contraction %"
+                    ),
+                    "flagpole_return_pct": (
+                        "Flagpole %"
+                    ),
+                    "flag_retracement_pct": (
+                        "Retracement %"
+                    ),
+                    "touches_high": (
+                        "High touches"
+                    ),
+                    "touches_low": (
+                        "Low touches"
+                    ),
+                    "breakout_age_bars": (
+                        "Breakout age"
+                    ),
+                    "pattern_end": (
+                        "Pattern end"
+                    ),
+                },
+            )
+
+            selected_market_candidate_index = (
+                st.selectbox(
+                    "Market candidate to inspect",
+                    options=list(
+                        range(
+                            len(
+                                filtered_market_geometries
+                            )
+                        )
+                    ),
+                    format_func=lambda index: (
+                        f"{filtered_market_geometries.iloc[index]['symbol']} · "
+                        f"{filtered_market_geometries.iloc[index]['geometry']} · "
+                        f"{filtered_market_geometries.iloc[index]['status']} · "
+                        f"confidence "
+                        f"{filtered_market_geometries.iloc[index]['confidence']:.2f}"
+                    ),
+                    key=(
+                        "selected_market_geometry"
+                    ),
+                )
+            )
+
+            selected_market_candidate = (
+                filtered_market_geometries
+                .iloc[
+                    selected_market_candidate_index
+                ]
+            )
+
+            selected_market_symbol = str(
+                selected_market_candidate[
+                    "symbol"
+                ]
+            )
+
+            selected_market_candles = (
+                geometry_scanner_data_service
+                .get_closed_candles(
+                    symbol=(
+                        selected_market_symbol
+                    ),
+                    timeframe="30m",
+                    limit=160,
+                )
+            )
+
+            if selected_market_candles.empty:
+                st.error(
+                    "Could not load candles for "
+                    f"{selected_market_symbol}."
+                )
+
+            else:
+                market_geometry_figure = (
+                    build_geometry_scanner_chart(
+                        candles=(
+                            selected_market_candles
+                        ),
+                        candidate=(
+                            selected_market_candidate
+                        ),
+                        context_before=15,
+                        context_after=5,
+                        flagpole_lookback=10,
+                    )
+                )
+
+                st.plotly_chart(
+                    market_geometry_figure,
+                    use_container_width=True,
+                    config={
+                        "displaylogo": False,
+                        "scrollZoom": True,
+                    },
+                )
+
+        with st.expander(
+            "Market scan diagnostics"
+        ):
+            st.json(
+                market_geometry_diagnostics
+            )
+
+    st.markdown("---")
+    st.subheader(
+        "Manual symbol inspector"
     )
 
     control_1, control_2, control_3 = st.columns(
