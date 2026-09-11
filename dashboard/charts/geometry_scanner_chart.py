@@ -353,18 +353,66 @@ def build_geometry_scanner_chart(
             utc=True,
         )
 
+        raw_breakout_direction = (
+            candidate.get(
+                "breakout_direction"
+            )
+        )
+
+        if pd.notna(
+            raw_breakout_direction
+        ):
+            breakout_direction = str(
+                raw_breakout_direction
+            ).upper()
+        else:
+            breakout_direction = (
+                "UNKNOWN"
+            )
+
+        if breakout_direction == "UP":
+            breakout_color = "#00c087"
+            breakout_symbol = (
+                "triangle-up"
+            )
+            breakout_text = (
+                "Breakout UP"
+            )
+
+        elif breakout_direction == "DOWN":
+            breakout_color = "#f6465d"
+            breakout_symbol = (
+                "triangle-down"
+            )
+            breakout_text = (
+                "Breakout DOWN"
+            )
+
+        else:
+            breakout_color = "#ffd166"
+            breakout_symbol = "star"
+            breakout_text = "Breakout"
+
         figure.add_trace(
             go.Scatter(
                 x=[breakout_time],
                 y=[float(breakout_price)],
                 mode="markers+text",
-                name="Observed breakout",
-                text=["Breakout"],
+                name=breakout_text,
+                text=[breakout_text],
                 textposition="top center",
                 marker={
-                    "color": "#00c087",
-                    "size": 14,
-                    "symbol": "star",
+                    "color": breakout_color,
+                    "size": 15,
+                    "symbol": (
+                        breakout_symbol
+                    ),
+                    "line": {
+                        "color": (
+                            breakout_color
+                        ),
+                        "width": 2,
+                    },
                 },
             ),
             row=1,
