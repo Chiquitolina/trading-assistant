@@ -333,22 +333,20 @@ def build_geometry_scanner_chart(
         col=1,
     )
 
-    breakout_timestamp = (
-        candidate.get(
-            "breakout_timestamp"
-        )
+    breakout_timestamp = candidate.get(
+        "breakout_timestamp"
     )
 
-    breakout_price = (
-        candidate.get(
-            "breakout_price"
-        )
+    breakout_price = candidate.get(
+        "breakout_price"
     )
 
-    if (
-        breakout_timestamp is not None
-        and breakout_price is not None
-    ):
+    has_breakout = (
+        pd.notna(breakout_timestamp)
+        and pd.notna(breakout_price)
+    )
+
+    if has_breakout:
         breakout_time = pd.to_datetime(
             int(breakout_timestamp),
             unit="ms",
@@ -358,7 +356,7 @@ def build_geometry_scanner_chart(
         figure.add_trace(
             go.Scatter(
                 x=[breakout_time],
-                y=[breakout_price],
+                y=[float(breakout_price)],
                 mode="markers+text",
                 name="Observed breakout",
                 text=["Breakout"],
@@ -372,7 +370,7 @@ def build_geometry_scanner_chart(
             row=1,
             col=1,
         )
-
+        
     figure.update_layout(
         template="plotly_dark",
         height=720,
