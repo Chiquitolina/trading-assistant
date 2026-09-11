@@ -778,6 +778,7 @@ class GeometryScanner:
             and lower_up
             and contracts
             and bullish_flagpole
+            and controlled_retracement
         ):
             return (
                 "symmetric_pennant",
@@ -802,6 +803,7 @@ class GeometryScanner:
             and upper_slope < lower_slope
             and contracts
             and bullish_flagpole
+            and controlled_retracement
         ):
             return (
                 "descending_wedge",
