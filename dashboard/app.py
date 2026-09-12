@@ -247,6 +247,320 @@ def load_geometry_market_scan(
         diagnostics,
         error,
     )
+    
+def render_geometry_observation_form(
+    symbol,
+    timeframe,
+    candidate,
+    candles,
+    scanner_parameters,
+    source,
+    widget_prefix,
+):
+    if hasattr(candidate, "to_dict"):
+        candidate_dict = (
+            candidate.to_dict()
+        )
+    else:
+        candidate_dict = dict(
+            candidate
+        )
+
+    raw_status = candidate_dict.get(
+        "status"
+    )
+
+    if (
+        raw_status is not None
+        and pd.notna(raw_status)
+    ):
+        status = str(
+            raw_status
+        ).upper()
+    else:
+        status = (
+            "BREAKOUT"
+            if bool(
+                candidate_dict.get(
+                    "breakout_detected",
+                    False,
+                )
+            )
+            else "FORMING"
+        )
+
+    already_saved = (
+        geometry_observation_journal
+        .contains(
+            symbol=symbol,
+            timeframe=timeframe,
+            candidate=candidate_dict,
+        )
+    )
+
+    st.markdown("#### 💾 Review & Save")
+
+    st.caption(
+        "Congela la figura, sus velas, "
+        "parámetros y contexto Market Flow 4h."
+    )
+
+    if already_saved:
+        st.info(
+            "Esta figura ya fue guardada "
+            f"en estado {status}."
+        )
+
+    form_key = (
+        f"{widget_prefix}_"
+        f"{symbol}_"
+        f"{candidate_dict.get('geometry')}_"
+        f"{candidate_dict.get('start_timestamp')}_"
+        f"{status}"
+    )
+
+    with st.form(
+        key=f"geometry_review_{form_key}"
+    ):
+        review_1, review_2 = (
+            st.columns(2)
+        )
+
+        with review_1:
+            figure_quality = st.selectbox(
+                "Figure quality",
+                options=[
+                    "GOOD",
+                    "UNCERTAIN",
+                    "BAD",
+                ],
+                index=0,
+                key=(
+                    f"figure_quality_{form_key}"
+                ),
+            )
+
+        with review_2:
+            if status == "BREAKOUT":
+                breakout_options = [
+                    "GOOD",
+                    "WEAK",
+                    "FALSE_BREAKOUT",
+                    "UNCERTAIN",
+                ]
+            else:
+                breakout_options = [
+                    "PENDING",
+                    "NOT_APPLICABLE",
+                ]
+
+            breakout_quality = st.selectbox(
+                "Breakout quality",
+                options=breakout_options,
+                index=0,
+                key=(
+                    f"breakout_quality_"
+                    f"{form_key}"
+                ),
+            )
+
+        review_notes = st.text_area(
+            "Notes",
+            placeholder=(
+                "Qué te gustó o no de la "
+                "figura, breakout, volumen, "
+                "entrada potencial, etc."
+            ),
+            key=f"notes_{form_key}",
+        )
+
+        save_observation = (
+            st.form_submit_button(
+                "💾 Save observation",
+                disabled=already_saved,
+                use_container_width=True,
+            )
+        )
+
+    if not save_observation:
+        return
+
+    review_timestamp = int(
+        pd.Timestamp.now(
+            tz="UTC"
+        ).timestamp()
+        * 1000
+    )
+
+    market_flow_at_review = (
+        get_geometry_market_flow_context(
+            symbol=symbol,
+            reference_timestamp=(
+                review_timestamp
+            ),
+        )
+    )
+
+    breakout_timestamp = (
+        candidate_dict.get(
+            "breakout_timestamp"
+        )
+    )
+
+    if (
+        breakout_timestamp is not None
+        and pd.notna(
+            breakout_timestamp
+        )
+    ):
+        breakout_timestamp = int(
+            breakout_timestamp
+        )
+
+        possible_breakout_context = (
+            get_geometry_market_flow_context(
+                symbol=symbol,
+                reference_timestamp=(
+                    breakout_timestamp
+                ),
+            )
+        )
+
+        if (
+            possible_breakout_context.get(
+                "available"
+            )
+            and possible_breakout_context.get(
+                "temporal_relation"
+            )
+            == "AVAILABLE_AT_REFERENCE"
+        ):
+            market_flow_at_breakout = (
+                possible_breakout_context
+            )
+        else:
+            market_flow_at_breakout = {
+                "available": False,
+                "reason": (
+                    "historical_snapshot_unavailable"
+                ),
+                "symbol": symbol,
+                "reference_timestamp": (
+                    breakout_timestamp
+                ),
+                "checked_snapshot": (
+                    possible_breakout_context
+                ),
+            }
+
+    else:
+        market_flow_at_breakout = {
+            "available": False,
+            "reason": "breakout_not_observed",
+            "symbol": symbol,
+        }
+
+    saved = (
+        geometry_observation_journal
+        .save(
+            symbol=symbol,
+            timeframe=timeframe,
+            candidate=candidate_dict,
+            candles=candles,
+            scanner_parameters=(
+                scanner_parameters
+            ),
+            source=source,
+            figure_quality=(
+                figure_quality
+            ),
+            breakout_quality=(
+                breakout_quality
+            ),
+            notes=review_notes,
+            market_flow_at_review=(
+                market_flow_at_review
+            ),
+            market_flow_at_breakout=(
+                market_flow_at_breakout
+            ),
+        )
+    )
+
+    if saved is None:
+        if (
+            geometry_observation_journal
+            .last_error
+            == "duplicate_observation"
+        ):
+            st.warning(
+                "La observación ya estaba "
+                "guardada."
+            )
+        else:
+            st.error(
+                "No se pudo guardar: "
+                f"{geometry_observation_journal.last_error}"
+            )
+
+        return
+
+    st.success(
+        "Observation saved · "
+        f"{saved['observation_id']}"
+    )
+    
+def get_geometry_market_flow_context(
+    symbol,
+    reference_timestamp,
+):
+    snapshot = (
+        market_flow_dashboard_service
+        .get_snapshot(
+            timeframe="4h"
+        )
+    )
+
+    if snapshot is None:
+        return {
+            "available": False,
+            "reason": (
+                market_flow_dashboard_service
+                .last_error
+                or "snapshot_unavailable"
+            ),
+            "symbol": symbol,
+            "reference_timestamp": (
+                reference_timestamp
+            ),
+        }
+
+    context = (
+        market_flow_dashboard_service
+        .get_symbol_context(
+            snapshot=snapshot,
+            symbol=symbol,
+            reference_timestamp=(
+                reference_timestamp
+            ),
+        )
+    )
+
+    if context is None:
+        return {
+            "available": False,
+            "reason": (
+                market_flow_dashboard_service
+                .last_error
+                or "symbol_context_unavailable"
+            ),
+            "symbol": symbol,
+            "reference_timestamp": (
+                reference_timestamp
+            ),
+        }
+
+    return context
 
 @st.cache_data(show_spinner=False)
 def load_csv_cached(
@@ -7316,6 +7630,25 @@ if selected_section == "geometry_scanner":
                         "scrollZoom": True,
                     },
                 )
+                
+                render_geometry_observation_form(
+                    symbol=(
+                        selected_market_symbol
+                    ),
+                    timeframe="30m",
+                    candidate=(
+                        selected_market_candidate
+                    ),
+                    candles=(
+                        selected_market_candles
+                    ),
+                    scanner_parameters=(
+                        GeometryMarketScannerService
+                        .DEFAULT_SCANNER_PARAMETERS
+                    ),
+                    source="MARKET_SCANNER",
+                    widget_prefix="market",
+                )
 
         with st.expander(
             "Market scan diagnostics"
@@ -7631,10 +7964,8 @@ if selected_section == "geometry_scanner":
             min_directional_slope=float(
                 geometry_directional_slope
             ),
-            parallel_slope_difference_max=(
-                float(
-                    geometry_parallel_difference
-                )
+            parallel_slope_difference_max=float(
+                geometry_parallel_difference
             ),
             minimum_contraction_pct=float(
                 geometry_minimum_contraction
@@ -7652,6 +7983,41 @@ if selected_section == "geometry_scanner":
                 geometry_breakout_lookahead
             ),
         )
+
+        manual_scanner_parameters = {
+            "min_window": geometry_scanner.min_window,
+            "max_window": geometry_scanner.max_window,
+            "pivot_order": geometry_scanner.pivot_order,
+            "min_touches": geometry_scanner.min_touches,
+            "flat_slope_max": geometry_scanner.flat_slope_max,
+            "min_directional_slope": (
+                geometry_scanner.min_directional_slope
+            ),
+            "parallel_slope_difference_max": (
+                geometry_scanner
+                .parallel_slope_difference_max
+            ),
+            "minimum_contraction_pct": (
+                geometry_scanner.minimum_contraction_pct
+            ),
+            "flagpole_lookback": (
+                geometry_scanner.flagpole_lookback
+            ),
+            "minimum_flagpole_return_pct": (
+                geometry_scanner
+                .minimum_flagpole_return_pct
+            ),
+            "maximum_flag_retracement_pct": (
+                geometry_scanner
+                .maximum_flag_retracement_pct
+            ),
+            "breakout_lookahead": (
+                geometry_scanner.breakout_lookahead
+            ),
+            "boundary_tolerance_pct": (
+                geometry_scanner.boundary_tolerance_pct
+            ),
+        }
 
         geometry_candidates = (
             geometry_scanner.scan(
@@ -7996,6 +8362,22 @@ if selected_section == "geometry_scanner":
                         "displaylogo": False,
                         "scrollZoom": True,
                     },
+                )
+                
+                render_geometry_observation_form(
+                    symbol=geometry_symbol,
+                    timeframe=(
+                        geometry_timeframe
+                    ),
+                    candidate=(
+                        selected_candidate
+                    ),
+                    candles=geometry_candles,
+                    scanner_parameters=(
+                        manual_scanner_parameters
+                    ),
+                    source="MANUAL_INSPECTOR",
+                    widget_prefix="manual",
                 )
 
                 with st.expander(
