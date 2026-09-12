@@ -54,6 +54,10 @@ from dashboard.services.geometry_market_scanner_service import (
     GeometryMarketScannerService,
 )
 
+from dashboard.services.geometry_observation_journal import (
+    GeometryObservationJournal,
+)
+
 from dashboard.analytics.geometry_scanner import (
     GeometryScanner,
 )
@@ -151,6 +155,13 @@ TP_SL_REPLAY_CANDIDATES_FILE = (
     / "reports"
     / "tp_sl_replay_candidates.json"
 )
+
+GEOMETRY_OBSERVATIONS_FILE = (
+    BASE_DIR
+    / "reports"
+    / "geometry_observations.jsonl"
+)
+
 TZ = "America/Argentina/Buenos_Aires"
 SYMBOL = "BTCUSDT"
 STATUS_TTL_SECONDS = 10
@@ -178,6 +189,14 @@ geometry_market_scanner_service = (
     GeometryMarketScannerService(
         data_service=(
             geometry_scanner_data_service
+        ),
+    )
+)
+
+geometry_observation_journal = (
+    GeometryObservationJournal(
+        path=(
+            GEOMETRY_OBSERVATIONS_FILE
         ),
     )
 )

@@ -7,6 +7,7 @@ import redis
 
 from engine.live.data.redis_market_data_protocol import (
     market_flow_key,
+    normalize_symbol,
     normalize_timeframe,
 )
 
@@ -174,6 +175,212 @@ class MarketFlowDashboardService:
         ] = round(age_seconds, 3)
 
         return snapshot
+    
+    def get_symbol_context(
+        self,
+        snapshot,
+        symbol,
+        reference_timestamp=None,
+    ):
+        self.last_error = None
+
+        if not isinstance(snapshot, dict):
+            self.last_error = (
+                "snapshot_must_be_dict"
+            )
+            return None
+
+        try:
+            symbol = normalize_symbol(
+                symbol
+            )
+        except (TypeError, ValueError) as exc:
+            self.last_error = (
+                f"invalid_symbol:{exc}"
+            )
+            return None
+
+        symbols = snapshot.get(
+            "symbols"
+        )
+
+        if not isinstance(symbols, dict):
+            self.last_error = (
+                "invalid_symbols_payload"
+            )
+            return None
+
+        symbol_metrics = symbols.get(
+            symbol
+        )
+
+        if not isinstance(
+            symbol_metrics,
+            dict,
+        ):
+            self.last_error = (
+                f"symbol_unavailable:{symbol}"
+            )
+            return None
+
+        try:
+            candle_timestamp = int(
+                snapshot[
+                    "candle_timestamp"
+                ]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            self.last_error = (
+                "invalid_candle_timestamp"
+            )
+            return None
+
+        close_timestamp = int(
+            snapshot.get(
+                "market_flow_close_timestamp",
+                candle_timestamp
+                + self.TIMEFRAME_MS["4h"],
+            )
+        )
+
+        calculated_at = snapshot.get(
+            "calculated_at"
+        )
+
+        try:
+            calculated_at = int(
+                calculated_at
+            )
+        except (TypeError, ValueError):
+            calculated_at = None
+
+        temporal_relation = None
+
+        if reference_timestamp is not None:
+            try:
+                reference_timestamp = int(
+                    reference_timestamp
+                )
+            except (TypeError, ValueError):
+                self.last_error = (
+                    "invalid_reference_timestamp"
+                )
+                return None
+
+            available_timestamp = (
+                calculated_at
+                if calculated_at is not None
+                else close_timestamp
+            )
+
+            if (
+                available_timestamp
+                <= reference_timestamp
+            ):
+                temporal_relation = (
+                    "AVAILABLE_AT_REFERENCE"
+                )
+            else:
+                temporal_relation = (
+                    "CALCULATED_AFTER_REFERENCE"
+                )
+
+        return {
+            "available": True,
+            "symbol": symbol,
+            "timeframe": snapshot.get(
+                "timeframe"
+            ),
+            "reference_timestamp": (
+                reference_timestamp
+            ),
+            "temporal_relation": (
+                temporal_relation
+            ),
+
+            "snapshot": {
+                "candle_timestamp": (
+                    candle_timestamp
+                ),
+                "close_timestamp": (
+                    close_timestamp
+                ),
+                "calculated_at": (
+                    calculated_at
+                ),
+                "age_seconds": (
+                    snapshot.get(
+                        "market_flow_age_seconds"
+                    )
+                ),
+                "coverage_pct": (
+                    snapshot.get(
+                        "coverage_pct"
+                    )
+                ),
+                "configured_universe_size": (
+                    snapshot.get(
+                        "configured_universe_size"
+                    )
+                ),
+                "valid_universe_size": (
+                    snapshot.get(
+                        "valid_universe_size"
+                    )
+                ),
+                "positive_symbols": (
+                    snapshot.get(
+                        "positive_symbols"
+                    )
+                ),
+                "market_breadth_4h": (
+                    snapshot.get(
+                        "market_breadth_4h"
+                    )
+                ),
+                "btc_return_pct_4h": (
+                    snapshot.get(
+                        "btc_return_pct_4h"
+                    )
+                ),
+                "sector_context_available": (
+                    snapshot.get(
+                        "sector_context_available"
+                    )
+                ),
+                "sector_context_error": (
+                    snapshot.get(
+                        "sector_context_error"
+                    )
+                ),
+                "sector_catalog_generated_at": (
+                    snapshot.get(
+                        "sector_catalog_generated_at"
+                    )
+                ),
+                "sector_assignment_method": (
+                    snapshot.get(
+                        "sector_assignment_method"
+                    )
+                ),
+                "sector_return_aggregation": (
+                    snapshot.get(
+                        "sector_return_aggregation"
+                    )
+                ),
+            },
+
+            # Conservamos el bloque completo para que
+            # nuevas métricas futuras también queden
+            # guardadas automáticamente.
+            "symbol_metrics": dict(
+                symbol_metrics
+            ),
+        }
 
     def build_symbol_table(
         self,
