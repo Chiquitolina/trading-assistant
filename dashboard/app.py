@@ -694,6 +694,104 @@ def render_breakout_quality_metrics(
         "the geometry confidence."
     )
 
+def render_pattern_maturity_metrics(
+    candidate,
+):
+    if hasattr(candidate, "to_dict"):
+        candidate = candidate.to_dict()
+    else:
+        candidate = dict(candidate)
+
+    st.markdown(
+        "#### Pattern maturity"
+    )
+
+    columns = st.columns(4)
+
+    columns[0].metric(
+        "Progress to apex",
+        format_geometry_metric(
+            candidate.get(
+                "pattern_progress_pct"
+            ),
+            suffix="%",
+        ),
+    )
+
+    columns[1].metric(
+        "Bars to apex",
+        format_geometry_metric(
+            candidate.get(
+                "distance_to_apex_bars"
+            ),
+        ),
+    )
+
+    columns[2].metric(
+        "Current width",
+        format_geometry_metric(
+            candidate.get(
+                "current_width_pct"
+            ),
+            suffix="%",
+            decimals=4,
+        ),
+    )
+
+    columns[3].metric(
+        "Price position",
+        format_geometry_metric(
+            candidate.get(
+                "current_price_position_pct"
+            ),
+            suffix="%",
+        ),
+    )
+
+    progress = candidate.get(
+        "pattern_progress_pct"
+    )
+
+    if (
+        progress is not None
+        and pd.notna(progress)
+    ):
+        progress = float(progress)
+
+        if progress < 40:
+            maturity_label = (
+                "Early structure"
+            )
+        elif progress < 60:
+            maturity_label = (
+                "Developing structure"
+            )
+        elif progress <= 90:
+            maturity_label = (
+                "Mature structure"
+            )
+        elif progress <= 100:
+            maturity_label = (
+                "Near theoretical apex"
+            )
+        else:
+            maturity_label = (
+                "Past theoretical apex"
+            )
+
+        st.caption(
+            f"Maturity state: "
+            f"{maturity_label}. "
+            "These ranges are descriptive and "
+            "are not entry conditions."
+        )
+
+    else:
+        st.caption(
+            "This geometry has no finite "
+            "convergence apex."
+        )
+
 @st.cache_data(show_spinner=False)
 def load_csv_cached(
     path,
@@ -7613,6 +7711,10 @@ if selected_section == "geometry_scanner":
                 "breakout_close_distance_pct",
                 "breakout_volume_ratio",
                 "breakout_atr_extension",
+                "pattern_progress_pct",
+                "distance_to_apex_bars",
+                "current_width_pct",
+                "current_price_position_pct",
             ]
 
             for column in market_breakout_columns:
@@ -7657,6 +7759,9 @@ if selected_section == "geometry_scanner":
                 "breakout_volume_ratio",
                 "breakout_atr_extension",
                 "breakout_age_bars",
+                "pattern_progress_pct",
+                "distance_to_apex_bars",
+                "current_price_position_pct",
                 "pattern_end",
             ]
 
@@ -7729,6 +7834,26 @@ if selected_section == "geometry_scanner":
                     "pattern_end": (
                         "Pattern end"
                     ),
+                    "pattern_progress_pct": (
+                        st.column_config.ProgressColumn(
+                            "Maturity %",
+                            min_value=0.0,
+                            max_value=100.0,
+                            format="%.2f",
+                        )
+                    ),
+                    "distance_to_apex_bars": (
+                        st.column_config.NumberColumn(
+                            "Bars to apex",
+                            format="%.2f",
+                        )
+                    ),
+                    "current_price_position_pct": (
+                        st.column_config.NumberColumn(
+                            "Price position %",
+                            format="%.2f",
+                        )
+                    ),
                 },
             )
 
@@ -7787,6 +7912,9 @@ if selected_section == "geometry_scanner":
 
             else:
                 render_breakout_quality_metrics(
+                    selected_market_candidate
+                )
+                render_pattern_maturity_metrics(
                     selected_market_candidate
                 )
 
@@ -7870,6 +7998,36 @@ if selected_section == "geometry_scanner":
                         "breakout_close_location_pct": (
                             selected_market_candidate.get(
                                 "breakout_close_location_pct"
+                            )
+                        ),
+                        "pattern_progress_pct": (
+                            selected_market_candidate.get(
+                                "pattern_progress_pct"
+                            )
+                        ),
+                        "apex_index": (
+                            selected_market_candidate.get(
+                                "apex_index"
+                            )
+                        ),
+                        "apex_timestamp": (
+                            selected_market_candidate.get(
+                                "apex_timestamp"
+                            )
+                        ),
+                        "distance_to_apex_bars": (
+                            selected_market_candidate.get(
+                                "distance_to_apex_bars"
+                            )
+                        ),
+                        "current_width_pct": (
+                            selected_market_candidate.get(
+                                "current_width_pct"
+                            )
+                        ),
+                        "current_price_position_pct": (
+                            selected_market_candidate.get(
+                                "current_price_position_pct"
                             )
                         ),
                     })
@@ -8374,6 +8532,10 @@ if selected_section == "geometry_scanner":
                     "breakout_close_distance_pct",
                     "breakout_volume_ratio",
                     "breakout_atr_extension",
+                    "pattern_progress_pct",
+                    "distance_to_apex_bars",
+                    "current_width_pct",
+                    "current_price_position_pct",
                 ]
 
                 for column in manual_breakout_columns:
@@ -8455,6 +8617,9 @@ if selected_section == "geometry_scanner":
                     "breakout_close_distance_pct",
                     "breakout_volume_ratio",
                     "breakout_atr_extension",
+                    "pattern_progress_pct",
+                    "distance_to_apex_bars",
+                    "current_price_position_pct",
                 ]
 
                 st.dataframe(
@@ -8534,6 +8699,26 @@ if selected_section == "geometry_scanner":
                         "breakout_atr_extension": (
                             st.column_config.NumberColumn(
                                 "ATR extension",
+                                format="%.2f",
+                            )
+                        ),
+                        "pattern_progress_pct": (
+                            st.column_config.ProgressColumn(
+                                "Maturity %",
+                                min_value=0.0,
+                                max_value=100.0,
+                                format="%.2f",
+                            )
+                        ),
+                        "distance_to_apex_bars": (
+                            st.column_config.NumberColumn(
+                                "Bars to apex",
+                                format="%.2f",
+                            )
+                        ),
+                        "current_price_position_pct": (
+                            st.column_config.NumberColumn(
+                                "Price position %",
                                 format="%.2f",
                             )
                         ),
@@ -8631,6 +8816,10 @@ if selected_section == "geometry_scanner":
                 )
                 
                 render_breakout_quality_metrics(
+                    selected_candidate
+                )
+
+                render_pattern_maturity_metrics(
                     selected_candidate
                 )
 
@@ -8781,6 +8970,36 @@ if selected_section == "geometry_scanner":
                         "breakout_close_location_pct": (
                             selected_candidate.get(
                                 "breakout_close_location_pct"
+                            )
+                        ),
+                        "pattern_progress_pct": (
+                            selected_candidate.get(
+                                "pattern_progress_pct"
+                            )
+                        ),
+                        "apex_index": (
+                            selected_candidate.get(
+                                "apex_index"
+                            )
+                        ),
+                        "apex_timestamp": (
+                            selected_candidate.get(
+                                "apex_timestamp"
+                            )
+                        ),
+                        "distance_to_apex_bars": (
+                            selected_candidate.get(
+                                "distance_to_apex_bars"
+                            )
+                        ),
+                        "current_width_pct": (
+                            selected_candidate.get(
+                                "current_width_pct"
+                            )
+                        ),
+                        "current_price_position_pct": (
+                            selected_candidate.get(
+                                "current_price_position_pct"
                             )
                         ),
                     })
