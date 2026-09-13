@@ -691,12 +691,53 @@ class GeometryScanner:
                 else None
             ),
             "breakout_boundary_price": (
+                breakout["boundary_price"]
+                if breakout
+                else None
+            ),
+            "breakout_score": (
+                breakout["score"]
+                if breakout
+                else None
+            ),
+            "breakout_close_distance_pct": (
                 breakout[
-                    "boundary_price"
+                    "close_distance_pct"
                 ]
                 if breakout
                 else None
             ),
+            "breakout_body_distance_pct": (
+                breakout[
+                    "body_distance_pct"
+                ]
+                if breakout
+                else None
+            ),
+            "breakout_body_pct": (
+                breakout["body_pct"]
+                if breakout
+                else None
+            ),
+            "breakout_volume_ratio": (
+                breakout["volume_ratio"]
+                if breakout
+                else None
+            ),
+            "breakout_atr_extension": (
+                breakout["atr_extension"]
+                if breakout
+                else None
+            ),
+            "breakout_close_location_pct": (
+                breakout[
+                    "close_location_pct"
+                ]
+                if breakout
+                else None
+            ),
+
+            "reasons": reasons,
             
             "reasons": reasons,
         }
@@ -1102,46 +1143,479 @@ class GeometryScanner:
             )
 
             close_price = float(
-                candles[
-                    "close"
-                ].iloc[future_index]
+                candles["close"].iloc[
+                    future_index
+                ]
             )
 
             timestamp = int(
-                candles[
-                    "timestamp"
-                ].iloc[future_index]
+                candles["timestamp"].iloc[
+                    future_index
+                ]
             )
 
-            if close_price > projected_upper_price:
-                return {
-                    "timestamp": timestamp,
-                    "price": round(
-                        close_price,
-                        10,
-                    ),
-                    "direction": "UP",
-                    "boundary_price": round(
-                        projected_upper_price,
-                        10,
-                    ),
-                }
+            if (
+                close_price
+                > projected_upper_price
+            ):
+                return (
+                    self._build_breakout_result(
+                        candles=candles,
+                        breakout_index=(
+                            future_index
+                        ),
+                        timestamp=timestamp,
+                        direction="UP",
+                        boundary_price=(
+                            projected_upper_price
+                        ),
+                    )
+                )
 
-            if close_price < projected_lower_price:
-                return {
-                    "timestamp": timestamp,
-                    "price": round(
-                        close_price,
-                        10,
-                    ),
-                    "direction": "DOWN",
-                    "boundary_price": round(
-                        projected_lower_price,
-                        10,
-                    ),
-                }
+            if (
+                close_price
+                < projected_lower_price
+            ):
+                return (
+                    self._build_breakout_result(
+                        candles=candles,
+                        breakout_index=(
+                            future_index
+                        ),
+                        timestamp=timestamp,
+                        direction="DOWN",
+                        boundary_price=(
+                            projected_lower_price
+                        ),
+                    )
+                )
 
         return None
+
+    def _build_breakout_result(
+        self,
+        candles,
+        breakout_index,
+        timestamp,
+        direction,
+        boundary_price,
+    ):
+        candle = candles.iloc[
+            breakout_index
+        ]
+
+        open_price = float(
+            candle["open"]
+        )
+
+        high_price = float(
+            candle["high"]
+        )
+
+        low_price = float(
+            candle["low"]
+        )
+
+        close_price = float(
+            candle["close"]
+        )
+
+        volume = float(
+            candle["volume"]
+        )
+
+        candle_range = max(
+            high_price - low_price,
+            0.0,
+        )
+
+        candle_body = abs(
+            close_price - open_price
+        )
+
+        body_low = min(
+            open_price,
+            close_price,
+        )
+
+        body_high = max(
+            open_price,
+            close_price,
+        )
+
+        if direction == "UP":
+            close_distance = (
+                close_price
+                - boundary_price
+            )
+
+            body_outside = max(
+                0.0,
+                body_high
+                - max(
+                    body_low,
+                    boundary_price,
+                ),
+            )
+
+            close_location_pct = (
+                (
+                    close_price
+                    - low_price
+                )
+                / candle_range
+                * 100
+                if candle_range > 0
+                else 50.0
+            )
+
+        else:
+            close_distance = (
+                boundary_price
+                - close_price
+            )
+
+            body_outside = max(
+                0.0,
+                min(
+                    body_high,
+                    boundary_price,
+                )
+                - body_low,
+            )
+
+            close_location_pct = (
+                (
+                    high_price
+                    - close_price
+                )
+                / candle_range
+                * 100
+                if candle_range > 0
+                else 50.0
+            )
+
+        close_distance_pct = (
+            close_distance
+            / boundary_price
+            * 100
+        )
+
+        body_distance_pct = (
+            body_outside
+            / boundary_price
+            * 100
+        )
+
+        body_pct = (
+            candle_body
+            / candle_range
+            * 100
+            if candle_range > 0
+            else 0.0
+        )
+
+        volume_ratio = (
+            self._calculate_breakout_volume_ratio(
+                candles=candles,
+                breakout_index=(
+                    breakout_index
+                ),
+                breakout_volume=volume,
+            )
+        )
+
+        atr = self._calculate_prior_atr(
+            candles=candles,
+            breakout_index=(
+                breakout_index
+            ),
+            period=14,
+        )
+
+        atr_extension = (
+            close_distance
+            / atr
+            if (
+                atr is not None
+                and atr > 0
+            )
+            else None
+        )
+
+        score = self._calculate_breakout_score(
+            close_distance_pct=(
+                close_distance_pct
+            ),
+            body_distance_pct=(
+                body_distance_pct
+            ),
+            body_pct=body_pct,
+            volume_ratio=volume_ratio,
+            atr_extension=atr_extension,
+            close_location_pct=(
+                close_location_pct
+            ),
+        )
+
+        return {
+            "timestamp": int(timestamp),
+            "price": round(
+                close_price,
+                10,
+            ),
+            "direction": direction,
+            "boundary_price": round(
+                boundary_price,
+                10,
+            ),
+            "score": round(
+                score,
+                2,
+            ),
+            "close_distance_pct": round(
+                max(
+                    close_distance_pct,
+                    0.0,
+                ),
+                4,
+            ),
+            "body_distance_pct": round(
+                max(
+                    body_distance_pct,
+                    0.0,
+                ),
+                4,
+            ),
+            "body_pct": round(
+                body_pct,
+                2,
+            ),
+            "volume_ratio": (
+                round(
+                    volume_ratio,
+                    4,
+                )
+                if volume_ratio
+                is not None
+                else None
+            ),
+            "atr_extension": (
+                round(
+                    atr_extension,
+                    4,
+                )
+                if atr_extension
+                is not None
+                else None
+            ),
+            "close_location_pct": round(
+                close_location_pct,
+                2,
+            ),
+        }
+
+
+    def _calculate_breakout_volume_ratio(
+        self,
+        candles,
+        breakout_index,
+        breakout_volume,
+        lookback=20,
+    ):
+        first_index = max(
+            0,
+            breakout_index
+            - int(lookback),
+        )
+
+        previous_volumes = (
+            candles["volume"]
+            .iloc[
+                first_index:
+                breakout_index
+            ]
+            .astype(float)
+        )
+
+        previous_volumes = (
+            previous_volumes[
+                np.isfinite(
+                    previous_volumes
+                )
+                & (
+                    previous_volumes
+                    >= 0
+                )
+            ]
+        )
+
+        if previous_volumes.empty:
+            return None
+
+        median_volume = float(
+            previous_volumes.median()
+        )
+
+        if median_volume <= 0:
+            return None
+
+        return (
+            breakout_volume
+            / median_volume
+        )
+
+
+    def _calculate_prior_atr(
+        self,
+        candles,
+        breakout_index,
+        period=14,
+    ):
+        last_index = (
+            breakout_index - 1
+        )
+
+        if last_index < 1:
+            return None
+
+        first_index = max(
+            1,
+            last_index
+            - int(period)
+            + 1,
+        )
+
+        true_ranges = []
+
+        for index in range(
+            first_index,
+            last_index + 1,
+        ):
+            high_price = float(
+                candles["high"].iloc[
+                    index
+                ]
+            )
+
+            low_price = float(
+                candles["low"].iloc[
+                    index
+                ]
+            )
+
+            previous_close = float(
+                candles["close"].iloc[
+                    index - 1
+                ]
+            )
+
+            true_range = max(
+                high_price - low_price,
+                abs(
+                    high_price
+                    - previous_close
+                ),
+                abs(
+                    low_price
+                    - previous_close
+                ),
+            )
+
+            if math.isfinite(
+                true_range
+            ):
+                true_ranges.append(
+                    true_range
+                )
+
+        if not true_ranges:
+            return None
+
+        return float(
+            np.mean(true_ranges)
+        )
+
+
+    def _calculate_breakout_score(
+        self,
+        close_distance_pct,
+        body_distance_pct,
+        body_pct,
+        volume_ratio,
+        atr_extension,
+        close_location_pct,
+    ):
+        close_distance_score = min(
+            max(
+                close_distance_pct,
+                0.0,
+            )
+            / 0.30,
+            1.0,
+        )
+
+        body_distance_score = min(
+            max(
+                body_distance_pct,
+                0.0,
+            )
+            / 0.10,
+            1.0,
+        )
+
+        body_score = min(
+            max(
+                body_pct,
+                0.0,
+            )
+            / 70.0,
+            1.0,
+        )
+
+        volume_score = (
+            min(
+                max(
+                    volume_ratio,
+                    0.0,
+                )
+                / 1.50,
+                1.0,
+            )
+            if volume_ratio is not None
+            else 0.0
+        )
+
+        atr_score = (
+            min(
+                max(
+                    atr_extension,
+                    0.0,
+                )
+                / 0.35,
+                1.0,
+            )
+            if atr_extension is not None
+            else 0.0
+        )
+
+        close_location_score = min(
+            max(
+                close_location_pct,
+                0.0,
+            )
+            / 100.0,
+            1.0,
+        )
+
+        return (
+            close_distance_score * 25
+            + body_distance_score * 15
+            + body_score * 20
+            + volume_score * 20
+            + atr_score * 10
+            + close_location_score * 10
+        )
 
     def _deduplicate(
         self,
