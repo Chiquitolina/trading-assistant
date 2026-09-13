@@ -562,6 +562,138 @@ def get_geometry_market_flow_context(
 
     return context
 
+def format_geometry_metric(
+    value,
+    suffix="",
+    decimals=2,
+):
+    if (
+        value is None
+        or pd.isna(value)
+    ):
+        return "—"
+
+    return (
+        f"{float(value):.{decimals}f}"
+        f"{suffix}"
+    )
+
+
+def render_breakout_quality_metrics(
+    candidate,
+):
+    if hasattr(candidate, "to_dict"):
+        candidate = candidate.to_dict()
+    else:
+        candidate = dict(candidate)
+
+    breakout_detected = bool(
+        candidate.get(
+            "breakout_detected",
+            False,
+        )
+    )
+
+    st.markdown(
+        "#### Breakout quality"
+    )
+
+    if not breakout_detected:
+        st.caption(
+            "No breakout has been observed. "
+            "Quality metrics are pending."
+        )
+        return
+
+    row_1 = st.columns(4)
+
+    row_1[0].metric(
+        "Breakout score",
+        format_geometry_metric(
+            candidate.get(
+                "breakout_score"
+            )
+        ),
+    )
+
+    row_1[1].metric(
+        "Direction",
+        candidate.get(
+            "breakout_direction"
+        )
+        or "—",
+    )
+
+    row_1[2].metric(
+        "Close outside",
+        format_geometry_metric(
+            candidate.get(
+                "breakout_close_distance_pct"
+            ),
+            suffix="%",
+            decimals=4,
+        ),
+    )
+
+    row_1[3].metric(
+        "Body outside",
+        format_geometry_metric(
+            candidate.get(
+                "breakout_body_distance_pct"
+            ),
+            suffix="%",
+            decimals=4,
+        ),
+    )
+
+    row_2 = st.columns(4)
+
+    row_2[0].metric(
+        "Candle body",
+        format_geometry_metric(
+            candidate.get(
+                "breakout_body_pct"
+            ),
+            suffix="%",
+        ),
+    )
+
+    row_2[1].metric(
+        "Volume ratio",
+        format_geometry_metric(
+            candidate.get(
+                "breakout_volume_ratio"
+            ),
+            suffix="x",
+        ),
+    )
+
+    row_2[2].metric(
+        "ATR extension",
+        format_geometry_metric(
+            candidate.get(
+                "breakout_atr_extension"
+            ),
+            suffix=" ATR",
+        ),
+    )
+
+    row_2[3].metric(
+        "Directional close",
+        format_geometry_metric(
+            candidate.get(
+                "breakout_close_location_pct"
+            ),
+            suffix="%",
+        ),
+    )
+
+    st.caption(
+        "Breakout score measures the observed "
+        "rupture quality. It is independent from "
+        "the geometry confidence."
+    )
+
 @st.cache_data(show_spinner=False)
 def load_csv_cached(
     path,
@@ -7504,6 +7636,10 @@ if selected_section == "geometry_scanner":
                 "touches_high",
                 "touches_low",
                 "breakout_direction",
+                "breakout_score",
+                "breakout_close_distance_pct",
+                "breakout_volume_ratio",
+                "breakout_atr_extension",
                 "breakout_age_bars",
                 "pattern_end",
             ]
@@ -7544,6 +7680,32 @@ if selected_section == "geometry_scanner":
                     ),
                     "breakout_direction": (
                         "Breakout direction"
+                    ),
+                    "breakout_score": (
+                        st.column_config.ProgressColumn(
+                            "Breakout score",
+                            min_value=0.0,
+                            max_value=100.0,
+                            format="%.2f",
+                        )
+                    ),
+                    "breakout_close_distance_pct": (
+                        st.column_config.NumberColumn(
+                            "Close outside %",
+                            format="%.4f",
+                        )
+                    ),
+                    "breakout_volume_ratio": (
+                        st.column_config.NumberColumn(
+                            "Breakout volume",
+                            format="%.2fx",
+                        )
+                    ),
+                    "breakout_atr_extension": (
+                        st.column_config.NumberColumn(
+                            "ATR extension",
+                            format="%.2f",
+                        )
                     ),
                     "breakout_age_bars": (
                         "Breakout age"
@@ -7608,6 +7770,10 @@ if selected_section == "geometry_scanner":
                 )
 
             else:
+                render_breakout_quality_metrics(
+                    selected_market_candidate
+                )
+
                 market_geometry_figure = (
                     build_geometry_scanner_chart(
                         candles=(
@@ -7630,6 +7796,67 @@ if selected_section == "geometry_scanner":
                         "scrollZoom": True,
                     },
                 )
+                
+                with st.expander(
+                    "Selected breakout diagnostics"
+                ):
+                    st.json({
+                        "breakout_timestamp": (
+                            selected_market_candidate.get(
+                                "breakout_timestamp"
+                            )
+                        ),
+                        "breakout_price": (
+                            selected_market_candidate.get(
+                                "breakout_price"
+                            )
+                        ),
+                        "breakout_direction": (
+                            selected_market_candidate.get(
+                                "breakout_direction"
+                            )
+                        ),
+                        "breakout_boundary_price": (
+                            selected_market_candidate.get(
+                                "breakout_boundary_price"
+                            )
+                        ),
+                        "breakout_score": (
+                            selected_market_candidate.get(
+                                "breakout_score"
+                            )
+                        ),
+                        "breakout_close_distance_pct": (
+                            selected_market_candidate.get(
+                                "breakout_close_distance_pct"
+                            )
+                        ),
+                        "breakout_body_distance_pct": (
+                            selected_market_candidate.get(
+                                "breakout_body_distance_pct"
+                            )
+                        ),
+                        "breakout_body_pct": (
+                            selected_market_candidate.get(
+                                "breakout_body_pct"
+                            )
+                        ),
+                        "breakout_volume_ratio": (
+                            selected_market_candidate.get(
+                                "breakout_volume_ratio"
+                            )
+                        ),
+                        "breakout_atr_extension": (
+                            selected_market_candidate.get(
+                                "breakout_atr_extension"
+                            )
+                        ),
+                        "breakout_close_location_pct": (
+                            selected_market_candidate.get(
+                                "breakout_close_location_pct"
+                            )
+                        ),
+                    })
                 
                 render_geometry_observation_form(
                     symbol=(
@@ -8190,6 +8417,11 @@ if selected_section == "geometry_scanner":
                     "touches_high",
                     "touches_low",
                     "breakout_detected",
+                    "breakout_direction",
+                    "breakout_score",
+                    "breakout_close_distance_pct",
+                    "breakout_volume_ratio",
+                    "breakout_atr_extension",
                 ]
 
                 st.dataframe(
@@ -8242,6 +8474,35 @@ if selected_section == "geometry_scanner":
                         ),
                         "breakout_detected": (
                             "Breakout"
+                        ),
+                        "breakout_direction": (
+                            "Breakout direction"
+                        ),
+                        "breakout_score": (
+                            st.column_config.ProgressColumn(
+                                "Breakout score",
+                                min_value=0.0,
+                                max_value=100.0,
+                                format="%.2f",
+                            )
+                        ),
+                        "breakout_close_distance_pct": (
+                            st.column_config.NumberColumn(
+                                "Close outside %",
+                                format="%.4f",
+                            )
+                        ),
+                        "breakout_volume_ratio": (
+                            st.column_config.NumberColumn(
+                                "Breakout volume",
+                                format="%.2fx",
+                            )
+                        ),
+                        "breakout_atr_extension": (
+                            st.column_config.NumberColumn(
+                                "ATR extension",
+                                format="%.2f",
+                            )
                         ),
                     },
                 )
@@ -8334,6 +8595,10 @@ if selected_section == "geometry_scanner":
                         ]
                         else "No"
                     ),
+                )
+                
+                render_breakout_quality_metrics(
+                    selected_candidate
                 )
 
                 geometry_figure = (
@@ -8439,6 +8704,51 @@ if selected_section == "geometry_scanner":
                             selected_candidate[
                                 "breakout_price"
                             ]
+                        ),
+                        "breakout_direction": (
+                            selected_candidate.get(
+                                "breakout_direction"
+                            )
+                        ),
+                        "breakout_boundary_price": (
+                            selected_candidate.get(
+                                "breakout_boundary_price"
+                            )
+                        ),
+                        "breakout_score": (
+                            selected_candidate.get(
+                                "breakout_score"
+                            )
+                        ),
+                        "breakout_close_distance_pct": (
+                            selected_candidate.get(
+                                "breakout_close_distance_pct"
+                            )
+                        ),
+                        "breakout_body_distance_pct": (
+                            selected_candidate.get(
+                                "breakout_body_distance_pct"
+                            )
+                        ),
+                        "breakout_body_pct": (
+                            selected_candidate.get(
+                                "breakout_body_pct"
+                            )
+                        ),
+                        "breakout_volume_ratio": (
+                            selected_candidate.get(
+                                "breakout_volume_ratio"
+                            )
+                        ),
+                        "breakout_atr_extension": (
+                            selected_candidate.get(
+                                "breakout_atr_extension"
+                            )
+                        ),
+                        "breakout_close_location_pct": (
+                            selected_candidate.get(
+                                "breakout_close_location_pct"
+                            )
                         ),
                     })
 
