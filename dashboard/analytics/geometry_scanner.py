@@ -517,6 +517,18 @@ class GeometryScanner:
                 reference_price,
             )
         )
+        
+        pattern_maturity = (
+            self._calculate_pattern_maturity(
+                candles=candles,
+                window=window,
+                upper_line=upper_line,
+                lower_line=lower_line,
+                reference_price=(
+                    reference_price
+                ),
+            )
+        )
 
         breakout = self._find_breakout(
             candles=candles,
@@ -669,6 +681,36 @@ class GeometryScanner:
             "lower_end_price": round(
                 lower_end_price,
                 10,
+            ),
+            "pattern_progress_pct": (
+                pattern_maturity[
+                    "pattern_progress_pct"
+                ]
+            ),
+            "apex_index": (
+                pattern_maturity[
+                    "apex_index"
+                ]
+            ),
+            "apex_timestamp": (
+                pattern_maturity[
+                    "apex_timestamp"
+                ]
+            ),
+            "distance_to_apex_bars": (
+                pattern_maturity[
+                    "distance_to_apex_bars"
+                ]
+            ),
+            "current_width_pct": (
+                pattern_maturity[
+                    "current_width_pct"
+                ]
+            ),
+            "current_price_position_pct": (
+                pattern_maturity[
+                    "current_price_position_pct"
+                ]
             ),
             "breakout_detected": (
                 breakout is not None
@@ -1081,6 +1123,209 @@ class GeometryScanner:
             score,
             100.0,
         )
+            
+    def _calculate_pattern_maturity(
+        self,
+        candles,
+        window,
+        upper_line,
+        lower_line,
+        reference_price,
+    ):
+        last_x = float(
+            len(window) - 1
+        )
+
+        upper_slope = float(
+            upper_line["slope"]
+        )
+
+        lower_slope = float(
+            lower_line["slope"]
+        )
+
+        upper_intercept = float(
+            upper_line["intercept"]
+        )
+
+        lower_intercept = float(
+            lower_line["intercept"]
+        )
+
+        slope_difference = (
+            upper_slope
+            - lower_slope
+        )
+
+        current_upper_pct = (
+            upper_intercept
+            + upper_slope
+            * last_x
+        )
+
+        current_lower_pct = (
+            lower_intercept
+            + lower_slope
+            * last_x
+        )
+
+        current_width_pct = (
+            current_upper_pct
+            - current_lower_pct
+        )
+
+        current_close = float(
+            window["close"].iloc[-1]
+        )
+
+        current_close_pct = (
+            (
+                current_close
+                / reference_price
+            )
+            - 1
+        ) * 100
+
+        if current_width_pct > 0:
+            current_price_position_pct = (
+                (
+                    current_close_pct
+                    - current_lower_pct
+                )
+                / current_width_pct
+                * 100
+            )
+        else:
+            current_price_position_pct = None
+
+        apex_index = None
+        apex_timestamp = None
+        distance_to_apex_bars = None
+        pattern_progress_pct = None
+
+        if abs(slope_difference) > 1e-12:
+            calculated_apex_index = (
+                (
+                    lower_intercept
+                    - upper_intercept
+                )
+                / slope_difference
+            )
+
+            if (
+                math.isfinite(
+                    calculated_apex_index
+                )
+                and calculated_apex_index > 0
+            ):
+                apex_index = float(
+                    calculated_apex_index
+                )
+
+                distance_to_apex_bars = (
+                    apex_index
+                    - last_x
+                )
+
+                pattern_progress_pct = (
+                    last_x
+                    / apex_index
+                    * 100
+                )
+
+                timestamps = (
+                    candles["timestamp"]
+                    .astype("int64")
+                    .sort_values()
+                    .drop_duplicates()
+                )
+
+                timestamp_differences = (
+                    timestamps.diff()
+                    .dropna()
+                )
+
+                timestamp_differences = (
+                    timestamp_differences[
+                        timestamp_differences > 0
+                    ]
+                )
+
+                if not timestamp_differences.empty:
+                    timeframe_ms = int(
+                        timestamp_differences.median()
+                    )
+
+                    start_timestamp = int(
+                        window[
+                            "timestamp"
+                        ].iloc[0]
+                    )
+
+                    apex_timestamp = int(
+                        round(
+                            start_timestamp
+                            + apex_index
+                            * timeframe_ms
+                        )
+                    )
+
+        return {
+            "pattern_progress_pct": (
+                round(
+                    pattern_progress_pct,
+                    2,
+                )
+                if pattern_progress_pct
+                is not None
+                else None
+            ),
+            "apex_index": (
+                round(
+                    apex_index,
+                    4,
+                )
+                if apex_index
+                is not None
+                else None
+            ),
+            "apex_timestamp": (
+                apex_timestamp
+            ),
+            "distance_to_apex_bars": (
+                round(
+                    distance_to_apex_bars,
+                    2,
+                )
+                if distance_to_apex_bars
+                is not None
+                else None
+            ),
+            "current_width_pct": (
+                round(
+                    current_width_pct,
+                    4,
+                )
+                if math.isfinite(
+                    current_width_pct
+                )
+                else None
+            ),
+            "current_price_position_pct": (
+                round(
+                    current_price_position_pct,
+                    2,
+                )
+                if (
+                    current_price_position_pct
+                    is not None
+                    and math.isfinite(
+                        current_price_position_pct
+                    )
+                )
+                else None
+            ),
+        }
 
     def _find_breakout(
         self,
