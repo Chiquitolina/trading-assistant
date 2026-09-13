@@ -7607,6 +7607,22 @@ if selected_section == "geometry_scanner":
                 filtered_market_geometries
                 .copy()
             )
+            
+            market_breakout_columns = [
+                "breakout_score",
+                "breakout_close_distance_pct",
+                "breakout_volume_ratio",
+                "breakout_atr_extension",
+            ]
+
+            for column in market_breakout_columns:
+                if (
+                    column
+                    not in market_geometry_table.columns
+                ):
+                    market_geometry_table[
+                        column
+                    ] = None
 
             market_geometry_table[
                 "pattern_end"
@@ -8351,6 +8367,23 @@ if selected_section == "geometry_scanner":
                 table_candidates = (
                     filtered_candidates.copy()
                 )
+                
+                manual_breakout_columns = [
+                    "breakout_direction",
+                    "breakout_score",
+                    "breakout_close_distance_pct",
+                    "breakout_volume_ratio",
+                    "breakout_atr_extension",
+                ]
+
+                for column in manual_breakout_columns:
+                    if (
+                        column
+                        not in table_candidates.columns
+                    ):
+                        table_candidates[
+                            column
+                        ] = None
                 
                 table_candidates[
                     "symbol"
