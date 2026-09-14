@@ -65,14 +65,19 @@ def _add_panel_score_bar(
     figure,
     label,
     value,
-    y,
+    y,    
+    bar_color=None,
 ):
     numeric_value = _finite_number(
         value
     )
 
-    color = _score_color(
-        numeric_value
+    color = (
+        str(bar_color)
+        if bar_color is not None
+        else _score_color(
+            numeric_value
+        )
     )
 
     display_value = (
@@ -108,7 +113,7 @@ def _add_panel_score_bar(
 
     figure.add_annotation(
         x=bar_x0,
-        y=y + 0.018,
+        y=y + 0.030,
         xref="paper",
         yref="paper",
         text=label,
@@ -122,7 +127,7 @@ def _add_panel_score_bar(
 
     figure.add_annotation(
         x=0.978,
-        y=y + 0.018,
+        y=y + 0.030,
         xref="paper",
         yref="paper",
         text=display_value,
@@ -140,8 +145,8 @@ def _add_panel_score_bar(
         yref="paper",
         x0=bar_x0,
         x1=bar_x1,
-        y0=y - 0.014,
-        y1=y,
+        y0=y - 0.020,
+        y1=y - 0.006,
         line={
             "width": 0,
         },
@@ -156,8 +161,8 @@ def _add_panel_score_bar(
             yref="paper",
             x0=bar_x0,
             x1=filled_x1,
-            y0=y - 0.014,
-            y1=y,
+            y0=y - 0.020,
+            y1=y - 0.006,
             line={
                 "width": 0,
             },
@@ -407,6 +412,7 @@ def _add_geometry_metrics_panel(
             "pattern_progress_pct"
         ),
         y=0.50,
+        bar_color="#7b61ff",
     )
 
     figure.add_shape(
