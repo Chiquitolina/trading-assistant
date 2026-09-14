@@ -529,6 +529,14 @@ def _add_geometry_metrics_panel(
             "width": 1,
         },
     )
+    
+    insight_color = (
+        status_color
+        if chart_status == "FORMING"
+        else _score_color(
+            breakout_score
+        )
+    )
 
     figure.add_annotation(
         x=0.775,
@@ -554,7 +562,7 @@ def _add_geometry_metrics_panel(
         xanchor="right",
         font={
             "size": 10,
-            "color": status_color,
+            "color": insight_color,
         },
     )
 
@@ -906,7 +914,7 @@ def build_geometry_scanner_chart(
         fillcolor="#7b61ff",
         opacity=0.08,
         line_width=0,
-        annotation_text="Flagpole window",
+        annotation_text="Flagpole",
         annotation_position="top left",
         row=1,
         col=1,
@@ -921,7 +929,7 @@ def build_geometry_scanner_chart(
         annotation_text=(
             candidate["geometry"]
         ),
-        annotation_position="top left",
+        annotation_position="top right",
         row=1,
         col=1,
     )
