@@ -904,15 +904,8 @@ class RedisMarketDataProvider:
                         raw_status
                     )
 
-                    if (
-                        status.get("phase")
-                        == "READY"
-                        and status.get("running")
-                        is True
-                        and status.get(
-                            "ws_connected"
-                        )
-                        is True
+                    if self._is_service_ready(
+                        status
                     ):
                         return
 
