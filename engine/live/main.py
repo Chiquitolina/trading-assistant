@@ -16,6 +16,10 @@ from engine.live.data.redis_market_data_provider import (
     RedisMarketDataProvider,
 )
 
+from engine.live.data.redis_market_data_protocol import (
+    replay_engine_processed_key,
+)
+
 from signals.utils.logger import BotLogger
 
 from services.market_context.btc_correlation_analyzer import (
@@ -141,6 +145,20 @@ REDIS_DB = int(
     )
 )
 
+MARKET_CLOCK_MODE = os.getenv(
+    "MARKET_CLOCK_MODE",
+    "real",
+).strip().lower()
+
+if MARKET_CLOCK_MODE not in (
+    "real",
+    "replay",
+):
+    raise ValueError(
+        "MARKET_CLOCK_MODE must be "
+        "'real' or 'replay'"
+    )
+
 # =========================================================
 # CONFIG
 # =========================================================
@@ -189,6 +207,7 @@ if MARKET_DATA_PROVIDER == "redis":
         host=REDIS_HOST,
         port=REDIS_PORT,
         db=REDIS_DB,
+        clock_mode=MARKET_CLOCK_MODE,
     )
 
 elif MARKET_DATA_PROVIDER == "local":
@@ -443,6 +462,22 @@ else:
 
 market_data.start()
 
+def publish_replay_engine_ack(
+    boundary_ts,
+):
+    if (
+        MARKET_DATA_PROVIDER != "redis"
+        or MARKET_CLOCK_MODE != "replay"
+    ):
+        return
+
+    market_data.redis.set(
+        replay_engine_processed_key(
+            BRANCH_LABEL
+        ),
+        int(boundary_ts),
+    )
+
 print(
     "\033[94m[LIVE ENGINE]\033[0m "
     "🚀 Live Engine started! Ctrl+C to stop.\n"
@@ -629,6 +664,8 @@ try:
             
             if STRATEGY_MODE == "compression":
                 compression_strategy.reset_stats()
+                
+            processed_boundary_ts = None
 
             for symbol in symbols_to_process:
 
@@ -642,6 +679,28 @@ try:
                 # =================================================
                 close_price = buffer.last_price(symbol)
                 closed_candle_ts = buffer.last_ws_close_time[symbol][TRIGGER_TF]
+                
+                if closed_candle_ts:
+                    current_boundary_ts = int(
+                        closed_candle_ts
+                    )
+
+                    if processed_boundary_ts is None:
+                        processed_boundary_ts = (
+                            current_boundary_ts
+                        )
+
+                    elif (
+                        MARKET_CLOCK_MODE == "replay"
+                        and current_boundary_ts
+                        != processed_boundary_ts
+                    ):
+                        raise RuntimeError(
+                            "Mixed replay boundaries in "
+                            f"same trigger batch: "
+                            f"{processed_boundary_ts} vs "
+                            f"{current_boundary_ts}"
+                        )
                 
                 # =================================================
                 # COMPRESSION SNAPSHOT LIVE
@@ -1084,6 +1143,11 @@ try:
                 f"elapsed={batch_elapsed:.2f}s "
                 f"max_delay={max_delay_seen:.2f}s"
             )
+            
+            if processed_boundary_ts is not None:
+                publish_replay_engine_ack(
+                    processed_boundary_ts
+                )
 
 # =========================================================
 # STOP

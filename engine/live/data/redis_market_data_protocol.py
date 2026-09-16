@@ -81,3 +81,14 @@ def consumer_cursor_key(
         f"{KEY_PREFIX}:consumer-cursor:"
         f"{consumer_name}"
     )
+    
+def replay_engine_processed_key(
+    consumer_name: str,
+) -> str:
+    if not consumer_name:
+        raise ValueError("consumer_name is required")
+
+    return (
+        f"{KEY_PREFIX}:replay:engine-processed:"
+        f"{consumer_name}"
+    )
