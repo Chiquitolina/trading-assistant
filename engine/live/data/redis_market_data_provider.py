@@ -98,6 +98,32 @@ class RedisMarketDataProvider:
 
         self.market_flow_last_error = None
 
+    def _is_service_ready(self, status):
+        if not isinstance(status, dict):
+            return False
+
+        if (
+            status.get("phase") != "READY"
+            or status.get("running") is not True
+        ):
+            return False
+
+        source = str(
+            status.get("source", "live")
+        ).strip().lower()
+
+        if source == "live":
+            return status.get(
+                "ws_connected"
+            ) is True
+
+        if source == "replay":
+            return status.get(
+                "replay_ready"
+            ) is True
+
+        return False
+
     @property
     def is_connected(self):
         if not self.running:
@@ -120,9 +146,9 @@ class RedisMarketDataProvider:
             status = json.loads(raw_status)
 
             service_ready = (
-                status.get("phase") == "READY"
-                and status.get("running") is True
-                and status.get("ws_connected") is True
+                self._is_service_ready(
+                    status
+                )
             )
 
             threads_alive = bool(
