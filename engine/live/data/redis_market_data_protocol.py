@@ -13,6 +13,7 @@ PRICE_CHANNEL = f"{KEY_PREFIX}:price"
 
 # Los cierres deben poder recuperarse si un consumidor se desconecta
 CLOSED_CANDLES_STREAM = f"{KEY_PREFIX}:closed-candles"
+REPLAY_CLOCK_KEY = "market-data:v1:replay-clock"
 
 # Último snapshot cross-sectional del mercado
 MARKET_FLOW_KEY_PREFIX = f"{KEY_PREFIX}:market-flow"

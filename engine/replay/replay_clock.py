@@ -38,3 +38,25 @@ class ReplayClock:
     @property
     def initialized(self) -> bool:
         return self._current_ms is not None
+    
+class RedisReplayClock:
+    """
+    Replay clock backed by Redis.
+
+    Used by processes that consume replay market data but do not
+    share memory with the HistoricalReplayService.
+    """
+
+    def __init__(self, redis_client, key):
+        self.redis = redis_client
+        self.key = key
+
+    def now_ms(self) -> int:
+        value = self.redis.get(self.key)
+
+        if value is None:
+            raise RuntimeError(
+                "Replay clock has not been initialized in Redis"
+            )
+
+        return int(value)

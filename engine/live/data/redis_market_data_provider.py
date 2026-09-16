@@ -9,14 +9,19 @@ from engine.live.data.redis_market_data_protocol import (
     CLOSED_CANDLES_STREAM,
     HEARTBEAT_KEY,
     PRICE_CHANNEL,
+    REPLAY_CLOCK_KEY,
     STATUS_KEY,
     consumer_cursor_key,
     history_key,
     market_flow_key,
 )
 
+from engine.replay.replay_clock import (
+    RealClock,
+    RedisReplayClock,
+)
 
-class RedisMarketDataProvider:
+class RedisMarketDataProvider:  
     def __init__(
         self,
         buffer,
@@ -27,6 +32,7 @@ class RedisMarketDataProvider:
         port=6379,
         db=0,
         ready_timeout=1800,
+        clock_mode="real",
     ):
         if not consumer_name:
             raise ValueError(
@@ -52,6 +58,26 @@ class RedisMarketDataProvider:
             db=db,
             decode_responses=True,
         )
+        
+        self.clock_mode = str(
+            clock_mode
+        ).strip().lower()
+
+        if self.clock_mode == "real":
+            self.clock = RealClock()
+
+        elif self.clock_mode == "replay":
+            self.clock = RedisReplayClock(
+                redis_client=self.redis,
+                key=REPLAY_CLOCK_KEY,
+            )
+
+        else:
+            raise ValueError(
+                "clock_mode must be "
+                "'real' or 'replay'"
+            )
+        
 
         self.running = False
         self.stream_cursor = None
@@ -240,9 +266,7 @@ class RedisMarketDataProvider:
             + timeframe_ms
         )
 
-        now_ms = int(
-            time.time() * 1000
-        )
+        now_ms = self.clock.now_ms()
 
         # Un pequeño margen tolera diferencias
         # mínimas de reloj entre procesos.
