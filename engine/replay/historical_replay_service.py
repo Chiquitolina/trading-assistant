@@ -7,6 +7,7 @@ from engine.live.data.redis_market_data_protocol import (
     HEARTBEAT_KEY,
     REPLAY_CLOCK_KEY,
     STATUS_KEY,
+    REPLAY_PROVIDER_APPLIED_KEY,
 )
 from engine.replay.replay_clock import ReplayClock
 
@@ -34,6 +35,10 @@ class HistoricalReplayService:
         timestamp_ms,
     ):
         self.redis.ping()
+        
+        self.redis.delete(
+            REPLAY_PROVIDER_APPLIED_KEY
+        )
 
         self.clock.set(
             timestamp_ms

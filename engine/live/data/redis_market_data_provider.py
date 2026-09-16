@@ -14,6 +14,7 @@ from engine.live.data.redis_market_data_protocol import (
     consumer_cursor_key,
     history_key,
     market_flow_key,
+    REPLAY_PROVIDER_APPLIED_KEY,
 )
 
 from engine.replay.replay_clock import (
@@ -787,12 +788,17 @@ class RedisMarketDataProvider:
 
                             if (
                                 symbol in self.symbols
-                                and timeframe
-                                in self.timeframes
+                                and timeframe in self.timeframes
                             ):
                                 self._emit_closed_to_buffer(
                                     payload
                                 )
+
+                                if self.clock_mode == "replay":
+                                    self.redis.set(
+                                        REPLAY_PROVIDER_APPLIED_KEY,
+                                        event_id,
+                                    )
 
                         except Exception as exc:
                             print(

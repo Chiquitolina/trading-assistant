@@ -15,6 +15,10 @@ PRICE_CHANNEL = f"{KEY_PREFIX}:price"
 CLOSED_CANDLES_STREAM = f"{KEY_PREFIX}:closed-candles"
 REPLAY_CLOCK_KEY = "market-data:v1:replay-clock"
 
+REPLAY_PROVIDER_APPLIED_KEY = (
+    "market-data:v1:replay:provider-applied"
+)
+
 # Último snapshot cross-sectional del mercado
 MARKET_FLOW_KEY_PREFIX = f"{KEY_PREFIX}:market-flow"
 
