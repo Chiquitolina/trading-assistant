@@ -165,7 +165,7 @@ class RedisMarketDataPublisher:
 
         normalized["source"] = "historical_replay"
 
-        self._publish_closed_candle(
+        stream_id = self._publish_closed_candle(
             normalized
         )
 
@@ -178,6 +178,7 @@ class RedisMarketDataPublisher:
             "close_timestamp": normalized[
                 "close_timestamp"
             ],
+            "stream_id": stream_id,
         }
 
     def replace_history(
@@ -382,7 +383,11 @@ class RedisMarketDataPublisher:
             approximate=True,
         )
 
-        pipeline.execute()
+        results = pipeline.execute()
+
+        stream_id = results[-1]
+
+        return stream_id
 
     def _normalize_history_candle(
         self,
