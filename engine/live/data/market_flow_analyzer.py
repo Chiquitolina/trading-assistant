@@ -1,7 +1,8 @@
 import bisect
 import json
 import statistics
-import time
+from engine.replay.replay_clock import RealClock
+
 
 from engine.live.data.redis_market_data_protocol import (
     history_key,
@@ -15,11 +16,13 @@ class MarketFlowAnalyzer:
         self,
         redis_client,
         baseline_candles=42,
+        clock=None,
     ):
         self.redis = redis_client
         self.baseline_candles = int(
             baseline_candles
         )
+        self.clock = clock or RealClock()
 
         if self.baseline_candles < 1:
             raise ValueError(
@@ -183,9 +186,7 @@ class MarketFlowAnalyzer:
             "candle_timestamp": (
                 candle_timestamp
             ),
-            "calculated_at": int(
-                time.time() * 1000
-            ),
+            "calculated_at": self.clock.now_ms(),
             "baseline_candles": (
                 self.baseline_candles
             ),
