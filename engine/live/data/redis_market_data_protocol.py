@@ -15,6 +15,10 @@ PRICE_CHANNEL = f"{KEY_PREFIX}:price"
 CLOSED_CANDLES_STREAM = f"{KEY_PREFIX}:closed-candles"
 REPLAY_CLOCK_KEY = "market-data:v1:replay-clock"
 
+REPLAY_BOUNDARY_READY_KEY = (
+    f"{KEY_PREFIX}:replay:boundary-ready"
+)
+
 REPLAY_PROVIDER_APPLIED_KEY = (
     "market-data:v1:replay:provider-applied"
 )
@@ -90,5 +94,16 @@ def replay_engine_processed_key(
 
     return (
         f"{KEY_PREFIX}:replay:engine-processed:"
+        f"{consumer_name}"
+    )
+    
+def replay_provider_applied_key(
+    consumer_name: str,
+) -> str:
+    if not consumer_name:
+        raise ValueError("consumer_name is required")
+
+    return (
+        f"{KEY_PREFIX}:replay:provider-applied:"
         f"{consumer_name}"
     )

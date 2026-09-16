@@ -14,7 +14,7 @@ from engine.live.data.redis_market_data_protocol import (
     consumer_cursor_key,
     history_key,
     market_flow_key,
-    REPLAY_PROVIDER_APPLIED_KEY,
+    replay_provider_applied_key,
 )
 
 from engine.replay.replay_clock import (
@@ -52,6 +52,12 @@ class RedisMarketDataProvider:
 
         self.consumer_name = consumer_name
         self.ready_timeout = ready_timeout
+        
+        self.replay_applied_key = (
+            replay_provider_applied_key(
+                self.consumer_name
+            )
+        )
 
         self.redis = redis.Redis(
             host=host,
@@ -794,11 +800,18 @@ class RedisMarketDataProvider:
                                     payload
                                 )
 
-                                if self.clock_mode == "replay":
-                                    self.redis.set(
-                                        REPLAY_PROVIDER_APPLIED_KEY,
-                                        event_id,
-                                    )
+                            # En replay este ACK significa:
+                            #
+                            # "este consumer procesó el stream
+                            # correctamente hasta event_id".
+                            #
+                            # Debe avanzar aunque el evento no
+                            # pertenezca al universo de esta rama.
+                            if self.clock_mode == "replay":
+                                self.redis.set(
+                                    self.replay_applied_key,
+                                    event_id,
+                                )
 
                         except Exception as exc:
                             print(
@@ -807,6 +820,12 @@ class RedisMarketDataProvider:
                                 f"id={event_id} "
                                 f"error={exc}"
                             )
+
+                            if self.clock_mode == "replay":
+                                self.running = False
+                                self.stop_event.set()
+
+                                raise
 
                 self.redis.set(
                     consumer_cursor_key(
