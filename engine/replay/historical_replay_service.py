@@ -1,6 +1,7 @@
 import json
 
 import redis
+import time
 
 from engine.live.data.redis_market_data_protocol import (
     HEARTBEAT_KEY,
@@ -78,7 +79,7 @@ class HistoricalReplayService:
     def _publish_heartbeat(self):
         self.redis.set(
             HEARTBEAT_KEY,
-            self.clock.now_ms(),
+            int(time.time() * 1000),
         )
 
     def _publish_status(self):
