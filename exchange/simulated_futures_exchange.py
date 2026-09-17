@@ -486,6 +486,138 @@ class SimulatedFuturesExchange:
             "avgPrice": str(price),
             "updateTime": timestamp_ms,
         }
+        
+    def place_stop_loss(
+        self,
+        symbol: str,
+        side: str,
+        quantity,
+        stop_price,
+        price_rounding="DOWN",
+    ):
+        symbol = str(symbol).upper()
+        side = str(side).upper()
+        quantity = float(quantity)
+        stop_price = float(stop_price)
+
+        if side not in ("BUY", "SELL"):
+            raise ValueError(
+                f"Invalid stop-loss side: {side}"
+            )
+
+        if quantity <= 0:
+            raise ValueError(
+                f"Invalid stop-loss quantity: {quantity}"
+            )
+
+        order_id = self._next_id()
+
+        order = {
+            "symbol": symbol,
+            "orderId": order_id,
+            "type": "STOP_MARKET",
+            "side": side,
+            "quantity": quantity,
+            "stopPrice": stop_price,
+            "status": "NEW",
+            "reduceOnly": True,
+            "createdTime": int(
+                self._current_timestamp_ms
+            ),
+        }
+
+        symbol_orders = self.open_orders.setdefault(
+            symbol,
+            {}
+        )
+
+        symbol_orders["SL"] = order
+
+        print(
+            "[REPLAY SL] "
+            f"symbol={symbol} "
+            f"side={side} "
+            f"qty={quantity} "
+            f"stop={stop_price} "
+            f"order_id={order_id}"
+        )
+
+        return order
+
+
+    def place_take_profit_limit(
+        self,
+        symbol: str,
+        side: str,
+        quantity,
+        price,
+        price_rounding="UP",
+    ):
+        symbol = str(symbol).upper()
+        side = str(side).upper()
+        quantity = float(quantity)
+        price = float(price)
+
+        if side not in ("BUY", "SELL"):
+            raise ValueError(
+                f"Invalid take-profit side: {side}"
+            )
+
+        if quantity <= 0:
+            raise ValueError(
+                f"Invalid take-profit quantity: {quantity}"
+            )
+
+        order_id = self._next_id()
+
+        order = {
+            "symbol": symbol,
+            "orderId": order_id,
+            "type": "TAKE_PROFIT_LIMIT",
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "stopPrice": price,
+            "status": "NEW",
+            "reduceOnly": True,
+            "createdTime": int(
+                self._current_timestamp_ms
+            ),
+        }
+
+        symbol_orders = self.open_orders.setdefault(
+            symbol,
+            {}
+        )
+
+        symbol_orders["TP"] = order
+
+        print(
+            "[REPLAY TP] "
+            f"symbol={symbol} "
+            f"side={side} "
+            f"qty={quantity} "
+            f"price={price} "
+            f"order_id={order_id}"
+        )
+
+        return order
+    
+    def get_simulated_protective_orders(
+        self,
+        symbol: str,
+    ):
+        symbol = str(symbol).upper()
+
+        orders = self.open_orders.get(
+            symbol,
+            {}
+        )
+
+        return {
+            key: dict(value)
+            for key, value in orders.items()
+        }
 
 
     def get_recent_fills(
