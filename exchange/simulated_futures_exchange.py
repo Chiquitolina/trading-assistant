@@ -448,6 +448,12 @@ class SimulatedFuturesExchange:
             * self.taker_fee_pct
             / 100.0
         )
+        
+        # ==========================================
+        # ENTRY FEE
+        # ==========================================
+
+        self.wallet_balance -= commission
 
         fill = {
             "symbol": symbol,
@@ -812,6 +818,31 @@ class SimulatedFuturesExchange:
             * self.taker_fee_pct
             / 100.0
         )
+        
+        entry_fills = self.fills.get(
+            symbol,
+            []
+        )
+
+        entry_commission = 0.0
+
+        if entry_fills:
+            entry_commission = float(
+                entry_fills[0].get(
+                    "commission",
+                    0.0,
+                )
+            )
+
+        total_fees = (
+            entry_commission
+            + commission
+        )
+
+        net_pnl = (
+            realized_pnl
+            - total_fees
+        )
 
         # ==========================================
         # EXIT FILL
@@ -863,11 +894,23 @@ class SimulatedFuturesExchange:
             "quantity": quantity,
             "entry_price": entry_price,
             "exit_price": exit_price,
-            "realized_pnl": realized_pnl,
-            "commission": commission,
+
+            "gross_pnl": realized_pnl,
+
+            "entry_fee": entry_commission,
+            "exit_fee": commission,
+            "total_fees": total_fees,
+
+            "net_pnl": net_pnl,
+
+            "wallet_balance": (
+                self.wallet_balance
+            ),
+
             "timestamp": int(
                 timestamp_ms
             ),
+
             "ambiguous": bool(
                 ambiguous
             ),
@@ -881,8 +924,11 @@ class SimulatedFuturesExchange:
             f"qty={quantity} "
             f"entry={entry_price} "
             f"exit={exit_price} "
-            f"pnl={realized_pnl:.8f} "
-            f"fee={commission:.8f} "
+            f"gross_pnl={realized_pnl:.8f} "
+            f"entry_fee={entry_commission:.8f} "
+            f"exit_fee={commission:.8f} "
+            f"net_pnl={net_pnl:.8f} "
+            f"wallet={self.wallet_balance:.8f} "
             f"ambiguous={ambiguous} "
             f"ts={timestamp_ms}"
         )

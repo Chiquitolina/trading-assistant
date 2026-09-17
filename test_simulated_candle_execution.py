@@ -72,7 +72,7 @@ print("EVENT:", event)
 assert event is not None
 assert event["exit_reason"] == "TP"
 assert event["exit_price"] == 102.0
-assert event["realized_pnl"] == 4.0
+assert event["gross_pnl"] == 4.0
 assert event["ambiguous"] is False
 
 assert (
@@ -123,7 +123,7 @@ print("EVENT:", event)
 assert event is not None
 assert event["exit_reason"] == "SL"
 assert event["exit_price"] == 98.0
-assert event["realized_pnl"] == -4.0
+assert event["gross_pnl"] == -4.0
 assert event["ambiguous"] is False
 
 assert (
@@ -177,7 +177,7 @@ assert event is not None
 # SL wins when both were touched.
 assert event["exit_reason"] == "SL"
 assert event["exit_price"] == 98.0
-assert event["realized_pnl"] == -4.0
+assert event["gross_pnl"] == -4.0
 assert event["ambiguous"] is True
 
 assert (
