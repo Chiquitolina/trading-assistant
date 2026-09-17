@@ -60,6 +60,10 @@ from engine.live.trade.trade_manager import TradeManager
 
 from exchange.binance_exchange import BinanceExchange
 
+from exchange.simulated_futures_exchange import (
+    SimulatedFuturesExchange,
+)
+
 from ui.banners import print_live_banner
 
 from engine.live.status_writer import StatusWriter
@@ -281,45 +285,70 @@ if (
 # EXCHANGE
 # =========================================================
 
-exchange = BinanceExchange(
-    api_key=api_key,
-    api_secret=secret,
-    testnet=True
-)
+if IS_REPLAY:
+
+    exchange = SimulatedFuturesExchange(
+        market_data=buffer,
+        initial_balance=1000.0,
+    )
+
+    print(
+        "\033[95m[REPLAY EXCHANGE]\033[0m "
+        "Simulated Futures Exchange enabled"
+    )
+
+else:
+
+    exchange = BinanceExchange(
+        api_key=api_key,
+        api_secret=secret,
+        testnet=True,
+    )
 
 # =========================================================
 # TEST API CONNECTION
 # =========================================================
 
-try:
-
-    print(
-        f"\033[94m[EXCHANGE]\033[0m "
-        f"🔐 Testing Binance API connection."
-    )
+if IS_REPLAY:
 
     balance = exchange.get_balance()
 
     print(
-        f"\033[94m[EXCHANGE]\033[0m "
-        f"✅ Binance account connected!"
+        "\033[95m[REPLAY EXCHANGE]\033[0m "
+        f"Initial balance: {balance:.2f} USDT"
     )
 
-    print(
-        f"\033[94m[EXCHANGE]\033[0m "
-        f"💰 USDT Balance: {balance}\n"
-    )
+else:
 
-except Exception as e:
+    try:
 
-    print(
-        f"\033[94m[EXCHANGE]\033[0m "
-        f"❌ Binance API connection failed"
-    )
+        print(
+            f"\033[94m[EXCHANGE]\033[0m "
+            f"🔐 Testing Binance API connection."
+        )
 
-    print(e)
+        balance = exchange.get_balance()
 
-    raise SystemExit(1)
+        print(
+            f"\033[94m[EXCHANGE]\033[0m "
+            f"✅ Binance account connected!"
+        )
+
+        print(
+            f"\033[94m[EXCHANGE]\033[0m "
+            f"💰 USDT Balance: {balance}\n"
+        )
+
+    except Exception as e:
+
+        print(
+            f"\033[94m[EXCHANGE]\033[0m "
+            f"❌ Binance API connection failed"
+        )
+
+        print(e)
+
+        raise SystemExit(1)
 
 # =========================================================
 # INIT ENGINES
@@ -368,7 +397,12 @@ execution = ExecutionEngine(
     exchange,
     position_manager,
     execution_strategy,
-    symbol=SYMBOL
+    symbol=SYMBOL,
+    execution_mode=(
+        "replay"
+        if IS_REPLAY
+        else "live"
+    ),
 )
 
 status_writer = StatusWriter()
@@ -446,30 +480,52 @@ status_writer.write({
 
 restored_count = 0
 
-for symbol in SYMBOLS:
-    try:
-        before = len(execution.positions)
+if not IS_REPLAY:
 
-        execution.restore_state(symbol)
+    for symbol in SYMBOLS:
+        try:
+            before = len(
+                execution.positions
+            )
 
-        after = len(execution.positions)
+            execution.restore_state(
+                symbol
+            )
 
-        if after > before:
-            restored_count += 1
+            after = len(
+                execution.positions
+            )
 
-    except Exception as e:
+            if after > before:
+                restored_count += 1
+
+        except Exception as e:
+            print(
+                "\033[94m[SYNC]\033[0m "
+                f"⚠️ Restore failed | "
+                f"symbol={symbol} | "
+                f"error={e}"
+            )
+            continue
+
+    if restored_count == 0:
         print(
-            f"\033[94m[SYNC]\033[0m "
-            f"⚠️ Restore failed | symbol={symbol} | error={e}"
+            "\033[94m[SYNC]\033[0m "
+            "ℹ️ No position restored."
         )
-        continue
+    else:
+        print(
+            "\033[94m[SYNC]\033[0m "
+            f"✅ Restored "
+            f"{restored_count} positions: "
+            f"{list(execution.positions.keys())}"
+        )
 
-if restored_count == 0:
-    print("\033[94m[SYNC]\033[0m ℹ️ No position restored.")
 else:
+
     print(
-        f"\033[94m[SYNC]\033[0m "
-        f"✅ Restored {restored_count} positions: {list(execution.positions.keys())}"
+        "\033[95m[REPLAY]\033[0m "
+        "Snapshot restore disabled"
     )
 
 # =========================================================
@@ -620,6 +676,10 @@ try:
             replay_boundary_ts = int(
                 replay_boundary["timestamp"]
             )
+            
+            exchange.set_market_timestamp(
+                replay_boundary_ts
+            )
 
             if (
                 last_replay_boundary_ts
@@ -676,6 +736,76 @@ try:
 
         if MARKET_CLOCK_MODE == "replay":
             context_symbols.sort()
+            
+        # =================================================
+        # REPLAY PROTECTIVE ORDER EXECUTION
+        # =================================================
+
+        if IS_REPLAY:
+
+            for replay_symbol in context_symbols:
+
+                candle = buffer.last_closed_candle(
+                    replay_symbol,
+                    "1m",
+                )
+
+                if candle is None:
+                    raise RuntimeError(
+                        "Replay 1m close event without "
+                        f"candle | symbol={replay_symbol}"
+                    )
+                    
+                candle_close_ts = (
+                    buffer.last_ws_close_time[
+                        replay_symbol
+                    ]["1m"]
+                )
+
+                if candle_close_ts is None:
+                    raise RuntimeError(
+                        "Replay 1m candle without "
+                        f"close timestamp | "
+                        f"symbol={replay_symbol}"
+                    )
+
+                if (
+                    int(candle_close_ts)
+                    != int(replay_boundary_ts)
+                ):
+                    raise RuntimeError(
+                        "Replay 1m candle/boundary "
+                        "mismatch | "
+                        f"symbol={replay_symbol} "
+                        f"candle_close="
+                        f"{candle_close_ts} "
+                        f"boundary="
+                        f"{replay_boundary_ts}"
+                    )
+
+                exit_event = exchange.process_candle(
+                    symbol=replay_symbol,
+                    open_price=candle["open"],
+                    high=candle["high"],
+                    low=candle["low"],
+                    close=candle["close"],
+                    timestamp_ms=replay_boundary_ts,
+                )
+
+                if exit_event:
+
+                    print(
+                        "\033[95m[REPLAY EXIT EVENT]\033[0m "
+                        f"symbol={replay_symbol} "
+                        f"reason={exit_event['exit_reason']} "
+                        f"gross={exit_event['gross_pnl']:.8f} "
+                        f"net={exit_event['net_pnl']:.8f} "
+                        f"ambiguous={exit_event['ambiguous']}"
+                    )
+                    
+                    execution.handle_replay_exit(
+                        exit_event
+                    )
 
         for context_symbol in context_symbols:
 

@@ -1038,6 +1038,86 @@ class ExecutionEngine:
                 count += 1
 
         return count
+    
+    def handle_replay_exit(self, exit_event: dict):
+        if not self.is_replay:
+            raise RuntimeError(
+                "handle_replay_exit can only be used "
+                "in replay mode"
+            )
+
+        if not isinstance(exit_event, dict):
+            raise ValueError(
+                "Replay exit event must be a dict"
+            )
+
+        symbol = str(
+            exit_event["symbol"]
+        ).upper()
+
+        position = self.positions.get(symbol)
+
+        if position is None:
+            raise RuntimeError(
+                "Replay exchange closed a position "
+                "that ExecutionEngine does not have | "
+                f"symbol={symbol}"
+            )
+
+        entry_ts = int(position.entry_ts)
+        exit_ts = int(exit_event["timestamp"])
+
+        duration_seconds = max(
+            0,
+            (exit_ts - entry_ts) / 1000.0,
+        )
+
+        print(
+            "\n"
+            "\033[95m"
+            "[REPLAY TRADE CLOSED]"
+            "\033[0m\n"
+            f"Symbol       : {symbol}\n"
+            f"Side         : {position.side}\n"
+            f"Quantity     : {position.quantity}\n"
+            f"Entry        : {exit_event['entry_price']:.8f}\n"
+            f"TP           : {position.tp:.8f}\n"
+            f"SL           : {position.sl:.8f}\n"
+            f"Exit         : {exit_event['exit_price']:.8f}\n"
+            f"Reason       : {exit_event['exit_reason']}\n"
+            f"Gross PnL    : {exit_event['gross_pnl']:.8f} USDT\n"
+            f"Entry fee    : {exit_event['entry_commission']:.8f} USDT\n"
+            f"Exit fee     : {exit_event['exit_commission']:.8f} USDT\n"
+            f"Net PnL      : {exit_event['net_pnl']:.8f} USDT\n"
+            f"Wallet       : {exit_event['wallet_balance']:.8f} USDT\n"
+            f"Entry ts     : {entry_ts}\n"
+            f"Exit ts      : {exit_ts}\n"
+            f"Duration     : {duration_seconds:.0f}s\n"
+            f"Ambiguous    : {exit_event['ambiguous']}\n"
+        )
+
+        self.positions.pop(
+            symbol,
+            None,
+        )
+
+        if (
+            self.position
+            and self.position.symbol == symbol
+        ):
+            self.position = None
+
+        self.snapshot_manager.clear(symbol)
+
+        print(
+            "\033[95m"
+            "[REPLAY POSITION RELEASED]"
+            "\033[0m "
+            f"symbol={symbol} "
+            f"open_positions={len(self.positions)}"
+        )
+
+        return True
         
     def get_position(self, symbol: str):
         return self.positions.get(symbol)
