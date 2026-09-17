@@ -46,6 +46,94 @@ def fetch_history(symbol: str, timeframe: str, days: int):
 
     return df
 
+def fetch_futures_klines_range(
+    symbol: str,
+    timeframe: str,
+    start_ms: int,
+    end_ms: int,
+):
+    if timeframe not in TIMEFRAME_CONFIGS:
+        raise ValueError(
+            f"Unsupported timeframe: {timeframe}"
+        )
+
+    symbol = str(symbol).upper()
+    start_ms = int(start_ms)
+    end_ms = int(end_ms)
+
+    if end_ms < start_ms:
+        raise ValueError(
+            "end_ms must be >= start_ms"
+        )
+
+    ms_per_candle = int(
+        TIMEFRAME_CONFIGS[
+            timeframe
+        ]["ms_per_candle"]
+    )
+
+    limit = 1000
+    since = start_ms
+    candles = []
+
+    while since <= end_ms:
+        rows = exchange.fapiPublicGetKlines({
+            "symbol": symbol,
+            "interval": timeframe,
+            "startTime": since,
+            "endTime": end_ms,
+            "limit": limit,
+        })
+
+        if not rows:
+            break
+
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 8:
+                raise ValueError(
+                    "Invalid Binance kline response | "
+                    f"symbol={symbol} | "
+                    f"timeframe={timeframe}"
+                )
+
+            open_timestamp = int(row[0])
+            close_timestamp = int(row[6])
+
+            if open_timestamp < start_ms:
+                continue
+
+            if open_timestamp > end_ms:
+                continue
+
+            candles.append({
+                "timestamp": open_timestamp,
+                "close_timestamp": close_timestamp,
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": float(row[5]),
+                "quoteVolume": float(row[7]),
+            })
+
+        last_timestamp = int(rows[-1][0])
+        next_since = last_timestamp + ms_per_candle
+
+        if next_since <= since:
+            raise RuntimeError(
+                "Historical pagination did not advance | "
+                f"symbol={symbol} | "
+                f"timeframe={timeframe} | "
+                f"since={since}"
+            )
+
+        since = next_since
+
+        if len(rows) < limit:
+            break
+
+    return candles
+
 def fetch_closed_futures_candle(
     symbol: str,
     timeframe: str,
