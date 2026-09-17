@@ -531,8 +531,21 @@ def main():
     )
 
     print(
-        "[REPLAY] Waiting for engine/provider "
-        "through first barrier..."
+        "[REPLAY] Waiting for consumer startup..."
+    )
+
+    service.wait_consumer_ready(
+        consumer_name=CONSUMER_NAME,
+        timeout_seconds=args.barrier_timeout,
+    )
+
+    print(
+        "[REPLAY] Consumer READY | "
+        f"consumer={CONSUMER_NAME}"
+    )
+
+    print(
+        "[REPLAY] Starting historical clock..."
     )
 
     print()

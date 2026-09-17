@@ -10,6 +10,7 @@ from engine.live.data.redis_market_data_protocol import (
     STATUS_KEY,
     replay_engine_processed_key,
     replay_provider_applied_key,
+    replay_consumer_ready_key,
 )
 
 from engine.replay.replay_clock import ReplayClock
@@ -94,6 +95,40 @@ class HistoricalReplayService:
             replay_engine_processed_key(
                 consumer_name
             )
+        )
+
+        self.redis.delete(
+            replay_consumer_ready_key(
+                consumer_name
+            )
+        )
+        
+    def wait_consumer_ready(
+        self,
+        consumer_name,
+        timeout_seconds=120.0,
+    ):
+        key = replay_consumer_ready_key(
+            consumer_name
+        )
+
+        deadline = (
+            time.monotonic()
+            + float(timeout_seconds)
+        )
+
+        while time.monotonic() < deadline:
+            ready = self.redis.get(key)
+
+            if ready == "1":
+                return True
+
+            time.sleep(0.01)
+
+        raise TimeoutError(
+            "Replay consumer startup timeout | "
+            f"consumer={consumer_name} | "
+            f"ready={self.redis.get(key)}"
         )
 
 

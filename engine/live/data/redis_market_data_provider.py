@@ -15,6 +15,7 @@ from engine.live.data.redis_market_data_protocol import (
     history_key,
     market_flow_key,
     replay_provider_applied_key,
+    replay_consumer_ready_key,
 )
 
 from engine.replay.replay_clock import (
@@ -55,6 +56,12 @@ class RedisMarketDataProvider:
         
         self.replay_applied_key = (
             replay_provider_applied_key(
+                self.consumer_name
+            )
+        )
+        
+        self.replay_consumer_ready_key = (
+            replay_consumer_ready_key(
                 self.consumer_name
             )
         )
@@ -653,6 +660,12 @@ class RedisMarketDataProvider:
 
         self.price_thread.start()
         self.closed_thread.start()
+        
+        if self.clock_mode == "replay":
+            self.redis.set(
+                self.replay_consumer_ready_key,
+                "1",
+            )
 
         print(
             "[REDIS MARKET DATA] "

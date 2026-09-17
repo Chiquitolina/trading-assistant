@@ -11,6 +11,19 @@ PRODUCER_LOCK_KEY = f"{KEY_PREFIX}:producer-lock"
 # Los precios intravela no necesitan persistencia
 PRICE_CHANNEL = f"{KEY_PREFIX}:price"
 
+REPLAY_CONSUMER_READY_PREFIX = (
+    f"{KEY_PREFIX}:replay:consumer-ready"
+)
+
+
+def replay_consumer_ready_key(
+    consumer_name,
+):
+    return (
+        f"{REPLAY_CONSUMER_READY_PREFIX}:"
+        f"{consumer_name}"
+    )
+
 # Los cierres deben poder recuperarse si un consumidor se desconecta
 CLOSED_CANDLES_STREAM = f"{KEY_PREFIX}:closed-candles"
 REPLAY_CLOCK_KEY = "market-data:v1:replay-clock"
