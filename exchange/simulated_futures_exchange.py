@@ -619,6 +619,275 @@ class SimulatedFuturesExchange:
             for key, value in orders.items()
         }
 
+    def process_candle(
+        self,
+        symbol: str,
+        open_price: float,
+        high: float,
+        low: float,
+        close: float,
+        timestamp_ms: int,
+    ):
+        symbol = str(symbol).upper()
+
+        open_price = float(open_price)
+        high = float(high)
+        low = float(low)
+        close = float(close)
+        timestamp_ms = int(timestamp_ms)
+
+        position = self.positions.get(symbol)
+
+        if not position:
+            return None
+
+        orders = self.open_orders.get(
+            symbol,
+            {}
+        )
+
+        sl_order = orders.get("SL")
+        tp_order = orders.get("TP")
+
+        if not sl_order and not tp_order:
+            return None
+
+        amount = float(
+            position["amount"]
+        )
+
+        is_long = amount > 0
+
+        sl_hit = False
+        tp_hit = False
+
+        # ==========================================
+        # LONG
+        # ==========================================
+
+        if is_long:
+
+            if sl_order:
+                sl_price = float(
+                    sl_order["stopPrice"]
+                )
+
+                sl_hit = low <= sl_price
+
+            if tp_order:
+                tp_price = float(
+                    tp_order["price"]
+                )
+
+                tp_hit = high >= tp_price
+
+        # ==========================================
+        # SHORT
+        # ==========================================
+
+        else:
+
+            if sl_order:
+                sl_price = float(
+                    sl_order["stopPrice"]
+                )
+
+                sl_hit = high >= sl_price
+
+            if tp_order:
+                tp_price = float(
+                    tp_order["price"]
+                )
+
+                tp_hit = low <= tp_price
+
+        # ==========================================
+        # NOTHING HIT
+        # ==========================================
+
+        if not sl_hit and not tp_hit:
+            return None
+
+        # ==========================================
+        # DETERMINE EXIT
+        # ==========================================
+
+        ambiguous = (
+            sl_hit
+            and tp_hit
+        )
+
+        # V1 conservative policy:
+        # if TP and SL are touched inside the same
+        # 1m candle, assume SL happened first.
+        if sl_hit:
+            exit_reason = "SL"
+            exit_order = sl_order
+
+            exit_price = float(
+                sl_order["stopPrice"]
+            )
+
+        else:
+            exit_reason = "TP"
+            exit_order = tp_order
+
+            exit_price = float(
+                tp_order["price"]
+            )
+
+        return self._execute_protective_exit(
+            symbol=symbol,
+            exit_order=exit_order,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+            timestamp_ms=timestamp_ms,
+            ambiguous=ambiguous,
+        )
+        
+    def _execute_protective_exit(
+        self,
+        symbol: str,
+        exit_order: dict,
+        exit_price: float,
+        exit_reason: str,
+        timestamp_ms: int,
+        ambiguous: bool = False,
+    ):
+        position = self.positions.get(symbol)
+
+        if not position:
+            raise RuntimeError(
+                "Replay protective exit without "
+                f"position | symbol={symbol}"
+            )
+
+        amount = float(
+            position["amount"]
+        )
+
+        quantity = abs(amount)
+
+        entry_price = float(
+            position["entry_price"]
+        )
+
+        is_long = amount > 0
+
+        exit_side = (
+            "SELL"
+            if is_long
+            else "BUY"
+        )
+
+        exit_price = float(exit_price)
+
+        # ==========================================
+        # REALIZED PNL
+        # ==========================================
+
+        if is_long:
+            realized_pnl = (
+                exit_price
+                - entry_price
+            ) * quantity
+
+        else:
+            realized_pnl = (
+                entry_price
+                - exit_price
+            ) * quantity
+
+        # ==========================================
+        # EXIT FEE
+        # ==========================================
+
+        notional = (
+            quantity
+            * exit_price
+        )
+
+        commission = (
+            notional
+            * self.taker_fee_pct
+            / 100.0
+        )
+
+        # ==========================================
+        # EXIT FILL
+        # ==========================================
+
+        fill = {
+            "symbol": symbol,
+            "orderId": exit_order["orderId"],
+            "side": exit_side,
+            "price": exit_price,
+            "qty": quantity,
+            "commission": commission,
+            "realizedPnl": realized_pnl,
+            "time": int(timestamp_ms),
+        }
+
+        self.fills.setdefault(
+            symbol,
+            []
+        ).append(fill)
+
+        # ==========================================
+        # WALLET
+        # ==========================================
+
+        self.wallet_balance += (
+            realized_pnl
+            - commission
+        )
+
+        # ==========================================
+        # CLOSE POSITION + CANCEL SIBLING ORDER
+        # ==========================================
+
+        self.positions.pop(
+            symbol,
+            None,
+        )
+
+        self.open_orders.pop(
+            symbol,
+            None,
+        )
+
+        event = {
+            "symbol": symbol,
+            "exit_reason": exit_reason,
+            "side": exit_side,
+            "quantity": quantity,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "realized_pnl": realized_pnl,
+            "commission": commission,
+            "timestamp": int(
+                timestamp_ms
+            ),
+            "ambiguous": bool(
+                ambiguous
+            ),
+        }
+
+        print(
+            "[REPLAY EXIT] "
+            f"symbol={symbol} "
+            f"reason={exit_reason} "
+            f"side={exit_side} "
+            f"qty={quantity} "
+            f"entry={entry_price} "
+            f"exit={exit_price} "
+            f"pnl={realized_pnl:.8f} "
+            f"fee={commission:.8f} "
+            f"ambiguous={ambiguous} "
+            f"ts={timestamp_ms}"
+        )
+
+        return event
 
     def get_recent_fills(
         self,
