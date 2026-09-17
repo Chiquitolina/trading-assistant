@@ -701,22 +701,6 @@ try:
             last_status_ts = now
 
         # =================================================
-        # PRICE UPDATE
-        # =================================================
-
-        for pos_symbol in list(execution.positions.keys()):
-
-            price = buffer.last_price(pos_symbol)
-            timestamp = buffer.last_timestamp(pos_symbol)
-
-            if price is not None and timestamp is not None:
-                execution.on_price_update(
-                    pos_symbol,
-                    price,
-                    timestamp
-                )
-                
-        # =================================================
         # 1m CONTEXT UPDATE
         # =================================================
 
@@ -806,6 +790,22 @@ try:
                     execution.handle_replay_exit(
                         exit_event
                     )
+                    
+        # =================================================
+        # PRICE UPDATE
+        # =================================================
+
+        for pos_symbol in list(execution.positions.keys()):
+
+            price = buffer.last_price(pos_symbol)
+            timestamp = buffer.last_timestamp(pos_symbol)
+
+            if price is not None and timestamp is not None:
+                execution.on_price_update(
+                    pos_symbol,
+                    price,
+                    timestamp
+                )
 
         for context_symbol in context_symbols:
 
