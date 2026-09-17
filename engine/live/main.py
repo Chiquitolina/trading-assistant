@@ -17,6 +17,7 @@ from engine.live.data.redis_market_data_provider import (
 )
 
 from engine.live.data.redis_market_data_protocol import (
+    REPLAY_BOUNDARY_READY_KEY,
     replay_engine_processed_key,
 )
 
@@ -259,8 +260,23 @@ print(
 
 market_data.load_history()
 
-        #print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
+#print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
 
+
+IS_REPLAY = (
+    MARKET_DATA_PROVIDER == "redis"
+    and MARKET_CLOCK_MODE == "replay"
+)
+
+if (
+    MARKET_CLOCK_MODE == "replay"
+    and MARKET_DATA_PROVIDER != "redis"
+):
+    raise RuntimeError(
+        "Replay clock requires "
+        "MARKET_DATA_PROVIDER=redis"
+    )
+    
 # =========================================================
 # EXCHANGE
 # =========================================================
@@ -462,6 +478,38 @@ else:
 
 market_data.start()
 
+last_replay_boundary_ts = None
+
+
+def get_replay_boundary():
+    if (
+        MARKET_DATA_PROVIDER != "redis"
+        or MARKET_CLOCK_MODE != "replay"
+    ):
+        return None
+
+    raw = market_data.redis.get(
+        REPLAY_BOUNDARY_READY_KEY
+    )
+
+    if not raw:
+        return None
+
+    payload = json.loads(raw)
+
+    timestamp = int(
+        payload["timestamp"]
+    )
+
+    end_stream_id = str(
+        payload["end_stream_id"]
+    )
+
+    return {
+        "timestamp": timestamp,
+        "end_stream_id": end_stream_id,
+    }
+
 def publish_replay_engine_ack(
     boundary_ts,
 ):
@@ -555,6 +603,31 @@ try:
 
     while True:
 
+        replay_boundary = None
+
+        if (
+            MARKET_DATA_PROVIDER == "redis"
+            and MARKET_CLOCK_MODE == "replay"
+        ):
+            replay_boundary = (
+                get_replay_boundary()
+            )
+
+            if replay_boundary is None:
+                time.sleep(0.01)
+                continue
+
+            replay_boundary_ts = int(
+                replay_boundary["timestamp"]
+            )
+
+            if (
+                last_replay_boundary_ts
+                == replay_boundary_ts
+            ):
+                time.sleep(0.01)
+                continue
+
         now = time.time()
 
         # =================================================
@@ -587,40 +660,76 @@ try:
         # 1m CONTEXT UPDATE
         # =================================================
 
-        context_symbol = buffer.consume_any_closed_tf("1m")
+        context_symbols = []
 
-        if context_symbol and execution.get_position(context_symbol):
+        while True:
+            context_symbol = (
+                buffer.consume_any_closed_tf("1m")
+            )
 
-            context_signal = signals.generate_direction_context(
+            if not context_symbol:
+                break
+
+            context_symbols.append(
                 context_symbol
             )
 
-            if context_signal:
+        if MARKET_CLOCK_MODE == "replay":
+            context_symbols.sort()
 
-                context_price = buffer.last_price(context_symbol)
+        for context_symbol in context_symbols:
 
-                micro = getattr(
+            if not execution.get_position(
+                context_symbol
+            ):
+                continue
+
+            context_signal = (
+                signals.generate_direction_context(
+                    context_symbol
+                )
+            )
+
+            if not context_signal:
+                continue
+
+            context_price = buffer.last_price(
+                context_symbol
+            )
+
+            micro = getattr(
+                context_signal,
+                "micro",
+                None,
+            )
+
+            execution.update_position_context(
+                symbol=context_symbol,
+                trend=context_signal.trend.value,
+                direction=context_signal.direction.value,
+                momentum=context_signal.momentum.value,
+                micro_momentum=(
+                    micro.value
+                    if micro
+                    else context_signal.momentum.value
+                ),
+                current_price=context_price,
+                ema20_1m=getattr(
                     context_signal,
-                    "micro",
-                    None
-                )
-
-                execution.update_position_context(
-                    symbol=context_symbol,
-                    trend=context_signal.trend.value,
-                    direction=context_signal.direction.value,
-                    momentum=context_signal.momentum.value,
-                    micro_momentum=(
-                        micro.value
-                        if micro
-                        else context_signal.momentum.value
-                    ),
-                    current_price=context_price,
-                    ema20_1m=getattr(context_signal, "ema20_1m", None),
-                    ema34_1m=getattr(context_signal, "ema34_1m", None),
-                    ema50_1m=getattr(context_signal, "ema50_1m", None),
-                )
-
+                    "ema20_1m",
+                    None,
+                ),
+                ema34_1m=getattr(
+                    context_signal,
+                    "ema34_1m",
+                    None,
+                ),
+                ema50_1m=getattr(
+                    context_signal,
+                    "ema50_1m",
+                    None,
+                ),
+            )
         # =================================================
         # TRIGGER TF CLOSED
         # =================================================
@@ -641,15 +750,30 @@ try:
                 f"pending={pending_trigger} max={max_trigger_queue}"
             )
 
-        symbols_to_process = []
+        if TRIGGER_TF == "1m":
+            symbols_to_process = list(
+                context_symbols
+            )
 
-        while True:
-            symbol = buffer.consume_any_closed_tf(TRIGGER_TF)
+        else:
+            symbols_to_process = []
 
-            if not symbol:
-                break
+            while True:
+                symbol = (
+                    buffer.consume_any_closed_tf(
+                        TRIGGER_TF
+                    )
+                )
 
-            symbols_to_process.append(symbol)
+                if not symbol:
+                    break
+
+                symbols_to_process.append(
+                    symbol
+                )
+
+        if MARKET_CLOCK_MODE == "replay":
+            symbols_to_process.sort()
 
         if symbols_to_process:
 
@@ -1144,10 +1268,23 @@ try:
                 f"max_delay={max_delay_seen:.2f}s"
             )
             
-            if processed_boundary_ts is not None:
-                publish_replay_engine_ack(
-                    processed_boundary_ts
-                )
+        # =================================================
+        # REPLAY BOUNDARY ACK
+        # =================================================
+
+        if (
+            MARKET_DATA_PROVIDER == "redis"
+            and MARKET_CLOCK_MODE == "replay"
+        ):
+            publish_replay_engine_ack(
+                replay_boundary_ts
+            )
+
+            last_replay_boundary_ts = (
+                replay_boundary_ts
+            )
+        
+        
 
 # =========================================================
 # STOP
