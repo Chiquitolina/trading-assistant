@@ -33,6 +33,8 @@ class SimulatedFuturesExchange:
         self.leverages = {}
 
         self._next_order_id = 1
+        
+        self._current_timestamp_ms = 0
 
         # ExecutionEngine consulta esto.
         self.testnet = True
@@ -336,3 +338,168 @@ class SimulatedFuturesExchange:
         return (
             f"{adjusted:.{decimals}f}"
         )
+        
+def set_market_timestamp(
+    self,
+    timestamp_ms: int,
+):
+    self._current_timestamp_ms = int(
+        timestamp_ms
+    )
+
+
+def _next_id(self):
+    order_id = self._next_order_id
+    self._next_order_id += 1
+    return order_id
+
+
+def cancel_all_orders(
+    self,
+    symbol: str,
+):
+    # Replay:
+    # no simulamos infraestructura de cancelación.
+    # Solo limpiamos órdenes simuladas si existen.
+    self.open_orders.pop(symbol, None)
+
+    return []
+
+
+def place_market_order(
+    self,
+    symbol: str,
+    side: str,
+    quantity,
+):
+    symbol = str(symbol).upper()
+    side = str(side).upper()
+    quantity = float(quantity)
+
+    if side not in ("BUY", "SELL"):
+        raise ValueError(
+            f"Invalid market side: {side}"
+        )
+
+    if quantity <= 0:
+        raise ValueError(
+            f"Invalid quantity: {quantity}"
+        )
+
+    price = float(
+        self.get_price(symbol)
+    )
+
+    order_id = self._next_id()
+
+    timestamp_ms = int(
+        self._current_timestamp_ms
+    )
+
+    if timestamp_ms <= 0:
+        raise RuntimeError(
+            "Replay market timestamp "
+            "was not initialized"
+        )
+
+    current = self.positions.get(symbol)
+
+    # ==========================================
+    # OPEN POSITION
+    # ==========================================
+
+    if current is None:
+
+        signed_qty = (
+            quantity
+            if side == "BUY"
+            else -quantity
+        )
+
+        self.positions[symbol] = {
+            "symbol": symbol,
+            "amount": signed_qty,
+            "entry_price": price,
+            "leverage": int(
+                self.leverages.get(
+                    symbol,
+                    1,
+                )
+            ),
+        }
+
+        realized_pnl = 0.0
+
+    else:
+        raise RuntimeError(
+            "Replay V1 does not support "
+            "adding to an existing position | "
+            f"symbol={symbol}"
+        )
+
+    # ==========================================
+    # ENTRY FILL
+    # ==========================================
+
+    notional = quantity * price
+
+    commission = (
+        notional
+        * self.taker_fee_pct
+        / 100.0
+    )
+
+    fill = {
+        "symbol": symbol,
+        "orderId": order_id,
+        "side": side,
+        "price": price,
+        "qty": quantity,
+        "commission": commission,
+        "realizedPnl": realized_pnl,
+        "time": timestamp_ms,
+    }
+
+    self.fills.setdefault(
+        symbol,
+        []
+    ).append(fill)
+
+    print(
+        "[REPLAY ENTRY] "
+        f"symbol={symbol} "
+        f"side={side} "
+        f"qty={quantity} "
+        f"price={price} "
+        f"fee={commission:.8f} "
+        f"ts={timestamp_ms}"
+    )
+
+    return {
+        "symbol": symbol,
+        "orderId": order_id,
+        "status": "FILLED",
+        "side": side,
+        "type": "MARKET",
+        "origQty": str(quantity),
+        "executedQty": str(quantity),
+        "avgPrice": str(price),
+        "updateTime": timestamp_ms,
+    }
+
+
+def get_recent_fills(
+    self,
+    symbol: str,
+    limit: int = 1000,
+):
+    symbol = str(symbol).upper()
+
+    fills = self.fills.get(
+        symbol,
+        []
+    )
+
+    return list(
+        fills[-int(limit):]
+    )
