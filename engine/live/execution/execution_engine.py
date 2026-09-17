@@ -204,33 +204,86 @@ class ExecutionEngine:
             for field_name in field_names
         }
 
-    def __init__(self, exchange, position_manager, strategy, symbol):
+    def __init__(
+        self,
+        exchange,
+        position_manager,
+        strategy,
+        symbol,
+        execution_mode="live",
+    ):
         self.exchange = exchange
         self.is_testnet = getattr(exchange, "testnet", False)
         self.position_manager = position_manager
         self.symbol = symbol
+
+        self.execution_mode = str(
+            execution_mode
+        ).strip().lower()
+
+        if self.execution_mode not in (
+            "live",
+            "replay",
+        ):
+            raise ValueError(
+                "execution_mode must be "
+                "'live' or 'replay'"
+            )
+
+        self.is_replay = (
+            self.execution_mode == "replay"
+        )
+
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
         self.journal = TradeJournal()
         self.fees = self.exchange.get_futures_fees()
+
         self.position_sizer = PositionSizer(
             total_usage_pct=0.65,
             max_positions=10,
             buffer=0.90,
             min_notional=105,
         )
+
         self.risk_manager = RiskManager()
         self.snapshot_manager = SnapshotManager()
         self.order_executor = OrderExecutor(exchange)
         self.strategy = strategy
+
         self.positions: dict[str, Position] = {}
+
         self.max_global_positions = MAX_GLOBAL_POSITIONS
         self.opening_position = False
+
         self.last_global_entry_ts = 0
         self.last_symbol_entry_ts = {}
 
-        self.global_entry_cooldown = 0   # 0 min
-        self.symbol_entry_cooldown = 900   # 15 min
+        self.global_entry_cooldown = 0
+        self.symbol_entry_cooldown = 900
+        
+    def _now_ms(self) -> int:
+        if self.is_replay:
+            timestamp_ms = int(
+                getattr(
+                    self.exchange,
+                    "_current_timestamp_ms",
+                    0,
+                )
+            )
+
+            if timestamp_ms <= 0:
+                raise RuntimeError(
+                    "Replay timestamp was not initialized"
+                )
+
+            return timestamp_ms
+
+        return int(time.time() * 1000)
+
+
+    def _now_seconds(self) -> float:
+        return self._now_ms() / 1000.0
 
     def _apply_slippage(self, price: float, side: str, is_entry: bool = True):
         slippage_pct = random.uniform(0.01, 0.05) / 100
@@ -1004,7 +1057,7 @@ class ExecutionEngine:
         if self.open_positions_count() >= self.max_global_positions:
             return False
 
-        now = time.time()
+        now = self._now_seconds()
 
         # ==========================
         # GLOBAL COOLDOWN
@@ -1055,16 +1108,31 @@ class ExecutionEngine:
                 return False
             t = self._timer("local_positions_count", t)
             
-            exchange_pos = self.position_manager.sync(plan.symbol)
-            t = self._timer("position_manager.sync before order", t)
+            if not self.is_replay:
 
-            if exchange_pos == "INVALID_SYMBOL":
-                print(f"⚠️ Invalid symbol skipped | {plan.symbol}")
-                return False
+                exchange_pos = self.position_manager.sync(
+                    plan.symbol
+                )
 
-            if exchange_pos is not None:
-                print("\033[94m[EXECUTION ENGINE]\033[0m ⚠️ Position already open (exchange). Plan ignored.\n")
-                return False
+                t = self._timer(
+                    "position_manager.sync before order",
+                    t,
+                )
+
+                if exchange_pos == "INVALID_SYMBOL":
+                    print(
+                        f"⚠️ Invalid symbol skipped | "
+                        f"{plan.symbol}"
+                    )
+                    return False
+
+                if exchange_pos is not None:
+                    print(
+                        "\033[94m[EXECUTION ENGINE]\033[0m "
+                        "⚠️ Position already open (exchange). "
+                        "Plan ignored.\n"
+                    )
+                    return False
 
             if plan.side not in ("LONG", "SHORT"):
                 return False
@@ -1151,11 +1219,23 @@ class ExecutionEngine:
             # ==========================
             try:
                 
-                try:
-                    self.order_executor.cancel_all(plan.symbol)
-                    print(f"🧹 Pre-open cleanup | symbol={plan.symbol}")
-                except Exception as e:
-                    print(f"⚠️ Pre-open cleanup failed | symbol={plan.symbol} | error={e}")
+                if not self.is_replay:
+                    try:
+                        self.order_executor.cancel_all(
+                            plan.symbol
+                        )
+
+                        print(
+                            f"🧹 Pre-open cleanup | "
+                            f"symbol={plan.symbol}"
+                        )
+
+                    except Exception as e:
+                        print(
+                            f"⚠️ Pre-open cleanup failed | "
+                            f"symbol={plan.symbol} | "
+                            f"error={e}"
+                        )
                     
                 order = self.order_executor.market_order(
                     symbol=plan.symbol,
@@ -1203,32 +1283,96 @@ class ExecutionEngine:
                 print("❌ Order failed")
                 return False
 
-            exchange_pos = self.wait_for_exchange_position(
-                symbol=plan.symbol,
-                retries=10,
-                delay=0.5
-            )
-            t = self._timer("wait_for_exchange_position after order", t)
+            if self.is_replay:
 
-            if exchange_pos == "INVALID_SYMBOL":
-                print(f"⚠️ Invalid symbol skipped after order | {plan.symbol}")
-                return False
+                pos = self.exchange.get_position(
+                    plan.symbol
+                )
 
-            if exchange_pos is None:
-                print("❌ No position confirmed after market order. Cleaning up.")
-                try:
-                    self.order_executor.cancel_all(plan.symbol)
-                except Exception as e:
-                    print(f"⚠️ Failed cleanup after missing position | {plan.symbol} | {e}")
-                return False
+                if not pos:
+                    raise RuntimeError(
+                        "Replay market order did not create "
+                        f"position | symbol={plan.symbol}"
+                    )
 
-            time.sleep(1.0)
-            t = self._timer("sleep_1s", t)
+                real_entry = float(
+                    pos["entry_price"]
+                )
 
-            pos = self.exchange.get_position(plan.symbol)
-            t = self._timer("get_position", t)
-            real_entry = float(pos["entry_price"]) if pos else plan.entry
-            entry_ts = int(time.time() * 1000)
+                entry_ts = self._now_ms()
+
+                print(
+                    "[REPLAY EXECUTION] "
+                    f"entry confirmed | "
+                    f"symbol={plan.symbol} "
+                    f"price={real_entry} "
+                    f"ts={entry_ts}"
+                )
+
+            else:
+
+                exchange_pos = (
+                    self.wait_for_exchange_position(
+                        symbol=plan.symbol,
+                        retries=10,
+                        delay=0.5,
+                    )
+                )
+
+                t = self._timer(
+                    "wait_for_exchange_position after order",
+                    t,
+                )
+
+                if exchange_pos == "INVALID_SYMBOL":
+                    print(
+                        f"⚠️ Invalid symbol skipped "
+                        f"after order | {plan.symbol}"
+                    )
+                    return False
+
+                if exchange_pos is None:
+                    print(
+                        "❌ No position confirmed after "
+                        "market order. Cleaning up."
+                    )
+
+                    try:
+                        self.order_executor.cancel_all(
+                            plan.symbol
+                        )
+                    except Exception as e:
+                        print(
+                            "⚠️ Failed cleanup after "
+                            f"missing position | "
+                            f"{plan.symbol} | {e}"
+                        )
+
+                    return False
+
+                time.sleep(1.0)
+
+                t = self._timer(
+                    "sleep_1s",
+                    t,
+                )
+
+                pos = self.exchange.get_position(
+                    plan.symbol
+                )
+
+                t = self._timer(
+                    "get_position",
+                    t,
+                )
+
+                real_entry = (
+                    float(pos["entry_price"])
+                    if pos
+                    else plan.entry
+                )
+
+                entry_ts = self._now_ms()
 
             opening_snapshot = {
                 "position": {
@@ -1331,8 +1475,12 @@ class ExecutionEngine:
             
                 
             TF_MS = 1 * 60 * 1000
-            entry_candle_ts = int(plan.signal_ts + TF_MS)
-            entry_ts = int(time.time() * 1000)
+
+            entry_candle_ts = int(
+                plan.signal_ts + TF_MS
+            )
+
+            entry_ts = self._now_ms()
 
             delay_sec = (entry_ts - int(plan.signal_ts)) / 1000
 
@@ -1376,9 +1524,12 @@ class ExecutionEngine:
             # compatibilidad temporal
             self.position = position
             
-            now = time.time()
+            now = self._now_seconds()
+
             self.last_global_entry_ts = now
-            self.last_symbol_entry_ts[plan.symbol] = now
+            self.last_symbol_entry_ts[
+                plan.symbol
+            ] = now
             
             snapshot = {
                 "position": {
@@ -1793,15 +1944,24 @@ class ExecutionEngine:
         if not position:
             return
 
-        exchange_pos = self.position_manager.sync(symbol)
+        if not self.is_replay:
 
-        if exchange_pos == "INVALID_SYMBOL":
-            return
+            exchange_pos = self.position_manager.sync(
+                symbol
+            )
 
-        if exchange_pos is None:
-            self.position = position
-            self._handle_external_close(price, timestamp)
-            return
+            if exchange_pos == "INVALID_SYMBOL":
+                return
+
+            if exchange_pos is None:
+                self.position = position
+
+                self._handle_external_close(
+                    price,
+                    timestamp,
+                )
+
+                return
 
         # compat temporal
         self.position = position
