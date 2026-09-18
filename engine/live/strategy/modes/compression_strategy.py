@@ -226,6 +226,76 @@ class CompressionStrategy:
             atr=atr,
         )
         
+        if symbol == "AWEUSDT":
+            current_candle = df_tf.iloc[-1].to_dict()
+
+            print(
+                "\n"
+                "========================================\n"
+                "[AWE FIDELITY AUDIT]\n"
+                "========================================\n"
+                f"State              : {compression_state.get('state')}\n"
+                f"Reason             : {compression_state.get('reason')}\n"
+                f"Candle timestamp   : {current_candle.get('timestamp')}\n"
+                f"Candle close ts    : {current_candle.get('close_timestamp')}\n"
+                f"Open               : {current_candle.get('open')}\n"
+                f"High               : {current_candle.get('high')}\n"
+                f"Low                : {current_candle.get('low')}\n"
+                f"Close              : {current_candle.get('close')}\n"
+                "\n"
+                "----- DETECTOR INPUT/RESULT -----\n"
+                f"Prev candles       : {len(prev_df)}\n"
+                f"Trend up           : {trend.get('trend_up')}\n"
+                f"Trend score        : {trend.get('score')}\n"
+                f"Is compression     : {compression.get('is_compression')}\n"
+                f"Compression score  : {compression.get('score')}\n"
+                f"Lookback           : {compression.get('lookback')}\n"
+                f"Base lookback      : {compression.get('base_lookback')}\n"
+                f"Detected high      : {compression.get('compression_high')}\n"
+                f"Detected low       : {compression.get('compression_low')}\n"
+                f"Range ratio        : {compression.get('range_ratio')}\n"
+                f"ATR ratio          : {compression.get('atr_ratio')}\n"
+                f"Volume ratio       : {compression.get('volume_ratio')}\n"
+                f"Avg body pct       : {compression.get('avg_body_pct')}\n"
+                "\n"
+                "----- FROZEN WATCH -----\n"
+                f"Compression high   : {compression_state.get('compression_high')}\n"
+                f"Compression low    : {compression_state.get('compression_low')}\n"
+                f"Created ts         : {compression_state.get('created_ts')}\n"
+                f"Watch age          : {compression_state.get('watch_age')}\n"
+                f"Candles waiting    : {compression_state.get('candles_waiting')}\n"
+                "\n"
+                "----- BREAKOUT -----\n"
+                f"Breakout           : {breakout.get('breakout')}\n"
+                f"Breakout reason    : {breakout.get('reason')}\n"
+                f"Failed reasons     : {breakout.get('failed_reasons')}\n"
+                f"Breakout volume    : {breakout.get('volume_ratio')}\n"
+                "========================================\n"
+            )
+            
+        if (
+            symbol == "AWEUSDT"
+            and compression_state.get("state") == "WATCH_CREATED"
+        ):
+            print(
+                "[AWE COMPRESSION INPUT CANDLES]"
+            )
+
+            print(
+                prev_df[
+                    [
+                        "timestamp",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                    ]
+                ]
+                .tail(10)
+                .to_string(index=False)
+            )
+        
         market_flow_context = (
             self._resolve_frozen_market_flow_context(
                 symbol=symbol,
