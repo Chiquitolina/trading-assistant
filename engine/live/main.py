@@ -5,6 +5,10 @@ import argparse
 
 from engine.live.journal.compression_watch_journal import CompressionWatchJournal
 
+from engine.live.journal.compression_fidelity_journal import (
+    CompressionFidelityJournal,
+)
+
 import json
 from pathlib import Path
 
@@ -428,10 +432,12 @@ compression_snapshot_builder = SignalCompressionSnapshotBuilder(
 compression_snapshot_manager = CompressionSnapshotManager()
 
 compression_watch_journal = CompressionWatchJournal()
+compression_fidelity_journal = CompressionFidelityJournal()
 
 compression_strategy = CompressionStrategy(
     buffer=buffer,
     journal=compression_watch_journal,
+    fidelity_journal=compression_fidelity_journal,
     market_flow_provider=market_data,
     max_watch_candles=8,
     max_pullback_candles=5,

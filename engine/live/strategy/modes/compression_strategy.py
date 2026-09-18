@@ -20,6 +20,7 @@ class CompressionStrategy:
         self,
         buffer,
         journal=None,
+        fidelity_journal=None,
         market_flow_provider=None,
         max_watch_candles=8,
         max_pullback_candles=5,
@@ -29,6 +30,7 @@ class CompressionStrategy:
         self.stats = {}
         self.buffer = buffer
         self.journal = journal
+        self.fidelity_journal = fidelity_journal
         self.market_flow_provider = market_flow_provider
 
         self.machine = CompressionStateMachine(
@@ -39,7 +41,6 @@ class CompressionStrategy:
         )
 
         self.last_context_by_symbol = {}
-        
         self.market_flow_context_by_symbol = {}
         
     def _build_signal_context(
@@ -206,6 +207,12 @@ class CompressionStrategy:
         )
 
         watch = self.machine.get(symbol)
+        
+        state_before = (
+            watch.state.value
+            if watch is not None
+            else "IDLE"
+        )
 
         if watch is not None:
             breakout = detect_breakout_from_watch(
@@ -224,6 +231,18 @@ class CompressionStrategy:
             compression=compression,
             breakout=breakout,
             atr=atr,
+        )
+        
+        self._log_fidelity(
+            symbol=symbol,
+            tf=tf,
+            df_tf=df_tf,
+            prev_df=prev_df,
+            trend=trend,
+            compression=compression,
+            breakout=breakout,
+            compression_state=compression_state,
+            state_before=state_before,
         )
         
         if symbol == "AWEUSDT":
@@ -664,6 +683,256 @@ class CompressionStrategy:
             return {}
 
         return dict(context)
+    
+    def _log_fidelity(
+        self,
+        symbol,
+        tf,
+        df_tf,
+        prev_df,
+        trend,
+        compression,
+        breakout,
+        compression_state,
+        state_before,
+    ):
+        if not self.fidelity_journal:
+            return
+
+        current_candle = (
+            df_tf.iloc[-1].to_dict()
+        )
+
+        candle_open_ts = int(
+            current_candle["timestamp"]
+        )
+
+        timeframe_ms = {
+            "1m": 60_000,
+            "5m": 300_000,
+            "15m": 900_000,
+            "30m": 1_800_000,
+            "1h": 3_600_000,
+            "4h": 14_400_000,
+            "1d": 86_400_000,
+        }.get(tf)
+
+        candle_close_ts = (
+            candle_open_ts
+            + timeframe_ms
+            - 1
+            if timeframe_ms is not None
+            else None
+        )
+
+        detector_columns = [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+        available_columns = [
+            column
+            for column in detector_columns
+            if column in prev_df.columns
+        ]
+
+        detector_input_last_10 = (
+            prev_df[available_columns]
+            .tail(10)
+            .to_dict("records")
+        )
+
+        self.fidelity_journal.log(
+            symbol=symbol,
+            data={
+                # ----------------------------------
+                # Evaluation identity
+                # ----------------------------------
+                "tf": tf,
+                "evaluation_ts": candle_close_ts,
+                "candle_open_ts": candle_open_ts,
+                "candle_close_ts": candle_close_ts,
+
+                # ----------------------------------
+                # Exact market input
+                # ----------------------------------
+                "buffer_candles": len(df_tf),
+                "detector_prev_candles": len(prev_df),
+
+                "current_candle": current_candle,
+
+                "detector_input_last_10": (
+                    detector_input_last_10
+                ),
+
+                # ----------------------------------
+                # Trend detector
+                # ----------------------------------
+                "trend_up": trend.get(
+                    "trend_up"
+                ),
+                "trend_score": trend.get(
+                    "score"
+                ),
+                "trend_reasons": trend.get(
+                    "reasons"
+                ),
+
+                # ----------------------------------
+                # Compression detector
+                # ----------------------------------
+                "compression_detected": (
+                    compression.get(
+                        "is_compression"
+                    )
+                ),
+                "compression_score": (
+                    compression.get("score")
+                ),
+                "compression_reasons": (
+                    compression.get("reasons")
+                ),
+
+                "detected_compression_high": (
+                    compression.get(
+                        "compression_high"
+                    )
+                ),
+                "detected_compression_low": (
+                    compression.get(
+                        "compression_low"
+                    )
+                ),
+
+                "compression_lookback": (
+                    compression.get("lookback")
+                ),
+                "compression_base_lookback": (
+                    compression.get(
+                        "base_lookback"
+                    )
+                ),
+
+                "range_ratio": compression.get(
+                    "range_ratio"
+                ),
+                "atr_ratio": compression.get(
+                    "atr_ratio"
+                ),
+                "volume_ratio": compression.get(
+                    "volume_ratio"
+                ),
+                "avg_body_pct": compression.get(
+                    "avg_body_pct"
+                ),
+
+                # ----------------------------------
+                # State machine
+                # ----------------------------------
+                "state_before": state_before,
+
+                "state_after": (
+                    compression_state.get(
+                        "state"
+                    )
+                ),
+
+                "state_reason": (
+                    compression_state.get(
+                        "reason"
+                    )
+                ),
+
+                "watch_created_ts": (
+                    compression_state.get(
+                        "created_ts"
+                    )
+                ),
+
+                "watch_updated_ts": (
+                    compression_state.get(
+                        "updated_ts"
+                    )
+                ),
+
+                "watch_age": (
+                    compression_state.get(
+                        "watch_age"
+                    )
+                ),
+
+                "candles_waiting": (
+                    compression_state.get(
+                        "candles_waiting"
+                    )
+                ),
+
+                "frozen_compression_high": (
+                    compression_state.get(
+                        "compression_high"
+                    )
+                ),
+
+                "frozen_compression_low": (
+                    compression_state.get(
+                        "compression_low"
+                    )
+                ),
+
+                # ----------------------------------
+                # Breakout
+                # ----------------------------------
+                "breakout_detected": (
+                    breakout.get("breakout")
+                ),
+                "breakout_reason": (
+                    breakout.get("reason")
+                ),
+                "breakout_failed_reasons": (
+                    breakout.get(
+                        "failed_reasons"
+                    )
+                ),
+                "breakout_volume_ratio": (
+                    breakout.get(
+                        "volume_ratio"
+                    )
+                ),
+
+                # ----------------------------------
+                # Pullback / entry
+                # ----------------------------------
+                "pullback_pct": (
+                    compression_state.get(
+                        "pullback_pct"
+                    )
+                ),
+                "valid_pullback": (
+                    compression_state.get(
+                        "valid_pullback"
+                    )
+                ),
+                "holds_compression_high": (
+                    compression_state.get(
+                        "holds_compression_high"
+                    )
+                ),
+                "continuation": (
+                    compression_state.get(
+                        "continuation"
+                    )
+                ),
+                "entry_price": (
+                    compression_state.get(
+                        "entry_price"
+                    )
+                ),
+            },
+        )
 
     def _log(
         self,
