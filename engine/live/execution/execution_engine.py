@@ -793,6 +793,54 @@ class ExecutionEngine:
             
             compression_state=ctx.get("compression_state"),
             compression_reason=ctx.get("compression_reason"),
+            
+            # ==========================
+            # SWING HIGH 4H BUCKET
+            # ==========================
+            swing_high_4h_bucket_enabled=ctx.get(
+                "swing_high_4h_bucket_enabled"
+            ),
+            swing_high_4h_bucket_match=ctx.get(
+                "swing_high_4h_bucket_match"
+            ),
+            swing_high_4h_bucket_min_pct=ctx.get(
+                "swing_high_4h_bucket_min_pct"
+            ),
+            swing_high_4h_bucket_max_pct=ctx.get(
+                "swing_high_4h_bucket_max_pct"
+            ),
+
+            # ==========================
+            # HYBRID STRUCTURAL SL
+            # ==========================
+            hybrid_structural_sl_enabled=ctx.get(
+                "hybrid_structural_sl_enabled"
+            ),
+            hybrid_structural_max_risk_pct=ctx.get(
+                "hybrid_structural_max_risk_pct"
+            ),
+            hybrid_structural_sl_buffer_pct=ctx.get(
+                "hybrid_structural_sl_buffer_pct"
+            ),
+
+            hybrid_sl_mode=ctx.get(
+                "hybrid_sl_mode"
+            ),
+            hybrid_sl_reason=ctx.get(
+                "hybrid_sl_reason"
+            ),
+            hybrid_structural_risk_pct=ctx.get(
+                "hybrid_structural_risk_pct"
+            ),
+            hybrid_structural_sl_price=ctx.get(
+                "hybrid_structural_sl_price"
+            ),
+            hybrid_original_sl_price=ctx.get(
+                "hybrid_original_sl_price"
+            ),
+            hybrid_selected_sl_price=ctx.get(
+                "hybrid_selected_sl_price"
+            ),
 
             compression_high=ctx.get("compression_high"),
             compression_low=ctx.get("compression_low"),
@@ -2422,6 +2470,54 @@ class ExecutionEngine:
             
             compression_state=ctx.get("compression_state"),
             compression_reason=ctx.get("compression_reason"),
+            
+            # ==========================
+            # SWING HIGH 4H BUCKET
+            # ==========================
+            swing_high_4h_bucket_enabled=ctx.get(
+                "swing_high_4h_bucket_enabled"
+            ),
+            swing_high_4h_bucket_match=ctx.get(
+                "swing_high_4h_bucket_match"
+            ),
+            swing_high_4h_bucket_min_pct=ctx.get(
+                "swing_high_4h_bucket_min_pct"
+            ),
+            swing_high_4h_bucket_max_pct=ctx.get(
+                "swing_high_4h_bucket_max_pct"
+            ),
+
+            # ==========================
+            # HYBRID STRUCTURAL SL
+            # ==========================
+            hybrid_structural_sl_enabled=ctx.get(
+                "hybrid_structural_sl_enabled"
+            ),
+            hybrid_structural_max_risk_pct=ctx.get(
+                "hybrid_structural_max_risk_pct"
+            ),
+            hybrid_structural_sl_buffer_pct=ctx.get(
+                "hybrid_structural_sl_buffer_pct"
+            ),
+
+            hybrid_sl_mode=ctx.get(
+                "hybrid_sl_mode"
+            ),
+            hybrid_sl_reason=ctx.get(
+                "hybrid_sl_reason"
+            ),
+            hybrid_structural_risk_pct=ctx.get(
+                "hybrid_structural_risk_pct"
+            ),
+            hybrid_structural_sl_price=ctx.get(
+                "hybrid_structural_sl_price"
+            ),
+            hybrid_original_sl_price=ctx.get(
+                "hybrid_original_sl_price"
+            ),
+            hybrid_selected_sl_price=ctx.get(
+                "hybrid_selected_sl_price"
+            ),
 
             compression_high=ctx.get("compression_high"),
             compression_low=ctx.get("compression_low"),

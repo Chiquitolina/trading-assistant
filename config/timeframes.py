@@ -62,6 +62,23 @@ MODE_CONFIG = {
 
         "compression_enabled": True,
         "compression_tf": MAIN_TF,
+
+        # ======================================
+        # SWING HIGH 4H BUCKET
+        # ======================================
+        "swing_high_4h_bucket_enabled": True,
+        "swing_high_4h_bucket_min_pct": -1.0,
+        "swing_high_4h_bucket_max_pct": 0.0,
+        "swing_high_4h_bucket_router_reason": (
+            "compression_breakout"
+        ),
+
+        # ======================================
+        # HYBRID STRUCTURAL SL
+        # ======================================
+        "hybrid_structural_sl_enabled": True,
+        "hybrid_structural_max_risk_pct": 2.0,
+        "hybrid_structural_sl_buffer_pct": 0.0,
     }
 }
 
