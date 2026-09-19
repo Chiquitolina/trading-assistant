@@ -265,8 +265,32 @@ def fmt_price_for_display(x, decimals=10):
         return f"{float(x):.{decimals}f}".rstrip("0").rstrip(".")
     except Exception:
         return str(x)
+
+@st.cache_data(show_spinner=False)
+def load_position_snapshot_cached(
+    snapshot_path,
+    modified_ns,
+):
+    snapshot_path = Path(snapshot_path)
+
+    if not snapshot_path.exists():
+        return None
+
+    try:
+        with open(
+            snapshot_path,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            return json.load(file)
+
+    except (
+        OSError,
+        json.JSONDecodeError,
+        TypeError,
+    ):
+        return None
     
-@st.cache_data(ttl=2)
 def build_open_position_inspector_df(
     open_positions,
     snapshots_dir,
@@ -297,33 +321,28 @@ def build_open_position_inspector_df(
                 / f"{symbol}.json"
             )
 
-            if snapshot_path.exists():
-                try:
-                    with open(
-                        snapshot_path,
-                        "r",
-                        encoding="utf-8",
-                    ) as file:
-                        snapshot = json.load(file)
+            snapshot = load_position_snapshot_cached(
+                snapshot_path,
+                get_file_modified_ns(
+                    snapshot_path
+                ),
+            )
 
-                    position_data = (
-                        snapshot.get("position")
-                        or {}
+            if isinstance(snapshot, dict):
+                position_data = (
+                    snapshot.get("position")
+                    or {}
+                )
+
+                context_data = (
+                    snapshot.get("context")
+                    or position_data.get(
+                        "signal_context"
                     )
+                    or {}
+                )
 
-                    context_data = (
-                        snapshot.get("context")
-                        or position_data.get(
-                            "signal_context"
-                        )
-                        or {}
-                    )
-
-                    snapshot_available = True
-
-                except Exception:
-                    position_data = {}
-                    context_data = {}
+                snapshot_available = True
 
         # El exchange prevalece para mark price,
         # quantity y PnL actuales.
@@ -418,32 +437,44 @@ def normalize_epoch_ms(value):
     return int(timestamp.timestamp() * 1000)
 
 
-def load_watch_history(
-    symbol,
-    compression_created_ts=None,
-    base_dir="compression_watch_journal",
+@st.cache_data(show_spinner=False)
+def load_watch_history_cached(
+    path,
+    modified_ns,
+    compression_created_ts,
+    limit,
+    timezone,
 ):
-    path = (
-        Path(base_dir)
-        / f"{str(symbol).upper()}.jsonl"
-    )
+    path = Path(path)
 
     if not path.exists():
         return pd.DataFrame()
 
     rows = []
 
-    with path.open("r", encoding="utf-8") as file:
-        for line in file:
-            line = line.strip()
+    try:
+        with path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            for line in file:
+                line = line.strip()
 
-            if not line:
-                continue
+                if not line:
+                    continue
 
-            try:
-                rows.append(json.loads(line))
-            except (json.JSONDecodeError, TypeError):
-                continue
+                try:
+                    rows.append(
+                        json.loads(line)
+                    )
+                except (
+                    json.JSONDecodeError,
+                    TypeError,
+                ):
+                    continue
+
+    except OSError:
+        return pd.DataFrame()
 
     if not rows:
         return pd.DataFrame()
@@ -461,19 +492,34 @@ def load_watch_history(
         in history_df.columns
     ):
         journal_created_ts = pd.to_numeric(
-            history_df["compression_created_ts"],
+            history_df[
+                "compression_created_ts"
+            ],
             errors="coerce",
         )
 
-        history_df = history_df[
-            journal_created_ts == created_ts_ms
+        history_df = history_df.loc[
+            journal_created_ts.eq(
+                created_ts_ms
+            )
         ].copy()
 
     if history_df.empty:
         return history_df
 
-    # Extraer OHLCV guardado dentro de last_candle.
+    # Extraer OHLCV guardado en last_candle.
     if "last_candle" in history_df.columns:
+        candle_data = (
+            history_df["last_candle"]
+            .apply(
+                lambda value: (
+                    value
+                    if isinstance(value, dict)
+                    else {}
+                )
+            )
+        )
+
         for field in [
             "timestamp",
             "open",
@@ -483,40 +529,78 @@ def load_watch_history(
             "volume",
             "atr",
         ]:
-            history_df[f"candle_{field}"] = (
-                history_df["last_candle"].apply(
-                    lambda candle: (
-                        candle.get(field)
-                        if isinstance(candle, dict)
-                        else None
-                    )
-                )
+            history_df[
+                f"candle_{field}"
+            ] = candle_data.apply(
+                lambda candle: candle.get(field)
             )
 
-    if "compression_updated_ts" in history_df.columns:
+    if (
+        "compression_updated_ts"
+        in history_df.columns
+    ):
+        numeric_updated_ts = pd.to_numeric(
+            history_df[
+                "compression_updated_ts"
+            ],
+            errors="coerce",
+        )
+
         history_df["timestamp"] = (
             pd.to_datetime(
-                pd.to_numeric(
-                    history_df[
-                        "compression_updated_ts"
-                    ],
-                    errors="coerce",
-                ),
+                numeric_updated_ts,
                 unit="ms",
                 utc=True,
                 errors="coerce",
             )
-            .dt.tz_convert(
-                "America/Argentina/Cordoba"
+            .dt.tz_convert(timezone)
+        )
+
+        history_df = (
+            history_df.sort_values(
+                "compression_updated_ts",
+                ascending=True,
             )
         )
 
-        history_df = history_df.sort_values(
-            "compression_updated_ts",
-            ascending=True,
-        )
+    if limit is not None:
+        try:
+            normalized_limit = int(limit)
+        except (TypeError, ValueError):
+            normalized_limit = 0
 
-    return history_df.reset_index(drop=True)
+        if normalized_limit > 0:
+            history_df = history_df.tail(
+                normalized_limit
+            )
+
+    return history_df.reset_index(
+        drop=True
+    )
+
+
+def load_watch_history(
+    symbol,
+    compression_created_ts=None,
+    base_dir="compression_watch_journal",
+    limit=None,
+):
+    path = (
+        Path(base_dir)
+        / f"{str(symbol).upper()}.jsonl"
+    )
+
+    return load_watch_history_cached(
+        path=path,
+        modified_ns=get_file_modified_ns(
+            path
+        ),
+        compression_created_ts=(
+            compression_created_ts
+        ),
+        limit=limit,
+        timezone=TZ,
+    )
 
 def load_all_entry_ready_events():
     modified_ns = get_file_modified_ns(
@@ -918,6 +1002,150 @@ def render_trade_inspector_for_row(
             candles_df[available_candle_columns],
             use_container_width=True,
             hide_index=True,
+        )
+
+
+def render_single_bucket_trade_explorer(
+    source_df,
+    summary_df,
+    bucket_col,
+    bucket_label,
+    key_prefix,
+):
+    """Select one or more values from a 1-D bucket and inspect its trades."""
+    st.markdown("#### 🔎 Analyze dependency buckets")
+
+    if source_df.empty or summary_df.empty:
+        st.info("No bucket values available to inspect.")
+        return
+
+    if bucket_col not in source_df.columns:
+        st.info(f"Missing explorer column: {bucket_col}")
+        return
+
+    options_df = summary_df.copy()
+    options_df = options_df[options_df["trades"] > 0].copy()
+    options_df["bucket_value"] = options_df[bucket_col].astype(str)
+    options_df["bucket_label"] = (
+        options_df["bucket_value"]
+        + " — "
+        + options_df["trades"].astype(int).astype(str)
+        + " trades | WR "
+        + options_df["winrate"].round(2).astype(str)
+        + "% | PF "
+        + options_df["profit_factor"].fillna(0).round(2).astype(str)
+    )
+
+    label_to_value = dict(zip(
+        options_df["bucket_label"],
+        options_df["bucket_value"],
+    ))
+
+    selected_labels = st.multiselect(
+        f"Select one or more {bucket_label} values",
+        options=options_df["bucket_label"].tolist(),
+        key=f"{key_prefix}_selected_buckets",
+    )
+
+    if not selected_labels:
+        st.caption("Select a bucket to see and inspect its trades.")
+        return
+
+    selected_values = {
+        label_to_value[label]
+        for label in selected_labels
+    }
+
+    selected_trades = source_df[
+        source_df[bucket_col].astype(str).isin(selected_values)
+    ].copy()
+
+    if "trade_id" in selected_trades.columns:
+        selected_trades["trade_key"] = (
+            selected_trades["trade_id"].astype(str)
+        )
+    elif "entry_ts" in selected_trades.columns:
+        selected_trades["trade_key"] = (
+            selected_trades["symbol"].astype(str)
+            + "_"
+            + selected_trades["entry_ts"].astype(str)
+        )
+    else:
+        selected_trades["trade_key"] = (
+            selected_trades["symbol"].astype(str)
+            + "_row_"
+            + selected_trades.index.astype(str)
+        )
+
+    selected_trades = selected_trades.drop_duplicates(
+        subset=["trade_key"],
+        keep="first",
+    )
+
+    sort_col = (
+        "entry_ts_dt"
+        if "entry_ts_dt" in selected_trades.columns
+        else "pnl"
+    )
+    selected_trades = selected_trades.sort_values(
+        sort_col,
+        ascending=False,
+    ).reset_index(drop=True)
+
+    display_columns = [
+        "trade_key",
+        "entry_ts",
+        "symbol",
+        "side",
+        "pnl",
+        "pnl_usd",
+        bucket_col,
+        "max_favorable_pct",
+        "max_adverse_pct",
+        "exit_reason",
+    ]
+    display_columns = [
+        col for col in display_columns
+        if col in selected_trades.columns
+    ]
+    display_df = selected_trades[display_columns].copy()
+
+    if "entry_ts_dt" in selected_trades.columns:
+        entry_time = pd.to_datetime(
+            selected_trades["entry_ts_dt"],
+            errors="coerce",
+            utc=True,
+        ).dt.strftime("%d-%m-%Y %H:%M")
+
+        if "entry_ts" in display_df.columns:
+            display_df["entry_ts"] = entry_time
+        else:
+            display_df.insert(1, "entry_time", entry_time)
+
+    st.caption(
+        f"{len(selected_trades)} unique trades. "
+        "Seleccioná uno para abrir el Trade Inspector."
+    )
+
+    selection = st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        key=f"{key_prefix}_trade_selector",
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    selected_rows = selection.selection.rows
+
+    if selected_rows:
+        selected_row = selected_trades.iloc[selected_rows[0]]
+        render_trade_inspector_for_row(
+            row=selected_row,
+            status="CLOSED",
+            key_prefix=(
+                f"{key_prefix}_{selected_row['trade_key']}"
+            ),
         )
         
 # ==========================================
@@ -6224,36 +6452,83 @@ df_raw = prepare_trade_data_cached(
 )
 
 # =========================
-# GLOBAL VIEW (NO FILTER YET)
-# =========================
-df_view = df_raw.copy()
-
-# =========================
 # GLOBAL DATE FILTER
 # =========================
-if "entry_ts_dt" in df_view.columns and not df_view.empty:
+df_view = df_raw
 
-    st.sidebar.markdown("## 📅 Trade Filter")
-
-    start_date = st.sidebar.date_input(
-        "Start Date",
-        value=df_view["entry_ts_dt"].min().date(),
-        key="global_start_date"
+if (
+    not df_raw.empty
+    and "entry_ts_dt" in df_raw.columns
+):
+    valid_entry_times = (
+        df_raw["entry_ts_dt"]
+        .dropna()
     )
 
-    end_date = st.sidebar.date_input(
-        "End Date",
-        value=df_view["entry_ts_dt"].max().date(),
-        key="global_end_date"
-    )
+    if not valid_entry_times.empty:
+        st.sidebar.markdown(
+            "## 📅 Trade Filter"
+        )
 
-    df_view = df_view[
-        (df_view["entry_ts_dt"].dt.date >= start_date)
-        &
-        (df_view["entry_ts_dt"].dt.date <= end_date)
-    ].copy()
-    
-st.sidebar.caption(f"Filtered trades: {len(df_view)}")
+        min_entry_date = (
+            valid_entry_times.min().date()
+        )
+
+        max_entry_date = (
+            valid_entry_times.max().date()
+        )
+
+        start_date = st.sidebar.date_input(
+            "Start Date",
+            value=min_entry_date,
+            min_value=min_entry_date,
+            max_value=max_entry_date,
+            key="global_start_date",
+        )
+
+        end_date = st.sidebar.date_input(
+            "End Date",
+            value=max_entry_date,
+            min_value=min_entry_date,
+            max_value=max_entry_date,
+            key="global_end_date",
+        )
+
+        if start_date > end_date:
+            st.sidebar.error(
+                "Start Date must be before End Date."
+            )
+
+            df_view = df_raw.iloc[0:0]
+
+        else:
+            start_ts = (
+                pd.Timestamp(start_date)
+                .tz_localize(TZ)
+            )
+
+            end_ts_exclusive = (
+                pd.Timestamp(end_date)
+                .tz_localize(TZ)
+                + pd.Timedelta(days=1)
+            )
+
+            date_mask = (
+                df_raw["entry_ts_dt"].ge(
+                    start_ts
+                )
+                & df_raw["entry_ts_dt"].lt(
+                    end_ts_exclusive
+                )
+            )
+
+            df_view = df_raw.loc[
+                date_mask
+            ]
+
+st.sidebar.caption(
+    f"Filtered trades: {len(df_view)}"
+)
 
 # =========================
 # MFE / MAE REPORT
@@ -9264,6 +9539,17 @@ if selected_section == "btc_correlation":
                         use_container_width=True,
                     )
 
+                render_single_bucket_trade_explorer(
+                    source_df=available_df,
+                    summary_df=dependency_report,
+                    bucket_col=dependency_col,
+                    bucket_label="BTC dependency classification",
+                    key_prefix=(
+                        "btc_dependency_explorer_"
+                        f"{selected_btc_tf}"
+                    ),
+                )
+
             st.caption(
                 "btc_copied_weak: BTC explica mucho del movimiento "
                 "y el residual es contrario al trade. "
@@ -10876,162 +11162,7 @@ if selected_section == "mfe_mae":
                 pd.DataFrame(mfe_report["worst_symbols_by_mfe"]),
                 use_container_width=True
             )
-            
-        st.markdown("### Simulated Fixed TP")
-
-        tp_levels = [0.20, 0.25, 0.30, 0.40, 0.50]
-
-        sim_rows = []
-
-        sim_df = df_view.copy()
-
-        sim_df["pnl"] = pd.to_numeric(sim_df["pnl"], errors="coerce")
-        sim_df["max_favorable_pct"] = pd.to_numeric(
-            sim_df["max_favorable_pct"],
-            errors="coerce"
-        )
-
-        sim_df = sim_df.dropna(subset=["pnl", "max_favorable_pct"])
-
-        for tp_level in tp_levels:
-            simulated_pnl = sim_df.apply(
-                lambda row: tp_level
-                if row["max_favorable_pct"] >= tp_level
-                else row["pnl"],
-                axis=1,
-            )
-
-            wins = simulated_pnl[simulated_pnl > 0].sum()
-            losses = abs(simulated_pnl[simulated_pnl < 0].sum())
-
-            sim_rows.append({
-                "tp_level": f"{tp_level}%",
-                "trades": len(simulated_pnl),
-                "wins": int((simulated_pnl > 0).sum()),
-                "losses": int((simulated_pnl <= 0).sum()),
-                "winrate": round((simulated_pnl > 0).mean() * 100, 2),
-                "avg_win": round(simulated_pnl[simulated_pnl > 0].mean(), 4),
-                "avg_loss": round(simulated_pnl[simulated_pnl < 0].mean(), 4),
-                "gross_win": round(simulated_pnl[simulated_pnl > 0].sum(), 4),
-                "gross_loss": round(simulated_pnl[simulated_pnl < 0].sum(), 4),
-                "avg_pnl": round(simulated_pnl.mean(), 4),
-                "net_pnl": round(simulated_pnl.sum(), 4),
-                "profit_factor": round(wins / losses, 2) if losses > 0 else None,
-            })
-
-        sim_tp_df = pd.DataFrame(sim_rows)
-
-        st.dataframe(sim_tp_df, use_container_width=True)
-        
-        st.markdown("### Simulated Fixed TP / SL Matrix")
-
-        tp_levels = [0.20, 0.25, 0.30, 0.40, 0.50]
-        sl_levels = [0.30, 0.40, 0.50, 0.60, 0.80]
-
-        matrix_rows = []
-
-        matrix_df = df_view.copy()
-
-        matrix_df["pnl"] = pd.to_numeric(matrix_df["pnl"], errors="coerce")
-        matrix_df["max_favorable_pct"] = pd.to_numeric(matrix_df["max_favorable_pct"], errors="coerce")
-        matrix_df["max_adverse_pct"] = pd.to_numeric(matrix_df["max_adverse_pct"], errors="coerce")
-
-        matrix_df = matrix_df.dropna(subset=["pnl", "max_favorable_pct", "max_adverse_pct"])
-
-        for tp_level in tp_levels:
-            for sl_level in sl_levels:
-
-                simulated = []
-
-                for _, row in matrix_df.iterrows():
-
-                    if row["max_favorable_pct"] >= tp_level:
-                        simulated.append(tp_level)
-
-                    elif abs(row["max_adverse_pct"]) >= sl_level:
-                        simulated.append(-sl_level)
-
-                    else:
-                        simulated.append(row["pnl"])
-
-                simulated_pnl = pd.Series(simulated)
-
-                gross_win = simulated_pnl[simulated_pnl > 0].sum()
-                gross_loss = abs(simulated_pnl[simulated_pnl < 0].sum())
-
-                matrix_rows.append({
-                    "tp": tp_level,
-                    "sl": sl_level,
-                    "trades": len(simulated_pnl),
-                    "wins": int((simulated_pnl > 0).sum()),
-                    "losses": int((simulated_pnl <= 0).sum()),
-                    "winrate": round((simulated_pnl > 0).mean() * 100, 2),
-                    "avg_pnl": round(simulated_pnl.mean(), 4),
-                    "net_pnl": round(simulated_pnl.sum(), 4),
-                    "pf": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
-                })
-
-        tp_sl_matrix_df = pd.DataFrame(matrix_rows)
-
-        st.dataframe(
-            tp_sl_matrix_df.sort_values(
-                ["pf", "net_pnl"],
-                ascending=False,
-                na_position="last"
-            ),
-            use_container_width=True
-        )
-        
-        st.markdown("### Pure TP / SL Matrix")
-
-        pure_rows = []
-
-        for tp_level in tp_levels:
-            for sl_level in sl_levels:
-
-                simulated = []
-
-                for _, row in matrix_df.iterrows():
-                    if row["max_favorable_pct"] >= tp_level:
-                        simulated.append(tp_level)
-                    else:
-                        simulated.append(-sl_level)
-
-                simulated_pnl = pd.Series(simulated)
-
-                gross_win = simulated_pnl[simulated_pnl > 0].sum()
-                gross_loss = abs(simulated_pnl[simulated_pnl < 0].sum())
-
-                winrate = (simulated_pnl > 0).mean()
-                avg_win = simulated_pnl[simulated_pnl > 0].mean()
-                avg_loss = abs(simulated_pnl[simulated_pnl < 0].mean())
-
-                expectancy = (winrate * avg_win) - ((1 - winrate) * avg_loss)
-
-                pure_rows.append({
-                    "tp": tp_level,
-                    "sl": sl_level,
-                    "trades": len(simulated_pnl),
-                    "wins": int((simulated_pnl > 0).sum()),
-                    "losses": int((simulated_pnl <= 0).sum()),
-                    "winrate": round(winrate * 100, 2),
-                    "avg_pnl": round(simulated_pnl.mean(), 4),
-                    "net_pnl": round(simulated_pnl.sum(), 4),
-                    "expectancy": round(expectancy, 4),
-                    "pf": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
-                })
-
-        pure_matrix_df = pd.DataFrame(pure_rows)
-
-        st.dataframe(
-            pure_matrix_df.sort_values(
-                ["expectancy", "pf", "net_pnl"],
-                ascending=False,
-                na_position="last"
-            ),
-            use_container_width=True
-        )
-        
+                    
 if selected_section == "setups":
 
     st.markdown("---")
@@ -22134,6 +22265,7 @@ if selected_section == "tp_sl_replay":
                 "Combined + Robustness",
                 "SL Only",
                 "TP Only",
+                "Fixed Matrix",
                 "Factorial",
                 "Diagnostics",
             ],
@@ -22170,6 +22302,7 @@ if selected_section == "tp_sl_replay":
             "Combined + Robustness",
             "SL Only",
             "TP Only",
+            "Fixed Matrix",
             "Factorial",
         ]:
             replay_control_1, replay_control_2 = (
@@ -25042,6 +25175,419 @@ if selected_section == "tp_sl_replay":
                             tp_survival_report,
                             use_container_width=True,
                             hide_index=True,
+                        )
+                        
+        if replay_analysis_mode == "Fixed Matrix":
+
+            st.markdown(
+                "### Chronological Fixed TP / SL Matrix"
+            )
+
+            st.caption(
+                "Replay cronológico con velas de 1 minuto. "
+                "El TP utiliza Trade Price y el SL Mark Price. "
+                "Todas las métricas descuentan el costo "
+                "round-trip seleccionado."
+            )
+
+            matrix_required_columns = [
+                "replay_trade_key",
+                "entry_ts",
+                "sl_mode",
+                "fixed_sl_pct",
+                "tp_target_pct",
+                "result",
+                "simulated_pnl_pct",
+            ]
+
+            matrix_missing_columns = [
+                column
+                for column in matrix_required_columns
+                if column not in mature_scenarios.columns
+            ]
+
+            if matrix_missing_columns:
+                st.warning(
+                    "Faltan columnas en "
+                    "tp_sl_scenarios.csv: "
+                    f"{matrix_missing_columns}. "
+                    "Regenerá el reporte del replay."
+                )
+
+            else:
+                fixed_matrix = (
+                    mature_scenarios[
+                        mature_scenarios["sl_mode"]
+                        .fillna("")
+                        .astype(str)
+                        .str.upper()
+                        .eq("FIXED_MATRIX")
+                    ]
+                    .copy()
+                )
+
+                if fixed_matrix.empty:
+                    st.info(
+                        "Todavía no existen escenarios "
+                        "FIXED_MATRIX. Ejecutá nuevamente "
+                        "tools/analyze_post_trade_replay.py."
+                    )
+
+                else:
+                    fixed_matrix["result"] = (
+                        fixed_matrix["result"]
+                        .fillna("")
+                        .astype(str)
+                        .str.upper()
+                    )
+
+                    for column in [
+                        "fixed_sl_pct",
+                        "tp_target_pct",
+                        "simulated_pnl_pct",
+                    ]:
+                        fixed_matrix[column] = (
+                            pd.to_numeric(
+                                fixed_matrix[column],
+                                errors="coerce",
+                            )
+                        )
+
+                    fixed_matrix = (
+                        fixed_matrix
+                        .dropna(
+                            subset=[
+                                "replay_trade_key",
+                                "entry_ts",
+                                "fixed_sl_pct",
+                                "tp_target_pct",
+                            ]
+                        )
+                        .drop_duplicates(
+                            subset=[
+                                "replay_trade_key",
+                                "fixed_sl_pct",
+                                "tp_target_pct",
+                            ],
+                            keep="first",
+                        )
+                    )
+
+                    matrix_rows = []
+
+                    matrix_groups = fixed_matrix.groupby(
+                        [
+                            "tp_target_pct",
+                            "fixed_sl_pct",
+                        ],
+                        dropna=False,
+                        sort=True,
+                    )
+
+                    for (
+                        tp_target_pct,
+                        fixed_sl_pct,
+                    ), matrix_group in matrix_groups:
+
+                        matrix_group = (
+                            matrix_group
+                            .sort_values("entry_ts")
+                            .copy()
+                        )
+
+                        scenario_trades = (
+                            matrix_group[
+                                "replay_trade_key"
+                            ]
+                            .nunique()
+                        )
+
+                        resolved_mask = (
+                            matrix_group["result"]
+                            .isin(["TP", "SL"])
+                            &
+                            matrix_group[
+                                "simulated_pnl_pct"
+                            ].notna()
+                        )
+
+                        resolved_group = (
+                            matrix_group[
+                                resolved_mask
+                            ]
+                            .copy()
+                        )
+
+                        resolved_trades = (
+                            resolved_group[
+                                "replay_trade_key"
+                            ]
+                            .nunique()
+                        )
+
+                        ambiguous_trades = (
+                            matrix_group.loc[
+                                matrix_group["result"]
+                                .eq("AMBIGUOUS"),
+                                "replay_trade_key",
+                            ]
+                            .nunique()
+                        )
+
+                        unresolved_trades = max(
+                            scenario_trades
+                            - resolved_trades
+                            - ambiguous_trades,
+                            0,
+                        )
+
+                        if (
+                            resolved_trades
+                            < scenario_min_trades
+                        ):
+                            continue
+
+                        # El replay guarda PnL bruto.
+                        # Acá se descuenta el costo
+                        # round-trip para obtener PnL neto.
+                        resolved_group[
+                            "net_pnl_pct"
+                        ] = (
+                            resolved_group[
+                                "simulated_pnl_pct"
+                            ]
+                            - scenario_cost_pct
+                        )
+
+                        matrix_metrics = (
+                            summarize_replay_strategy(
+                                strategy_name=(
+                                    "Fixed TP / SL"
+                                ),
+                                pnl_values=(
+                                    resolved_group[
+                                        "net_pnl_pct"
+                                    ]
+                                ),
+                            )
+                        )
+
+                        coverage_pct = (
+                            resolved_trades
+                            / scenario_trades
+                            * 100
+                            if scenario_trades
+                            else 0.0
+                        )
+
+                        matrix_rows.append({
+                            "tp_pct":
+                                tp_target_pct,
+
+                            "sl_pct":
+                                fixed_sl_pct,
+
+                            "scenario_trades":
+                                scenario_trades,
+
+                            "resolved_trades":
+                                resolved_trades,
+
+                            "ambiguous_trades":
+                                ambiguous_trades,
+
+                            "unresolved_trades":
+                                unresolved_trades,
+
+                            "coverage_pct":
+                                coverage_pct,
+
+                            "wins":
+                                matrix_metrics["wins"],
+
+                            "losses":
+                                matrix_metrics["losses"],
+
+                            "breakeven":
+                                matrix_metrics[
+                                    "breakeven"
+                                ],
+
+                            "winrate":
+                                matrix_metrics[
+                                    "winrate"
+                                ],
+
+                            "avg_win_net":
+                                matrix_metrics[
+                                    "avg_win"
+                                ],
+
+                            "avg_loss_net":
+                                matrix_metrics[
+                                    "avg_loss"
+                                ],
+
+                            "payoff_ratio_net":
+                                matrix_metrics[
+                                    "payoff_ratio"
+                                ],
+
+                            "breakeven_winrate":
+                                matrix_metrics[
+                                    "breakeven_winrate"
+                                ],
+
+                            "avg_net_pnl_pct":
+                                matrix_metrics[
+                                    "avg_pnl"
+                                ],
+
+                            "total_net_pnl_pct_points":
+                                matrix_metrics[
+                                    "total_pnl"
+                                ],
+
+                            "net_profit_factor":
+                                matrix_metrics[
+                                    "profit_factor"
+                                ],
+
+                            "max_drawdown_pct_points":
+                                matrix_metrics[
+                                    "max_drawdown"
+                                ],
+
+                            "estimated_cost_pct":
+                                scenario_cost_pct,
+                        })
+
+                    fixed_matrix_report = (
+                        pd.DataFrame(matrix_rows)
+                    )
+
+                    if fixed_matrix_report.empty:
+                        st.info(
+                            "Ninguna combinación alcanza "
+                            "el mínimo de trades resueltos."
+                        )
+
+                    else:
+                        matrix_numeric_columns = [
+                            "tp_pct",
+                            "sl_pct",
+                            "coverage_pct",
+                            "winrate",
+                            "avg_win_net",
+                            "avg_loss_net",
+                            "payoff_ratio_net",
+                            "breakeven_winrate",
+                            "avg_net_pnl_pct",
+                            "total_net_pnl_pct_points",
+                            "net_profit_factor",
+                            "max_drawdown_pct_points",
+                            "estimated_cost_pct",
+                        ]
+
+                        for column in (
+                            matrix_numeric_columns
+                        ):
+                            fixed_matrix_report[
+                                column
+                            ] = (
+                                pd.to_numeric(
+                                    fixed_matrix_report[
+                                        column
+                                    ],
+                                    errors="coerce",
+                                )
+                                .round(4)
+                            )
+
+                        fixed_matrix_report = (
+                            fixed_matrix_report
+                            .sort_values(
+                                by=[
+                                    "net_profit_factor",
+                                    "total_net_pnl_pct_points",
+                                    "coverage_pct",
+                                ],
+                                ascending=[
+                                    False,
+                                    False,
+                                    False,
+                                ],
+                                na_position="last",
+                            )
+                            .reset_index(drop=True)
+                        )
+
+                        # ==========================
+                        # BEST CONFIGURATION SUMMARY
+                        # ==========================
+
+                        best_matrix_row = (
+                            fixed_matrix_report.iloc[0]
+                        )
+
+                        best_col_1, best_col_2, (
+                            best_col_3
+                        ), best_col_4 = st.columns(4)
+
+                        best_col_1.metric(
+                            "Best TP / SL",
+                            (
+                                f"{best_matrix_row['tp_pct']:.2g}%"
+                                " / "
+                                f"{best_matrix_row['sl_pct']:.2f}%"
+                            ),
+                        )
+
+                        best_col_2.metric(
+                            "Net Profit Factor",
+                            (
+                                f"{best_matrix_row['net_profit_factor']:.2f}"
+                                if pd.notna(
+                                    best_matrix_row[
+                                        "net_profit_factor"
+                                    ]
+                                )
+                                else "N/A"
+                            ),
+                        )
+
+                        best_col_3.metric(
+                            "Avg Net PnL",
+                            (
+                                f"{best_matrix_row['avg_net_pnl_pct']:.4f}%"
+                            ),
+                        )
+
+                        best_col_4.metric(
+                            "Resolved / Coverage",
+                            (
+                                f"{int(best_matrix_row['resolved_trades'])}"
+                                " / "
+                                f"{best_matrix_row['coverage_pct']:.1f}%"
+                            ),
+                        )
+
+                        # ==========================
+                        # COMPLETE MATRIX
+                        # ==========================
+
+                        st.dataframe(
+                            fixed_matrix_report,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.caption(
+                            "Winrate, PnL, Profit Factor y "
+                            "drawdown son netos del costo estimado. "
+                            "Los casos AMBIGUOUS y UNRESOLVED se "
+                            "muestran, pero no participan de las "
+                            "métricas económicas."
                         )
                 
 
