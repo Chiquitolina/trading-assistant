@@ -1003,6 +1003,150 @@ def render_trade_inspector_for_row(
             use_container_width=True,
             hide_index=True,
         )
+
+
+def render_single_bucket_trade_explorer(
+    source_df,
+    summary_df,
+    bucket_col,
+    bucket_label,
+    key_prefix,
+):
+    """Select one or more values from a 1-D bucket and inspect its trades."""
+    st.markdown("#### 🔎 Analyze dependency buckets")
+
+    if source_df.empty or summary_df.empty:
+        st.info("No bucket values available to inspect.")
+        return
+
+    if bucket_col not in source_df.columns:
+        st.info(f"Missing explorer column: {bucket_col}")
+        return
+
+    options_df = summary_df.copy()
+    options_df = options_df[options_df["trades"] > 0].copy()
+    options_df["bucket_value"] = options_df[bucket_col].astype(str)
+    options_df["bucket_label"] = (
+        options_df["bucket_value"]
+        + " — "
+        + options_df["trades"].astype(int).astype(str)
+        + " trades | WR "
+        + options_df["winrate"].round(2).astype(str)
+        + "% | PF "
+        + options_df["profit_factor"].fillna(0).round(2).astype(str)
+    )
+
+    label_to_value = dict(zip(
+        options_df["bucket_label"],
+        options_df["bucket_value"],
+    ))
+
+    selected_labels = st.multiselect(
+        f"Select one or more {bucket_label} values",
+        options=options_df["bucket_label"].tolist(),
+        key=f"{key_prefix}_selected_buckets",
+    )
+
+    if not selected_labels:
+        st.caption("Select a bucket to see and inspect its trades.")
+        return
+
+    selected_values = {
+        label_to_value[label]
+        for label in selected_labels
+    }
+
+    selected_trades = source_df[
+        source_df[bucket_col].astype(str).isin(selected_values)
+    ].copy()
+
+    if "trade_id" in selected_trades.columns:
+        selected_trades["trade_key"] = (
+            selected_trades["trade_id"].astype(str)
+        )
+    elif "entry_ts" in selected_trades.columns:
+        selected_trades["trade_key"] = (
+            selected_trades["symbol"].astype(str)
+            + "_"
+            + selected_trades["entry_ts"].astype(str)
+        )
+    else:
+        selected_trades["trade_key"] = (
+            selected_trades["symbol"].astype(str)
+            + "_row_"
+            + selected_trades.index.astype(str)
+        )
+
+    selected_trades = selected_trades.drop_duplicates(
+        subset=["trade_key"],
+        keep="first",
+    )
+
+    sort_col = (
+        "entry_ts_dt"
+        if "entry_ts_dt" in selected_trades.columns
+        else "pnl"
+    )
+    selected_trades = selected_trades.sort_values(
+        sort_col,
+        ascending=False,
+    ).reset_index(drop=True)
+
+    display_columns = [
+        "trade_key",
+        "entry_ts",
+        "symbol",
+        "side",
+        "pnl",
+        "pnl_usd",
+        bucket_col,
+        "max_favorable_pct",
+        "max_adverse_pct",
+        "exit_reason",
+    ]
+    display_columns = [
+        col for col in display_columns
+        if col in selected_trades.columns
+    ]
+    display_df = selected_trades[display_columns].copy()
+
+    if "entry_ts_dt" in selected_trades.columns:
+        entry_time = pd.to_datetime(
+            selected_trades["entry_ts_dt"],
+            errors="coerce",
+            utc=True,
+        ).dt.strftime("%d-%m-%Y %H:%M")
+
+        if "entry_ts" in display_df.columns:
+            display_df["entry_ts"] = entry_time
+        else:
+            display_df.insert(1, "entry_time", entry_time)
+
+    st.caption(
+        f"{len(selected_trades)} unique trades. "
+        "Seleccioná uno para abrir el Trade Inspector."
+    )
+
+    selection = st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        key=f"{key_prefix}_trade_selector",
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    selected_rows = selection.selection.rows
+
+    if selected_rows:
+        selected_row = selected_trades.iloc[selected_rows[0]]
+        render_trade_inspector_for_row(
+            row=selected_row,
+            status="CLOSED",
+            key_prefix=(
+                f"{key_prefix}_{selected_row['trade_key']}"
+            ),
+        )
         
 # ==========================================
 # TP / SL REPLAY SEGMENT HELPERS
@@ -9394,6 +9538,17 @@ if selected_section == "btc_correlation":
                         dependency_chart,
                         use_container_width=True,
                     )
+
+                render_single_bucket_trade_explorer(
+                    source_df=available_df,
+                    summary_df=dependency_report,
+                    bucket_col=dependency_col,
+                    bucket_label="BTC dependency classification",
+                    key_prefix=(
+                        "btc_dependency_explorer_"
+                        f"{selected_btc_tf}"
+                    ),
+                )
 
             st.caption(
                 "btc_copied_weak: BTC explica mucho del movimiento "
