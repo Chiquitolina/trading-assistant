@@ -1,6 +1,15 @@
 import json
+import threading
+import time
 
 import redis
+
+# =========================================================
+# CLOSED CANDLE COVERAGE AUDIT
+# =========================================================
+
+COVERAGE_AUDIT_TIMEFRAME = "30m"
+COVERAGE_AUDIT_SETTLE_SECONDS = 15
 
 from engine.live.data.redis_market_data_protocol import (
     CLOSED_CANDLES_STREAM,
@@ -28,9 +37,66 @@ class RedisMarketDataPublisher:
             db=db,
             decode_responses=True,
         )
+        
+        self._coverage_lock = threading.Lock()
+
+        self._closed_candle_coverage = {}
+
+        self._coverage_reported = set()
 
     def ping(self):
         return self.redis.ping()
+    
+    def _register_closed_candle_coverage(
+        self,
+        candle,
+    ):
+        timeframe = str(
+            candle.get("timeframe", "")
+        ).lower()
+
+        if timeframe != COVERAGE_AUDIT_TIMEFRAME:
+            return
+
+        symbol = candle.get("symbol")
+
+        if not symbol:
+            return
+
+        symbol = str(symbol).upper()
+
+        close_ts = candle.get(
+            "close_timestamp"
+        )
+
+        if close_ts is None:
+            return
+
+        try:
+            close_ts = int(close_ts)
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return
+
+        now = time.monotonic()
+
+        with self._coverage_lock:
+            batch = (
+                self._closed_candle_coverage
+                .setdefault(
+                    close_ts,
+                    {
+                        "symbols": set(),
+                        "first_seen_at": now,
+                        "last_seen_at": now,
+                    },
+                )
+            )
+
+            batch["symbols"].add(symbol)
+            batch["last_seen_at"] = now
     
     def publish_market_flow_snapshot(
         self,
@@ -387,7 +453,118 @@ class RedisMarketDataPublisher:
 
         stream_id = results[-1]
 
+        self._register_closed_candle_coverage(
+            candle
+        )
+
         return stream_id
+    
+    def report_closed_candle_coverage(
+        self,
+        expected_symbols,
+    ):
+        now = time.monotonic()
+
+        expected_symbols = {
+            str(symbol).upper()
+            for symbol in expected_symbols
+        }
+
+        reports = []
+
+        with self._coverage_lock:
+            for close_ts in sorted(
+                self._closed_candle_coverage
+            ):
+                if close_ts in self._coverage_reported:
+                    continue
+
+                batch = (
+                    self._closed_candle_coverage[
+                        close_ts
+                    ]
+                )
+
+                age_seconds = (
+                    now
+                    - batch["first_seen_at"]
+                )
+
+                if (
+                    age_seconds
+                    < COVERAGE_AUDIT_SETTLE_SECONDS
+                ):
+                    continue
+
+                received_symbols = set(
+                    batch["symbols"]
+                )
+
+                missing_symbols = sorted(
+                    expected_symbols
+                    - received_symbols
+                )
+
+                reports.append({
+                    "close_ts": close_ts,
+                    "received": len(
+                        received_symbols
+                    ),
+                    "expected": len(
+                        expected_symbols
+                    ),
+                    "missing_symbols": (
+                        missing_symbols
+                    ),
+                    "age_seconds": age_seconds,
+                })
+
+                self._coverage_reported.add(
+                    close_ts
+                )
+
+            if len(self._coverage_reported) > 20:
+                reported_sorted = sorted(
+                    self._coverage_reported
+                )
+
+                keep = set(
+                    reported_sorted[-10:]
+                )
+
+                self._coverage_reported = keep
+
+                self._closed_candle_coverage = {
+                    ts: batch
+                    for ts, batch
+                    in self._closed_candle_coverage.items()
+                    if (
+                        ts in keep
+                        or (
+                            now
+                            - batch["first_seen_at"]
+                            < COVERAGE_AUDIT_SETTLE_SECONDS
+                        )
+                    )
+                }
+
+        for report in reports:
+            missing = report[
+                "missing_symbols"
+            ]
+
+            print(
+                "[PUBLISH TF COVERAGE] "
+                f"tf={COVERAGE_AUDIT_TIMEFRAME} "
+                f"close_ts={report['close_ts']} "
+                f"received={report['received']}/"
+                f"{report['expected']} "
+                f"missing={len(missing)} "
+                f"missing_symbols="
+                f"{','.join(missing) if missing else '-'} "
+                f"waited="
+                f"{report['age_seconds']:.1f}s"
+            )
 
     def _normalize_history_candle(
         self,

@@ -95,6 +95,18 @@ class RedisMarketDataProvider:
 
         self.running = False
         self.stream_cursor = None
+        
+        # ==========================================
+        # CLOSED STREAM DIAGNOSTICS
+        # ==========================================
+        self._stream_diag_lock = threading.Lock()
+
+        self._stream_diag_30m = {}
+
+        self._stream_diag_last_reported_30m = None
+
+        self._stream_diag_xread_calls = 0
+        self._stream_diag_xread_events = 0
 
         self.price_thread = None
         self.closed_thread = None
@@ -774,17 +786,51 @@ class RedisMarketDataProvider:
     def _closed_candle_loop(self):
         while self.running:
             try:
+                cursor_before = self.stream_cursor
+
                 response = self.redis.xread(
                     {
                         CLOSED_CANDLES_STREAM:
-                            self.stream_cursor
+                            cursor_before
                     },
                     count=500,
                     block=1000,
                 )
 
+                self._stream_diag_xread_calls += 1
+
                 if not response:
                     continue
+
+                response_event_count = sum(
+                    len(events)
+                    for _, events in response
+                )
+
+                self._stream_diag_xread_events += (
+                    response_event_count
+                )
+
+                first_event_id = None
+                last_event_id = None
+
+                for _, events in response:
+                    if not events:
+                        continue
+
+                    if first_event_id is None:
+                        first_event_id = events[0][0]
+
+                    last_event_id = events[-1][0]
+
+                print(
+                    "[PROVIDER XREAD] "
+                    f"consumer={self.consumer_name} "
+                    f"cursor_before={cursor_before} "
+                    f"events={response_event_count} "
+                    f"first_id={first_event_id} "
+                    f"last_id={last_event_id}"
+                )
 
                 for _, events in response:
                     for event_id, fields in events:
@@ -804,6 +850,45 @@ class RedisMarketDataProvider:
                             timeframe = str(
                                 payload["timeframe"]
                             ).lower()
+                            
+                            if timeframe == "30m":
+                                close_timestamp = int(
+                                    payload.get(
+                                        "close_timestamp",
+                                        payload.get(
+                                            "timestamp",
+                                            0,
+                                        ),
+                                    )
+                                )
+
+                                with self._stream_diag_lock:
+                                    batch = (
+                                        self._stream_diag_30m
+                                        .setdefault(
+                                            close_timestamp,
+                                            {
+                                                "symbols": set(),
+                                                "events": 0,
+                                                "first_event_id": (
+                                                    event_id
+                                                ),
+                                                "last_event_id": (
+                                                    event_id
+                                                ),
+                                            },
+                                        )
+                                    )
+
+                                    batch["symbols"].add(
+                                        symbol
+                                    )
+
+                                    batch["events"] += 1
+
+                                    batch[
+                                        "last_event_id"
+                                    ] = event_id
 
                             if (
                                 symbol in self.symbols
@@ -839,7 +924,16 @@ class RedisMarketDataProvider:
                                 self.stop_event.set()
 
                                 raise
+                            
+                self._report_stream_30m_coverage()
 
+                print(
+                    "[PROVIDER XREAD APPLIED] "
+                    f"consumer={self.consumer_name} "
+                    f"cursor_before={cursor_before} "
+                    f"cursor_after={self.stream_cursor} "
+                    f"events={response_event_count}"
+                    )
                 self.redis.set(
                     consumer_cursor_key(
                         self.consumer_name
@@ -855,6 +949,89 @@ class RedisMarketDataProvider:
                     )
 
                     self.stop_event.wait(2)
+                    
+    def _report_stream_30m_coverage(self):
+        with self._stream_diag_lock:
+            timestamps = sorted(
+                self._stream_diag_30m
+            )
+
+            if len(timestamps) < 2:
+                return
+
+            # Si ya apareció el siguiente cierre,
+            # consideramos terminado el anterior.
+            close_timestamp = timestamps[-2]
+
+            if (
+                self._stream_diag_last_reported_30m
+                == close_timestamp
+            ):
+                return
+
+            batch = self._stream_diag_30m[
+                close_timestamp
+            ]
+
+            received_symbols = set(
+                batch["symbols"]
+            )
+
+            expected_symbols = set(
+                self.symbols
+            )
+
+            missing_symbols = sorted(
+                expected_symbols
+                - received_symbols
+            )
+
+            extra_symbols = sorted(
+                received_symbols
+                - expected_symbols
+            )
+
+            duplicate_events = (
+                batch["events"]
+                - len(received_symbols)
+            )
+
+            print(
+                "[PROVIDER TF COVERAGE] "
+                f"consumer={self.consumer_name} "
+                f"tf=30m "
+                f"close_ts={close_timestamp} "
+                f"received="
+                f"{len(received_symbols)}/"
+                f"{len(expected_symbols)} "
+                f"events={batch['events']} "
+                f"duplicates={duplicate_events} "
+                f"missing={len(missing_symbols)} "
+                f"extra={len(extra_symbols)} "
+                f"first_id="
+                f"{batch['first_event_id']} "
+                f"last_id="
+                f"{batch['last_event_id']} "
+                f"missing_symbols="
+                f"{','.join(missing_symbols) or '-'}"
+            )
+
+            self._stream_diag_last_reported_30m = (
+                close_timestamp
+            )
+
+            # No necesitamos acumular batches viejos.
+            stale_timestamps = [
+                ts
+                for ts in timestamps
+                if ts < close_timestamp
+            ]
+
+            for ts in stale_timestamps:
+                self._stream_diag_30m.pop(
+                    ts,
+                    None,
+                )
 
     def _emit_price_to_buffer(
         self,

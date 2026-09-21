@@ -176,7 +176,11 @@ class MarketDataService:
                     self.phase = "READY"
                 else:
                     self.phase = "CONNECTING_WS"
-                    
+
+                self.publisher.report_closed_candle_coverage(
+                    expected_symbols=self.symbols
+                )
+
                 self._maybe_publish_market_flow()
 
                 self.stop_event.wait(1)

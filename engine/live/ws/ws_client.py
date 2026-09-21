@@ -4,6 +4,16 @@ import time
 import threading
 from binance import ThreadedWebsocketManager
 
+# =========================================================
+# CLOSED CANDLE COVERAGE AUDIT
+# =========================================================
+
+COVERAGE_AUDIT_TIMEFRAME = "30m"
+
+# Esperamos antes de considerar cerrado el batch.
+# Los cierres de Binance no llegan todos simultáneamente.
+COVERAGE_AUDIT_SETTLE_SECONDS = 15
+
 class WSClient:
     def __init__(self, on_message, timeframes, symbols, stale_after=60, chunk_size=25):
         self.on_message = on_message
@@ -50,6 +60,12 @@ class WSClient:
         self._callback_slow_100ms = 0
         self._last_callback_stats_log = time.time()
         
+        self._coverage_lock = threading.Lock()
+
+        self._closed_candle_coverage = {}
+
+        self._coverage_reported = set()
+        
     def _chunk_list(self, items, size):
         for i in range(0, len(items), size):
             yield items[i:i + size]
@@ -84,7 +100,11 @@ class WSClient:
 
     def run(self):
         while self.running:
-            try:
+
+            try:    
+                
+                self._report_closed_candle_coverage()
+
                 now = time.time()
                 
                 if now - self._last_health_log >= 30:
@@ -294,6 +314,183 @@ class WSClient:
             self.is_connected = False
             self.last_message_at = 0.0
             raise
+        
+    def _register_closed_candle_coverage(
+        self,
+        msg,
+    ):
+        if isinstance(msg, dict) and "data" in msg:
+            payload = msg["data"]
+        else:
+            payload = msg
+
+        if not isinstance(payload, dict):
+            return
+
+        if payload.get("e") not in (
+            "continuous_kline",
+            "kline",
+        ):
+            return
+
+        kline = payload.get("k")
+
+        if not isinstance(kline, dict):
+            return
+
+        timeframe = str(
+            kline.get("i", "")
+        ).lower()
+
+        if timeframe != COVERAGE_AUDIT_TIMEFRAME:
+            return
+
+        if not kline.get("x"):
+            return
+
+        symbol = (
+            payload.get("s")
+            or payload.get("ps")
+        )
+
+        if not symbol:
+            return
+
+        symbol = str(symbol).upper()
+
+        try:
+            close_ts = int(kline["T"])
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            return
+
+        now = time.monotonic()
+
+        with self._coverage_lock:
+            batch = (
+                self._closed_candle_coverage
+                .setdefault(
+                    close_ts,
+                    {
+                        "symbols": set(),
+                        "first_seen_at": now,
+                        "last_seen_at": now,
+                    },
+                )
+            )
+
+            batch["symbols"].add(symbol)
+            batch["last_seen_at"] = now
+            
+    def _report_closed_candle_coverage(
+        self,
+    ):
+        now = time.monotonic()
+
+        expected_symbols = set(
+            str(symbol).upper()
+            for symbol in self.symbols
+        )
+
+        reports = []
+
+        with self._coverage_lock:
+            for close_ts in sorted(
+                self._closed_candle_coverage
+            ):
+                if close_ts in self._coverage_reported:
+                    continue
+
+                batch = (
+                    self._closed_candle_coverage[
+                        close_ts
+                    ]
+                )
+
+                age_seconds = (
+                    now
+                    - batch["first_seen_at"]
+                )
+
+                if (
+                    age_seconds
+                    < COVERAGE_AUDIT_SETTLE_SECONDS
+                ):
+                    continue
+
+                received_symbols = set(
+                    batch["symbols"]
+                )
+
+                missing_symbols = sorted(
+                    expected_symbols
+                    - received_symbols
+                )
+
+                reports.append({
+                    "close_ts": close_ts,
+                    "received": len(
+                        received_symbols
+                    ),
+                    "expected": len(
+                        expected_symbols
+                    ),
+                    "missing_symbols": (
+                        missing_symbols
+                    ),
+                    "age_seconds": (
+                        age_seconds
+                    ),
+                })
+
+                self._coverage_reported.add(
+                    close_ts
+                )
+
+            # No dejamos crecer esto indefinidamente.
+            if len(self._coverage_reported) > 20:
+                reported_sorted = sorted(
+                    self._coverage_reported
+                )
+
+                keep = set(
+                    reported_sorted[-10:]
+                )
+
+                self._coverage_reported = keep
+
+                self._closed_candle_coverage = {
+                    ts: batch
+                    for ts, batch
+                    in self._closed_candle_coverage.items()
+                    if ts in keep
+                    or (
+                        now
+                        - batch["first_seen_at"]
+                        < COVERAGE_AUDIT_SETTLE_SECONDS
+                    )
+                }
+
+        for report in reports:
+            missing = report[
+                "missing_symbols"
+            ]
+
+            print(
+                "[WS TF COVERAGE] "
+                f"tf={COVERAGE_AUDIT_TIMEFRAME} "
+                f"close_ts={report['close_ts']} "
+                f"received={report['received']}/"
+                f"{report['expected']} "
+                f"missing={len(missing)} "
+                f"missing_symbols="
+                f"{','.join(missing) if missing else '-'} "
+                f"waited="
+                f"{report['age_seconds']:.1f}s"
+            )
 
     def _handle_message(self, msg, group_id=None):
         try:
@@ -329,6 +526,10 @@ class WSClient:
                 )
 
             callback_started = time.perf_counter()
+            
+            self._register_closed_candle_coverage(
+                msg
+            )
 
             self.on_message(msg)
 
