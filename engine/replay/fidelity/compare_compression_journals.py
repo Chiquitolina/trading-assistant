@@ -598,6 +598,9 @@ def compare_symbol(
     live_path: Path,
     replay_path: Path,
     show_all: bool = False,
+    comparable_only: bool = False,
+    from_ts: int | None = None,
+    to_ts: int | None = None,
 ):
     live_rows = load_jsonl(live_path)
     replay_rows = load_jsonl(replay_path)
@@ -657,10 +660,39 @@ def compare_symbol(
         f"{len(replay_only_timestamps)}"
     )
 
-    all_timestamps = sorted(
-        set(live_index)
-        | set(replay_index)
+    if comparable_only:
+        selected_timestamps = set(live_index) & set(replay_index)
+    else:
+        selected_timestamps = set(live_index) | set(replay_index)
+
+    if from_ts is not None:
+        selected_timestamps = {
+            ts for ts in selected_timestamps
+            if ts >= from_ts
+        }
+
+    if to_ts is not None:
+        selected_timestamps = {
+            ts for ts in selected_timestamps
+            if ts <= to_ts
+        }
+
+    all_timestamps = sorted(selected_timestamps)
+    print(
+        f"Selected timestamps   : "
+        f"{len(all_timestamps)}"
     )
+
+    print(
+        f"Comparison mode       : "
+        f"{'COMPARABLE ONLY' if comparable_only else 'ALL'}"
+    )
+
+    if from_ts is not None:
+        print(f"From timestamp        : {from_ts}")
+
+    if to_ts is not None:
+        print(f"To timestamp          : {to_ts}")
 
     if not all_timestamps:
         print()
@@ -858,6 +890,35 @@ def main():
         action="store_true",
         help="Print every match and divergence.",
     )
+    
+    parser.add_argument(
+        "--comparable-only",
+        action="store_true",
+        help=(
+            "Compare only market timestamps present "
+            "in both LIVE and REPLAY."
+        ),
+    )
+
+    parser.add_argument(
+        "--from-ts",
+        type=int,
+        default=None,
+        help=(
+            "Ignore evaluations before this market "
+            "timestamp in milliseconds."
+        ),
+    )
+
+    parser.add_argument(
+        "--to-ts",
+        type=int,
+        default=None,
+        help=(
+            "Ignore evaluations after this market "
+            "timestamp in milliseconds."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -882,9 +943,11 @@ def main():
             live_path=live_path,
             replay_path=replay_path,
             show_all=args.all,
+            comparable_only=args.comparable_only,
+            from_ts=args.from_ts,
+            to_ts=args.to_ts,
         )
     )
-
 
 if __name__ == "__main__":
     main()
