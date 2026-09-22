@@ -99,11 +99,17 @@ class RedisMarketDataProvider:
         # ==========================================
         # CLOSED STREAM DIAGNOSTICS
         # ==========================================
+        self._stream_diag_by_tf = {
+            tf: {}
+            for tf in self.timeframes
+        }
+
+        self._stream_diag_last_reported_by_tf = {
+            tf: None
+            for tf in self.timeframes
+        }
+
         self._stream_diag_lock = threading.Lock()
-
-        self._stream_diag_30m = {}
-
-        self._stream_diag_last_reported_30m = None
 
         self._stream_diag_xread_calls = 0
         self._stream_diag_xread_events = 0
@@ -851,7 +857,7 @@ class RedisMarketDataProvider:
                                 payload["timeframe"]
                             ).lower()
                             
-                            if timeframe == "30m":
+                            if timeframe in self._stream_diag_by_tf:
                                 close_timestamp = int(
                                     payload.get(
                                         "close_timestamp",
@@ -863,21 +869,24 @@ class RedisMarketDataProvider:
                                 )
 
                                 with self._stream_diag_lock:
-                                    batch = (
-                                        self._stream_diag_30m
-                                        .setdefault(
-                                            close_timestamp,
-                                            {
-                                                "symbols": set(),
-                                                "events": 0,
-                                                "first_event_id": (
-                                                    event_id
-                                                ),
-                                                "last_event_id": (
-                                                    event_id
-                                                ),
-                                            },
-                                        )
+                                    tf_batches = (
+                                        self._stream_diag_by_tf[
+                                            timeframe
+                                        ]
+                                    )
+
+                                    batch = tf_batches.setdefault(
+                                        close_timestamp,
+                                        {
+                                            "symbols": set(),
+                                            "events": 0,
+                                            "first_event_id": (
+                                                event_id
+                                            ),
+                                            "last_event_id": (
+                                                event_id
+                                            ),
+                                        },
                                     )
 
                                     batch["symbols"].add(
@@ -925,7 +934,7 @@ class RedisMarketDataProvider:
 
                                 raise
                             
-                self._report_stream_30m_coverage()
+                self._report_stream_tf_coverage()
 
                 print(
                     "[PROVIDER XREAD APPLIED] "
@@ -949,89 +958,104 @@ class RedisMarketDataProvider:
                     )
 
                     self.stop_event.wait(2)
-                    
-    def _report_stream_30m_coverage(self):
+                        
+    def _report_stream_tf_coverage(self):
         with self._stream_diag_lock:
-            timestamps = sorted(
-                self._stream_diag_30m
-            )
-
-            if len(timestamps) < 2:
-                return
-
-            # Si ya apareció el siguiente cierre,
-            # consideramos terminado el anterior.
-            close_timestamp = timestamps[-2]
-
-            if (
-                self._stream_diag_last_reported_30m
-                == close_timestamp
+            for timeframe in sorted(
+                self._stream_diag_by_tf
             ):
-                return
-
-            batch = self._stream_diag_30m[
-                close_timestamp
-            ]
-
-            received_symbols = set(
-                batch["symbols"]
-            )
-
-            expected_symbols = set(
-                self.symbols
-            )
-
-            missing_symbols = sorted(
-                expected_symbols
-                - received_symbols
-            )
-
-            extra_symbols = sorted(
-                received_symbols
-                - expected_symbols
-            )
-
-            duplicate_events = (
-                batch["events"]
-                - len(received_symbols)
-            )
-
-            print(
-                "[PROVIDER TF COVERAGE] "
-                f"consumer={self.consumer_name} "
-                f"tf=30m "
-                f"close_ts={close_timestamp} "
-                f"received="
-                f"{len(received_symbols)}/"
-                f"{len(expected_symbols)} "
-                f"events={batch['events']} "
-                f"duplicates={duplicate_events} "
-                f"missing={len(missing_symbols)} "
-                f"extra={len(extra_symbols)} "
-                f"first_id="
-                f"{batch['first_event_id']} "
-                f"last_id="
-                f"{batch['last_event_id']} "
-                f"missing_symbols="
-                f"{','.join(missing_symbols) or '-'}"
-            )
-
-            self._stream_diag_last_reported_30m = (
-                close_timestamp
-            )
-
-            # No necesitamos acumular batches viejos.
-            stale_timestamps = [
-                ts
-                for ts in timestamps
-                if ts < close_timestamp
-            ]
-
-            for ts in stale_timestamps:
-                self._stream_diag_30m.pop(
-                    ts,
-                    None,
+                tf_batches = (
+                    self._stream_diag_by_tf[
+                        timeframe
+                    ]
                 )
+
+                timestamps = sorted(
+                    tf_batches
+                )
+
+                if len(timestamps) < 2:
+                    continue
+
+                # Si apareció el siguiente cierre
+                # de este TF, consideramos
+                # terminado el batch anterior.
+                close_timestamp = (
+                    timestamps[-2]
+                )
+
+                if (
+                    self._stream_diag_last_reported_by_tf[
+                        timeframe
+                    ]
+                    == close_timestamp
+                ):
+                    continue
+
+                batch = tf_batches[
+                    close_timestamp
+                ]
+
+                received_symbols = set(
+                    batch["symbols"]
+                )
+
+                expected_symbols = set(
+                    self.symbols
+                )
+
+                missing_symbols = sorted(
+                    expected_symbols
+                    - received_symbols
+                )
+
+                extra_symbols = sorted(
+                    received_symbols
+                    - expected_symbols
+                )
+
+                duplicate_events = (
+                    batch["events"]
+                    - len(received_symbols)
+                )
+
+                print(
+                    "[PROVIDER TF COVERAGE] "
+                    f"consumer={self.consumer_name} "
+                    f"tf={timeframe} "
+                    f"close_ts={close_timestamp} "
+                    f"received="
+                    f"{len(received_symbols)}/"
+                    f"{len(expected_symbols)} "
+                    f"events={batch['events']} "
+                    f"duplicates={duplicate_events} "
+                    f"missing={len(missing_symbols)} "
+                    f"extra={len(extra_symbols)} "
+                    f"first_id="
+                    f"{batch['first_event_id']} "
+                    f"last_id="
+                    f"{batch['last_event_id']} "
+                    f"missing_symbols="
+                    f"{','.join(missing_symbols) or '-'}"
+                )
+
+                self._stream_diag_last_reported_by_tf[
+                    timeframe
+                ] = close_timestamp
+
+                # No necesitamos conservar
+                # batches ya auditados.
+                stale_timestamps = [
+                    ts
+                    for ts in timestamps
+                    if ts <= close_timestamp
+                ]
+
+                for ts in stale_timestamps:
+                    tf_batches.pop(
+                        ts,
+                        None,
+                    )
 
     def _emit_price_to_buffer(
         self,

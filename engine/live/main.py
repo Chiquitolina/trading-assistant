@@ -121,7 +121,9 @@ logger = BotLogger(debug=DEBUG_LOGS)
 TIMEFRAMES = mode_config["timeframes"]
 TRIGGER_TF = mode_config["trigger_tf"]
 
-BRANCH_LABEL = "lookback-10-base-superpuesta-main-tf-30m"
+BRANCH_LABEL = (
+    f"lookback-10-base-superpuesta-main-tf-{TRIGGER_TF}"
+)
 
 # =========================================================
 # ENV
@@ -727,6 +729,24 @@ try:
         if MARKET_CLOCK_MODE == "replay":
             context_symbols.sort()
             
+        if context_symbols:
+            unique_context_symbols = set(
+                context_symbols
+            )
+
+            duplicate_context_events = (
+                len(context_symbols)
+                - len(unique_context_symbols)
+            )
+
+            print(
+                "[MAIN 1M CONTEXT] "
+                f"events={len(context_symbols)} "
+                f"unique={len(unique_context_symbols)} "
+                f"duplicates={duplicate_context_events} "
+                f"expected={len(set(SYMBOLS))}"
+            )
+            
         # =================================================
         # REPLAY PROTECTIVE ORDER EXECUTION
         # =================================================
@@ -913,9 +933,29 @@ try:
 
         if symbols_to_process:
 
+            unique_symbols_to_process = set(
+                symbols_to_process
+            )
+
+            duplicate_trigger_events = (
+                len(symbols_to_process)
+                - len(unique_symbols_to_process)
+            )
+
+            missing_trigger_symbols = sorted(
+                set(SYMBOLS)
+                - unique_symbols_to_process
+            )
+
             print(
                 f"\033[93m[{TRIGGER_TF} BATCH]\033[0m "
-                f"symbols={len(symbols_to_process)}"
+                f"events={len(symbols_to_process)} "
+                f"unique={len(unique_symbols_to_process)} "
+                f"expected={len(set(SYMBOLS))} "
+                f"duplicates={duplicate_trigger_events} "
+                f"missing={len(missing_trigger_symbols)} "
+                f"missing_symbols="
+                f"{','.join(missing_trigger_symbols) or '-'}"
             )
 
             batch_started = time.perf_counter()
