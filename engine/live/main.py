@@ -792,42 +792,16 @@ try:
 
             for replay_symbol in replay_context_symbols:
 
-                candle = buffer.last_closed_candle(
+                candle = buffer.closed_candle_at(
                     replay_symbol,
                     "1m",
+                    int(replay_boundary_ts),
                 )
 
                 if candle is None:
                     raise RuntimeError(
                         "Replay 1m close event without "
                         f"candle | symbol={replay_symbol}"
-                    )
-                    
-                candle_close_ts = (
-                    buffer.last_ws_close_time[
-                        replay_symbol
-                    ]["1m"]
-                )
-
-                if candle_close_ts is None:
-                    raise RuntimeError(
-                        "Replay 1m candle without "
-                        f"close timestamp | "
-                        f"symbol={replay_symbol}"
-                    )
-
-                if (
-                    int(candle_close_ts)
-                    != int(replay_boundary_ts)
-                ):
-                    raise RuntimeError(
-                        "Replay 1m candle/boundary "
-                        "mismatch | "
-                        f"symbol={replay_symbol} "
-                        f"candle_close="
-                        f"{candle_close_ts} "
-                        f"boundary="
-                        f"{replay_boundary_ts}"
                     )
 
                 exit_event = exchange.process_candle(
@@ -1077,26 +1051,33 @@ try:
                 # =================================================
                 # 1. SNAPSHOT + SIGNAL GENERATION (PRIMERO SIEMPRE)
                 # =================================================
-                close_price = buffer.last_price(symbol)
-                closed_candle_ts = buffer.last_ws_close_time[symbol][TRIGGER_TF]
-                
-                if closed_candle_ts:
-
-                    current_boundary_ts = int(
-                        closed_candle_ts
+                if trigger_batch_boundary_ts is None:
+                    raise RuntimeError(
+                        "Trigger batch without boundary | "
+                        f"symbol={symbol}"
                     )
 
-                    if (
-                        trigger_batch_boundary_ts is not None
-                        and current_boundary_ts
-                        != int(trigger_batch_boundary_ts)
-                    ):
-                        raise RuntimeError(
-                            "Trigger candle/batch boundary mismatch | "
-                            f"symbol={symbol} "
-                            f"candle_close={current_boundary_ts} "
-                            f"batch_boundary={trigger_batch_boundary_ts}"
-                        )
+                closed_candle_ts = int(
+                    trigger_batch_boundary_ts
+                )
+
+                trigger_candle = buffer.closed_candle_at(
+                    symbol,
+                    TRIGGER_TF,
+                    closed_candle_ts,
+                )
+
+                if trigger_candle is None:
+                    raise RuntimeError(
+                        "Trigger candle missing for batch boundary | "
+                        f"symbol={symbol} "
+                        f"tf={TRIGGER_TF} "
+                        f"boundary={closed_candle_ts}"
+                    )
+
+                close_price = float(
+                    trigger_candle["close"]
+                )
                 
                 # =================================================
                 # COMPRESSION SNAPSHOT LIVE

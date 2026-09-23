@@ -34,6 +34,13 @@ class DataBuffer:
                 for tf in self.timeframes
             }
         )
+        
+        self.closed_candles_by_boundary = defaultdict(
+            lambda: {
+                tf: {}
+                for tf in self.timeframes
+            }
+        )
 
     def _normalize_symbol(self, symbol):
         if not symbol:
@@ -95,6 +102,10 @@ class DataBuffer:
             "quoteVolume": float(k.get("q", 0)),
             "closed_at": datetime.utcfromtimestamp(close_time / 1000),
         }
+        
+        self.closed_candles_by_boundary[symbol][tf][
+            close_time
+        ] = candle
 
         if (
             self.buffers[symbol][tf]
@@ -183,6 +194,20 @@ class DataBuffer:
             return None
 
         return self.buffers[symbol][tf][-1]
+    
+    def closed_candle_at(
+        self,
+        symbol: str,
+        tf: str,
+        close_time: int,
+    ):
+        symbol = self._normalize_symbol(symbol)
+
+        return (
+            self.closed_candles_by_boundary[
+                symbol
+            ][tf].get(int(close_time))
+        )
 
     def get_candles(self, symbol: str, tf: str):
         symbol = self._normalize_symbol(symbol)
@@ -221,6 +246,10 @@ class DataBuffer:
             ),
             "closed_at": datetime.utcfromtimestamp(close_time / 1000),
         }
+        
+        self.closed_candles_by_boundary[symbol][tf][
+            close_time
+        ] = formatted   
 
         self.buffers[symbol][tf].append(formatted)
         self.last_close_time[symbol][tf] = close_time
