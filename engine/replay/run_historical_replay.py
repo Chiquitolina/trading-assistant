@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from config.strategies.v1 import SYMBOLS
-from config.timeframes import MODE_CONFIG
+from config.timeframes import MODE_CONFIG, MAIN_TF
 
 from data.market_data import fetch_futures_klines_range
 
@@ -27,7 +27,7 @@ TIMEFRAMES = MODE_CONFIG[
 ]["timeframes"]
 
 CONSUMER_NAME = (
-    "lookback-10-base-superpuesta-main-tf-30m"
+    f"lookback-10-base-superpuesta-main-tf-{MAIN_TF}"
 )
 
 DAYS_BY_TF = {
