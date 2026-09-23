@@ -107,7 +107,9 @@ class DataBuffer:
         self.last_close_time[symbol][tf] = open_time
         self.last_ws_close_time[symbol][tf] = close_time
         with self.closed_events_lock:
-            self.closed_events.add((symbol, tf))
+            self.closed_events.add(
+                (symbol, tf, close_time)
+            )
 
         #print(
         #    f"\033[94m[DATA LAYER]\033[0m "
@@ -119,22 +121,32 @@ class DataBuffer:
     # ==========================================
     def consume_closed_tf(self, symbol: str, tf: str) -> bool:
         symbol = self._normalize_symbol(symbol)
-        event = (symbol, tf)
 
         with self.closed_events_lock:
-            if event in self.closed_events:
-                self.closed_events.remove(event)
-                return True
+            for event in tuple(self.closed_events):
+                event_symbol, event_tf, _ = event
+
+                if (
+                    event_symbol == symbol
+                    and event_tf == tf
+                ):
+                    self.closed_events.remove(event)
+                    return True
 
         return False
 
-
     def consume_any_closed_tf(self, tf: str):
         with self.closed_events_lock:
-            for symbol, closed_tf in tuple(self.closed_events):
+            for event in tuple(self.closed_events):
+                symbol, closed_tf, close_time = event
+
                 if closed_tf == tf:
-                    self.closed_events.remove((symbol, closed_tf))
-                    return symbol
+                    self.closed_events.remove(event)
+
+                    return (
+                        symbol,
+                        close_time,
+                    )
 
         return None
 
@@ -213,7 +225,9 @@ class DataBuffer:
         self.buffers[symbol][tf].append(formatted)
         self.last_close_time[symbol][tf] = close_time
         with self.closed_events_lock:
-            self.closed_events.add((symbol, tf))
+            self.closed_events.add(
+                (symbol, tf, close_time)
+            )
 
         print(
             f"\033[95m[REPLAY DATA]\033[0m "

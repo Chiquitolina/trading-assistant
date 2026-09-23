@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 import os
 import time
 import argparse
+from collections import defaultdict
 
 from engine.live.journal.compression_watch_journal import CompressionWatchJournal
 
@@ -543,6 +544,7 @@ else:
 market_data.start()
 
 last_replay_boundary_ts = None
+last_replay_context_processed_ts = None
 
 
 def get_replay_boundary():
@@ -662,8 +664,11 @@ def write_heartbeat():
 # =========================================================
 
 try:
-    
+
     max_trigger_queue = 0
+
+    pending_context_batches = defaultdict(set)
+    pending_trigger_batches = defaultdict(set)
 
     while True:
 
@@ -712,22 +717,54 @@ try:
         # 1m CONTEXT UPDATE
         # =================================================
 
-        context_symbols = []
+        context_events = []
 
         while True:
-            context_symbol = (
+            context_event = (
                 buffer.consume_any_closed_tf("1m")
             )
 
-            if not context_symbol:
+            if not context_event:
                 break
 
-            context_symbols.append(
-                context_symbol
+            context_events.append(
+                context_event
             )
 
         if MARKET_CLOCK_MODE == "replay":
-            context_symbols.sort()
+            context_events.sort(
+                key=lambda item: (
+                    item[1],
+                    item[0],
+                )
+            )
+
+        for context_symbol, context_close_time in context_events:
+            pending_context_batches[
+                int(context_close_time)
+            ].add(context_symbol)
+            
+        replay_context_symbols = []
+
+        if IS_REPLAY:
+            replay_context_boundary = pending_context_batches.get(
+                int(replay_boundary_ts),
+                set(),
+            )
+
+            if (
+                replay_context_boundary == set(SYMBOLS)
+                and last_replay_context_processed_ts
+                != int(replay_boundary_ts)
+            ):
+                replay_context_symbols = sorted(
+                    replay_context_boundary
+                )
+            
+        context_symbols = [
+            symbol
+            for symbol, _ in context_events
+        ]
             
         if context_symbols:
             unique_context_symbols = set(
@@ -753,7 +790,7 @@ try:
 
         if IS_REPLAY:
 
-            for replay_symbol in context_symbols:
+            for replay_symbol in replay_context_symbols:
 
                 candle = buffer.last_closed_candle(
                     replay_symbol,
@@ -816,6 +853,11 @@ try:
                     execution.handle_replay_exit(
                         exit_event
                     )
+                    
+            if replay_context_symbols:
+                last_replay_context_processed_ts = int(
+                    replay_boundary_ts
+                )
                     
         # =================================================
         # PRICE UPDATE
@@ -894,7 +936,7 @@ try:
 
         pending_trigger = sum(
             1
-            for _, tf in closed_events_snapshot
+            for _, tf, _ in closed_events_snapshot
             if tf == TRIGGER_TF
         )
 
@@ -906,30 +948,90 @@ try:
                 f"pending={pending_trigger} max={max_trigger_queue}"
             )
 
+        # =================================================
+        # BUILD TRIGGER BATCHES BY CANDLE BOUNDARY
+        # =================================================
+
         if TRIGGER_TF == "1m":
-            symbols_to_process = list(
-                context_symbols
-            )
+
+            # Los eventos 1m ya fueron consumidos arriba y agrupados
+            # por close_time en pending_context_batches.
+            for boundary_ts, symbols in pending_context_batches.items():
+                pending_trigger_batches[
+                    int(boundary_ts)
+                ].update(symbols)
+
+            pending_context_batches.clear()
 
         else:
-            symbols_to_process = []
 
             while True:
-                symbol = (
+                trigger_event = (
                     buffer.consume_any_closed_tf(
                         TRIGGER_TF
                     )
                 )
 
-                if not symbol:
+                if not trigger_event:
                     break
 
-                symbols_to_process.append(
-                    symbol
-                )
+                trigger_symbol, trigger_close_time = trigger_event
+
+                pending_trigger_batches[
+                    int(trigger_close_time)
+                ].add(trigger_symbol)
+
+
+        symbols_to_process = []
+        trigger_batch_boundary_ts = None
+        
+        replay_boundary_complete = False
+
+
+        # =================================================
+        # SELECT BOUNDARY TO PROCESS
+        # =================================================
 
         if MARKET_CLOCK_MODE == "replay":
-            symbols_to_process.sort()
+
+            # En replay SOLO procesamos el boundary que el replay
+            # engine declaró listo.
+            trigger_batch_boundary_ts = int(
+                replay_boundary_ts
+            )
+
+            expected_symbols = set(SYMBOLS)
+
+            boundary_symbols = pending_trigger_batches.get(
+                trigger_batch_boundary_ts,
+                set(),
+            )
+
+            replay_boundary_complete = (
+                boundary_symbols == expected_symbols
+            )
+
+            if replay_boundary_complete:
+                symbols_to_process = sorted(
+                    pending_trigger_batches.pop(
+                        trigger_batch_boundary_ts
+                    )
+                )
+
+        else:
+
+            # En live procesamos el boundary más viejo disponible.
+            if pending_trigger_batches:
+
+                trigger_batch_boundary_ts = min(
+                    pending_trigger_batches
+                )
+
+                symbols_to_process = sorted(
+                    pending_trigger_batches.pop(
+                        trigger_batch_boundary_ts
+                    )
+                )
 
         if symbols_to_process:
 
@@ -965,8 +1067,6 @@ try:
             if STRATEGY_MODE == "compression":
                 compression_strategy.reset_stats()
                 
-            processed_boundary_ts = None
-
             for symbol in symbols_to_process:
 
                 logger.debug(
@@ -981,25 +1081,21 @@ try:
                 closed_candle_ts = buffer.last_ws_close_time[symbol][TRIGGER_TF]
                 
                 if closed_candle_ts:
+
                     current_boundary_ts = int(
                         closed_candle_ts
                     )
 
-                    if processed_boundary_ts is None:
-                        processed_boundary_ts = (
-                            current_boundary_ts
-                        )
-
-                    elif (
-                        MARKET_CLOCK_MODE == "replay"
+                    if (
+                        trigger_batch_boundary_ts is not None
                         and current_boundary_ts
-                        != processed_boundary_ts
+                        != int(trigger_batch_boundary_ts)
                     ):
                         raise RuntimeError(
-                            "Mixed replay boundaries in "
-                            f"same trigger batch: "
-                            f"{processed_boundary_ts} vs "
-                            f"{current_boundary_ts}"
+                            "Trigger candle/batch boundary mismatch | "
+                            f"symbol={symbol} "
+                            f"candle_close={current_boundary_ts} "
+                            f"batch_boundary={trigger_batch_boundary_ts}"
                         )
                 
                 # =================================================
@@ -1451,6 +1547,7 @@ try:
         if (
             MARKET_DATA_PROVIDER == "redis"
             and MARKET_CLOCK_MODE == "replay"
+            and replay_boundary_complete
         ):
             publish_replay_engine_ack(
                 replay_boundary_ts
