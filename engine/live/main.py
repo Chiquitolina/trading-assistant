@@ -14,6 +14,10 @@ from engine.live.research.volume_exhaustion_collector import (
     VolumeExhaustionCollector,
 )
 
+from engine.live.research.volume_exhaustion_outcome_tracker import (
+    VolumeExhaustionOutcomeTracker,
+)
+
 import json
 from pathlib import Path
 
@@ -221,6 +225,14 @@ volume_exhaustion_collector = (
         baseline_lookback=30,
         min_relative_volume=2.0,
         rsi_period=14,
+    )
+)
+
+volume_exhaustion_outcome_tracker = (
+    VolumeExhaustionOutcomeTracker(
+        outcomes_path=(
+            "volume_exhaustion_outcomes.csv"
+        ),
     )
 )
 
@@ -754,16 +766,78 @@ try:
             )
 
         for context_symbol, context_close_time in context_events:
+            context_close_time = int(
+                context_close_time
+            )
+
             pending_context_batches[
-                int(context_close_time)
+                context_close_time
             ].add(context_symbol)
-            
-            event = volume_exhaustion_collector.evaluate(
-                symbol=context_symbol,
-                close_time=int(context_close_time),
+
+            # ==========================================
+            # VOLUME EXHAUSTION OUTCOMES
+            # ==========================================
+            #
+            # IMPORTANTE:
+            # Primero actualizamos eventos ANTERIORES
+            # con esta nueva vela.
+            #
+            # Después evaluamos si esta misma vela
+            # crea un evento NUEVO.
+            #
+            # De esta forma T0 nunca cuenta como T+1.
+            # ==========================================
+
+            context_candle = (
+                buffer.closed_candle_at(
+                    context_symbol,
+                    "1m",
+                    context_close_time,
+                )
+            )
+
+            if context_candle is not None:
+
+                completed_outcomes = (
+                    volume_exhaustion_outcome_tracker
+                    .on_candle(
+                        symbol=context_symbol,
+                        close_time=context_close_time,
+                        candle=context_candle,
+                    )
+                )
+
+                for outcome in completed_outcomes:
+                    print(
+                        "[VOLUME EXHAUSTION OUTCOME] "
+                        f"symbol={outcome['symbol']} "
+                        f"side={outcome['potential_side']} "
+                        f"r5={outcome['return_5m_pct']:.3f}% "
+                        f"mfe5={outcome['mfe_5m_pct']:.3f}% "
+                        f"mae5={outcome['mae_5m_pct']:.3f}% "
+                        f"r30={outcome['return_30m_pct']:.3f}% "
+                        f"mfe30={outcome['mfe_30m_pct']:.3f}% "
+                        f"mae30={outcome['mae_30m_pct']:.3f}%"
+                    )
+
+            # ==========================================
+            # DETECT NEW EVENT
+            # ==========================================
+
+            event = (
+                volume_exhaustion_collector.evaluate(
+                    symbol=context_symbol,
+                    close_time=context_close_time,
+                )
             )
 
             if event:
+
+                registered = (
+                    volume_exhaustion_outcome_tracker
+                    .register(event)
+                )
+
                 print(
                     "[VOLUME EXHAUSTION CANDIDATE] "
                     f"symbol={event['symbol']} "
@@ -775,9 +849,10 @@ try:
                     f"move5m={event['move_5m_pct']:.3f}% "
                     f"rsi={event['rsi_1m']:.1f} "
                     f"closeLoc={event['close_location']:.2f} "
-                    f"eff3m={event['efficiency_3m']:.4f}"
+                    f"eff3m={event['efficiency_3m']:.4f} "
+                    f"tracking={registered}"
                 )
-            
+ 
         replay_context_symbols = []
 
         if IS_REPLAY:
