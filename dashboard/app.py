@@ -7590,7 +7590,7 @@ def load_volume_exhaustion_events():
 def build_volume_exhaustion_chart(
     candles,
     event_row,
-    swing_points=None,
+    swing_points_by_timeframe=None,
 ):
     candles = candles.copy()
 
@@ -7624,95 +7624,98 @@ def build_volume_exhaustion_chart(
         )
     )
 
-    if swing_points:
-        swing_highs = [
-            point
-            for point in swing_points
-            if point.side == "HIGH"
-        ]
-        swing_lows = [
-            point
-            for point in swing_points
-            if point.side == "LOW"
-        ]
+    if swing_points_by_timeframe:
+        for swing_timeframe, swing_points in (
+            swing_points_by_timeframe.items()
+        ):
+            swing_highs = [
+                point
+                for point in swing_points
+                if point.side == "HIGH"
+            ]
+            swing_lows = [
+                point
+                for point in swing_points
+                if point.side == "LOW"
+            ]
 
-        if swing_highs:
-            fig.add_trace(
-                go.Scatter(
-                    x=[
-                        pd.to_datetime(
-                            point.pivot_timestamp,
-                            unit="ms",
-                            utc=True,
-                        ).tz_convert(TZ)
-                        for point in swing_highs
-                    ],
-                    y=[
-                        point.price
-                        for point in swing_highs
-                    ],
-                    mode="markers",
-                    marker={
-                        "size": 10,
-                        "symbol": "triangle-down",
-                    },
-                    name="Swing high",
-                    customdata=[
-                        [
-                            point.confirmed_timestamp,
-                            point.prominence_pct,
-                        ]
-                        for point in swing_highs
-                    ],
-                    hovertemplate=(
-                        "<b>Swing high</b><br>"
-                        "Pivot: %{x}<br>"
-                        "Price: %{y:.8f}<br>"
-                        "Confirmed ms: %{customdata[0]}<br>"
-                        "Prominence: %{customdata[1]:.4f}%"
-                        "<extra></extra>"
-                    ),
+            if swing_highs:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[
+                            pd.to_datetime(
+                                point.pivot_timestamp,
+                                unit="ms",
+                                utc=True,
+                            ).tz_convert(TZ)
+                            for point in swing_highs
+                        ],
+                        y=[
+                            point.price
+                            for point in swing_highs
+                        ],
+                        mode="markers",
+                        marker={
+                            "size": 10,
+                            "symbol": "triangle-down",
+                        },
+                        name=f"Swing high {swing_timeframe}",
+                        customdata=[
+                            [
+                                point.confirmed_timestamp,
+                                point.prominence_pct,
+                            ]
+                            for point in swing_highs
+                        ],
+                        hovertemplate=(
+                            f"<b>Swing high {swing_timeframe}</b><br>"
+                            "Pivot: %{x}<br>"
+                            "Price: %{y:.8f}<br>"
+                            "Confirmed ms: %{customdata[0]}<br>"
+                            "Prominence: %{customdata[1]:.4f}%"
+                            "<extra></extra>"
+                        ),
+                    )
                 )
-            )
 
-        if swing_lows:
-            fig.add_trace(
-                go.Scatter(
-                    x=[
-                        pd.to_datetime(
-                            point.pivot_timestamp,
-                            unit="ms",
-                            utc=True,
-                        ).tz_convert(TZ)
-                        for point in swing_lows
-                    ],
-                    y=[
-                        point.price
-                        for point in swing_lows
-                    ],
-                    mode="markers",
-                    marker={
-                        "size": 10,
-                        "symbol": "triangle-up",
-                    },
-                    name="Swing low",
-                    customdata=[
-                        [
-                            point.confirmed_timestamp,
-                            point.prominence_pct,
-                        ]
-                        for point in swing_lows
-                    ],
-                    hovertemplate=(
-                        "<b>Swing low</b><br>"
-                        "Pivot: %{x}<br>"
-                        "Price: %{y:.8f}<br>"
-                        "Confirmed ms: %{customdata[0]}<br>"
-                        "Prominence: %{customdata[1]:.4f}%"
-                        "<extra></extra>"
-                    ),
+            if swing_lows:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[
+                            pd.to_datetime(
+                                point.pivot_timestamp,
+                                unit="ms",
+                                utc=True,
+                            ).tz_convert(TZ)
+                            for point in swing_lows
+                        ],
+                        y=[
+                            point.price
+                            for point in swing_lows
+                        ],
+                        mode="markers",
+                        marker={
+                            "size": 10,
+                            "symbol": "triangle-up",
+                        },
+                        name=f"Swing low {swing_timeframe}",
+                        customdata=[
+                            [
+                                point.confirmed_timestamp,
+                                point.prominence_pct,
+                            ]
+                            for point in swing_lows
+                        ],
+                        hovertemplate=(
+                            f"<b>Swing low {swing_timeframe}</b><br>"
+                            "Pivot: %{x}<br>"
+                            "Price: %{y:.8f}<br>"
+                            "Confirmed ms: %{customdata[0]}<br>"
+                            "Prominence: %{customdata[1]:.4f}%"
+                            "<extra></extra>"
+                        ),
+                    )
                 )
-            )
 
     event_timestamp = event_row.get(
         "candle_open_timestamp"
@@ -8066,7 +8069,7 @@ if selected_section == "volume_exhaustion":
             swing_window = st.selectbox(
                 "Swing detector",
                 ["2x2", "3x3", "5x5"],
-                index=1,
+                index=2,
                 key="volume_exhaustion_swing_window",
             )
 
@@ -8079,6 +8082,13 @@ if selected_section == "volume_exhaustion":
                 format="%.2f",
                 key="volume_exhaustion_swing_prominence",
             )
+
+        swing_timeframes = st.multiselect(
+            "Swing timeframes",
+            options=["1m", "5m", "15m", "30m", "1h"],
+            default=["1m", "5m", "15m"],
+            key="volume_exhaustion_swing_timeframes",
+        )
 
         candle_limit = st.slider(
             "1m candles",
@@ -8132,7 +8142,7 @@ if selected_section == "volume_exhaustion":
                     "are no longer in this live buffer."
                 )
 
-        swing_points = []
+        swing_points_by_timeframe = {}
         last_swing_high = None
         last_swing_low = None
 
@@ -8148,31 +8158,57 @@ if selected_section == "volume_exhaustion":
                 ),
             )
 
-            swing_candles = candles.to_dict(
-                orient="records"
-            )
-            swing_points = swing_detector.detect_all(
-                swing_candles
-            )
+            for swing_timeframe in swing_timeframes:
+                if swing_timeframe == "1m":
+                    swing_tf_candles_df = candles
+                else:
+                    swing_tf_candles_df = (
+                        geometry_scanner_data_service
+                        .get_closed_candles(
+                            symbol=selected_symbol,
+                            timeframe=swing_timeframe,
+                            limit=400,
+                        )
+                    )
 
-            if pd.notna(event_ts):
-                last_swing_high = (
-                    swing_detector.last_confirmed_high(
-                        swing_candles,
-                        as_of_timestamp=int(event_ts),
+                if swing_tf_candles_df.empty:
+                    continue
+
+                swing_tf_candles = (
+                    swing_tf_candles_df.to_dict(
+                        orient="records"
                     )
                 )
-                last_swing_low = (
-                    swing_detector.last_confirmed_low(
-                        swing_candles,
-                        as_of_timestamp=int(event_ts),
-                    )
+
+                swing_points_by_timeframe[
+                    swing_timeframe
+                ] = swing_detector.detect_all(
+                    swing_tf_candles
                 )
+
+                # Keep the existing Structure at event metrics
+                # tied to the 1m swing context.
+                if (
+                    swing_timeframe == "1m"
+                    and pd.notna(event_ts)
+                ):
+                    last_swing_high = (
+                        swing_detector.last_confirmed_high(
+                            swing_tf_candles,
+                            as_of_timestamp=int(event_ts),
+                        )
+                    )
+                    last_swing_low = (
+                        swing_detector.last_confirmed_low(
+                            swing_tf_candles,
+                            as_of_timestamp=int(event_ts),
+                        )
+                    )
 
         figure = build_volume_exhaustion_chart(
             candles=candles,
             event_row=selected_event,
-            swing_points=swing_points,
+            swing_points_by_timeframe=swing_points_by_timeframe,
         )
 
         st.plotly_chart(
