@@ -8165,7 +8165,7 @@ if selected_section == "volume_exhaustion":
         candle_limit = st.slider(
             "1m candles",
             min_value=60,
-            max_value=400,
+            max_value=2000,
             value=180,
             step=20,
             key="volume_exhaustion_candle_limit",
@@ -8215,8 +8215,7 @@ if selected_section == "volume_exhaustion":
                 )
 
         swing_points_by_timeframe = {}
-        last_swing_high = None
-        last_swing_low = None
+        swing_structure_at_event = {}
 
         if show_swings:
             swing_bars = int(
@@ -8258,24 +8257,25 @@ if selected_section == "volume_exhaustion":
                     swing_tf_candles
                 )
 
-                # Keep the existing Structure at event metrics
-                # tied to the 1m swing context.
-                if (
-                    swing_timeframe == "1m"
-                    and pd.notna(event_ts)
-                ):
-                    last_swing_high = (
-                        swing_detector.last_confirmed_high(
-                            swing_tf_candles,
-                            as_of_timestamp=int(event_ts),
-                        )
-                    )
-                    last_swing_low = (
-                        swing_detector.last_confirmed_low(
-                            swing_tf_candles,
-                            as_of_timestamp=int(event_ts),
-                        )
-                    )
+                if pd.notna(event_ts):
+                    swing_structure_at_event[
+                        swing_timeframe
+                    ] = {
+                        "high": (
+                            swing_detector
+                            .last_confirmed_high(
+                                swing_tf_candles,
+                                as_of_timestamp=int(event_ts),
+                            )
+                        ),
+                        "low": (
+                            swing_detector
+                            .last_confirmed_low(
+                                swing_tf_candles,
+                                as_of_timestamp=int(event_ts),
+                            )
+                        ),
+                    }
 
         figure = build_volume_exhaustion_chart(
             candles=candles,
@@ -8311,102 +8311,218 @@ if selected_section == "volume_exhaustion":
         if show_swings:
             st.markdown("### Structure at event")
 
-            structure_1, structure_2, structure_3, structure_4 = (
-                st.columns(4)
-            )
-
             event_price = selected_event.get("close")
+            structure_rows = []
+
+            timeframe_ms = {
+                "1m": 60_000,
+                "5m": 5 * 60_000,
+                "15m": 15 * 60_000,
+                "30m": 30 * 60_000,
+                "1h": 60 * 60_000,
+            }
 
             if (
-                last_swing_low is not None
+                pd.notna(event_ts)
                 and pd.notna(event_price)
             ):
-                low_distance_pct = (
-                    (
-                        float(event_price)
-                        - float(last_swing_low.price)
-                    )
-                    / float(last_swing_low.price)
-                    * 100.0
-                )
-                low_age_candles = max(
-                    0,
-                    int(
-                        (
-                            int(event_ts)
-                            - int(
-                                last_swing_low
-                                .pivot_timestamp
-                            )
+                event_price_float = float(event_price)
+
+                for swing_timeframe in swing_timeframes:
+                    structure = (
+                        swing_structure_at_event.get(
+                            swing_timeframe,
+                            {},
                         )
-                        // 60_000
-                    ),
-                )
-                structure_1.metric(
-                    "Last swing low",
-                    f"{float(last_swing_low.price):.8f}",
-                )
-                structure_2.metric(
-                    "Distance swing low",
-                    f"{low_distance_pct:+.3f}%",
-                )
-                structure_2.caption(
-                    f"Age: {low_age_candles} candles"
-                )
-            else:
-                structure_1.metric(
-                    "Last swing low",
-                    "—",
-                )
-                structure_2.metric(
-                    "Distance swing low",
-                    "—",
+                    )
+
+                    for side_label, side_key in (
+                        ("LOW", "low"),
+                        ("HIGH", "high"),
+                    ):
+                        swing_point = structure.get(side_key)
+
+                        if swing_point is None:
+                            continue
+
+                        swing_price = float(swing_point.price)
+                        distance_pct = (
+                            (
+                                event_price_float
+                                - swing_price
+                            )
+                            / swing_price
+                            * 100.0
+                        )
+
+                        bar_ms = timeframe_ms.get(
+                            swing_timeframe
+                        )
+                        age_bars = None
+
+                        if bar_ms:
+                            age_bars = max(
+                                0,
+                                int(
+                                    (
+                                        int(event_ts)
+                                        - int(
+                                            swing_point
+                                            .pivot_timestamp
+                                        )
+                                    )
+                                    // bar_ms
+                                ),
+                            )
+
+                        structure_rows.append({
+                            "timeframe": swing_timeframe,
+                            "side": side_label,
+                            "swing_price": swing_price,
+                            "distance_pct": distance_pct,
+                            "abs_distance_pct": abs(distance_pct),
+                            "age_bars": age_bars,
+                            "pivot_time": (
+                                pd.to_datetime(
+                                    int(
+                                        swing_point
+                                        .pivot_timestamp
+                                    ),
+                                    unit="ms",
+                                    utc=True,
+                                )
+                                .tz_convert(TZ)
+                                .strftime("%Y-%m-%d %H:%M")
+                            ),
+                            "confirmed_time": (
+                                pd.to_datetime(
+                                    int(
+                                        swing_point
+                                        .confirmed_timestamp
+                                    ),
+                                    unit="ms",
+                                    utc=True,
+                                )
+                                .tz_convert(TZ)
+                                .strftime("%Y-%m-%d %H:%M")
+                            ),
+                        })
+
+            if structure_rows:
+                structure_df = pd.DataFrame(structure_rows)
+
+                display_structure_df = structure_df[
+                    [
+                        "timeframe",
+                        "side",
+                        "swing_price",
+                        "distance_pct",
+                        "age_bars",
+                        "pivot_time",
+                        "confirmed_time",
+                    ]
+                ].copy()
+
+                display_structure_df[
+                    "swing_price"
+                ] = display_structure_df[
+                    "swing_price"
+                ].round(8)
+
+                display_structure_df[
+                    "distance_pct"
+                ] = display_structure_df[
+                    "distance_pct"
+                ].round(4)
+
+                st.dataframe(
+                    display_structure_df,
+                    use_container_width=True,
+                    hide_index=True,
                 )
 
-            if (
-                last_swing_high is not None
-                and pd.notna(event_price)
-            ):
-                high_distance_pct = (
-                    (
-                        float(event_price)
-                        - float(last_swing_high.price)
-                    )
-                    / float(last_swing_high.price)
-                    * 100.0
+                st.caption(
+                    "Confluence is descriptive only. "
+                    "The threshold is adjustable for research "
+                    "and is not a trading filter."
                 )
-                high_age_candles = max(
-                    0,
-                    int(
-                        (
-                            int(event_ts)
-                            - int(
-                                last_swing_high
-                                .pivot_timestamp
-                            )
-                        )
-                        // 60_000
+
+                confluence_threshold_pct = st.number_input(
+                    "Swing confluence distance %",
+                    min_value=0.0,
+                    value=0.20,
+                    step=0.05,
+                    format="%.2f",
+                    key=(
+                        "volume_exhaustion_"
+                        "swing_confluence_distance"
                     ),
                 )
-                structure_3.metric(
-                    "Last swing high",
-                    f"{float(last_swing_high.price):.8f}",
+
+                low_confluence = int(
+                    (
+                        structure_df["side"].eq("LOW")
+                        & structure_df[
+                            "abs_distance_pct"
+                        ].le(
+                            float(confluence_threshold_pct)
+                        )
+                    ).sum()
                 )
-                structure_4.metric(
-                    "Distance swing high",
-                    f"{high_distance_pct:+.3f}%",
+
+                high_confluence = int(
+                    (
+                        structure_df["side"].eq("HIGH")
+                        & structure_df[
+                            "abs_distance_pct"
+                        ].le(
+                            float(confluence_threshold_pct)
+                        )
+                    ).sum()
                 )
-                structure_4.caption(
-                    f"Age: {high_age_candles} candles"
+
+                conf_1, conf_2, conf_3 = st.columns(3)
+
+                conf_1.metric(
+                    "LOW confluence",
+                    low_confluence,
                 )
+                conf_2.metric(
+                    "HIGH confluence",
+                    high_confluence,
+                )
+                conf_3.metric(
+                    "Threshold",
+                    f"{float(confluence_threshold_pct):.2f}%",
+                )
+
+                selected_potential_side = str(
+                    selected_event.get(
+                        "potential_side",
+                        "NEUTRAL",
+                    )
+                )
+
+                if selected_potential_side == "LONG":
+                    st.caption(
+                        "LONG research context: "
+                        f"{low_confluence} selected timeframe(s) "
+                        "have a confirmed swing LOW within "
+                        f"{float(confluence_threshold_pct):.2f}% "
+                        "of the event price."
+                    )
+                elif selected_potential_side == "SHORT":
+                    st.caption(
+                        "SHORT research context: "
+                        f"{high_confluence} selected timeframe(s) "
+                        "have a confirmed swing HIGH within "
+                        f"{float(confluence_threshold_pct):.2f}% "
+                        "of the event price."
+                    )
             else:
-                structure_3.metric(
-                    "Last swing high",
-                    "—",
-                )
-                structure_4.metric(
-                    "Distance swing high",
-                    "—",
+                st.info(
+                    "No confirmed swing structure is available "
+                    "for the selected event and timeframes."
                 )
 
             st.caption(
