@@ -23,26 +23,83 @@ class VolumeExhaustionCollector:
 
         self.events_detected = 0
 
-    def evaluate(self, symbol: str):
+        # Último boundary procesado por símbolo.
+        # Evita procesar dos o más veces la misma vela.
+        self._last_processed_close_time = {}
+
+    def evaluate(
+        self,
+        symbol: str,
+        close_time: int,
+    ):
+        symbol = str(symbol).upper()
+        close_time = int(close_time)
+
+        # ==========================================
+        # IDEMPOTENCIA
+        # ==========================================
+        last_processed = (
+            self._last_processed_close_time.get(symbol)
+        )
+
+        if (
+            last_processed is not None
+            and close_time <= last_processed
+        ):
+            return None
+
+        # ==========================================
+        # VELA EXACTA DEL EVENTO
+        # ==========================================
+        current = self.buffer.closed_candle_at(
+            symbol,
+            self.timeframe,
+            close_time,
+        )
+
+        if current is None:
+            return None
+
+        # Marcamos este boundary como procesado
+        # solamente después de comprobar que existe.
+        self._last_processed_close_time[symbol] = (
+            close_time
+        )
+
+        # ==========================================
+        # HISTÓRICO
+        # ==========================================
         candles = self.buffer.get_candles(
             symbol,
             self.timeframe,
         )
 
-        # Necesitamos:
-        # baseline_lookback velas anteriores
-        # + la vela actual.
         if len(candles) < self.baseline_lookback + 1:
             return None
 
-        current = candles[-1]
+        current_timestamp = int(
+            current["timestamp"]
+        )
 
-        # IMPORTANTE:
-        # excluimos la vela actual del baseline.
-        baseline = candles[
-            -(self.baseline_lookback + 1):-1
+        # Tomamos exclusivamente velas anteriores
+        # a la vela que estamos evaluando.
+        previous_candles = [
+            candle
+            for candle in candles
+            if int(candle["timestamp"])
+            < current_timestamp
         ]
 
+        if len(previous_candles) < self.baseline_lookback:
+            return None
+
+        baseline = previous_candles[
+            -self.baseline_lookback:
+        ]
+
+        # ==========================================
+        # BASELINE DE VOLUMEN
+        # ==========================================
         volumes = [
             float(candle["volume"])
             for candle in baseline
@@ -68,6 +125,9 @@ class VolumeExhaustionCollector:
         if relative_volume < self.min_relative_volume:
             return None
 
+        # ==========================================
+        # PRECIO
+        # ==========================================
         open_price = float(current["open"])
         close_price = float(current["close"])
         high_price = float(current["high"])
@@ -87,15 +147,25 @@ class VolumeExhaustionCollector:
 
         if close_price > open_price:
             candle_direction = "BUY"
+
         elif close_price < open_price:
             candle_direction = "SELL"
+
         else:
             candle_direction = "NEUTRAL"
 
+        # ==========================================
+        # EVENT
+        # ==========================================
         event = {
             "symbol": symbol,
             "timeframe": self.timeframe,
-            "timestamp": current["timestamp"],
+
+            # Boundary que originó la evaluación.
+            "close_time": close_time,
+
+            # Open timestamp de la vela.
+            "timestamp": current_timestamp,
 
             "open": open_price,
             "high": high_price,

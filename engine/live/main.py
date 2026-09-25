@@ -758,7 +758,8 @@ try:
             ].add(context_symbol)
             
             event = volume_exhaustion_collector.evaluate(
-                context_symbol
+                symbol=context_symbol,
+                close_time=int(context_close_time),
             )
 
             if event:
