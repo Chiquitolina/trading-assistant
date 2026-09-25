@@ -7597,22 +7597,59 @@ def build_volume_exhaustion_chart(
     if candles.empty:
         return go.Figure()
 
-    candles["chart_time"] = pd.to_datetime(
-        pd.to_numeric(
-            candles["timestamp"],
+    candles["timestamp"] = pd.to_numeric(
+        candles["timestamp"],
+        errors="coerce",
+    )
+
+    for column in ["open", "high", "low", "close"]:
+        candles[column] = pd.to_numeric(
+            candles[column],
             errors="coerce",
-        ),
+        )
+
+    candles["chart_time"] = pd.to_datetime(
+        candles["timestamp"],
         unit="ms",
         utc=True,
         errors="coerce",
     ).dt.tz_convert(TZ)
 
-    candles = candles.dropna(
-        subset=["chart_time"]
-    ).sort_values("chart_time")
+    candles = (
+        candles
+        .dropna(
+            subset=[
+                "timestamp",
+                "chart_time",
+                "open",
+                "high",
+                "low",
+                "close",
+            ]
+        )
+        .sort_values("chart_time")
+        .reset_index(drop=True)
+    )
+
+    if candles.empty:
+        return go.Figure()
+
+    visible_start_ms = int(candles["timestamp"].min())
+    visible_end_ms = int(candles["timestamp"].max())
+
+    visible_start_time = candles["chart_time"].iloc[0]
+    visible_end_time = candles["chart_time"].iloc[-1]
+
+    # Give the last 1m candle a small amount of visual breathing room
+    # without allowing overlays to redefine the chart window.
+    visible_end_with_padding = (
+        visible_end_time
+        + pd.Timedelta(minutes=1)
+    )
 
     fig = go.Figure()
 
+    # Candles always define the chart itself.
     fig.add_trace(
         go.Candlestick(
             x=candles["chart_time"],
@@ -7624,18 +7661,32 @@ def build_volume_exhaustion_chart(
         )
     )
 
+    # Swings are overlays only. A HTF detector can use a long history,
+    # but only pivots inside the currently visible 1m window are drawn.
     if swing_points_by_timeframe:
         for swing_timeframe, swing_points in (
             swing_points_by_timeframe.items()
         ):
+            visible_swing_points = [
+                point
+                for point in swing_points
+                if (
+                    point.pivot_timestamp is not None
+                    and visible_start_ms
+                    <= int(point.pivot_timestamp)
+                    <= visible_end_ms
+                )
+            ]
+
             swing_highs = [
                 point
-                for point in swing_points
+                for point in visible_swing_points
                 if point.side == "HIGH"
             ]
+
             swing_lows = [
                 point
-                for point in swing_points
+                for point in visible_swing_points
                 if point.side == "LOW"
             ]
 
@@ -7722,59 +7773,70 @@ def build_volume_exhaustion_chart(
     )
 
     if pd.notna(event_timestamp):
-        event_time = pd.to_datetime(
-            int(event_timestamp),
-            unit="ms",
-            utc=True,
-        ).tz_convert(TZ)
+        event_timestamp = int(event_timestamp)
 
-        event_price = event_row.get("close")
-        potential_side = str(
-            event_row.get(
-                "potential_side",
-                "NEUTRAL",
-            )
+        # An old stored event must not stretch/compress the live chart.
+        # Only draw it when it belongs to the current visible candle window.
+        event_is_visible = (
+            visible_start_ms
+            <= event_timestamp
+            <= visible_end_ms
         )
 
-        fig.add_vline(
-            x=event_time.timestamp() * 1000,
-            line_dash="dash",
-            line_width=1,
-            annotation_text=(
-                f"{potential_side} candidate"
-            ),
-            annotation_position="top",
-        )
+        if event_is_visible:
+            event_time = pd.to_datetime(
+                event_timestamp,
+                unit="ms",
+                utc=True,
+            ).tz_convert(TZ)
 
-        if pd.notna(event_price):
-            marker_symbol = (
-                "triangle-up"
-                if potential_side == "LONG"
-                else "triangle-down"
-                if potential_side == "SHORT"
-                else "circle"
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    x=[event_time],
-                    y=[float(event_price)],
-                    mode="markers+text",
-                    text=[potential_side],
-                    textposition="top center",
-                    marker={
-                        "size": 14,
-                        "symbol": marker_symbol,
-                    },
-                    name="Exhaustion event",
-                    hovertemplate=(
-                        "<b>%{text} candidate</b><br>"
-                        "Time: %{x}<br>"
-                        "Close: %{y:.8f}"
-                        "<extra></extra>"
-                    ),
+            event_price = event_row.get("close")
+            potential_side = str(
+                event_row.get(
+                    "potential_side",
+                    "NEUTRAL",
                 )
             )
+
+            fig.add_vline(
+                x=event_time.timestamp() * 1000,
+                line_dash="dash",
+                line_width=1,
+                annotation_text=(
+                    f"{potential_side} candidate"
+                ),
+                annotation_position="top",
+            )
+
+            if pd.notna(event_price):
+                marker_symbol = (
+                    "triangle-up"
+                    if potential_side == "LONG"
+                    else "triangle-down"
+                    if potential_side == "SHORT"
+                    else "circle"
+                )
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=[event_time],
+                        y=[float(event_price)],
+                        mode="markers+text",
+                        text=[potential_side],
+                        textposition="top center",
+                        marker={
+                            "size": 14,
+                            "symbol": marker_symbol,
+                        },
+                        name="Exhaustion event",
+                        hovertemplate=(
+                            "<b>%{text} candidate</b><br>"
+                            "Time: %{x}<br>"
+                            "Close: %{y:.8f}"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
 
     fig.update_layout(
         height=620,
@@ -7790,6 +7852,16 @@ def build_volume_exhaustion_chart(
             f"{event_row.get('symbol', '')} · "
             "1m live development"
         ),
+    )
+
+    # Critical: the visible X range is owned exclusively by the 1m candles.
+    # Neither old events nor HTF swing history can expand it.
+    fig.update_xaxes(
+        range=[
+            visible_start_time,
+            visible_end_with_padding,
+        ],
+        autorange=False,
     )
 
     return fig
