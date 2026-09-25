@@ -10,6 +10,10 @@ from engine.live.journal.compression_fidelity_journal import (
     CompressionFidelityJournal,
 )
 
+from engine.live.research.volume_exhaustion_collector import (
+    VolumeExhaustionCollector,
+)
+
 import json
 from pathlib import Path
 
@@ -208,6 +212,15 @@ MAX_SELECTED_PLANS_PER_WINDOW = len(SYMBOLS)
 buffer = DataBuffer(
     TIMEFRAMES,
     symbols=SYMBOLS
+)
+
+volume_exhaustion_collector = (
+    VolumeExhaustionCollector(
+        buffer=buffer,
+        timeframe="1m",
+        baseline_lookback=30,
+        min_relative_volume=2.0,
+    )
 )
 
 if MARKET_DATA_PROVIDER == "redis":
@@ -743,6 +756,20 @@ try:
             pending_context_batches[
                 int(context_close_time)
             ].add(context_symbol)
+            
+            event = volume_exhaustion_collector.evaluate(
+                context_symbol
+            )
+
+            if event:
+                print(
+                    "[VOLUME EXHAUSTION CANDIDATE] "
+                    f"symbol={event['symbol']} "
+                    f"direction={event['candle_direction']} "
+                    f"volume_ratio={event['relative_volume']:.2f}x "
+                    f"return={event['return_pct']:.3f}% "
+                    f"range={event['range_pct']:.3f}%"
+                )
             
         replay_context_symbols = []
 
