@@ -1,3 +1,6 @@
+import csv
+import os
+from datetime import datetime, timezone
 from statistics import median
 
 
@@ -6,6 +9,8 @@ class VolumeExhaustionCollector:
     Research-only collector for 1m volume exhaustion research.
 
     Detecta anomalías de volumen y captura contexto multivela.
+    Persiste cada candidato en CSV para análisis posterior.
+
     No genera señales ni ejecuta órdenes.
     """
 
@@ -16,14 +21,19 @@ class VolumeExhaustionCollector:
         baseline_lookback=30,
         min_relative_volume=2.0,
         rsi_period=14,
+        events_path="volume_exhaustion_events.csv",
     ):
         self.buffer = buffer
         self.timeframe = timeframe
         self.baseline_lookback = baseline_lookback
         self.min_relative_volume = min_relative_volume
         self.rsi_period = rsi_period
+        self.events_path = events_path
 
         self.events_detected = 0
+
+        # Último boundary procesado por símbolo.
+        # Evita procesar dos veces la misma vela.
         self._last_processed_close_time = {}
 
     # ==========================================
@@ -39,6 +49,17 @@ class VolumeExhaustionCollector:
             return None
 
         return ((end / start) - 1) * 100
+
+    @staticmethod
+    def _timestamp_to_iso(timestamp_ms):
+        """
+        Convierte timestamp Unix en milisegundos
+        a fecha ISO UTC legible.
+        """
+        return datetime.fromtimestamp(
+            int(timestamp_ms) / 1000,
+            tz=timezone.utc,
+        ).isoformat()
 
     @staticmethod
     def _calculate_rsi(candles, period=14):
@@ -62,9 +83,11 @@ class VolumeExhaustionCollector:
             if change > 0:
                 gains.append(change)
                 losses.append(0.0)
+
             elif change < 0:
                 gains.append(0.0)
                 losses.append(abs(change))
+
             else:
                 gains.append(0.0)
                 losses.append(0.0)
@@ -75,6 +98,7 @@ class VolumeExhaustionCollector:
         if avg_loss == 0:
             if avg_gain == 0:
                 return 50.0
+
             return 100.0
 
         rs = avg_gain / avg_loss
@@ -102,6 +126,35 @@ class VolumeExhaustionCollector:
             return None
 
         return actual / expected
+
+    def _save_event(self, event):
+        """
+        Persiste un candidato en CSV.
+
+        El header se crea automáticamente
+        la primera vez.
+        """
+        file_exists = os.path.exists(
+            self.events_path
+        )
+
+        fieldnames = list(event.keys())
+
+        with open(
+            self.events_path,
+            "a",
+            newline="",
+            encoding="utf-8",
+        ) as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=fieldnames,
+            )
+
+            if not file_exists:
+                writer.writeheader()
+
+            writer.writerow(event)
 
     # ==========================================
     # EVALUATE
@@ -200,8 +253,8 @@ class VolumeExhaustionCollector:
             current_volume / baseline_volume
         )
 
-        # Seguimos usando esto SOLAMENTE
-        # como puerta amplia del dataset.
+        # Puerta amplia del dataset.
+        # Todavía NO significa exhaustion confirmado.
         if relative_volume < self.min_relative_volume:
             return None
 
@@ -281,7 +334,9 @@ class VolumeExhaustionCollector:
             close_price,
         )
 
-        range_price = high_price - low_price
+        range_price = (
+            high_price - low_price
+        )
 
         range_pct = (
             (range_price / open_price) * 100
@@ -330,8 +385,10 @@ class VolumeExhaustionCollector:
 
         if close_price > open_price:
             candle_direction = "BUY"
+
         elif close_price < open_price:
             candle_direction = "SELL"
+
         else:
             candle_direction = "NEUTRAL"
 
@@ -375,15 +432,54 @@ class VolumeExhaustionCollector:
         )
 
         # ======================================
+        # EVENT ID + TIMESTAMPS
+        # ======================================
+
+        event_id = (
+            f"{symbol}_"
+            f"{self.timeframe}_"
+            f"{current_timestamp}"
+        )
+
+        candle_open_time_utc = (
+            self._timestamp_to_iso(
+                current_timestamp
+            )
+        )
+
+        candle_close_time_utc = (
+            self._timestamp_to_iso(
+                close_time
+            )
+        )
+
+        # ======================================
         # EVENT
         # ======================================
 
         event = {
+            # Identity
+            "event_id": event_id,
             "symbol": symbol,
             "timeframe": self.timeframe,
-            "close_time": close_time,
-            "timestamp": current_timestamp,
 
+            # Raw timestamps
+            "candle_open_timestamp": (
+                current_timestamp
+            ),
+            "candle_close_timestamp": (
+                close_time
+            ),
+
+            # Human-readable timestamps
+            "candle_open_time_utc": (
+                candle_open_time_utc
+            ),
+            "candle_close_time_utc": (
+                candle_close_time_utc
+            ),
+
+            # Price
             "open": open_price,
             "high": high_price,
             "low": low_price,
@@ -393,10 +489,20 @@ class VolumeExhaustionCollector:
             "volume": current_volume,
             "baseline_volume": baseline_volume,
             "relative_volume": relative_volume,
-            "volume_2m_ratio": volume_2m_ratio,
-            "volume_3m_ratio": volume_3m_ratio,
-            "volume_4m_ratio": volume_4m_ratio,
-            "volume_5m_ratio": volume_5m_ratio,
+
+            "volume_2m_ratio": (
+                volume_2m_ratio
+            ),
+            "volume_3m_ratio": (
+                volume_3m_ratio
+            ),
+            "volume_4m_ratio": (
+                volume_4m_ratio
+            ),
+            "volume_5m_ratio": (
+                volume_5m_ratio
+            ),
+
             "high_volume_candles_5m": (
                 high_volume_candles_5m
             ),
@@ -414,7 +520,9 @@ class VolumeExhaustionCollector:
             "upper_wick_pct": upper_wick_pct,
             "lower_wick_pct": lower_wick_pct,
             "close_location": close_location,
-            "candle_direction": candle_direction,
+            "candle_direction": (
+                candle_direction
+            ),
 
             # Momentum
             "rsi_1m": rsi_1m,
@@ -423,9 +531,19 @@ class VolumeExhaustionCollector:
             "price_volume_efficiency": (
                 price_volume_efficiency
             ),
-            "efficiency_3m": efficiency_3m,
-            "efficiency_5m": efficiency_5m,
+            "efficiency_3m": (
+                efficiency_3m
+            ),
+            "efficiency_5m": (
+                efficiency_5m
+            ),
         }
+
+        # ======================================
+        # PERSIST
+        # ======================================
+
+        self._save_event(event)
 
         self.events_detected += 1
 

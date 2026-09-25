@@ -71,6 +71,9 @@ from dashboard.charts.trade_inspector_chart import (
 )
 
 TRADES_FILE = BASE_DIR / "trades.csv"
+VOLUME_EXHAUSTION_EVENTS_FILE = (
+    BASE_DIR / "volume_exhaustion_events.csv"
+)
 
 DASHBOARD_CACHE_DIR = (
     BASE_DIR
@@ -7447,6 +7450,7 @@ if trigger_tf in (None, "", "N/A"):
 
 DASHBOARD_SECTIONS = {
     "overview": "📊 Overview",
+    "volume_exhaustion": "⚡ Volume Exhaustion",
     "geometry_scanner": "📐 Geometry Scanner",
     "btc_correlation": "₿ BTC Correlation",
     "btc_alignment": "🧭 BTC Alignment Edge",
@@ -7485,12 +7489,588 @@ selected_section = st.sidebar.radio(
 
 if (
     df_raw.empty
-    and selected_section != "geometry_scanner"
+    and selected_section not in {
+        "geometry_scanner",
+        "volume_exhaustion",
+    }
 ):
     st.markdown("---")
     st.info("📭 No trades yet")
     st.stop()
     
+def load_volume_exhaustion_events():
+    modified_ns = get_file_modified_ns(
+        VOLUME_EXHAUSTION_EVENTS_FILE
+    )
+
+    if modified_ns is None:
+        return pd.DataFrame()
+
+    events = load_csv_cached(
+        VOLUME_EXHAUSTION_EVENTS_FILE,
+        modified_ns,
+    ).copy()
+
+    if events.empty:
+        return events
+
+    numeric_columns = [
+        "candle_open_timestamp",
+        "candle_close_timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "relative_volume",
+        "volume_3m_ratio",
+        "high_volume_candles_5m",
+        "move_3m_pct",
+        "move_5m_pct",
+        "rsi_1m",
+        "close_location",
+        "efficiency_3m",
+    ]
+
+    for column in numeric_columns:
+        if column in events.columns:
+            events[column] = pd.to_numeric(
+                events[column],
+                errors="coerce",
+            )
+
+    if "symbol" in events.columns:
+        events["symbol"] = (
+            events["symbol"]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+        )
+
+    if "move_3m_pct" in events.columns:
+        events["potential_side"] = np.select(
+            [
+                events["move_3m_pct"] < 0,
+                events["move_3m_pct"] > 0,
+            ],
+            [
+                "LONG",
+                "SHORT",
+            ],
+            default="NEUTRAL",
+        )
+    else:
+        events["potential_side"] = "NEUTRAL"
+
+    timestamp_column = (
+        "candle_open_timestamp"
+        if "candle_open_timestamp" in events.columns
+        else "candle_close_timestamp"
+    )
+
+    if timestamp_column in events.columns:
+        events["event_time_utc"] = pd.to_datetime(
+            events[timestamp_column],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+
+        events["event_time_local"] = (
+            events["event_time_utc"]
+            .dt.tz_convert(TZ)
+        )
+
+    return events
+
+
+def build_volume_exhaustion_chart(
+    candles,
+    event_row,
+):
+    candles = candles.copy()
+
+    if candles.empty:
+        return go.Figure()
+
+    candles["chart_time"] = pd.to_datetime(
+        pd.to_numeric(
+            candles["timestamp"],
+            errors="coerce",
+        ),
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+
+    candles = candles.dropna(
+        subset=["chart_time"]
+    ).sort_values("chart_time")
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Candlestick(
+            x=candles["chart_time"],
+            open=candles["open"],
+            high=candles["high"],
+            low=candles["low"],
+            close=candles["close"],
+            name="1m",
+        )
+    )
+
+    event_timestamp = event_row.get(
+        "candle_open_timestamp"
+    )
+
+    if pd.notna(event_timestamp):
+        event_time = pd.to_datetime(
+            int(event_timestamp),
+            unit="ms",
+            utc=True,
+        ).tz_convert(TZ)
+
+        event_price = event_row.get("close")
+        potential_side = str(
+            event_row.get(
+                "potential_side",
+                "NEUTRAL",
+            )
+        )
+
+        fig.add_vline(
+            x=event_time.timestamp() * 1000,
+            line_dash="dash",
+            line_width=1,
+            annotation_text=(
+                f"{potential_side} candidate"
+            ),
+            annotation_position="top",
+        )
+
+        if pd.notna(event_price):
+            marker_symbol = (
+                "triangle-up"
+                if potential_side == "LONG"
+                else "triangle-down"
+                if potential_side == "SHORT"
+                else "circle"
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[event_time],
+                    y=[float(event_price)],
+                    mode="markers+text",
+                    text=[potential_side],
+                    textposition="top center",
+                    marker={
+                        "size": 14,
+                        "symbol": marker_symbol,
+                    },
+                    name="Exhaustion event",
+                    hovertemplate=(
+                        "<b>%{text} candidate</b><br>"
+                        "Time: %{x}<br>"
+                        "Close: %{y:.8f}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+    fig.update_layout(
+        height=620,
+        margin={
+            "l": 10,
+            "r": 10,
+            "t": 45,
+            "b": 10,
+        },
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        title=(
+            f"{event_row.get('symbol', '')} · "
+            "1m live development"
+        ),
+    )
+
+    return fig
+
+
+if selected_section == "volume_exhaustion":
+    st.markdown("## ⚡ Volume Exhaustion")
+    st.caption(
+        "Research-only inspector. LONG/SHORT are potential "
+        "exhaustion directions, not trading signals."
+    )
+
+    @st.fragment(run_every="5s")
+    def render_volume_exhaustion_live():
+        events = load_volume_exhaustion_events()
+
+        if events.empty:
+            st.info(
+                "No volume exhaustion events have been "
+                "persisted yet."
+            )
+            st.caption(
+                f"Expected file: "
+                f"{VOLUME_EXHAUSTION_EVENTS_FILE}"
+            )
+            return
+
+        valid_events = events[
+            events["potential_side"].isin(
+                ["LONG", "SHORT"]
+            )
+        ].copy()
+
+        if valid_events.empty:
+            st.info(
+                "Events exist, but none can currently be "
+                "classified as potential LONG/SHORT."
+            )
+            return
+
+        long_events = valid_events[
+            valid_events["potential_side"].eq("LONG")
+        ]
+        short_events = valid_events[
+            valid_events["potential_side"].eq("SHORT")
+        ]
+
+        summary_1, summary_2, summary_3, summary_4 = (
+            st.columns(4)
+        )
+
+        summary_1.metric(
+            "Events",
+            len(valid_events),
+        )
+        summary_2.metric(
+            "Potential LONG",
+            len(long_events),
+        )
+        summary_3.metric(
+            "Potential SHORT",
+            len(short_events),
+        )
+        summary_4.metric(
+            "Symbols",
+            valid_events["symbol"].nunique(),
+        )
+
+        control_1, control_2, control_3 = st.columns(
+            [1, 1.4, 2.6]
+        )
+
+        with control_1:
+            selected_side = st.selectbox(
+                "Side",
+                ["ALL", "LONG", "SHORT"],
+                key="volume_exhaustion_side",
+            )
+
+        side_events = valid_events.copy()
+
+        if selected_side != "ALL":
+            side_events = side_events[
+                side_events["potential_side"].eq(
+                    selected_side
+                )
+            ].copy()
+
+        symbols = sorted(
+            side_events["symbol"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+
+        if not symbols:
+            st.info(
+                "No symbols match the selected side."
+            )
+            return
+
+        with control_2:
+            selected_symbol = st.selectbox(
+                "Symbol",
+                symbols,
+                key="volume_exhaustion_symbol",
+            )
+
+        symbol_events = side_events[
+            side_events["symbol"].eq(
+                selected_symbol
+            )
+        ].copy()
+
+        if "event_time_utc" in symbol_events.columns:
+            symbol_events = symbol_events.sort_values(
+                "event_time_utc",
+                ascending=False,
+            )
+
+        event_options = []
+        event_lookup = {}
+
+        for index, row in symbol_events.iterrows():
+            local_time = row.get("event_time_local")
+
+            if pd.notna(local_time):
+                time_label = local_time.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            else:
+                time_label = str(
+                    row.get(
+                        "candle_open_timestamp",
+                        index,
+                    )
+                )
+
+            label = (
+                f"{time_label} · "
+                f"{row.get('potential_side', '—')} · "
+                f"RSI {row.get('rsi_1m', float('nan')):.1f} · "
+                f"Vol {row.get('relative_volume', float('nan')):.2f}x"
+            )
+
+            event_options.append(label)
+            event_lookup[label] = index
+
+        with control_3:
+            selected_event_label = st.selectbox(
+                "Event",
+                event_options,
+                key="volume_exhaustion_event",
+            )
+
+        selected_event = symbol_events.loc[
+            event_lookup[selected_event_label]
+        ]
+
+        metric_1, metric_2, metric_3, metric_4 = (
+            st.columns(4)
+        )
+
+        metric_1.metric(
+            "Potential",
+            selected_event.get(
+                "potential_side",
+                "—",
+            ),
+        )
+        metric_2.metric(
+            "RSI 1m",
+            (
+                f"{float(selected_event['rsi_1m']):.1f}"
+                if pd.notna(
+                    selected_event.get("rsi_1m")
+                )
+                else "—"
+            ),
+        )
+        metric_3.metric(
+            "Relative volume",
+            (
+                f"{float(selected_event['relative_volume']):.2f}x"
+                if pd.notna(
+                    selected_event.get(
+                        "relative_volume"
+                    )
+                )
+                else "—"
+            ),
+        )
+        metric_4.metric(
+            "High-volume candles 5m",
+            (
+                int(
+                    selected_event[
+                        "high_volume_candles_5m"
+                    ]
+                )
+                if pd.notna(
+                    selected_event.get(
+                        "high_volume_candles_5m"
+                    )
+                )
+                else "—"
+            ),
+        )
+
+        metric_5, metric_6, metric_7, metric_8 = (
+            st.columns(4)
+        )
+
+        for column in [
+            "move_3m_pct",
+            "move_5m_pct",
+            "volume_3m_ratio",
+            "close_location",
+        ]:
+            if column not in selected_event.index:
+                selected_event[column] = np.nan
+
+        metric_5.metric(
+            "Move 3m",
+            (
+                f"{float(selected_event['move_3m_pct']):.3f}%"
+                if pd.notna(
+                    selected_event["move_3m_pct"]
+                )
+                else "—"
+            ),
+        )
+        metric_6.metric(
+            "Move 5m",
+            (
+                f"{float(selected_event['move_5m_pct']):.3f}%"
+                if pd.notna(
+                    selected_event["move_5m_pct"]
+                )
+                else "—"
+            ),
+        )
+        metric_7.metric(
+            "Volume 3m",
+            (
+                f"{float(selected_event['volume_3m_ratio']):.2f}x"
+                if pd.notna(
+                    selected_event["volume_3m_ratio"]
+                )
+                else "—"
+            ),
+        )
+        metric_8.metric(
+            "Close location",
+            (
+                f"{float(selected_event['close_location']):.2f}"
+                if pd.notna(
+                    selected_event["close_location"]
+                )
+                else "—"
+            ),
+        )
+
+        candle_limit = st.slider(
+            "1m candles",
+            min_value=60,
+            max_value=400,
+            value=180,
+            step=20,
+            key="volume_exhaustion_candle_limit",
+        )
+
+        candles = (
+            geometry_scanner_data_service
+            .get_closed_candles(
+                symbol=selected_symbol,
+                timeframe="1m",
+                limit=int(candle_limit),
+            )
+        )
+
+        if candles.empty:
+            st.error(
+                "Could not load live 1m candles for "
+                f"{selected_symbol}."
+            )
+            st.code(
+                str(
+                    geometry_scanner_data_service
+                    .last_error
+                )
+            )
+            return
+
+        event_ts = selected_event.get(
+            "candle_open_timestamp"
+        )
+
+        if pd.notna(event_ts):
+            event_ts = int(event_ts)
+            oldest_ts = int(
+                pd.to_numeric(
+                    candles["timestamp"],
+                    errors="coerce",
+                ).dropna().min()
+            )
+
+            if event_ts < oldest_ts:
+                st.warning(
+                    "The selected event is older than the "
+                    "current Redis candle window. The event "
+                    "remains stored, but its original candles "
+                    "are no longer in this live buffer."
+                )
+
+        figure = build_volume_exhaustion_chart(
+            candles=candles,
+            event_row=selected_event,
+        )
+
+        st.plotly_chart(
+            figure,
+            use_container_width=True,
+            key="volume_exhaustion_live_chart",
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+        )
+
+        latest_candle_ts = pd.to_datetime(
+            pd.to_numeric(
+                candles["timestamp"],
+                errors="coerce",
+            ).dropna().max(),
+            unit="ms",
+            utc=True,
+        ).tz_convert(TZ)
+
+        st.caption(
+            "Auto-refresh: 5s · chart uses closed 1m "
+            "candles from Redis · latest candle: "
+            f"{latest_candle_ts.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+        table_columns = [
+            "event_time_local",
+            "symbol",
+            "potential_side",
+            "relative_volume",
+            "volume_3m_ratio",
+            "high_volume_candles_5m",
+            "move_3m_pct",
+            "move_5m_pct",
+            "rsi_1m",
+            "close_location",
+            "event_id",
+        ]
+
+        table_columns = [
+            column
+            for column in table_columns
+            if column in side_events.columns
+        ]
+
+        st.markdown("### Detected candidates")
+        st.dataframe(
+            side_events.sort_values(
+                "event_time_utc",
+                ascending=False,
+            )[table_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    render_volume_exhaustion_live()
+
+
 if selected_section == "geometry_scanner":
     st.markdown("## 📐 Geometry Scanner")
 
