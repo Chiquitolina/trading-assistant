@@ -220,6 +220,7 @@ volume_exhaustion_collector = (
         timeframe="1m",
         baseline_lookback=30,
         min_relative_volume=2.0,
+        rsi_period=14,
     )
 )
 
@@ -766,10 +767,15 @@ try:
                 print(
                     "[VOLUME EXHAUSTION CANDIDATE] "
                     f"symbol={event['symbol']} "
-                    f"direction={event['candle_direction']} "
-                    f"volume_ratio={event['relative_volume']:.2f}x "
-                    f"return={event['return_pct']:.3f}% "
-                    f"range={event['range_pct']:.3f}%"
+                    f"dir={event['candle_direction']} "
+                    f"vol={event['relative_volume']:.2f}x "
+                    f"vol3m={event['volume_3m_ratio']:.2f}x "
+                    f"hv5={event['high_volume_candles_5m']} "
+                    f"move3m={event['move_3m_pct']:.3f}% "
+                    f"move5m={event['move_5m_pct']:.3f}% "
+                    f"rsi={event['rsi_1m']:.1f} "
+                    f"closeLoc={event['close_location']:.2f} "
+                    f"eff3m={event['efficiency_3m']:.4f}"
                 )
             
         replay_context_symbols = []
