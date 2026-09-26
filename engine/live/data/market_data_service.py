@@ -1,5 +1,7 @@
 import argparse
 
+import copy
+
 import json
 
 import signal
@@ -14,7 +16,7 @@ import uuid
 
 from config.strategies.v1 import SYMBOLS
 
-from config.timeframes import MODE_CONFIG
+from config.timeframes import MODE_CONFIG, TIMEFRAME_CONFIGS
 
 from data.market_data import (
 
@@ -236,6 +238,11 @@ class MarketDataService:
 
         self.history_cutoff_ms = None
 
+        self.bootstrap_lock = threading.Lock()
+        self.bootstrap_buffering = False
+        self.bootstrap_closed_messages = []
+        self.bootstrap_buffer_sequence = 0
+
 
 
         self.stop_event = threading.Event()
@@ -276,8 +283,26 @@ class MarketDataService:
 
         try:
 
-            self.phase = "LOADING_HISTORY"
+            # Connect WS first and buffer every closed candle
+            # while the deterministic REST seed is installed.
+            self.phase = "CONNECTING_WS"
+            self._begin_bootstrap_ws_buffering()
+            self._write_status()
 
+            self._start_websocket()
+
+            if (
+                self.ws is None
+                or not self.ws.is_connected
+            ):
+                raise RuntimeError(
+                    "WebSocket did not become ready "
+                    "before history bootstrap"
+                )
+
+            # One shared cutoff for every symbol/timeframe.
+            # REST owns everything strictly before this point.
+            # WS buffer owns everything at/after this point.
             self.history_cutoff_ms = int(
                 time.time() * 1000
             )
@@ -287,25 +312,19 @@ class MarketDataService:
                 f"cutoff_ms={self.history_cutoff_ms}"
             )
 
+            self.phase = "LOADING_HISTORY"
             self._write_status()
-
-
 
             self._load_all_history()
 
-
-
-            self._publish_initial_market_flow()
-
-
-
-            self.phase = "CONNECTING_WS"
-
+            # Publish buffered WS closes only after REST seed
+            # is fully installed, preserving chronological order.
+            self.phase = "CATCHING_UP"
             self._write_status()
 
+            self._flush_bootstrap_ws_buffer()
 
-
-            self._start_websocket()
+            self._publish_initial_market_flow()
 
 
 
@@ -1195,96 +1214,283 @@ class MarketDataService:
 
 
 
-    def _on_ws_message(self, message):
+    def _begin_bootstrap_ws_buffering(self):
+        with self.bootstrap_lock:
+            self.bootstrap_closed_messages = []
+            self.bootstrap_buffer_sequence = 0
+            self.bootstrap_buffering = True
 
-        result = (
+        print(
+            "[MARKET DATA BOOTSTRAP] "
+            "WS closed-candle buffering enabled"
+        )
 
-            self.publisher.publish_ws_message(
 
-                message
+    def _closed_ws_metadata(self, message):
+        payload = message
 
+        if (
+            isinstance(payload, dict)
+            and "data" in payload
+        ):
+            payload = payload["data"]
+
+        if not isinstance(payload, dict):
+            return None
+
+        if payload.get("e") not in (
+            "continuous_kline",
+            "kline",
+        ):
+            return None
+
+        kline = payload.get("k")
+
+        if not isinstance(kline, dict):
+            return None
+
+        if not kline.get("x"):
+            return None
+
+        symbol = (
+            payload.get("s")
+            or payload.get("ps")
+        )
+
+        timeframe = kline.get("i")
+
+        if not symbol or not timeframe:
+            return None
+
+        try:
+            open_timestamp = int(
+                kline["t"]
+            )
+            close_timestamp = int(
+                kline["T"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            return None
+
+        return {
+            "symbol": str(symbol).upper(),
+            "timeframe": str(timeframe),
+            "timestamp": open_timestamp,
+            "close_timestamp": close_timestamp,
+        }
+
+
+    def _buffer_closed_ws_message_if_needed(
+        self,
+        message,
+    ):
+        metadata = self._closed_ws_metadata(
+            message
+        )
+
+        if metadata is None:
+            return None
+
+        with self.bootstrap_lock:
+            if not self.bootstrap_buffering:
+                return None
+
+            self.bootstrap_buffer_sequence += 1
+
+            self.bootstrap_closed_messages.append(
+                (
+                    metadata["close_timestamp"],
+                    metadata["symbol"],
+                    metadata["timeframe"],
+                    metadata["timestamp"],
+                    self.bootstrap_buffer_sequence,
+                    copy.deepcopy(message),
+                )
             )
 
+        return {
+            "type": "buffered_closed_candle",
+            **metadata,
+        }
+
+
+    def _process_ws_message(
+        self,
+        message,
+        publish_price=True,
+    ):
+        result = (
+            self.publisher.publish_ws_message(
+                message,
+                publish_price=publish_price,
+            )
         )
-
-
 
         if not isinstance(result, dict):
-
             return result
-
-
 
         if (
-
             result.get("type")
-
             != "closed_candle"
-
         ):
-
             return result
-
-
 
         timeframe = result.get(
-
             "timeframe"
-
         )
 
-
-
         if (
-
             timeframe
-
             != MARKET_FLOW_TIMEFRAME
-
         ):
-
             return result
-
-
 
         symbol = result.get("symbol")
-
         candle_timestamp = result.get(
-
             "timestamp"
-
         )
-
-
 
         if (
-
             not symbol
-
             or candle_timestamp is None
-
         ):
-
             return result
 
-
-
         self._register_market_flow_close(
-
             symbol=symbol,
-
             candle_timestamp=(
-
                 candle_timestamp
-
             ),
-
         )
-
-
 
         return result
 
+
+    def _flush_bootstrap_ws_buffer(self):
+        if self.history_cutoff_ms is None:
+            raise RuntimeError(
+                "History cutoff is not initialized"
+            )
+
+        cutoff_ms = int(
+            self.history_cutoff_ms
+        )
+
+        published_keys = set()
+        published = 0
+        discarded_before_cutoff = 0
+        duplicates = 0
+        passes = 0
+
+        while True:
+            with self.bootstrap_lock:
+                batch = (
+                    self.bootstrap_closed_messages
+                )
+                self.bootstrap_closed_messages = []
+
+            if batch:
+                passes += 1
+
+                batch.sort(
+                    key=lambda item: (
+                        item[0],
+                        item[1],
+                        int(
+                            TIMEFRAME_CONFIGS.get(
+                                item[2],
+                                {},
+                            ).get(
+                                "ms_per_candle",
+                                10**18,
+                            )
+                        ),
+                        item[3],
+                        item[4],
+                    )
+                )
+
+                for (
+                    close_timestamp,
+                    symbol,
+                    timeframe,
+                    open_timestamp,
+                    _sequence,
+                    message,
+                ) in batch:
+                    if (
+                        int(close_timestamp)
+                        < cutoff_ms
+                    ):
+                        discarded_before_cutoff += 1
+                        continue
+
+                    key = (
+                        symbol,
+                        timeframe,
+                        int(open_timestamp),
+                    )
+
+                    if key in published_keys:
+                        duplicates += 1
+                        continue
+
+                    self._process_ws_message(
+                        message,
+                        publish_price=False,
+                    )
+
+                    published_keys.add(key)
+                    published += 1
+
+            with self.bootstrap_lock:
+                if self.bootstrap_closed_messages:
+                    continue
+
+                # Atomic handoff:
+                # callbacks blocked on this same lock will either
+                # have been buffered already or will observe False
+                # and publish directly after the lock is released.
+                self.bootstrap_buffering = False
+                break
+
+        print(
+            "[MARKET DATA BOOTSTRAP] "
+            f"catchup complete "
+            f"passes={passes} "
+            f"published={published} "
+            f"discarded_before_cutoff="
+            f"{discarded_before_cutoff} "
+            f"duplicates={duplicates}"
+        )
+
+        return {
+            "passes": passes,
+            "published": published,
+            "discarded_before_cutoff": (
+                discarded_before_cutoff
+            ),
+            "duplicates": duplicates,
+        }
+
+
+    def _on_ws_message(self, message):
+        buffered = (
+            self._buffer_closed_ws_message_if_needed(
+                message
+            )
+        )
+
+        if buffered is not None:
+            return buffered
+
+        return self._process_ws_message(
+            message
+        )
 
 
     def _register_market_flow_close(
@@ -2274,6 +2480,18 @@ class MarketDataService:
             "history_cutoff_ms": (
 
                 self.history_cutoff_ms
+
+            ),
+
+            "bootstrap_buffering": (
+
+                self.bootstrap_buffering
+
+            ),
+
+            "bootstrap_buffered_closed": (
+
+                len(self.bootstrap_closed_messages)
 
             ),
 

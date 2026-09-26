@@ -629,7 +629,11 @@ class RedisMarketDataPublisher:
 
 
 
-    def publish_ws_message(self, msg: dict):
+    def publish_ws_message(
+        self,
+        msg: dict,
+        publish_price: bool = True,
+    ):
 
         msg = self._unwrap_message(msg)
 
@@ -679,7 +683,10 @@ class RedisMarketDataPublisher:
 
 
 
-        if timeframe == "1m":
+        if (
+            timeframe == "1m"
+            and publish_price
+        ):
 
             self._publish_price(
 
