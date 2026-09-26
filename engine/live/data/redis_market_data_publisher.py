@@ -1,644 +1,1324 @@
 import json
+
 import threading
+
 import time
+
+
 
 import redis
 
-# =========================================================
-# CLOSED CANDLE COVERAGE AUDIT
-# =========================================================
-
-COVERAGE_AUDIT_TIMEFRAME = "30m"
-COVERAGE_AUDIT_SETTLE_SECONDS = 15
-
-from engine.live.data.redis_market_data_protocol import (
-    CLOSED_CANDLES_STREAM,
-    CLOSED_STREAM_MAXLEN,
-    HISTORY_MAXLEN,
-    PRICE_CHANNEL,
-    history_key,
-    last_closed_key,
-    market_flow_key,
-    normalize_symbol,
-    normalize_timeframe,
+from data.market_data import (
+    HISTORY_TARGET_CANDLES,
 )
 
+
+
+# =========================================================
+
+# CLOSED CANDLE COVERAGE AUDIT
+
+# =========================================================
+
+
+
+COVERAGE_AUDIT_TIMEFRAME = "30m"
+
+COVERAGE_AUDIT_SETTLE_SECONDS = 15
+
+
+
+from engine.live.data.redis_market_data_protocol import (
+
+    CLOSED_CANDLES_STREAM,
+
+    CLOSED_STREAM_MAXLEN,
+
+    HISTORY_MAXLEN,
+
+    PRICE_CHANNEL,
+
+    history_key,
+
+    last_closed_key,
+
+    market_flow_key,
+
+    normalize_symbol,
+
+    normalize_timeframe,
+
+)
+
+
+
 class RedisMarketDataPublisher:
+
     def __init__(
+
         self,
+
         host="127.0.0.1",
+
         port=6379,
+
         db=0,
+
         redis_client=None,
+
     ):
+
         self.redis = redis_client or redis.Redis(
+
             host=host,
+
             port=port,
+
             db=db,
+
             decode_responses=True,
+
         )
-        
+
+
+
         self._coverage_lock = threading.Lock()
+
+
 
         self._closed_candle_coverage = {}
 
+
+
         self._coverage_reported = set()
 
+
+
     def ping(self):
+
         return self.redis.ping()
-    
-    def _register_closed_candle_coverage(
+
+
+
+    def _history_limit(
+
         self,
+
+        timeframe: str,
+
+    ) -> int:
+
+        timeframe = normalize_timeframe(
+            timeframe
+        )
+
+        return int(
+            HISTORY_TARGET_CANDLES.get(
+                timeframe,
+                HISTORY_MAXLEN,
+            )
+        )
+
+
+
+    def _register_closed_candle_coverage(
+
+        self,
+
         candle,
+
     ):
+
         timeframe = str(
+
             candle.get("timeframe", "")
+
         ).lower()
 
+
+
         if timeframe != COVERAGE_AUDIT_TIMEFRAME:
+
             return
+
+
 
         symbol = candle.get("symbol")
 
+
+
         if not symbol:
+
             return
+
+
 
         symbol = str(symbol).upper()
 
+
+
         close_ts = candle.get(
+
             "close_timestamp"
+
         )
 
+
+
         if close_ts is None:
+
             return
 
+
+
         try:
+
             close_ts = int(close_ts)
+
         except (
+
             TypeError,
+
             ValueError,
+
         ):
+
             return
+
+
 
         now = time.monotonic()
 
+
+
         with self._coverage_lock:
+
             batch = (
+
                 self._closed_candle_coverage
+
                 .setdefault(
+
                     close_ts,
+
                     {
+
                         "symbols": set(),
+
                         "first_seen_at": now,
+
                         "last_seen_at": now,
+
                     },
+
                 )
+
             )
+
+
 
             batch["symbols"].add(symbol)
+
             batch["last_seen_at"] = now
-    
+
+
+
     def publish_market_flow_snapshot(
+
         self,
+
         timeframe: str,
+
         snapshot: dict,
+
     ):
+
         timeframe = normalize_timeframe(
+
             timeframe
+
         )
+
+
 
         if not isinstance(snapshot, dict):
+
             raise TypeError(
+
                 "snapshot must be a dict"
+
             )
+
+
 
         target_key = market_flow_key(
+
             timeframe
+
         )
+
+
 
         serialized = self._serialize(
+
             snapshot
+
         )
+
+
 
         self.redis.set(
+
             target_key,
+
             serialized,
+
         )
+
+
 
         return {
+
             "key": target_key,
+
             "timeframe": timeframe,
+
             "candle_timestamp": (
+
                 snapshot.get(
+
                     "candle_timestamp"
+
                 )
+
             ),
+
             "valid_universe_size": (
+
                 snapshot.get(
+
                     "valid_universe_size"
+
                 )
+
             ),
+
             "coverage_pct": snapshot.get(
+
                 "coverage_pct"
+
             ),
+
         }
 
+
+
     def publish_recovered_candle(
+
         self,
+
         symbol: str,
+
         timeframe: str,
+
         candle: dict,
+
     ):
+
         symbol = normalize_symbol(symbol)
+
         timeframe = normalize_timeframe(timeframe)
 
+
+
         if not isinstance(candle, dict):
+
             raise TypeError(
+
                 "candle must be a dict"
+
             )
+
+
 
         normalized = (
+
             self._normalize_history_candle(
+
                 symbol=symbol,
+
                 timeframe=timeframe,
+
                 candle=candle,
+
             )
+
         )
+
+
 
         close_timestamp = (
+
             candle.get("close_timestamp")
+
             or candle.get("closeTimestamp")
+
         )
 
+
+
         if close_timestamp is not None:
+
             normalized["close_timestamp"] = int(
+
                 close_timestamp
+
             )
+
+
 
         normalized["source"] = "rest_repair"
 
+
+
         self._publish_closed_candle(
+
             normalized
+
         )
+
+
 
         return {
+
             "type": "closed_candle",
+
             "source": "rest_repair",
+
             "symbol": symbol,
+
             "timeframe": timeframe,
+
             "timestamp": normalized["timestamp"],
+
             "close_timestamp": normalized.get(
+
                 "close_timestamp"
+
             ),
+
         }
-        
+
+
+
     def publish_historical_candle(
+
         self,
+
         symbol: str,
+
         timeframe: str,
+
         candle: dict,
+
     ):
+
         symbol = normalize_symbol(symbol)
+
         timeframe = normalize_timeframe(timeframe)
 
+
+
         if not isinstance(candle, dict):
+
             raise TypeError(
+
                 "candle must be a dict"
+
             )
+
+
 
         normalized = (
+
             self._normalize_history_candle(
+
                 symbol=symbol,
+
                 timeframe=timeframe,
+
                 candle=candle,
+
             )
+
         )
+
+
 
         close_timestamp = (
+
             candle.get("close_timestamp")
+
             or candle.get("closeTimestamp")
+
         )
+
+
 
         if close_timestamp is None:
+
             raise ValueError(
+
                 "historical candle requires "
+
                 "close_timestamp"
+
             )
 
+
+
         normalized["close_timestamp"] = int(
+
             close_timestamp
+
         )
+
+
 
         normalized["source"] = "historical_replay"
 
+
+
         stream_id = self._publish_closed_candle(
+
             normalized
+
         )
+
+
 
         return {
+
             "type": "closed_candle",
+
             "source": "historical_replay",
+
             "symbol": symbol,
+
             "timeframe": timeframe,
+
             "timestamp": normalized["timestamp"],
+
             "close_timestamp": normalized[
+
                 "close_timestamp"
+
             ],
+
             "stream_id": stream_id,
+
         }
 
+
+
     def replace_history(
+
         self,
+
         symbol: str,
+
         timeframe: str,
+
         candles: list[dict],
+
     ):
+
         symbol = normalize_symbol(symbol)
+
         timeframe = normalize_timeframe(timeframe)
 
+
+
         target_key = history_key(
+
             symbol,
+
             timeframe,
+
         )
+
+
 
         temporary_key = f"{target_key}:loading"
 
+
+
+        history_limit = self._history_limit(
+            timeframe
+        )
+
+
+
         normalized = [
+
             self._normalize_history_candle(
+
                 symbol,
+
                 timeframe,
+
                 candle,
+
             )
-            for candle in candles[-HISTORY_MAXLEN:]
+
+            for candle in candles[-history_limit:]
+
         ]
 
+
+
         pipeline = self.redis.pipeline(
+
             transaction=True,
+
         )
+
+
 
         pipeline.delete(temporary_key)
 
+
+
         if normalized:
+
             pipeline.rpush(
+
                 temporary_key,
+
                 *[
+
                     self._serialize(candle)
+
                     for candle in normalized
+
                 ],
+
             )
 
+
+
             pipeline.rename(
+
                 temporary_key,
+
                 target_key,
+
             )
+
         else:
+
             pipeline.delete(target_key)
+
+
 
         pipeline.execute()
 
+
+
         return len(normalized)
 
+
+
     def publish_ws_message(self, msg: dict):
+
         msg = self._unwrap_message(msg)
 
+
+
         if not isinstance(msg, dict):
+
             return None
 
+
+
         if msg.get("e") not in (
+
             "continuous_kline",
+
             "kline",
+
         ):
+
             return None
+
+
 
         kline = msg.get("k")
 
+
+
         if not isinstance(kline, dict):
+
             return None
 
+
+
         symbol = normalize_symbol(
+
             msg.get("s") or msg.get("ps")
+
         )
+
+
 
         timeframe = normalize_timeframe(
+
             kline.get("i")
+
         )
-        
+
+
+
         if timeframe == "1m":
+
             self._publish_price(
+
                 symbol=symbol,
+
                 price=float(kline["c"]),
+
                 timestamp=int(kline["t"]),
+
             )
 
+
+
         if not kline.get("x"):
+
             return {
+
                 "type": "price",
+
                 "symbol": symbol,
+
                 "timeframe": timeframe,
+
             }
 
+
+
         candle = self._normalize_ws_candle(
+
             symbol=symbol,
+
             timeframe=timeframe,
+
             kline=kline,
+
         )
+
+
 
         self._publish_closed_candle(candle)
 
+
+
         return {
+
             "type": "closed_candle",
+
             "symbol": symbol,
+
             "timeframe": timeframe,
+
             "timestamp": candle["timestamp"],
+
         }
+
+
 
     def _publish_price(
+
         self,
+
         symbol: str,
+
         price: float,
+
         timestamp: int,
+
     ):
+
         payload = {
+
             "type": "price",
+
             "symbol": symbol,
+
             "price": price,
+
             "timestamp": timestamp,
+
         }
 
+
+
         self.redis.publish(
+
             PRICE_CHANNEL,
+
             self._serialize(payload),
+
         )
 
+
+
     def _publish_closed_candle(
+
         self,
+
         candle: dict,
+
     ):
+
         symbol = candle["symbol"]
+
         timeframe = candle["timeframe"]
+
+
 
         serialized = self._serialize(candle)
 
-        candle_history_key = history_key(
-            symbol,
-            timeframe,
+
+
+        history_limit = self._history_limit(
+            timeframe
         )
 
-        last_history_item = self.redis.lindex(
-            candle_history_key,
-            -1,
+
+
+        candle_history_key = history_key(
+
+            symbol,
+
+            timeframe,
+
         )
+
+
+
+        last_history_item = self.redis.lindex(
+
+            candle_history_key,
+
+            -1,
+
+        )
+
+
 
         replace_last = False
 
+
+
         if last_history_item:
+
             try:
+
                 last_candle = json.loads(
+
                     last_history_item
+
                 )
+
+
 
                 replace_last = (
+
                     int(last_candle["timestamp"])
+
                     == int(candle["timestamp"])
+
                 )
 
+
+
             except (
+
                 KeyError,
+
                 TypeError,
+
                 ValueError,
+
                 json.JSONDecodeError,
+
             ):
+
                 replace_last = False
 
+
+
         pipeline = self.redis.pipeline(
+
             transaction=True,
+
         )
+
+
 
         if replace_last:
+
             pipeline.lset(
+
                 candle_history_key,
+
                 -1,
+
                 serialized,
+
             )
+
         else:
+
             pipeline.rpush(
+
                 candle_history_key,
+
                 serialized,
+
             )
+
+
 
         pipeline.ltrim(
+
             candle_history_key,
-            -HISTORY_MAXLEN,
+
+            -history_limit,
+
             -1,
+
         )
+
+
 
         pipeline.set(
+
             last_closed_key(
+
                 symbol,
+
                 timeframe,
+
             ),
+
             serialized,
+
         )
 
+
+
         pipeline.xadd(
+
             CLOSED_CANDLES_STREAM,
+
             {
+
                 "payload": serialized,
+
             },
+
             maxlen=CLOSED_STREAM_MAXLEN,
+
             approximate=True,
+
         )
+
+
 
         results = pipeline.execute()
 
+
+
         stream_id = results[-1]
 
+
+
         self._register_closed_candle_coverage(
+
             candle
+
         )
 
+
+
         return stream_id
-    
+
+
+
     def report_closed_candle_coverage(
+
         self,
+
         expected_symbols,
+
     ):
+
         now = time.monotonic()
 
+
+
         expected_symbols = {
+
             str(symbol).upper()
+
             for symbol in expected_symbols
+
         }
+
+
 
         reports = []
 
+
+
         with self._coverage_lock:
+
             for close_ts in sorted(
+
                 self._closed_candle_coverage
+
             ):
+
                 if close_ts in self._coverage_reported:
+
                     continue
+
+
 
                 batch = (
+
                     self._closed_candle_coverage[
+
                         close_ts
+
                     ]
+
                 )
+
+
 
                 age_seconds = (
+
                     now
+
                     - batch["first_seen_at"]
+
                 )
+
+
 
                 if (
+
                     age_seconds
+
                     < COVERAGE_AUDIT_SETTLE_SECONDS
+
                 ):
+
                     continue
 
+
+
                 received_symbols = set(
+
                     batch["symbols"]
+
                 )
+
+
 
                 missing_symbols = sorted(
+
                     expected_symbols
+
                     - received_symbols
+
                 )
+
+
 
                 reports.append({
+
                     "close_ts": close_ts,
+
                     "received": len(
+
                         received_symbols
+
                     ),
+
                     "expected": len(
+
                         expected_symbols
+
                     ),
+
                     "missing_symbols": (
+
                         missing_symbols
+
                     ),
+
                     "age_seconds": age_seconds,
+
                 })
 
+
+
                 self._coverage_reported.add(
+
                     close_ts
+
                 )
+
+
 
             if len(self._coverage_reported) > 20:
+
                 reported_sorted = sorted(
+
                     self._coverage_reported
+
                 )
 
+
+
                 keep = set(
+
                     reported_sorted[-10:]
+
                 )
+
+
 
                 self._coverage_reported = keep
 
+
+
                 self._closed_candle_coverage = {
+
                     ts: batch
+
                     for ts, batch
+
                     in self._closed_candle_coverage.items()
+
                     if (
+
                         ts in keep
+
                         or (
+
                             now
+
                             - batch["first_seen_at"]
+
                             < COVERAGE_AUDIT_SETTLE_SECONDS
+
                         )
+
                     )
+
                 }
 
+
+
         for report in reports:
+
             missing = report[
+
                 "missing_symbols"
+
             ]
 
+
+
             print(
+
                 "[PUBLISH TF COVERAGE] "
+
                 f"tf={COVERAGE_AUDIT_TIMEFRAME} "
+
                 f"close_ts={report['close_ts']} "
+
                 f"received={report['received']}/"
+
                 f"{report['expected']} "
+
                 f"missing={len(missing)} "
+
                 f"missing_symbols="
+
                 f"{','.join(missing) if missing else '-'} "
+
                 f"waited="
+
                 f"{report['age_seconds']:.1f}s"
+
             )
+
+
 
     def _normalize_history_candle(
+
         self,
+
         symbol: str,
+
         timeframe: str,
+
         candle: dict,
+
     ):
+
         timestamp = candle["timestamp"]
 
+
+
         if hasattr(timestamp, "timestamp"):
+
             timestamp = int(
+
                 timestamp.timestamp() * 1000
+
             )
+
         else:
+
             timestamp = int(timestamp)
 
+
+
         normalized = {
+
             "type": "closed_candle",
+
             "symbol": symbol,
+
             "timeframe": timeframe,
+
             "timestamp": timestamp,
+
             "open": float(candle["open"]),
+
             "high": float(candle["high"]),
+
             "low": float(candle["low"]),
+
             "close": float(candle["close"]),
+
             "volume": float(candle["volume"]),
+
         }
 
+
+
         quote_volume = (
+
             candle.get("quoteVolume")
+
             or candle.get("quote_volume")
+
             or candle.get("quote_asset_volume")
+
         )
 
+
+
         if quote_volume is not None:
+
             normalized["quoteVolume"] = float(
+
                 quote_volume
+
             )
+
+
 
         return normalized
 
+
+
     def _normalize_ws_candle(
+
         self,
+
         symbol: str,
+
         timeframe: str,
+
         kline: dict,
+
     ):
+
         return {
+
             "type": "closed_candle",
+
             "symbol": symbol,
+
             "timeframe": timeframe,
+
             "timestamp": int(kline["t"]),
+
             "close_timestamp": int(kline["T"]),
+
             "open": float(kline["o"]),
+
             "high": float(kline["h"]),
+
             "low": float(kline["l"]),
+
             "close": float(kline["c"]),
+
             "volume": float(kline["v"]),
+
             "quoteVolume": float(
+
                 kline.get("q", 0)
+
             ),
+
         }
 
+
+
     def _unwrap_message(self, msg):
+
         if (
+
             isinstance(msg, dict)
+
             and "data" in msg
+
         ):
+
             return msg["data"]
+
+
 
         return msg
 
+
+
     def _serialize(self, value):
+
         return json.dumps(
+
             value,
+
             separators=(",", ":"),
+
         )
