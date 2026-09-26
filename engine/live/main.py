@@ -10,6 +10,10 @@ from engine.live.journal.compression_fidelity_journal import (
     CompressionFidelityJournal,
 )
 
+from engine.replay.fidelity.history_fingerprint import (
+    write_history_fingerprint,
+)
+
 import json
 from pathlib import Path
 
@@ -162,6 +166,27 @@ MARKET_CLOCK_MODE = os.getenv(
     "real",
 ).strip().lower()
 
+HISTORY_FINGERPRINT = (
+    os.getenv(
+        "HISTORY_FINGERPRINT",
+        "0",
+    ).strip()
+    == "1"
+)
+
+HISTORY_FINGERPRINT_EXIT = (
+    os.getenv(
+        "HISTORY_FINGERPRINT_EXIT",
+        "0",
+    ).strip()
+    == "1"
+)
+
+HISTORY_FINGERPRINT_DIR = os.getenv(
+    "HISTORY_FINGERPRINT_DIR",
+    "history_fingerprints",
+)
+
 if MARKET_CLOCK_MODE not in (
     "real",
     "replay",
@@ -271,7 +296,50 @@ print(
 
 market_data.load_history()
 
-#print(f"[HISTORY] {symbol} {tf} loaded into buffer\n")
+
+# =========================================================
+# HISTORY FINGERPRINT
+# =========================================================
+
+if HISTORY_FINGERPRINT:
+
+    fingerprint_mode = (
+        "replay"
+        if MARKET_CLOCK_MODE == "replay"
+        else "live"
+    )
+
+    (
+        fingerprint_path,
+        fingerprint,
+    ) = write_history_fingerprint(
+        buffer=buffer,
+        symbols=SYMBOLS,
+        timeframes=TIMEFRAMES,
+        mode=fingerprint_mode,
+        branch_label=BRANCH_LABEL,
+        output_dir=(
+            HISTORY_FINGERPRINT_DIR
+        ),
+    )
+
+    print(
+        "[HISTORY FINGERPRINT] "
+        f"mode={fingerprint_mode} "
+        f"pairs={len(fingerprint['pairs'])} "
+        f"global_sha256="
+        f"{fingerprint['global_sha256']} "
+        f"path={fingerprint_path}"
+    )
+
+    if HISTORY_FINGERPRINT_EXIT:
+        print(
+            "[HISTORY FINGERPRINT] "
+            "exit requested; "
+            "strategy/execution not started"
+        )
+
+        raise SystemExit(0)
 
 
 IS_REPLAY = (
