@@ -8230,6 +8230,13 @@ VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS = (
     0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.00,
 )
 
+# First-touch research is intentionally independent from the chart candle
+# slider. Ask Redis for a generous history and use whatever is actually
+# available. Complete forward windows are validated separately, so gaps
+# (for example a stopped WebSocket) are never bridged silently.
+VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT = 5000
+VOLUME_EXHAUSTION_FIRST_TOUCH_HORIZON_MINUTES = 60
+
 VOLUME_EXHAUSTION_FIRST_TOUCH_MATRIX_SETUPS = tuple(
     (
         f"TP {tp_pct:.2f}% / SL {sl_pct:.2f}%",
@@ -8354,6 +8361,173 @@ def _volume_exhaustion_first_touch_replay(
         "gross_pct": float(gross_pct),
         "touch_min": float(horizon_minutes),
     }
+
+def _volume_exhaustion_complete_future_window(
+    one_minute,
+    actionable_ts,
+    horizon_minutes,
+):
+    """Return an exact contiguous 1m forward window or None.
+
+    This prevents a WebSocket/data gap from being interpreted as a valid
+    60-minute replay merely because newer candles exist after the gap.
+    """
+    if one_minute is None or one_minute.empty:
+        return None
+
+    actionable_ts = int(actionable_ts)
+    horizon_minutes = int(horizon_minutes)
+    horizon_end = actionable_ts + horizon_minutes * 60_000
+
+    future = one_minute[
+        (one_minute["timestamp"] >= actionable_ts)
+        & (one_minute["timestamp"] < horizon_end)
+    ][["timestamp", "high", "low", "close"]].copy()
+
+    if len(future) != horizon_minutes:
+        return None
+
+    future = future.sort_values("timestamp").reset_index(drop=True)
+    timestamps = pd.to_numeric(
+        future["timestamp"], errors="coerce"
+    ).to_numpy(dtype="float64")
+
+    if np.isnan(timestamps).any():
+        return None
+
+    expected = (
+        actionable_ts
+        + np.arange(horizon_minutes, dtype="int64") * 60_000
+    )
+    if not np.array_equal(timestamps.astype("int64"), expected):
+        return None
+
+    return future
+
+
+def _volume_exhaustion_first_touch_replay_grid(
+    one_minute,
+    actionable_ts,
+    entry_price,
+    signal_side,
+    horizon_minutes=VOLUME_EXHAUSTION_FIRST_TOUCH_HORIZON_MINUTES,
+):
+    """Replay the complete TP x SL grid from one shared 1m path.
+
+    TP and SL first-hit candles are calculated once per threshold instead of
+    rescanning up to 60 candles for every one of the 81 matrix cells.
+    """
+    results = {}
+    setups = VOLUME_EXHAUSTION_FIRST_TOUCH_ALL_SETUPS
+
+    future = _volume_exhaustion_complete_future_window(
+        one_minute=one_minute,
+        actionable_ts=actionable_ts,
+        horizon_minutes=horizon_minutes,
+    )
+
+    if future is None or entry_price <= 0:
+        for _, tp_pct, sl_pct in setups:
+            results[_volume_exhaustion_first_touch_key(tp_pct, sl_pct)] = {
+                "result": "INCOMPLETE",
+                "gross_pct": np.nan,
+                "touch_min": np.nan,
+            }
+        return results
+
+    highs = pd.to_numeric(future["high"], errors="coerce").to_numpy()
+    lows = pd.to_numeric(future["low"], errors="coerce").to_numpy()
+    timestamps = pd.to_numeric(
+        future["timestamp"], errors="coerce"
+    ).to_numpy(dtype="int64")
+
+    if (
+        np.isnan(highs).any()
+        or np.isnan(lows).any()
+        or signal_side not in {"LONG", "SHORT"}
+    ):
+        for _, tp_pct, sl_pct in setups:
+            results[_volume_exhaustion_first_touch_key(tp_pct, sl_pct)] = {
+                "result": "INCOMPLETE",
+                "gross_pct": np.nan,
+                "touch_min": np.nan,
+            }
+        return results
+
+    def first_hit(mask):
+        indexes = np.flatnonzero(mask)
+        return int(indexes[0]) if indexes.size else None
+
+    tp_first = {}
+    sl_first = {}
+
+    for tp_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_TP_LEVELS:
+        fraction = float(tp_pct) / 100.0
+        if signal_side == "LONG":
+            price = entry_price * (1.0 + fraction)
+            tp_first[float(tp_pct)] = first_hit(highs >= price)
+        else:
+            price = entry_price * (1.0 - fraction)
+            tp_first[float(tp_pct)] = first_hit(lows <= price)
+
+    for sl_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS:
+        fraction = float(sl_pct) / 100.0
+        if signal_side == "LONG":
+            price = entry_price * (1.0 - fraction)
+            sl_first[float(sl_pct)] = first_hit(lows <= price)
+        else:
+            price = entry_price * (1.0 + fraction)
+            sl_first[float(sl_pct)] = first_hit(highs >= price)
+
+    final_close = float(future.iloc[-1]["close"])
+    time_gross = (
+        (final_close / entry_price - 1.0) * 100.0
+        if signal_side == "LONG"
+        else (entry_price / final_close - 1.0) * 100.0
+    )
+
+    for _, tp_pct, sl_pct in setups:
+        tp_idx = tp_first.get(float(tp_pct))
+        sl_idx = sl_first.get(float(sl_pct))
+        replay_key = _volume_exhaustion_first_touch_key(tp_pct, sl_pct)
+
+        if tp_idx is None and sl_idx is None:
+            results[replay_key] = {
+                "result": "TIME",
+                "gross_pct": float(time_gross),
+                "touch_min": float(horizon_minutes),
+            }
+            continue
+
+        if tp_idx is not None and sl_idx is not None and tp_idx == sl_idx:
+            touch_idx = tp_idx
+            result = "AMBIGUOUS"
+            gross_pct = np.nan
+        elif sl_idx is None or (
+            tp_idx is not None and tp_idx < sl_idx
+        ):
+            touch_idx = tp_idx
+            result = "TP"
+            gross_pct = float(tp_pct)
+        else:
+            touch_idx = sl_idx
+            result = "SL"
+            gross_pct = -float(sl_pct)
+
+        touch_min = max(
+            1.0,
+            (int(timestamps[touch_idx]) - int(actionable_ts))
+            / 60_000.0
+            + 1.0,
+        )
+        results[replay_key] = {
+            "result": result,
+            "gross_pct": gross_pct,
+            "touch_min": float(touch_min),
+        }
+
+    return results
+
 
 def build_volume_exhaustion_confirmation_edge_study(
     candles,
@@ -8496,18 +8670,15 @@ def build_volume_exhaustion_confirmation_edge_study(
                 mfe_col = f"mfe_{horizon}m_pct"
                 mae_col = f"mae_{horizon}m_pct"
 
-                # Require the complete forward horizon. Otherwise leave NaN.
-                if last_candle_close_ms < horizon_end:
-                    row[mfe_col] = np.nan
-                    row[mae_col] = np.nan
-                    continue
+                # Require an exact contiguous 1m forward horizon. A data
+                # outage must not be bridged by candles that arrive later.
+                future = _volume_exhaustion_complete_future_window(
+                    one_minute=one_minute,
+                    actionable_ts=actionable_ts,
+                    horizon_minutes=horizon,
+                )
 
-                future = one_minute[
-                    (one_minute["timestamp"] >= actionable_ts)
-                    & (one_minute["timestamp"] < horizon_end)
-                ]
-
-                if future.empty:
+                if future is None:
                     row[mfe_col] = np.nan
                     row[mae_col] = np.nan
                     continue
@@ -8533,30 +8704,27 @@ def build_volume_exhaustion_confirmation_edge_study(
                 row[mfe_col] = max(0.0, float(mfe))
                 row[mae_col] = max(0.0, float(mae))
 
-            for setup_label, tp_pct, sl_pct in (
+            replay_grid = _volume_exhaustion_first_touch_replay_grid(
+                one_minute=one_minute,
+                actionable_ts=actionable_ts,
+                entry_price=entry_price,
+                signal_side=signal_side,
+                horizon_minutes=(
+                    VOLUME_EXHAUSTION_FIRST_TOUCH_HORIZON_MINUTES
+                ),
+            )
+
+            for _, tp_pct, sl_pct in (
                 VOLUME_EXHAUSTION_FIRST_TOUCH_ALL_SETUPS
             ):
-                replay = _volume_exhaustion_first_touch_replay(
-                    one_minute=one_minute,
-                    actionable_ts=actionable_ts,
-                    entry_price=entry_price,
-                    signal_side=signal_side,
-                    tp_pct=tp_pct,
-                    sl_pct=sl_pct,
-                    horizon_minutes=60,
-                )
                 replay_key = _volume_exhaustion_first_touch_key(
                     tp_pct,
                     sl_pct,
                 )
-                if replay is None:
-                    row[f"{replay_key}_result"] = "INCOMPLETE"
-                    row[f"{replay_key}_gross_pct"] = np.nan
-                    row[f"{replay_key}_touch_min"] = np.nan
-                else:
-                    row[f"{replay_key}_result"] = replay["result"]
-                    row[f"{replay_key}_gross_pct"] = replay["gross_pct"]
-                    row[f"{replay_key}_touch_min"] = replay["touch_min"]
+                replay = replay_grid[replay_key]
+                row[f"{replay_key}_result"] = replay["result"]
+                row[f"{replay_key}_gross_pct"] = replay["gross_pct"]
+                row[f"{replay_key}_touch_min"] = replay["touch_min"]
 
             rows.append(row)
 
@@ -8693,6 +8861,27 @@ def build_volume_exhaustion_confirmation_study_all_symbols(
         frames,
         ignore_index=True,
     )
+
+
+def filter_volume_exhaustion_confirmation_study_by_move(
+    study_df,
+    max_confirmation_move_pct,
+):
+    """Apply the pivot→confirmation filter without rebuilding candle replays."""
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+    if max_confirmation_move_pct is None:
+        return study_df.copy()
+    if "pivot_to_confirmation_pct" not in study_df.columns:
+        return pd.DataFrame()
+
+    distance = pd.to_numeric(
+        study_df["pivot_to_confirmation_pct"],
+        errors="coerce",
+    )
+    return study_df.loc[
+        distance.le(float(max_confirmation_move_pct))
+    ].copy().reset_index(drop=True)
 
 
 def build_volume_exhaustion_confirmation_bucket_summary(
@@ -9263,9 +9452,11 @@ def render_volume_exhaustion_first_touch_replay(
     st.markdown("#### First-touch replay from confirmation")
     st.caption(
         "Chronological 1m replay from the first actionable confirmation. "
-        "TP/SL are checked candle by candle for 60m. If both are touched "
-        "inside the same 1m candle, the case is AMBIGUOUS and is excluded "
-        "from WR/PF instead of assuming an intrabar order."
+        "This research uses the available candle history independently from "
+        "the chart bars selector. TP/SL are checked candle by candle for 60m; "
+        "a missing 1m candle makes that forward window INCOMPLETE. If both are "
+        "touched inside the same 1m candle, the case is AMBIGUOUS and is "
+        "excluded from WR/PF instead of assuming an intrabar order."
     )
 
     round_trip_fee_pct = st.number_input(
@@ -9413,7 +9604,7 @@ def render_volume_exhaustion_confirmation_bucket_study(
 
     st.caption(
         f"Scope: {scope_label} · "
-        f"last {int(candle_limit)} 1m candles per symbol · "
+        f"up to {int(candle_limit)} available 1m candles per symbol · "
         f"{distance_scope_text}."
     )
 
@@ -10380,7 +10571,7 @@ if selected_section == "volume_exhaustion":
             )
 
         candle_limit = st.slider(
-            "1m candles",
+            "Chart 1m candles",
             min_value=60,
             max_value=5000,
             value=180,
@@ -10572,39 +10763,15 @@ if selected_section == "volume_exhaustion":
             ["Selected symbol", "All symbols"],
             key="volume_exhaustion_bucket_scope",
             help=(
-                "All symbols analyzes every symbol present in the "
-                "Volume Exhaustion event universe using the same "
-                "candle window and swing detector settings."
+                "Research uses all 1m candles currently available in Redis. "
+                "It is independent from the chart candle slider above."
             ),
         )
 
-        if bucket_scope == "Selected symbol":
-            bucket_study_df = (
-                build_volume_exhaustion_confirmation_edge_study(
-                    candles=candles,
-                    swing_points_by_timeframe=(
-                        swing_points_by_timeframe
-                    ),
-                    swing_candles_by_timeframe=(
-                        swing_candles_by_timeframe
-                    ),
-                    swing_detector_windows=(
-                        swing_detector_windows
-                    ),
-                    max_confirmation_move_pct=(
-                        bucket_max_confirmation_move_pct
-                    ),
-                )
-            )
-            if not bucket_study_df.empty:
-                bucket_study_df.insert(
-                    0,
-                    "symbol",
-                    str(selected_symbol),
-                )
-            bucket_scope_label = str(selected_symbol)
-        else:
-            all_study_symbols = tuple(
+        research_symbols = (
+            (str(selected_symbol),)
+            if bucket_scope == "Selected symbol"
+            else tuple(
                 sorted(
                     valid_events["symbol"]
                     .dropna()
@@ -10613,90 +10780,60 @@ if selected_section == "volume_exhaustion":
                     .tolist()
                 )
             )
+        )
 
-            with st.spinner(
-                "Building confirmation buckets for all symbols..."
-            ):
-                bucket_study_df = (
-                    build_volume_exhaustion_confirmation_study_all_symbols(
-                        symbols=all_study_symbols,
-                        candle_limit=int(candle_limit),
-                        swing_timeframes=tuple(
-                            swing_timeframes
-                        ),
-                        swing_detector_items=tuple(
-                            sorted(
-                                swing_detector_windows.items()
-                            )
-                        ),
-                        min_swing_prominence_pct=float(
-                            min_swing_prominence_pct
-                        ),
-                        max_confirmation_move_pct=(
-                            bucket_max_confirmation_move_pct
-                        ),
-                    )
+        st.caption(
+            "Research window: automatic · uses every 1m candle currently "
+            "available (up to "
+            f"{VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT:,} requested per symbol). "
+            "The chart candle selector does not limit First-Touch, MFE/MAE or "
+            "the TP × SL matrix. Forward windows with missing 1m candles are "
+            "marked INCOMPLETE and excluded."
+        )
+
+        # Build the expensive replay universe ONCE, without the distance
+        # filter. The filtered universe is then just an in-memory slice.
+        with st.spinner(
+            "Building First-Touch research from available candle history..."
+        ):
+            control_study_df = (
+                build_volume_exhaustion_confirmation_study_all_symbols(
+                    symbols=research_symbols,
+                    candle_limit=(
+                        VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+                    ),
+                    swing_timeframes=tuple(swing_timeframes),
+                    swing_detector_items=tuple(
+                        sorted(swing_detector_windows.items())
+                    ),
+                    min_swing_prominence_pct=float(
+                        min_swing_prominence_pct
+                    ),
+                    max_confirmation_move_pct=None,
                 )
-            bucket_scope_label = (
-                f"All symbols ({len(all_study_symbols)} available)"
             )
+
+        bucket_study_df = (
+            filter_volume_exhaustion_confirmation_study_by_move(
+                control_study_df,
+                bucket_max_confirmation_move_pct,
+            )
+        )
+
+        bucket_scope_label = (
+            str(selected_symbol)
+            if bucket_scope == "Selected symbol"
+            else f"All symbols ({len(research_symbols)} available)"
+        )
 
         render_volume_exhaustion_confirmation_bucket_study(
             study_df=bucket_study_df,
-            candle_limit=candle_limit,
+            candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
             scope_label=bucket_scope_label,
             max_confirmation_move_pct=(
                 bucket_max_confirmation_move_pct
             ),
         )
-
-        # Control universe: same symbols/window/detectors, but no
-        # pivot → confirmation distance filter. This lets us test whether
-        # the selected distance condition adds edge beyond the swing itself.
-        if bucket_scope == "Selected symbol":
-            control_study_df = (
-                build_volume_exhaustion_confirmation_edge_study(
-                    candles=candles,
-                    swing_points_by_timeframe=(
-                        swing_points_by_timeframe
-                    ),
-                    swing_candles_by_timeframe=(
-                        swing_candles_by_timeframe
-                    ),
-                    swing_detector_windows=(
-                        swing_detector_windows
-                    ),
-                    max_confirmation_move_pct=None,
-                )
-            )
-            if not control_study_df.empty:
-                control_study_df.insert(
-                    0,
-                    "symbol",
-                    str(selected_symbol),
-                )
-        else:
-            with st.spinner(
-                "Building unfiltered first-touch control..."
-            ):
-                control_study_df = (
-                    build_volume_exhaustion_confirmation_study_all_symbols(
-                        symbols=all_study_symbols,
-                        candle_limit=int(candle_limit),
-                        swing_timeframes=tuple(
-                            swing_timeframes
-                        ),
-                        swing_detector_items=tuple(
-                            sorted(
-                                swing_detector_windows.items()
-                            )
-                        ),
-                        min_swing_prominence_pct=float(
-                            min_swing_prominence_pct
-                        ),
-                        max_confirmation_move_pct=None,
-                    )
-                )
 
         render_volume_exhaustion_first_touch_replay(
             filtered_study_df=bucket_study_df,
