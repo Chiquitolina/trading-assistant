@@ -8123,10 +8123,99 @@ def render_volume_exhaustion_outcome_research(events):
     )
 
 
+def get_volume_exhaustion_swing_confirmation_info(
+    point,
+    timeframe_candles,
+    swing_timeframe,
+):
+    if (
+        point is None
+        or point.confirmed_timestamp is None
+        or point.price is None
+        or timeframe_candles is None
+        or timeframe_candles.empty
+    ):
+        return None
+
+    work = timeframe_candles.copy()
+
+    if (
+        "timestamp" not in work.columns
+        or "close" not in work.columns
+    ):
+        return None
+
+    work["timestamp"] = pd.to_numeric(
+        work["timestamp"],
+        errors="coerce",
+    )
+    work["close"] = pd.to_numeric(
+        work["close"],
+        errors="coerce",
+    )
+    work = (
+        work
+        .dropna(subset=["timestamp", "close"])
+        .sort_values("timestamp")
+    )
+
+    confirmed_ts = int(point.confirmed_timestamp)
+    confirmation_rows = work[
+        work["timestamp"].eq(confirmed_ts)
+    ]
+
+    if confirmation_rows.empty:
+        return None
+
+    confirmation_row = confirmation_rows.iloc[-1]
+    confirmation_close = float(confirmation_row["close"])
+    pivot_price = float(point.price)
+
+    if pivot_price <= 0:
+        return None
+
+    if point.side == "LOW":
+        move_pct = (
+            confirmation_close / pivot_price - 1.0
+        ) * 100.0
+    elif point.side == "HIGH":
+        move_pct = (
+            pivot_price / confirmation_close - 1.0
+        ) * 100.0
+    else:
+        return None
+
+    timeframe_ms = {
+        "1m": 60_000,
+        "3m": 3 * 60_000,
+        "5m": 5 * 60_000,
+        "15m": 15 * 60_000,
+        "30m": 30 * 60_000,
+        "1h": 60 * 60_000,
+        "2h": 2 * 60 * 60_000,
+        "4h": 4 * 60 * 60_000,
+    }.get(str(swing_timeframe))
+
+    # confirmed_timestamp identifies the confirming candle. Its close
+    # becomes actionable only when that candle has fully closed.
+    actionable_timestamp = confirmed_ts
+    if timeframe_ms is not None:
+        actionable_timestamp += timeframe_ms
+
+    return {
+        "move_pct": float(move_pct),
+        "confirmation_close": confirmation_close,
+        "confirmation_candle_timestamp": confirmed_ts,
+        "actionable_timestamp": actionable_timestamp,
+    }
+
+
 def build_volume_exhaustion_chart(
     candles,
     event_row,
     swing_points_by_timeframe=None,
+    swing_candles_by_timeframe=None,
+    max_confirmation_move_pct=None,
 ):
     candles = candles.copy()
 
@@ -8214,6 +8303,45 @@ def build_volume_exhaustion_chart(
                 )
             ]
 
+            timeframe_candles = None
+            if swing_candles_by_timeframe:
+                timeframe_candles = (
+                    swing_candles_by_timeframe.get(
+                        swing_timeframe
+                    )
+                )
+
+            swing_confirmation_info = {}
+            filtered_swing_points = []
+
+            for point in visible_swing_points:
+                confirmation_info = (
+                    get_volume_exhaustion_swing_confirmation_info(
+                        point=point,
+                        timeframe_candles=timeframe_candles,
+                        swing_timeframe=swing_timeframe,
+                    )
+                )
+
+                swing_confirmation_info[id(point)] = (
+                    confirmation_info
+                )
+
+                if max_confirmation_move_pct is None:
+                    filtered_swing_points.append(point)
+                    continue
+
+                if confirmation_info is None:
+                    continue
+
+                if (
+                    confirmation_info["move_pct"]
+                    <= float(max_confirmation_move_pct)
+                ):
+                    filtered_swing_points.append(point)
+
+            visible_swing_points = filtered_swing_points
+
             swing_highs = [
                 point
                 for point in visible_swing_points
@@ -8251,6 +8379,11 @@ def build_volume_exhaustion_chart(
                             [
                                 point.confirmed_timestamp,
                                 point.prominence_pct,
+                                (
+                                    swing_confirmation_info.get(
+                                        id(point)
+                                    ) or {}
+                                ).get("move_pct"),
                             ]
                             for point in swing_highs
                         ],
@@ -8259,7 +8392,9 @@ def build_volume_exhaustion_chart(
                             "Pivot: %{x}<br>"
                             "Price: %{y:.8f}<br>"
                             "Confirmed ms: %{customdata[0]}<br>"
-                            "Prominence: %{customdata[1]:.4f}%"
+                            "Prominence: %{customdata[1]:.4f}%<br>"
+                            "Pivot → confirmation: "
+                            "%{customdata[2]:.4f}%"
                             "<extra></extra>"
                         ),
                     )
@@ -8290,6 +8425,11 @@ def build_volume_exhaustion_chart(
                             [
                                 point.confirmed_timestamp,
                                 point.prominence_pct,
+                                (
+                                    swing_confirmation_info.get(
+                                        id(point)
+                                    ) or {}
+                                ).get("move_pct"),
                             ]
                             for point in swing_lows
                         ],
@@ -8298,7 +8438,69 @@ def build_volume_exhaustion_chart(
                             "Pivot: %{x}<br>"
                             "Price: %{y:.8f}<br>"
                             "Confirmed ms: %{customdata[0]}<br>"
-                            "Prominence: %{customdata[1]:.4f}%"
+                            "Prominence: %{customdata[1]:.4f}%<br>"
+                            "Pivot → confirmation: "
+                            "%{customdata[2]:.4f}%"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+            confirmation_points = []
+            for point in visible_swing_points:
+                info = swing_confirmation_info.get(id(point))
+                if info is None:
+                    continue
+
+                actionable_ts = int(info["actionable_timestamp"])
+                if not (
+                    visible_start_ms
+                    <= actionable_ts
+                    <= visible_end_ms + 60_000
+                ):
+                    continue
+
+                confirmation_points.append((point, info))
+
+            if confirmation_points:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[
+                            pd.to_datetime(
+                                info["actionable_timestamp"],
+                                unit="ms",
+                                utc=True,
+                            ).tz_convert(TZ)
+                            for _, info in confirmation_points
+                        ],
+                        y=[
+                            info["confirmation_close"]
+                            for _, info in confirmation_points
+                        ],
+                        mode="markers",
+                        marker={
+                            "size": 7,
+                            "symbol": "circle-open",
+                        },
+                        name=(
+                            f"Confirmation {swing_timeframe}"
+                        ),
+                        customdata=[
+                            [
+                                point.side,
+                                info["move_pct"],
+                                point.price,
+                            ]
+                            for point, info in confirmation_points
+                        ],
+                        hovertemplate=(
+                            f"<b>{swing_timeframe} confirmation</b><br>"
+                            "Available: %{x}<br>"
+                            "Confirmation close: %{y:.8f}<br>"
+                            "Side: %{customdata[0]}<br>"
+                            "Pivot price: %{customdata[2]:.8f}<br>"
+                            "Pivot → confirmation: "
+                            "%{customdata[1]:.4f}%"
                             "<extra></extra>"
                         ),
                     )
@@ -8738,6 +8940,34 @@ if selected_section == "volume_exhaustion":
                         ),
                     )
 
+        confirmation_filter_1, confirmation_filter_2 = (
+            st.columns([1.5, 2.0])
+        )
+
+        with confirmation_filter_1:
+            filter_by_confirmation_move = st.checkbox(
+                "Filter by pivot → confirmation move",
+                value=False,
+                key=(
+                    "volume_exhaustion_"
+                    "filter_confirmation_move"
+                ),
+            )
+
+        with confirmation_filter_2:
+            max_confirmation_move_pct = st.number_input(
+                "Max pivot → confirmation move %",
+                min_value=0.0,
+                value=0.30,
+                step=0.05,
+                format="%.2f",
+                disabled=not filter_by_confirmation_move,
+                key=(
+                    "volume_exhaustion_"
+                    "max_confirmation_move_pct"
+                ),
+            )
+
         candle_limit = st.slider(
             "1m candles",
             min_value=60,
@@ -8791,6 +9021,7 @@ if selected_section == "volume_exhaustion":
                 )
 
         swing_points_by_timeframe = {}
+        swing_candles_by_timeframe = {}
         swing_structure_at_event = {}
 
         if show_swings:
@@ -8832,6 +9063,10 @@ if selected_section == "volume_exhaustion":
                 if swing_tf_candles_df.empty:
                     continue
 
+                swing_candles_by_timeframe[
+                    swing_timeframe
+                ] = swing_tf_candles_df.copy()
+
                 swing_tf_candles = (
                     swing_tf_candles_df.to_dict(
                         orient="records"
@@ -8868,6 +9103,14 @@ if selected_section == "volume_exhaustion":
             candles=candles,
             event_row=selected_event,
             swing_points_by_timeframe=swing_points_by_timeframe,
+            swing_candles_by_timeframe=(
+                swing_candles_by_timeframe
+            ),
+            max_confirmation_move_pct=(
+                float(max_confirmation_move_pct)
+                if filter_by_confirmation_move
+                else None
+            ),
         )
 
         st.plotly_chart(
