@@ -8211,6 +8211,120 @@ def get_volume_exhaustion_swing_confirmation_info(
 
 
 
+
+VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS = (
+    ("TP 0.20% / SL 0.20%", 0.20, 0.20),
+    ("TP 0.30% / SL 0.20%", 0.30, 0.20),
+    ("TP 0.30% / SL 0.30%", 0.30, 0.30),
+    ("TP 0.50% / SL 0.25%", 0.50, 0.25),
+)
+
+
+def _volume_exhaustion_first_touch_key(tp_pct, sl_pct):
+    def token(value):
+        return f"{float(value):.2f}".replace(".", "p")
+
+    return f"ft_tp_{token(tp_pct)}_sl_{token(sl_pct)}"
+
+
+def _volume_exhaustion_first_touch_replay(
+    one_minute,
+    actionable_ts,
+    entry_price,
+    signal_side,
+    tp_pct,
+    sl_pct,
+    horizon_minutes=60,
+):
+    """Replay TP/SL chronologically from the actionable confirmation time.
+
+    If TP and SL are both touched inside the same 1m candle, the ordering is
+    unknowable from OHLC alone, so the result is AMBIGUOUS instead of making
+    a favorable assumption. A complete horizon with no touch exits at the
+    final 1m close (TIME). An incomplete horizon is not scored.
+    """
+    if one_minute is None or one_minute.empty or entry_price <= 0:
+        return None
+
+    horizon_end = int(actionable_ts) + int(horizon_minutes) * 60_000
+    last_candle_close_ms = int(one_minute["timestamp"].max()) + 60_000
+    if last_candle_close_ms < horizon_end:
+        return {
+            "result": "INCOMPLETE",
+            "gross_pct": np.nan,
+            "touch_min": np.nan,
+        }
+
+    future = one_minute[
+        (one_minute["timestamp"] >= int(actionable_ts))
+        & (one_minute["timestamp"] < horizon_end)
+    ].copy()
+
+    if future.empty:
+        return {
+            "result": "INCOMPLETE",
+            "gross_pct": np.nan,
+            "touch_min": np.nan,
+        }
+
+    tp_fraction = float(tp_pct) / 100.0
+    sl_fraction = float(sl_pct) / 100.0
+
+    if signal_side == "LONG":
+        tp_price = entry_price * (1.0 + tp_fraction)
+        sl_price = entry_price * (1.0 - sl_fraction)
+    else:
+        tp_price = entry_price * (1.0 - tp_fraction)
+        sl_price = entry_price * (1.0 + sl_fraction)
+
+    for _, candle in future.iterrows():
+        high = float(candle["high"])
+        low = float(candle["low"])
+
+        if signal_side == "LONG":
+            tp_hit = high >= tp_price
+            sl_hit = low <= sl_price
+        else:
+            tp_hit = low <= tp_price
+            sl_hit = high >= sl_price
+
+        candle_ts = int(candle["timestamp"])
+        touch_min = max(
+            1.0,
+            (candle_ts - int(actionable_ts)) / 60_000.0 + 1.0,
+        )
+
+        if tp_hit and sl_hit:
+            return {
+                "result": "AMBIGUOUS",
+                "gross_pct": np.nan,
+                "touch_min": touch_min,
+            }
+        if tp_hit:
+            return {
+                "result": "TP",
+                "gross_pct": float(tp_pct),
+                "touch_min": touch_min,
+            }
+        if sl_hit:
+            return {
+                "result": "SL",
+                "gross_pct": -float(sl_pct),
+                "touch_min": touch_min,
+            }
+
+    final_close = float(future.iloc[-1]["close"])
+    if signal_side == "LONG":
+        gross_pct = (final_close / entry_price - 1.0) * 100.0
+    else:
+        gross_pct = (entry_price / final_close - 1.0) * 100.0
+
+    return {
+        "result": "TIME",
+        "gross_pct": float(gross_pct),
+        "touch_min": float(horizon_minutes),
+    }
+
 def build_volume_exhaustion_confirmation_edge_study(
     candles,
     swing_points_by_timeframe=None,
@@ -8388,6 +8502,31 @@ def build_volume_exhaustion_confirmation_edge_study(
 
                 row[mfe_col] = max(0.0, float(mfe))
                 row[mae_col] = max(0.0, float(mae))
+
+            for setup_label, tp_pct, sl_pct in (
+                VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS
+            ):
+                replay = _volume_exhaustion_first_touch_replay(
+                    one_minute=one_minute,
+                    actionable_ts=actionable_ts,
+                    entry_price=entry_price,
+                    signal_side=signal_side,
+                    tp_pct=tp_pct,
+                    sl_pct=sl_pct,
+                    horizon_minutes=60,
+                )
+                replay_key = _volume_exhaustion_first_touch_key(
+                    tp_pct,
+                    sl_pct,
+                )
+                if replay is None:
+                    row[f"{replay_key}_result"] = "INCOMPLETE"
+                    row[f"{replay_key}_gross_pct"] = np.nan
+                    row[f"{replay_key}_touch_min"] = np.nan
+                else:
+                    row[f"{replay_key}_result"] = replay["result"]
+                    row[f"{replay_key}_gross_pct"] = replay["gross_pct"]
+                    row[f"{replay_key}_touch_min"] = replay["touch_min"]
 
             rows.append(row)
 
@@ -8673,6 +8812,303 @@ def build_volume_exhaustion_confirmation_bucket_summary(
 
     return result
 
+
+
+def build_volume_exhaustion_first_touch_summary(
+    study_df,
+    scope_name,
+    round_trip_fee_pct,
+):
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    fee_pct = float(round_trip_fee_pct)
+
+    for setup_label, tp_pct, sl_pct in (
+        VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS
+    ):
+        replay_key = _volume_exhaustion_first_touch_key(
+            tp_pct,
+            sl_pct,
+        )
+        result_col = f"{replay_key}_result"
+        gross_col = f"{replay_key}_gross_pct"
+
+        if (
+            result_col not in study_df.columns
+            or gross_col not in study_df.columns
+        ):
+            continue
+
+        complete = study_df[
+            study_df[result_col].isin(
+                ["TP", "SL", "TIME", "AMBIGUOUS"]
+            )
+        ].copy()
+        scored = complete[
+            complete[result_col].isin(["TP", "SL", "TIME"])
+        ].copy()
+
+        if scored.empty:
+            continue
+
+        scored["_net_pct"] = (
+            pd.to_numeric(
+                scored[gross_col],
+                errors="coerce",
+            )
+            - fee_pct
+        )
+        scored = scored.dropna(subset=["_net_pct"])
+        if scored.empty:
+            continue
+
+        wins = scored["_net_pct"] > 0
+        losses = scored["_net_pct"] < 0
+        gross_profit = scored.loc[wins, "_net_pct"].sum()
+        gross_loss = -scored.loc[losses, "_net_pct"].sum()
+        profit_factor = (
+            gross_profit / gross_loss
+            if gross_loss > 0
+            else np.inf
+            if gross_profit > 0
+            else np.nan
+        )
+
+        tp_count = int((scored[result_col] == "TP").sum())
+        sl_count = int((scored[result_col] == "SL").sum())
+        time_count = int((scored[result_col] == "TIME").sum())
+        ambiguous_count = int(
+            (complete[result_col] == "AMBIGUOUS").sum()
+        )
+
+        rows.append({
+            "Universe": scope_name,
+            "Setup": setup_label,
+            "N scored": len(scored),
+            "TP": tp_count,
+            "SL": sl_count,
+            "Time exit": time_count,
+            "Ambiguous": ambiguous_count,
+            "Net WR %": wins.mean() * 100.0,
+            "PF net": profit_factor,
+            "Net sum %": scored["_net_pct"].sum(),
+            "Net avg %": scored["_net_pct"].mean(),
+            "Net median %": scored["_net_pct"].median(),
+        })
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    for column in [
+        "Net WR %",
+        "PF net",
+        "Net sum %",
+        "Net avg %",
+        "Net median %",
+    ]:
+        if column in result.columns:
+            result[column] = pd.to_numeric(
+                result[column],
+                errors="coerce",
+            ).round(4)
+
+    return result
+
+
+
+def build_volume_exhaustion_first_touch_breakdown(
+    study_df,
+    round_trip_fee_pct,
+    breakdown,
+):
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+
+    work = study_df.copy()
+    if breakdown == "signal":
+        work["Breakdown"] = work["signal"].astype(str)
+        breakdown_order = ["LONG", "SHORT"]
+    elif breakdown == "distance":
+        distance = pd.to_numeric(
+            work["pivot_to_confirmation_pct"],
+            errors="coerce",
+        )
+        labels = [
+            "≤ 0.025%",
+            "0.025–0.050%",
+            "0.050–0.075%",
+            "0.075–0.100%",
+            "0.10–0.20%",
+            "0.20–0.30%",
+            "0.30–0.50%",
+            "0.50–1.00%",
+            "> 1.00%",
+        ]
+        work["Breakdown"] = pd.cut(
+            distance,
+            bins=[
+                -np.inf,
+                0.025,
+                0.050,
+                0.075,
+                0.100,
+                0.20,
+                0.30,
+                0.50,
+                1.00,
+                np.inf,
+            ],
+            labels=labels,
+            include_lowest=True,
+            right=True,
+        ).astype(str)
+        breakdown_order = labels
+    else:
+        return pd.DataFrame()
+
+    rows = []
+    for breakdown_value, group in work.groupby(
+        "Breakdown",
+        dropna=False,
+        observed=True,
+    ):
+        summary = build_volume_exhaustion_first_touch_summary(
+            group,
+            str(breakdown_value),
+            round_trip_fee_pct,
+        )
+        if summary.empty:
+            continue
+        summary = summary.rename(columns={"Universe": "Breakdown"})
+        rows.append(summary)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.concat(rows, ignore_index=True)
+    order_map = {
+        value: index
+        for index, value in enumerate(breakdown_order)
+    }
+    result["_order"] = (
+        result["Breakdown"]
+        .map(order_map)
+        .fillna(len(order_map))
+    )
+    return (
+        result
+        .sort_values(["Setup", "_order"])
+        .drop(columns=["_order"])
+        .reset_index(drop=True)
+    )
+
+def render_volume_exhaustion_first_touch_replay(
+    filtered_study_df,
+    control_study_df,
+    max_confirmation_move_pct,
+):
+    st.markdown("#### First-touch replay from confirmation")
+    st.caption(
+        "Chronological 1m replay from the first actionable confirmation. "
+        "TP/SL are checked candle by candle for 60m. If both are touched "
+        "inside the same 1m candle, the case is AMBIGUOUS and is excluded "
+        "from WR/PF instead of assuming an intrabar order."
+    )
+
+    round_trip_fee_pct = st.number_input(
+        "Round-trip fees %",
+        min_value=0.0,
+        value=0.08,
+        step=0.01,
+        format="%.3f",
+        key="volume_exhaustion_first_touch_fee_pct",
+        help=(
+            "Applied once to each scored replay result. Change this to "
+            "match the execution/fee assumption you want to test."
+        ),
+    )
+
+    if max_confirmation_move_pct is None:
+        filtered_label = "Selected distance universe"
+    else:
+        filtered_label = (
+            f"Filtered ≤ {float(max_confirmation_move_pct):.2f}%"
+        )
+
+    summaries = []
+    filtered_summary = build_volume_exhaustion_first_touch_summary(
+        filtered_study_df,
+        filtered_label,
+        round_trip_fee_pct,
+    )
+    if not filtered_summary.empty:
+        summaries.append(filtered_summary)
+
+    control_summary = build_volume_exhaustion_first_touch_summary(
+        control_study_df,
+        "CONTROL · all confirmed swings",
+        round_trip_fee_pct,
+    )
+    if not control_summary.empty:
+        summaries.append(control_summary)
+
+    if not summaries:
+        st.info(
+            "No complete +60m confirmations are available for first-touch replay yet."
+        )
+        return
+
+    comparison = pd.concat(summaries, ignore_index=True)
+    st.dataframe(
+        comparison,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    signal_breakdown = (
+        build_volume_exhaustion_first_touch_breakdown(
+            filtered_study_df,
+            round_trip_fee_pct,
+            breakdown="signal",
+        )
+    )
+    if not signal_breakdown.empty:
+        with st.expander(
+            "Filtered replay by LONG / SHORT",
+            expanded=False,
+        ):
+            st.dataframe(
+                signal_breakdown,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    distance_breakdown = (
+        build_volume_exhaustion_first_touch_breakdown(
+            filtered_study_df,
+            round_trip_fee_pct,
+            breakdown="distance",
+        )
+    )
+    if not distance_breakdown.empty:
+        with st.expander(
+            "Filtered replay by pivot → confirmation distance",
+            expanded=False,
+        ):
+            st.dataframe(
+                distance_breakdown,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.caption(
+        "The control uses the same symbols, candle window, swing timeframes, "
+        "detectors and prominence setting, but without the pivot → confirmation "
+        "distance filter. Net metrics subtract the fee assumption above."
+    )
 
 def render_volume_exhaustion_confirmation_bucket_study(
     study_df,
@@ -9952,6 +10388,62 @@ if selected_section == "volume_exhaustion":
             study_df=bucket_study_df,
             candle_limit=candle_limit,
             scope_label=bucket_scope_label,
+            max_confirmation_move_pct=(
+                bucket_max_confirmation_move_pct
+            ),
+        )
+
+        # Control universe: same symbols/window/detectors, but no
+        # pivot → confirmation distance filter. This lets us test whether
+        # the selected distance condition adds edge beyond the swing itself.
+        if bucket_scope == "Selected symbol":
+            control_study_df = (
+                build_volume_exhaustion_confirmation_edge_study(
+                    candles=candles,
+                    swing_points_by_timeframe=(
+                        swing_points_by_timeframe
+                    ),
+                    swing_candles_by_timeframe=(
+                        swing_candles_by_timeframe
+                    ),
+                    swing_detector_windows=(
+                        swing_detector_windows
+                    ),
+                    max_confirmation_move_pct=None,
+                )
+            )
+            if not control_study_df.empty:
+                control_study_df.insert(
+                    0,
+                    "symbol",
+                    str(selected_symbol),
+                )
+        else:
+            with st.spinner(
+                "Building unfiltered first-touch control..."
+            ):
+                control_study_df = (
+                    build_volume_exhaustion_confirmation_study_all_symbols(
+                        symbols=all_study_symbols,
+                        candle_limit=int(candle_limit),
+                        swing_timeframes=tuple(
+                            swing_timeframes
+                        ),
+                        swing_detector_items=tuple(
+                            sorted(
+                                swing_detector_windows.items()
+                            )
+                        ),
+                        min_swing_prominence_pct=float(
+                            min_swing_prominence_pct
+                        ),
+                        max_confirmation_move_pct=None,
+                    )
+                )
+
+        render_volume_exhaustion_first_touch_replay(
+            filtered_study_df=bucket_study_df,
+            control_study_df=control_study_df,
             max_confirmation_move_pct=(
                 bucket_max_confirmation_move_pct
             ),
