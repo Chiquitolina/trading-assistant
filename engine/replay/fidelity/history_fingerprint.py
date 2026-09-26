@@ -72,7 +72,10 @@ def build_history_fingerprint(
     timeframes,
 ):
     pairs = {}
-    global_hash_input = {}
+
+    global_full_hash_input = {}
+    global_core_hash_input = {}
+    global_timestamp_hash_input = {}
 
     for symbol in sorted(symbols):
         symbol = symbol.upper()
@@ -88,8 +91,49 @@ def build_history_fingerprint(
                 for candle in candles
             ]
 
-            pair_hash = _sha256(
+            # ==========================================
+            # FULL
+            # Includes quoteVolume.
+            # ==========================================
+
+            full_hash = _sha256(
                 normalized
+            )
+
+            # ==========================================
+            # CORE
+            # Strategy-relevant market data.
+            # Excludes quoteVolume.
+            # ==========================================
+
+            core = [
+                {
+                    "timestamp": candle["timestamp"],
+                    "open": candle["open"],
+                    "high": candle["high"],
+                    "low": candle["low"],
+                    "close": candle["close"],
+                    "volume": candle["volume"],
+                }
+                for candle in normalized
+            ]
+
+            core_hash = _sha256(
+                core
+            )
+
+            # ==========================================
+            # TIMESTAMPS
+            # Pure sequence / gap detection.
+            # ==========================================
+
+            timestamps = [
+                candle["timestamp"]
+                for candle in normalized
+            ]
+
+            timestamp_hash = _sha256(
+                timestamps
             )
 
             key = f"{symbol}|{tf}"
@@ -98,27 +142,65 @@ def build_history_fingerprint(
                 "symbol": symbol,
                 "timeframe": tf,
                 "count": len(normalized),
+
                 "first_timestamp": (
                     normalized[0]["timestamp"]
                     if normalized
                     else None
                 ),
+
                 "last_timestamp": (
                     normalized[-1]["timestamp"]
                     if normalized
                     else None
                 ),
-                "sha256": pair_hash,
+
+                # backward compatibility
+                "sha256": full_hash,
+
+                "full_sha256": (
+                    full_hash
+                ),
+
+                "core_sha256": (
+                    core_hash
+                ),
+
+                "timestamps_sha256": (
+                    timestamp_hash
+                ),
             }
 
-            global_hash_input[key] = (
-                pair_hash
-            )
+            global_full_hash_input[
+                key
+            ] = full_hash
+
+            global_core_hash_input[
+                key
+            ] = core_hash
+
+            global_timestamp_hash_input[
+                key
+            ] = timestamp_hash
 
     return {
         "pairs": pairs,
+
+        # backward compatibility
         "global_sha256": _sha256(
-            global_hash_input
+            global_full_hash_input
+        ),
+
+        "global_full_sha256": _sha256(
+            global_full_hash_input
+        ),
+
+        "global_core_sha256": _sha256(
+            global_core_hash_input
+        ),
+
+        "global_timestamps_sha256": _sha256(
+            global_timestamp_hash_input
         ),
     }
 
