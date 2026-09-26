@@ -8421,11 +8421,12 @@ def build_volume_exhaustion_confirmation_study_all_symbols(
     swing_timeframes,
     swing_detector_items,
     min_swing_prominence_pct,
+    max_confirmation_move_pct,
 ):
     """Build the same forward-safe confirmation study for many symbols.
 
-    The result intentionally does not apply the chart's max confirmation
-    distance filter because it is used to compare distance buckets.
+    The selected pivot → confirmation distance is applied here too, so the
+    all-symbol bucket study uses the exact same signal universe as the chart.
     """
     detector_windows = dict(swing_detector_items)
     frames = []
@@ -8502,7 +8503,11 @@ def build_volume_exhaustion_confirmation_study_all_symbols(
                     candles_by_timeframe
                 ),
                 swing_detector_windows=detector_windows,
-                max_confirmation_move_pct=None,
+                max_confirmation_move_pct=(
+                    float(max_confirmation_move_pct)
+                    if max_confirmation_move_pct is not None
+                    else None
+                ),
             )
         )
 
@@ -8673,6 +8678,7 @@ def render_volume_exhaustion_confirmation_bucket_study(
     study_df,
     candle_limit,
     scope_label,
+    max_confirmation_move_pct,
 ):
     st.markdown("#### Pivot → confirmation buckets")
 
@@ -8704,11 +8710,18 @@ def render_volume_exhaustion_confirmation_bucket_study(
         else 0
     )
 
+    if max_confirmation_move_pct is None:
+        distance_scope_text = "all pivot → confirmation distances"
+    else:
+        distance_scope_text = (
+            "pivot → confirmation "
+            f"≤ {float(max_confirmation_move_pct):.2f}%"
+        )
+
     st.caption(
         f"Scope: {scope_label} · "
         f"last {int(candle_limit)} 1m candles per symbol · "
-        "all pivot → confirmation distances are included so "
-        "the buckets can be compared without selection bias."
+        f"{distance_scope_text}."
     )
 
     metric_1, metric_2, metric_3, metric_4 = st.columns(4)
@@ -9854,6 +9867,13 @@ if selected_section == "volume_exhaustion":
         )
 
         st.markdown("---")
+
+        bucket_max_confirmation_move_pct = (
+            float(max_confirmation_move_pct)
+            if filter_by_confirmation_move
+            else None
+        )
+
         bucket_scope = st.selectbox(
             "Bucket study scope",
             ["Selected symbol", "All symbols"],
@@ -9878,7 +9898,9 @@ if selected_section == "volume_exhaustion":
                     swing_detector_windows=(
                         swing_detector_windows
                     ),
-                    max_confirmation_move_pct=None,
+                    max_confirmation_move_pct=(
+                        bucket_max_confirmation_move_pct
+                    ),
                 )
             )
             if not bucket_study_df.empty:
@@ -9917,6 +9939,9 @@ if selected_section == "volume_exhaustion":
                         min_swing_prominence_pct=float(
                             min_swing_prominence_pct
                         ),
+                        max_confirmation_move_pct=(
+                            bucket_max_confirmation_move_pct
+                        ),
                     )
                 )
             bucket_scope_label = (
@@ -9927,6 +9952,9 @@ if selected_section == "volume_exhaustion":
             study_df=bucket_study_df,
             candle_limit=candle_limit,
             scope_label=bucket_scope_label,
+            max_confirmation_move_pct=(
+                bucket_max_confirmation_move_pct
+            ),
         )
 
         latest_candle_ts = pd.to_datetime(
