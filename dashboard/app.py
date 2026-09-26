@@ -8205,7 +8205,7 @@ if selected_section == "volume_exhaustion":
         candle_limit = st.slider(
             "1m candles",
             min_value=60,
-            max_value=100000,
+            max_value=5000,
             value=180,
             step=20,
             key="volume_exhaustion_candle_limit",
