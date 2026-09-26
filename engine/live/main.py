@@ -230,6 +230,7 @@ volume_exhaustion_collector = (
 
 volume_exhaustion_outcome_tracker = (
     VolumeExhaustionOutcomeTracker(
+        buffer=buffer,
         outcomes_path=(
             "volume_exhaustion_outcomes.csv"
         ),
