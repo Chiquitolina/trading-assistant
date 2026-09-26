@@ -134,6 +134,122 @@ def fetch_futures_klines_range(
 
     return candles
 
+HISTORY_TARGET_CANDLES = {
+    "1m": 400,
+    "5m": 400,
+    "15m": 288,
+    "30m": 240,
+    "1h": 168,
+    "4h": 150,
+    "1d": 180,
+}
+
+
+def fetch_closed_history_before(
+    symbol: str,
+    timeframe: str,
+    cutoff_ms: int,
+    target_candles: int | None = None,
+):
+    """
+    Return a deterministic historical seed.
+
+    Rules:
+    - only fully closed candles before cutoff_ms
+    - sorted by open timestamp
+    - deduplicated by open timestamp
+    - exactly the last target_candles when available
+    """
+
+    if timeframe not in TIMEFRAME_CONFIGS:
+        raise ValueError(
+            f"Unsupported timeframe: {timeframe}"
+        )
+
+    symbol = str(symbol).upper()
+    cutoff_ms = int(cutoff_ms)
+
+    if target_candles is None:
+        target_candles = (
+            HISTORY_TARGET_CANDLES[
+                timeframe
+            ]
+        )
+
+    target_candles = int(
+        target_candles
+    )
+
+    if target_candles <= 0:
+        raise ValueError(
+            "target_candles must be > 0"
+        )
+
+    ms_per_candle = int(
+        TIMEFRAME_CONFIGS[
+            timeframe
+        ]["ms_per_candle"]
+    )
+
+    # Fetch substantially more than required.
+    # This gives room for alignment and any
+    # occasional missing interval.
+    lookback_candles = (
+        target_candles * 2
+        + 10
+    )
+
+    start_ms = max(
+        0,
+        cutoff_ms
+        - (
+            lookback_candles
+            * ms_per_candle
+        ),
+    )
+
+    candles = fetch_futures_klines_range(
+        symbol=symbol,
+        timeframe=timeframe,
+        start_ms=start_ms,
+        end_ms=cutoff_ms - 1,
+    )
+
+    # Only candles that were already completely
+    # closed at the requested cutoff.
+    candles = [
+        candle
+        for candle in candles
+        if int(
+            candle["close_timestamp"]
+        ) < cutoff_ms
+    ]
+
+    # Deterministic deduplication by candle open.
+    by_timestamp = {}
+
+    for candle in candles:
+        timestamp = int(
+            candle["timestamp"]
+        )
+
+        by_timestamp[
+            timestamp
+        ] = candle
+
+    candles = [
+        by_timestamp[timestamp]
+        for timestamp
+        in sorted(by_timestamp)
+    ]
+
+    if len(candles) > target_candles:
+        candles = candles[
+            -target_candles:
+        ]
+
+    return candles
+
 def fetch_closed_futures_candle(
     symbol: str,
     timeframe: str,
