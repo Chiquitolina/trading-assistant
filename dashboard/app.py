@@ -8414,6 +8414,367 @@ def build_volume_exhaustion_confirmation_edge_study(
     ).reset_index(drop=True)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def build_volume_exhaustion_confirmation_study_all_symbols(
+    symbols,
+    candle_limit,
+    swing_timeframes,
+    swing_detector_items,
+    min_swing_prominence_pct,
+):
+    """Build the same forward-safe confirmation study for many symbols.
+
+    The result intentionally does not apply the chart's max confirmation
+    distance filter because it is used to compare distance buckets.
+    """
+    detector_windows = dict(swing_detector_items)
+    frames = []
+
+    for symbol in symbols:
+        one_minute = (
+            geometry_scanner_data_service
+            .get_closed_candles(
+                symbol=str(symbol),
+                timeframe="1m",
+                limit=int(candle_limit),
+            )
+        )
+
+        if one_minute is None or one_minute.empty:
+            continue
+
+        points_by_timeframe = {}
+        candles_by_timeframe = {}
+
+        for swing_timeframe in swing_timeframes:
+            detector_name = detector_windows.get(
+                swing_timeframe,
+                "5x5",
+            )
+            swing_bars = int(
+                str(detector_name).split("x")[0]
+            )
+            detector = SwingDetector(
+                left_bars=swing_bars,
+                right_bars=swing_bars,
+                min_prominence_pct=float(
+                    min_swing_prominence_pct
+                ),
+            )
+
+            if swing_timeframe == "1m":
+                timeframe_candles = one_minute
+            else:
+                timeframe_candles = (
+                    geometry_scanner_data_service
+                    .get_closed_candles(
+                        symbol=str(symbol),
+                        timeframe=str(swing_timeframe),
+                        limit=400,
+                    )
+                )
+
+            if (
+                timeframe_candles is None
+                or timeframe_candles.empty
+            ):
+                continue
+
+            candles_by_timeframe[
+                swing_timeframe
+            ] = timeframe_candles.copy()
+
+            points_by_timeframe[
+                swing_timeframe
+            ] = detector.detect_all(
+                timeframe_candles.to_dict(
+                    orient="records"
+                )
+            )
+
+        symbol_study = (
+            build_volume_exhaustion_confirmation_edge_study(
+                candles=one_minute,
+                swing_points_by_timeframe=(
+                    points_by_timeframe
+                ),
+                swing_candles_by_timeframe=(
+                    candles_by_timeframe
+                ),
+                swing_detector_windows=detector_windows,
+                max_confirmation_move_pct=None,
+            )
+        )
+
+        if symbol_study.empty:
+            continue
+
+        symbol_study.insert(0, "symbol", str(symbol))
+        frames.append(symbol_study)
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+
+def build_volume_exhaustion_confirmation_bucket_summary(
+    study_df,
+):
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+
+    work = study_df.copy()
+    work["pivot_to_confirmation_pct"] = pd.to_numeric(
+        work["pivot_to_confirmation_pct"],
+        errors="coerce",
+    )
+    work = work.dropna(
+        subset=["pivot_to_confirmation_pct"]
+    )
+
+    if work.empty:
+        return pd.DataFrame()
+
+    bucket_edges = [
+        -np.inf,
+        0.05,
+        0.10,
+        0.20,
+        0.30,
+        0.50,
+        0.75,
+        1.00,
+        np.inf,
+    ]
+    bucket_labels = [
+        "≤ 0.05%",
+        "0.05–0.10%",
+        "0.10–0.20%",
+        "0.20–0.30%",
+        "0.30–0.50%",
+        "0.50–0.75%",
+        "0.75–1.00%",
+        "> 1.00%",
+    ]
+
+    work["Distance bucket"] = pd.cut(
+        work["pivot_to_confirmation_pct"],
+        bins=bucket_edges,
+        labels=bucket_labels,
+        include_lowest=True,
+        right=True,
+    )
+
+    rows = []
+    group_columns = [
+        "timeframe",
+        "detector",
+        "signal",
+        "Distance bucket",
+    ]
+
+    for group_key, group in work.groupby(
+        group_columns,
+        dropna=False,
+        observed=True,
+        sort=False,
+    ):
+        timeframe, detector, signal, distance_bucket = (
+            group_key
+        )
+        row = {
+            "Timeframe": timeframe,
+            "Detector": detector,
+            "Signal": signal,
+            "Distance bucket": str(distance_bucket),
+            "N": len(group),
+            "Symbols": (
+                group["symbol"].nunique()
+                if "symbol" in group.columns
+                else 1
+            ),
+            "Distance med %": group[
+                "pivot_to_confirmation_pct"
+            ].median(),
+        }
+
+        for horizon in [5, 15, 30, 60]:
+            mfe_col = f"mfe_{horizon}m_pct"
+            mae_col = f"mae_{horizon}m_pct"
+
+            if (
+                mfe_col not in group.columns
+                or mae_col not in group.columns
+            ):
+                continue
+
+            valid = (
+                group[mfe_col].notna()
+                & group[mae_col].notna()
+            )
+            row[f"N +{horizon}m"] = int(valid.sum())
+            row[f"MFE +{horizon}m med %"] = (
+                group.loc[valid, mfe_col].median()
+                if valid.any()
+                else np.nan
+            )
+            row[f"MAE +{horizon}m med %"] = (
+                group.loc[valid, mae_col].median()
+                if valid.any()
+                else np.nan
+            )
+
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    numeric_columns = [
+        column
+        for column in result.columns
+        if column.endswith("%")
+    ]
+    result[numeric_columns] = (
+        result[numeric_columns].round(4)
+    )
+
+    bucket_order = {
+        label: index
+        for index, label in enumerate(bucket_labels)
+    }
+    result["_bucket_order"] = (
+        result["Distance bucket"]
+        .map(bucket_order)
+        .fillna(len(bucket_order))
+    )
+    result = (
+        result
+        .sort_values(
+            [
+                "Timeframe",
+                "Detector",
+                "Signal",
+                "_bucket_order",
+            ]
+        )
+        .drop(columns=["_bucket_order"])
+        .reset_index(drop=True)
+    )
+
+    return result
+
+
+def render_volume_exhaustion_confirmation_bucket_study(
+    study_df,
+    candle_limit,
+    scope_label,
+):
+    st.markdown("#### Pivot → confirmation buckets")
+
+    if study_df is None or study_df.empty:
+        st.info(
+            "No confirmed swings are available for the "
+            "selected study scope and candle window."
+        )
+        return
+
+    bucket_df = (
+        build_volume_exhaustion_confirmation_bucket_summary(
+            study_df
+        )
+    )
+
+    if bucket_df.empty:
+        st.info("No distance buckets could be calculated.")
+        return
+
+    symbol_count = (
+        study_df["symbol"].nunique()
+        if "symbol" in study_df.columns
+        else 1
+    )
+    complete_30 = (
+        study_df["mfe_30m_pct"].notna().sum()
+        if "mfe_30m_pct" in study_df.columns
+        else 0
+    )
+
+    st.caption(
+        f"Scope: {scope_label} · "
+        f"last {int(candle_limit)} 1m candles per symbol · "
+        "all pivot → confirmation distances are included so "
+        "the buckets can be compared without selection bias."
+    )
+
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Symbols analyzed", int(symbol_count))
+    metric_2.metric("Confirmations", len(study_df))
+    metric_3.metric("Complete +30m", int(complete_30))
+    metric_4.metric(
+        "Median distance",
+        (
+            f"{study_df['pivot_to_confirmation_pct'].median():.3f}%"
+        ),
+    )
+
+    st.dataframe(
+        bucket_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander(
+        f"Bucket study confirmations ({len(study_df)})",
+        expanded=False,
+    ):
+        detail_columns = [
+            "symbol",
+            "timeframe",
+            "detector",
+            "signal",
+            "pivot_time",
+            "confirmation_available",
+            "pivot_to_confirmation_pct",
+            "prominence_pct",
+            "mfe_5m_pct",
+            "mae_5m_pct",
+            "mfe_15m_pct",
+            "mae_15m_pct",
+            "mfe_30m_pct",
+            "mae_30m_pct",
+            "mfe_60m_pct",
+            "mae_60m_pct",
+        ]
+        detail = study_df[
+            [
+                column
+                for column in detail_columns
+                if column in study_df.columns
+            ]
+        ].copy()
+
+        numeric_detail_columns = [
+            column
+            for column in detail.columns
+            if column.endswith("_pct")
+        ]
+        if numeric_detail_columns:
+            detail[numeric_detail_columns] = (
+                detail[numeric_detail_columns].round(6)
+            )
+
+        st.dataframe(
+            detail,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def render_volume_exhaustion_confirmation_edge_study(
     study_df,
     candle_limit,
@@ -9490,6 +9851,82 @@ if selected_section == "volume_exhaustion":
             study_df=confirmation_edge_study_df,
             candle_limit=candle_limit,
             max_confirmation_move_pct=max_confirmation_move_pct,
+        )
+
+        st.markdown("---")
+        bucket_scope = st.selectbox(
+            "Bucket study scope",
+            ["Selected symbol", "All symbols"],
+            key="volume_exhaustion_bucket_scope",
+            help=(
+                "All symbols analyzes every symbol present in the "
+                "Volume Exhaustion event universe using the same "
+                "candle window and swing detector settings."
+            ),
+        )
+
+        if bucket_scope == "Selected symbol":
+            bucket_study_df = (
+                build_volume_exhaustion_confirmation_edge_study(
+                    candles=candles,
+                    swing_points_by_timeframe=(
+                        swing_points_by_timeframe
+                    ),
+                    swing_candles_by_timeframe=(
+                        swing_candles_by_timeframe
+                    ),
+                    swing_detector_windows=(
+                        swing_detector_windows
+                    ),
+                    max_confirmation_move_pct=None,
+                )
+            )
+            if not bucket_study_df.empty:
+                bucket_study_df.insert(
+                    0,
+                    "symbol",
+                    str(selected_symbol),
+                )
+            bucket_scope_label = str(selected_symbol)
+        else:
+            all_study_symbols = tuple(
+                sorted(
+                    valid_events["symbol"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+            )
+
+            with st.spinner(
+                "Building confirmation buckets for all symbols..."
+            ):
+                bucket_study_df = (
+                    build_volume_exhaustion_confirmation_study_all_symbols(
+                        symbols=all_study_symbols,
+                        candle_limit=int(candle_limit),
+                        swing_timeframes=tuple(
+                            swing_timeframes
+                        ),
+                        swing_detector_items=tuple(
+                            sorted(
+                                swing_detector_windows.items()
+                            )
+                        ),
+                        min_swing_prominence_pct=float(
+                            min_swing_prominence_pct
+                        ),
+                    )
+                )
+            bucket_scope_label = (
+                f"All symbols ({len(all_study_symbols)} available)"
+            )
+
+        render_volume_exhaustion_confirmation_bucket_study(
+            study_df=bucket_study_df,
+            candle_limit=candle_limit,
+            scope_label=bucket_scope_label,
         )
 
         latest_candle_ts = pd.to_datetime(
