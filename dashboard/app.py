@@ -79,6 +79,10 @@ VOLUME_EXHAUSTION_EVENTS_FILE = (
     BASE_DIR / "volume_exhaustion_events.csv"
 )
 
+VOLUME_EXHAUSTION_OUTCOMES_FILE = (
+    BASE_DIR / "volume_exhaustion_outcomes.csv"
+)
+
 DASHBOARD_CACHE_DIR = (
     BASE_DIR
     / "reports"
@@ -7587,6 +7591,538 @@ def load_volume_exhaustion_events():
     return events
 
 
+
+def load_volume_exhaustion_outcomes():
+    modified_ns = get_file_modified_ns(
+        VOLUME_EXHAUSTION_OUTCOMES_FILE
+    )
+
+    if modified_ns is None:
+        return pd.DataFrame()
+
+    outcomes = load_csv_cached(
+        VOLUME_EXHAUSTION_OUTCOMES_FILE,
+        modified_ns,
+    ).copy()
+
+    if outcomes.empty:
+        return outcomes
+
+    numeric_columns = [
+        "candle_open_timestamp",
+        "candle_close_timestamp",
+        "entry_price",
+    ]
+
+    for timeframe in ["5m", "15m", "30m"]:
+        numeric_columns.extend([
+            f"future_swing_{timeframe}_pivot_timestamp",
+            f"future_swing_{timeframe}_confirmed_timestamp",
+            f"future_swing_{timeframe}_price",
+            f"future_swing_{timeframe}_pivot_distance_pct",
+            f"future_swing_{timeframe}_confirmed_after_min",
+        ])
+
+    for column in numeric_columns:
+        if column in outcomes.columns:
+            outcomes[column] = pd.to_numeric(
+                outcomes[column],
+                errors="coerce",
+            )
+
+    for timeframe in ["5m", "15m", "30m"]:
+        column = f"future_swing_{timeframe}_became_swing"
+
+        if column not in outcomes.columns:
+            continue
+
+        normalized = (
+            outcomes[column]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+
+        outcomes[column] = normalized.isin(
+            ["true", "1", "1.0", "yes"]
+        )
+
+    if "symbol" in outcomes.columns:
+        outcomes["symbol"] = (
+            outcomes["symbol"]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+        )
+
+    if "potential_side" in outcomes.columns:
+        outcomes["potential_side"] = (
+            outcomes["potential_side"]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+        )
+
+    return outcomes
+
+
+def build_volume_exhaustion_outcome_research(
+    outcomes,
+    events,
+):
+    if outcomes.empty:
+        return pd.DataFrame()
+
+    research = outcomes.copy()
+
+    if (
+        not events.empty
+        and "event_id" in research.columns
+        and "event_id" in events.columns
+    ):
+        event_feature_columns = [
+            "event_id",
+            "relative_volume",
+            "volume_3m_ratio",
+            "high_volume_candles_5m",
+            "move_3m_pct",
+            "move_5m_pct",
+            "rsi_1m",
+            "close_location",
+            "efficiency_3m",
+        ]
+
+        event_feature_columns = [
+            column
+            for column in event_feature_columns
+            if column in events.columns
+        ]
+
+        event_features = (
+            events[event_feature_columns]
+            .drop_duplicates(
+                subset=["event_id"],
+                keep="last",
+            )
+            .copy()
+        )
+
+        research = research.merge(
+            event_features,
+            on="event_id",
+            how="left",
+            suffixes=("", "_event"),
+        )
+
+        for feature_column in event_feature_columns:
+            if feature_column == "event_id":
+                continue
+
+            event_column = f"{feature_column}_event"
+
+            if event_column not in research.columns:
+                continue
+
+            if feature_column not in research.columns:
+                research[feature_column] = research[event_column]
+            else:
+                research[feature_column] = (
+                    research[feature_column]
+                    .combine_first(research[event_column])
+                )
+
+            research = research.drop(columns=[event_column])
+
+    for timeframe in ["5m", "15m", "30m"]:
+        column = f"future_swing_{timeframe}_became_swing"
+        if column not in research.columns:
+            research[column] = False
+        research[column] = research[column].fillna(False).astype(bool)
+
+    swing_5m = research["future_swing_5m_became_swing"]
+    swing_15m = research["future_swing_15m_became_swing"]
+    swing_30m = research["future_swing_30m_became_swing"]
+
+    research["swing_outcome_class"] = np.select(
+        [
+            swing_5m & swing_15m & swing_30m,
+            swing_5m & swing_15m & ~swing_30m,
+            swing_5m & ~swing_15m & ~swing_30m,
+            ~swing_5m & ~swing_15m & ~swing_30m,
+        ],
+        [
+            "5M_15M_30M",
+            "5M_15M",
+            "5M_ONLY",
+            "NO_SWING",
+        ],
+        default="OTHER_PATTERN",
+    )
+
+    event_reference_ts = pd.Series(
+        np.nan,
+        index=research.index,
+        dtype="float64",
+    )
+
+    if "candle_close_timestamp" in research.columns:
+        event_reference_ts = pd.to_numeric(
+            research["candle_close_timestamp"],
+            errors="coerce",
+        )
+
+    if "candle_open_timestamp" in research.columns:
+        event_open_ts = pd.to_numeric(
+            research["candle_open_timestamp"],
+            errors="coerce",
+        )
+        event_reference_ts = event_reference_ts.combine_first(
+            event_open_ts + 60_000
+        )
+
+    for timeframe in ["5m", "15m", "30m"]:
+        pivot_column = f"future_swing_{timeframe}_pivot_timestamp"
+        confirmed_after_column = (
+            f"future_swing_{timeframe}_confirmed_after_min"
+        )
+        pivot_after_column = (
+            f"future_swing_{timeframe}_pivot_after_min"
+        )
+        lag_column = (
+            f"future_swing_{timeframe}_confirmation_lag_min"
+        )
+
+        if pivot_column in research.columns:
+            pivot_ts = pd.to_numeric(
+                research[pivot_column],
+                errors="coerce",
+            )
+            research[pivot_after_column] = (
+                pivot_ts - event_reference_ts
+            ) / 60_000.0
+        else:
+            research[pivot_after_column] = np.nan
+
+        if confirmed_after_column in research.columns:
+            confirmed_after = pd.to_numeric(
+                research[confirmed_after_column],
+                errors="coerce",
+            )
+            research[lag_column] = (
+                confirmed_after
+                - research[pivot_after_column]
+            )
+        else:
+            research[lag_column] = np.nan
+
+    return research
+
+
+def render_volume_exhaustion_outcome_research(events):
+    st.markdown("---")
+    st.markdown("### 🧬 Future Swing Outcome Research")
+    st.caption(
+        "Future swings are labels observed after T0. "
+        "They are never used as entry-time features."
+    )
+
+    outcomes = load_volume_exhaustion_outcomes()
+
+    if outcomes.empty:
+        st.info(
+            "No completed +180m volume exhaustion outcomes "
+            "are available yet."
+        )
+        st.caption(
+            f"Expected file: {VOLUME_EXHAUSTION_OUTCOMES_FILE}"
+        )
+        return
+
+    swing_columns = [
+        column
+        for column in outcomes.columns
+        if column.startswith("future_swing_")
+    ]
+
+    if len(swing_columns) < 18:
+        st.warning(
+            "The outcomes file does not contain the complete "
+            "future-swing schema yet."
+        )
+        st.caption(
+            f"Detected {len(swing_columns)} future_swing columns; "
+            "expected 18."
+        )
+        return
+
+    research = build_volume_exhaustion_outcome_research(
+        outcomes=outcomes,
+        events=events,
+    )
+
+    filter_1, filter_2 = st.columns([1, 2])
+
+    with filter_1:
+        outcome_side = st.selectbox(
+            "Outcome side",
+            ["ALL", "LONG", "SHORT"],
+            key="volume_exhaustion_outcome_side",
+        )
+
+    filtered = research.copy()
+
+    if (
+        outcome_side != "ALL"
+        and "potential_side" in filtered.columns
+    ):
+        filtered = filtered[
+            filtered["potential_side"].eq(outcome_side)
+        ].copy()
+
+    class_order = [
+        "NO_SWING",
+        "5M_ONLY",
+        "5M_15M",
+        "5M_15M_30M",
+        "OTHER_PATTERN",
+    ]
+
+    present_classes = set(
+        filtered["swing_outcome_class"]
+        .dropna()
+        .astype(str)
+    )
+    available_classes = [
+        c for c in class_order if c in present_classes
+    ]
+
+    with filter_2:
+        selected_classes = st.multiselect(
+            "Swing outcome classes",
+            options=available_classes,
+            default=available_classes,
+            key="volume_exhaustion_outcome_classes",
+        )
+
+    if selected_classes:
+        filtered = filtered[
+            filtered["swing_outcome_class"].isin(
+                selected_classes
+            )
+        ].copy()
+    else:
+        filtered = filtered.iloc[0:0].copy()
+
+    if filtered.empty:
+        st.info(
+            "No completed outcomes match the selected filters."
+        )
+        return
+
+    summary_1, summary_2, summary_3, summary_4 = st.columns(4)
+    summary_1.metric("Completed outcomes", len(filtered))
+    summary_2.metric(
+        "5m swing",
+        f"{filtered['future_swing_5m_became_swing'].mean() * 100:.1f}%",
+    )
+    summary_3.metric(
+        "15m swing",
+        f"{filtered['future_swing_15m_became_swing'].mean() * 100:.1f}%",
+    )
+    summary_4.metric(
+        "30m swing",
+        f"{filtered['future_swing_30m_became_swing'].mean() * 100:.1f}%",
+    )
+
+    st.markdown("#### Swing outcome classification")
+    counts = filtered["swing_outcome_class"].value_counts()
+    classification_rows = []
+    for outcome_class in class_order:
+        count = int(counts.get(outcome_class, 0))
+        if count == 0:
+            continue
+        classification_rows.append({
+            "swing_outcome_class": outcome_class,
+            "outcomes": count,
+            "share_pct": round(
+                count / len(filtered) * 100.0,
+                2,
+            ),
+        })
+
+    st.dataframe(
+        pd.DataFrame(classification_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("#### Pivot & confirmation timing")
+    timing_rows = []
+
+    for timeframe in ["5m", "15m", "30m"]:
+        became_column = f"future_swing_{timeframe}_became_swing"
+        pivot_after_column = f"future_swing_{timeframe}_pivot_after_min"
+        confirmed_after_column = (
+            f"future_swing_{timeframe}_confirmed_after_min"
+        )
+        lag_column = (
+            f"future_swing_{timeframe}_confirmation_lag_min"
+        )
+        distance_column = (
+            f"future_swing_{timeframe}_pivot_distance_pct"
+        )
+
+        hits = filtered[filtered[became_column]].copy()
+        if hits.empty:
+            continue
+
+        timing_rows.append({
+            "timeframe": timeframe,
+            "swings": len(hits),
+            "swing_rate_pct": len(hits) / len(filtered) * 100.0,
+            "median_pivot_after_min": pd.to_numeric(
+                hits[pivot_after_column], errors="coerce"
+            ).median(),
+            "median_confirmed_after_min": pd.to_numeric(
+                hits[confirmed_after_column], errors="coerce"
+            ).median(),
+            "median_confirmation_lag_min": pd.to_numeric(
+                hits[lag_column], errors="coerce"
+            ).median(),
+            "median_pivot_distance_pct": pd.to_numeric(
+                hits[distance_column], errors="coerce"
+            ).median(),
+        })
+
+    timing_df = pd.DataFrame(timing_rows)
+    if not timing_df.empty:
+        for column in timing_df.columns:
+            if column not in {"timeframe", "swings"}:
+                timing_df[column] = pd.to_numeric(
+                    timing_df[column], errors="coerce"
+                ).round(3)
+        st.dataframe(
+            timing_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    feature_columns = [
+        "relative_volume",
+        "volume_3m_ratio",
+        "high_volume_candles_5m",
+        "move_3m_pct",
+        "move_5m_pct",
+        "rsi_1m",
+        "close_location",
+        "efficiency_3m",
+    ]
+    feature_columns = [
+        c for c in feature_columns if c in filtered.columns
+    ]
+
+    if feature_columns:
+        st.markdown("#### T0 features by future swing class")
+        st.caption(
+            "Medians only. These features were known at T0; "
+            "the swing class is a future label."
+        )
+        feature_source = filtered.copy()
+        for column in feature_columns:
+            feature_source[column] = pd.to_numeric(
+                feature_source[column], errors="coerce"
+            )
+        feature_summary = (
+            feature_source
+            .groupby("swing_outcome_class", observed=False)[feature_columns]
+            .median()
+            .reindex([c for c in class_order if c in set(feature_source["swing_outcome_class"])])
+            .reset_index()
+        )
+        feature_summary[feature_columns] = (
+            feature_summary[feature_columns].round(4)
+        )
+        st.dataframe(
+            feature_summary,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    outcome_metric_candidates = {
+        "return_30m": ["return_30m", "return_30m_pct"],
+        "mfe_30m": ["mfe_30m", "mfe_30m_pct"],
+        "mae_30m": ["mae_30m", "mae_30m_pct"],
+    }
+    outcome_metric_columns = {}
+    for display_name, candidates in outcome_metric_candidates.items():
+        selected_column = next(
+            (c for c in candidates if c in filtered.columns),
+            None,
+        )
+        if selected_column is not None:
+            outcome_metric_columns[display_name] = selected_column
+
+    if outcome_metric_columns:
+        st.markdown("#### 30m price outcome by swing class")
+        price_source = filtered.copy()
+        for column in outcome_metric_columns.values():
+            price_source[column] = pd.to_numeric(
+                price_source[column], errors="coerce"
+            )
+        price_summary = (
+            price_source
+            .groupby("swing_outcome_class", observed=False)[
+                list(outcome_metric_columns.values())
+            ]
+            .median()
+            .reset_index()
+            .rename(columns={
+                source: display
+                for display, source
+                in outcome_metric_columns.items()
+            })
+        )
+        for column in outcome_metric_columns:
+            if column in price_summary.columns:
+                price_summary[column] = price_summary[column].round(4)
+        st.dataframe(
+            price_summary,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("#### Completed outcome rows")
+    raw_columns = [
+        "event_id",
+        "symbol",
+        "potential_side",
+        "swing_outcome_class",
+        "future_swing_5m_pivot_after_min",
+        "future_swing_5m_confirmed_after_min",
+        "future_swing_5m_pivot_distance_pct",
+        "future_swing_15m_pivot_after_min",
+        "future_swing_15m_confirmed_after_min",
+        "future_swing_15m_pivot_distance_pct",
+        "future_swing_30m_pivot_after_min",
+        "future_swing_30m_confirmed_after_min",
+        "future_swing_30m_pivot_distance_pct",
+    ]
+    raw_columns = [
+        c for c in raw_columns if c in filtered.columns
+    ]
+    raw_display = filtered[raw_columns].copy()
+    for column in raw_display.columns:
+        if column.endswith("_min") or column.endswith("_pct"):
+            raw_display[column] = pd.to_numeric(
+                raw_display[column], errors="coerce"
+            ).round(3)
+    st.dataframe(
+        raw_display,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def build_volume_exhaustion_chart(
     candles,
     event_row,
@@ -8609,6 +9145,10 @@ if selected_section == "volume_exhaustion":
             )[table_columns],
             use_container_width=True,
             hide_index=True,
+        )
+
+        render_volume_exhaustion_outcome_research(
+            events=events,
         )
 
     render_volume_exhaustion_live()
