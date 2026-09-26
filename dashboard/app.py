@@ -8210,6 +8210,350 @@ def get_volume_exhaustion_swing_confirmation_info(
     }
 
 
+
+def build_volume_exhaustion_confirmation_edge_study(
+    candles,
+    swing_points_by_timeframe=None,
+    swing_candles_by_timeframe=None,
+    swing_detector_windows=None,
+    max_confirmation_move_pct=None,
+    horizons=(5, 15, 30, 60),
+):
+    """Measure forward MFE/MAE from the first actionable swing confirmation.
+
+    Research-only and forward-safe:
+    - pivot/confirmation come from the selected SwingDetector configuration;
+    - entry reference is the confirming HTF candle close;
+    - forward excursion starts at actionable_timestamp, i.e. after that
+      confirming candle has closed;
+    - only swings whose pivot is inside the visible 1m candle window are used;
+    - a horizon is populated only when the full horizon exists in the visible
+      1m window, avoiding partial-window bias near the right edge.
+    """
+    if (
+        candles is None
+        or candles.empty
+        or not swing_points_by_timeframe
+    ):
+        return pd.DataFrame()
+
+    one_minute = candles.copy()
+    required = {"timestamp", "high", "low", "close"}
+    if not required.issubset(one_minute.columns):
+        return pd.DataFrame()
+
+    for column in ["timestamp", "high", "low", "close"]:
+        one_minute[column] = pd.to_numeric(
+            one_minute[column],
+            errors="coerce",
+        )
+
+    one_minute = (
+        one_minute
+        .dropna(subset=["timestamp", "high", "low", "close"])
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+
+    if one_minute.empty:
+        return pd.DataFrame()
+
+    visible_start_ms = int(one_minute["timestamp"].min())
+    visible_end_ms = int(one_minute["timestamp"].max())
+    last_candle_close_ms = visible_end_ms + 60_000
+
+    rows = []
+
+    for swing_timeframe, swing_points in (
+        swing_points_by_timeframe.items()
+    ):
+        timeframe_candles = None
+        if swing_candles_by_timeframe:
+            timeframe_candles = swing_candles_by_timeframe.get(
+                swing_timeframe
+            )
+
+        detector_name = None
+        if swing_detector_windows:
+            detector_name = swing_detector_windows.get(
+                swing_timeframe
+            )
+
+        for point in swing_points:
+            if point.pivot_timestamp is None:
+                continue
+
+            pivot_ts = int(point.pivot_timestamp)
+            if not (
+                visible_start_ms
+                <= pivot_ts
+                <= visible_end_ms
+            ):
+                continue
+
+            info = get_volume_exhaustion_swing_confirmation_info(
+                point=point,
+                timeframe_candles=timeframe_candles,
+                swing_timeframe=swing_timeframe,
+            )
+
+            if info is None:
+                continue
+
+            move_pct = float(info["move_pct"])
+            if (
+                max_confirmation_move_pct is not None
+                and move_pct
+                > float(max_confirmation_move_pct)
+            ):
+                continue
+
+            actionable_ts = int(info["actionable_timestamp"])
+            if not (
+                visible_start_ms
+                <= actionable_ts
+                <= visible_end_ms + 60_000
+            ):
+                continue
+
+            entry_price = float(info["confirmation_close"])
+            if entry_price <= 0:
+                continue
+
+            signal_side = (
+                "SHORT"
+                if point.side == "HIGH"
+                else "LONG"
+                if point.side == "LOW"
+                else None
+            )
+            if signal_side is None:
+                continue
+
+            row = {
+                "timeframe": str(swing_timeframe),
+                "detector": detector_name or "—",
+                "signal": signal_side,
+                "pivot_timestamp": pivot_ts,
+                "actionable_timestamp": actionable_ts,
+                "pivot_price": float(point.price),
+                "entry_price": entry_price,
+                "pivot_to_confirmation_pct": move_pct,
+                "prominence_pct": float(point.prominence_pct),
+            }
+
+            for horizon in horizons:
+                horizon = int(horizon)
+                horizon_end = (
+                    actionable_ts
+                    + horizon * 60_000
+                )
+
+                mfe_col = f"mfe_{horizon}m_pct"
+                mae_col = f"mae_{horizon}m_pct"
+
+                # Require the complete forward horizon. Otherwise leave NaN.
+                if last_candle_close_ms < horizon_end:
+                    row[mfe_col] = np.nan
+                    row[mae_col] = np.nan
+                    continue
+
+                future = one_minute[
+                    (one_minute["timestamp"] >= actionable_ts)
+                    & (one_minute["timestamp"] < horizon_end)
+                ]
+
+                if future.empty:
+                    row[mfe_col] = np.nan
+                    row[mae_col] = np.nan
+                    continue
+
+                max_high = float(future["high"].max())
+                min_low = float(future["low"].min())
+
+                if signal_side == "LONG":
+                    mfe = (
+                        max_high / entry_price - 1.0
+                    ) * 100.0
+                    mae = (
+                        1.0 - min_low / entry_price
+                    ) * 100.0
+                else:
+                    mfe = (
+                        1.0 - min_low / entry_price
+                    ) * 100.0
+                    mae = (
+                        max_high / entry_price - 1.0
+                    ) * 100.0
+
+                row[mfe_col] = max(0.0, float(mfe))
+                row[mae_col] = max(0.0, float(mae))
+
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    result["pivot_time"] = pd.to_datetime(
+        result["pivot_timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+    result["confirmation_available"] = pd.to_datetime(
+        result["actionable_timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+
+    return result.sort_values(
+        ["actionable_timestamp", "timeframe"],
+        ascending=[False, True],
+    ).reset_index(drop=True)
+
+
+def render_volume_exhaustion_confirmation_edge_study(
+    study_df,
+    candle_limit,
+    max_confirmation_move_pct,
+):
+    st.markdown("#### Pivot → confirmation edge study")
+
+    if study_df is None or study_df.empty:
+        st.info(
+            "No confirmed swings inside the selected candle window "
+            "match the current pivot → confirmation distance."
+        )
+        return
+
+    st.caption(
+        "Forward-safe research from the confirmation close. "
+        f"Window: last {int(candle_limit)} 1m candles · "
+        "distance filter: "
+        f"≤ {float(max_confirmation_move_pct):.2f}% · "
+        "MFE/MAE use only complete future horizons."
+    )
+
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Matching confirmations", len(study_df))
+    metric_2.metric(
+        "Median distance",
+        f"{study_df['pivot_to_confirmation_pct'].median():.3f}%",
+    )
+
+    complete_30 = study_df["mfe_30m_pct"].notna().sum()
+    metric_3.metric("Complete +30m", int(complete_30))
+
+    if complete_30:
+        median_mfe_30 = study_df["mfe_30m_pct"].median()
+        median_mae_30 = study_df["mae_30m_pct"].median()
+        metric_4.metric(
+            "Median MFE / MAE +30m",
+            f"{median_mfe_30:.3f}% / {median_mae_30:.3f}%",
+        )
+    else:
+        metric_4.metric("Median MFE / MAE +30m", "—")
+
+    summary_rows = []
+    group_columns = ["timeframe", "detector", "signal"]
+
+    for group_key, group in study_df.groupby(
+        group_columns,
+        dropna=False,
+        observed=True,
+    ):
+        timeframe, detector, signal = group_key
+        summary_row = {
+            "Timeframe": timeframe,
+            "Detector": detector,
+            "Signal": signal,
+            "N": len(group),
+            "Distance med %": group[
+                "pivot_to_confirmation_pct"
+            ].median(),
+        }
+
+        for horizon in [5, 15, 30, 60]:
+            mfe_col = f"mfe_{horizon}m_pct"
+            mae_col = f"mae_{horizon}m_pct"
+            valid = group[mfe_col].notna()
+            summary_row[f"N +{horizon}m"] = int(valid.sum())
+            summary_row[f"MFE +{horizon}m med %"] = (
+                group.loc[valid, mfe_col].median()
+                if valid.any()
+                else np.nan
+            )
+            summary_row[f"MAE +{horizon}m med %"] = (
+                group.loc[valid, mae_col].median()
+                if valid.any()
+                else np.nan
+            )
+
+        summary_rows.append(summary_row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    numeric_summary_cols = [
+        column
+        for column in summary_df.columns
+        if column.endswith("%")
+    ]
+    summary_df[numeric_summary_cols] = (
+        summary_df[numeric_summary_cols].round(4)
+    )
+
+    st.dataframe(
+        summary_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander(
+        f"Matching confirmations ({len(study_df)})",
+        expanded=False,
+    ):
+        detail_columns = [
+            "timeframe",
+            "detector",
+            "signal",
+            "pivot_time",
+            "confirmation_available",
+            "pivot_price",
+            "entry_price",
+            "pivot_to_confirmation_pct",
+            "prominence_pct",
+            "mfe_5m_pct",
+            "mae_5m_pct",
+            "mfe_15m_pct",
+            "mae_15m_pct",
+            "mfe_30m_pct",
+            "mae_30m_pct",
+            "mfe_60m_pct",
+            "mae_60m_pct",
+        ]
+        detail = study_df[
+            [c for c in detail_columns if c in study_df.columns]
+        ].copy()
+
+        numeric_detail_cols = [
+            c
+            for c in detail.columns
+            if (
+                c.endswith("_pct")
+                or c in {"pivot_price", "entry_price"}
+            )
+        ]
+        detail[numeric_detail_cols] = (
+            detail[numeric_detail_cols].round(6)
+        )
+
+        st.dataframe(
+            detail,
+            use_container_width=True,
+            hide_index=True,
+        )
+
 def build_volume_exhaustion_chart(
     candles,
     event_row,
@@ -9121,6 +9465,31 @@ if selected_section == "volume_exhaustion":
                 "displaylogo": False,
                 "scrollZoom": True,
             },
+        )
+
+
+        # Analyze every confirmed swing visible in the same candle window
+        # using the exact pivot → confirmation distance selected above.
+        confirmation_edge_study_df = (
+            build_volume_exhaustion_confirmation_edge_study(
+                candles=candles,
+                swing_points_by_timeframe=swing_points_by_timeframe,
+                swing_candles_by_timeframe=(
+                    swing_candles_by_timeframe
+                ),
+                swing_detector_windows=swing_detector_windows,
+                max_confirmation_move_pct=(
+                    float(max_confirmation_move_pct)
+                    if filter_by_confirmation_move
+                    else float(max_confirmation_move_pct)
+                ),
+            )
+        )
+
+        render_volume_exhaustion_confirmation_edge_study(
+            study_df=confirmation_edge_study_df,
+            candle_limit=candle_limit,
+            max_confirmation_move_pct=max_confirmation_move_pct,
         )
 
         latest_candle_ts = pd.to_datetime(
