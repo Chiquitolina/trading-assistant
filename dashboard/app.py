@@ -8212,12 +8212,42 @@ def get_volume_exhaustion_swing_confirmation_info(
 
 
 
+# Compact scenarios kept in the original first-touch summary.
 VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS = (
     ("TP 0.20% / SL 0.20%", 0.20, 0.20),
     ("TP 0.30% / SL 0.20%", 0.30, 0.20),
     ("TP 0.30% / SL 0.30%", 0.30, 0.30),
     ("TP 0.50% / SL 0.25%", 0.50, 0.25),
 )
+
+# Full TP x SL research grid. Outcomes are precomputed while each symbol is
+# already in memory so the dashboard can pivot instantly without reloading
+# candles every time the matrix controls change.
+VOLUME_EXHAUSTION_FIRST_TOUCH_TP_LEVELS = (
+    0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.00,
+)
+VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS = (
+    0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.00,
+)
+
+VOLUME_EXHAUSTION_FIRST_TOUCH_MATRIX_SETUPS = tuple(
+    (
+        f"TP {tp_pct:.2f}% / SL {sl_pct:.2f}%",
+        tp_pct,
+        sl_pct,
+    )
+    for tp_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_TP_LEVELS
+    for sl_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS
+)
+
+# Deduplicate because the four compact scenarios are also present in the grid.
+VOLUME_EXHAUSTION_FIRST_TOUCH_ALL_SETUPS = tuple({
+    (float(tp_pct), float(sl_pct)): (label, float(tp_pct), float(sl_pct))
+    for label, tp_pct, sl_pct in (
+        VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS
+        + VOLUME_EXHAUSTION_FIRST_TOUCH_MATRIX_SETUPS
+    )
+}.values())
 
 
 def _volume_exhaustion_first_touch_key(tp_pct, sl_pct):
@@ -8504,7 +8534,7 @@ def build_volume_exhaustion_confirmation_edge_study(
                 row[mae_col] = max(0.0, float(mae))
 
             for setup_label, tp_pct, sl_pct in (
-                VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS
+                VOLUME_EXHAUSTION_FIRST_TOUCH_ALL_SETUPS
             ):
                 replay = _volume_exhaustion_first_touch_replay(
                     one_minute=one_minute,
@@ -9005,6 +9035,226 @@ def build_volume_exhaustion_first_touch_breakdown(
         .reset_index(drop=True)
     )
 
+def build_volume_exhaustion_first_touch_matrix(
+    study_df,
+    round_trip_fee_pct,
+    metric,
+):
+    """Build a TP(rows) x SL(columns) matrix from chronological first touches."""
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+
+    fee_pct = float(round_trip_fee_pct)
+    rows = []
+
+    for tp_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_TP_LEVELS:
+        row = {"TP %": float(tp_pct)}
+
+        for sl_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS:
+            replay_key = _volume_exhaustion_first_touch_key(
+                tp_pct,
+                sl_pct,
+            )
+            result_col = f"{replay_key}_result"
+            gross_col = f"{replay_key}_gross_pct"
+
+            if (
+                result_col not in study_df.columns
+                or gross_col not in study_df.columns
+            ):
+                row[f"SL {sl_pct:.2f}%"] = np.nan
+                continue
+
+            complete = study_df[
+                study_df[result_col].isin(
+                    ["TP", "SL", "TIME", "AMBIGUOUS"]
+                )
+            ].copy()
+            scored = complete[
+                complete[result_col].isin(["TP", "SL", "TIME"])
+            ].copy()
+
+            if scored.empty:
+                row[f"SL {sl_pct:.2f}%"] = np.nan
+                continue
+
+            scored["_net_pct"] = (
+                pd.to_numeric(scored[gross_col], errors="coerce")
+                - fee_pct
+            )
+            scored = scored.dropna(subset=["_net_pct"])
+            if scored.empty:
+                row[f"SL {sl_pct:.2f}%"] = np.nan
+                continue
+
+            wins = scored["_net_pct"] > 0
+            losses = scored["_net_pct"] < 0
+            gross_profit = scored.loc[wins, "_net_pct"].sum()
+            gross_loss = -scored.loc[losses, "_net_pct"].sum()
+            pf_net = (
+                gross_profit / gross_loss
+                if gross_loss > 0
+                else np.inf
+                if gross_profit > 0
+                else np.nan
+            )
+
+            if metric == "PF net":
+                value = pf_net
+            elif metric == "Net WR %":
+                value = wins.mean() * 100.0
+            elif metric == "Net avg %":
+                value = scored["_net_pct"].mean()
+            elif metric == "Net sum %":
+                value = scored["_net_pct"].sum()
+            elif metric == "N scored":
+                value = len(scored)
+            elif metric == "Ambiguous %":
+                value = (
+                    (complete[result_col] == "AMBIGUOUS").mean() * 100.0
+                    if len(complete)
+                    else np.nan
+                )
+            else:
+                value = np.nan
+
+            row[f"SL {sl_pct:.2f}%"] = value
+
+        rows.append(row)
+
+    result = pd.DataFrame(rows).set_index("TP %")
+    if metric == "N scored":
+        return result.round(0)
+    return result.round(4)
+
+
+def render_volume_exhaustion_first_touch_matrix(
+    filtered_study_df,
+    control_study_df,
+    round_trip_fee_pct,
+    max_confirmation_move_pct,
+):
+    st.markdown("##### TP × SL matrix")
+    st.caption(
+        "Rows are TP %, columns are SL %. Every cell replays the same "
+        "confirmation signals chronologically for 60m. Same-candle TP+SL "
+        "touches remain AMBIGUOUS and are excluded from PF/WR/net metrics."
+    )
+
+    universe_options = ["Filtered"]
+    if control_study_df is not None and not control_study_df.empty:
+        universe_options.append("CONTROL · all confirmed swings")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        universe = st.selectbox(
+            "Matrix universe",
+            universe_options,
+            key="volume_exhaustion_ft_matrix_universe",
+        )
+    with c2:
+        metric = st.selectbox(
+            "Matrix metric",
+            [
+                "PF net",
+                "Net avg %",
+                "Net WR %",
+                "Net sum %",
+                "N scored",
+                "Ambiguous %",
+            ],
+            key="volume_exhaustion_ft_matrix_metric",
+        )
+    with c3:
+        signal_filter = st.selectbox(
+            "Matrix signal",
+            ["ALL", "LONG", "SHORT"],
+            key="volume_exhaustion_ft_matrix_signal",
+        )
+
+    source = (
+        control_study_df.copy()
+        if universe == "CONTROL · all confirmed swings"
+        else filtered_study_df.copy()
+    )
+
+    if source is None or source.empty:
+        st.info("No first-touch rows are available for the matrix.")
+        return
+
+    timeframe_values = (
+        sorted(source["timeframe"].dropna().astype(str).unique().tolist())
+        if "timeframe" in source.columns
+        else []
+    )
+    detector_values = (
+        sorted(source["detector"].dropna().astype(str).unique().tolist())
+        if "detector" in source.columns
+        else []
+    )
+
+    c4, c5 = st.columns(2)
+    with c4:
+        timeframe_filter = st.selectbox(
+            "Matrix swing timeframe",
+            ["ALL"] + timeframe_values,
+            key="volume_exhaustion_ft_matrix_timeframe",
+        )
+    with c5:
+        detector_filter = st.selectbox(
+            "Matrix detector",
+            ["ALL"] + detector_values,
+            key="volume_exhaustion_ft_matrix_detector",
+        )
+
+    if signal_filter != "ALL" and "signal" in source.columns:
+        source = source[source["signal"].astype(str).eq(signal_filter)]
+    if timeframe_filter != "ALL" and "timeframe" in source.columns:
+        source = source[source["timeframe"].astype(str).eq(timeframe_filter)]
+    if detector_filter != "ALL" and "detector" in source.columns:
+        source = source[source["detector"].astype(str).eq(detector_filter)]
+
+    if source.empty:
+        st.info("No confirmations match the matrix filters.")
+        return
+
+    matrix = build_volume_exhaustion_first_touch_matrix(
+        source,
+        round_trip_fee_pct,
+        metric,
+    )
+    if matrix.empty:
+        st.info("No complete first-touch scenarios are available for this matrix.")
+        return
+
+    distance_text = (
+        "all distances"
+        if universe == "CONTROL · all confirmed swings"
+        or max_confirmation_move_pct is None
+        else f"pivot→confirmation ≤ {float(max_confirmation_move_pct):.2f}%"
+    )
+    st.caption(
+        f"Signals in selected matrix universe: {len(source)} · "
+        f"{distance_text} · fees {float(round_trip_fee_pct):.3f}% round trip."
+    )
+    st.dataframe(
+        matrix,
+        use_container_width=True,
+    )
+
+    stacked = (
+        matrix
+        .stack(dropna=True)
+        .rename("Value")
+        .reset_index()
+        .rename(columns={"level_1": "SL"})
+    )
+    if not stacked.empty and metric != "N scored":
+        top = stacked.sort_values("Value", ascending=False).head(10)
+        with st.expander("Top 10 matrix cells", expanded=False):
+            st.dataframe(top, use_container_width=True, hide_index=True)
+
+
 def render_volume_exhaustion_first_touch_replay(
     filtered_study_df,
     control_study_df,
@@ -9066,6 +9316,13 @@ def render_volume_exhaustion_first_touch_replay(
         comparison,
         use_container_width=True,
         hide_index=True,
+    )
+
+    render_volume_exhaustion_first_touch_matrix(
+        filtered_study_df=filtered_study_df,
+        control_study_df=control_study_df,
+        round_trip_fee_pct=round_trip_fee_pct,
+        max_confirmation_move_pct=max_confirmation_move_pct,
     )
 
     signal_breakdown = (
