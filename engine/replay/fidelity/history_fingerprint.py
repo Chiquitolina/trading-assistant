@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,16 +22,46 @@ def _sha256(value):
     ).hexdigest()
 
 
+def _normalize_number(value):
+    if value is None:
+        return None
+
+    number = float(value)
+
+    if math.isnan(number):
+        return "__NaN__"
+
+    if math.isinf(number):
+        if number > 0:
+            return "__Infinity__"
+
+        return "__-Infinity__"
+
+    return number
+
+
 def _normalize_candle(candle):
     return {
-        "timestamp": int(candle["timestamp"]),
-        "open": float(candle["open"]),
-        "high": float(candle["high"]),
-        "low": float(candle["low"]),
-        "close": float(candle["close"]),
-        "volume": float(candle["volume"]),
-        "quoteVolume": float(
-            candle.get("quoteVolume", 0)
+        "timestamp": int(
+            candle["timestamp"]
+        ),
+        "open": _normalize_number(
+            candle.get("open")
+        ),
+        "high": _normalize_number(
+            candle.get("high")
+        ),
+        "low": _normalize_number(
+            candle.get("low")
+        ),
+        "close": _normalize_number(
+            candle.get("close")
+        ),
+        "volume": _normalize_number(
+            candle.get("volume")
+        ),
+        "quoteVolume": _normalize_number(
+            candle.get("quoteVolume")
         ),
     }
 
