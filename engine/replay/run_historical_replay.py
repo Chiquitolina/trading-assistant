@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from config.strategies.v1 import SYMBOLS
 from config.timeframes import MODE_CONFIG, MAIN_TF
 
-from data.market_data import fetch_futures_klines_range
+from data.market_data import (
+    fetch_closed_history_before,
+    fetch_futures_klines_range,
+)
 
 from engine.live.data.redis_market_data_publisher import (
     RedisMarketDataPublisher,
@@ -30,17 +33,6 @@ CONSUMER_NAME = (
     f"lookback-10-base-superpuesta-main-tf-{MAIN_TF}"
 )
 
-DAYS_BY_TF = {
-    "1m": 1,
-    "5m": 2,
-    "15m": 3,
-    "30m": 5,
-    "1h": 7,
-    "4h": 25,
-    "1d": 180,
-}
-
-DAY_MS = 86_400_000
 
 TF_MS = {
     "1m": 60_000,
@@ -107,36 +99,11 @@ def load_warmup(
     timeframe,
     replay_start_ms,
 ):
-    days = DAYS_BY_TF[timeframe]
-
-    warmup_start_ms = (
-        replay_start_ms
-        - days * DAY_MS
-    )
-
-    warmup_end_ms = (
-        replay_start_ms - 1
-    )
-
-    candles = fetch_futures_klines_range(
+    candles = fetch_closed_history_before(
         symbol=symbol,
         timeframe=timeframe,
-        start_ms=warmup_start_ms,
-        end_ms=warmup_end_ms,
+        cutoff_ms=replay_start_ms,
     )
-
-    # CRITICAL:
-    # only candles fully closed before replay starts.
-    #
-    # Never allow a candle that was still open at
-    # replay_start_ms into the initial history.
-    candles = [
-        candle
-        for candle in candles
-        if int(
-            candle["close_timestamp"]
-        ) < replay_start_ms
-    ]
 
     publisher.replace_history(
         symbol=symbol,
@@ -145,7 +112,6 @@ def load_warmup(
     )
 
     return len(candles)
-
 
 def load_replay_candles(
     symbol,
