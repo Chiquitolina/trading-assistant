@@ -8126,8 +8126,8 @@ if selected_section == "volume_exhaustion":
             ),
         )
 
-        swing_control_1, swing_control_2, swing_control_3 = (
-            st.columns([1.2, 1.2, 2.2])
+        swing_control_1, swing_control_2 = (
+            st.columns([1.2, 2.2])
         )
 
         with swing_control_1:
@@ -8138,14 +8138,6 @@ if selected_section == "volume_exhaustion":
             )
 
         with swing_control_2:
-            swing_window = st.selectbox(
-                "Swing detector",
-                ["2x2", "3x3", "5x5"],
-                index=2,
-                key="volume_exhaustion_swing_window",
-            )
-
-        with swing_control_3:
             min_swing_prominence_pct = st.number_input(
                 "Min swing prominence %",
                 min_value=0.0,
@@ -8162,10 +8154,58 @@ if selected_section == "volume_exhaustion":
             key="volume_exhaustion_swing_timeframes",
         )
 
+        default_swing_detectors = {
+            "1m": "5x5",
+            "5m": "5x5",
+            "15m": "3x3",
+            "30m": "3x3",
+            "1h": "2x2",
+        }
+
+        swing_detector_windows = {}
+
+        if show_swings and swing_timeframes:
+            st.caption("Swing detector by timeframe")
+
+            detector_columns = st.columns(
+                len(swing_timeframes)
+            )
+
+            for detector_column, swing_timeframe in zip(
+                detector_columns,
+                swing_timeframes,
+            ):
+                detector_options = [
+                    "2x2",
+                    "3x3",
+                    "5x5",
+                ]
+                default_detector = (
+                    default_swing_detectors.get(
+                        swing_timeframe,
+                        "5x5",
+                    )
+                )
+
+                with detector_column:
+                    swing_detector_windows[
+                        swing_timeframe
+                    ] = st.selectbox(
+                        f"{swing_timeframe} detector",
+                        detector_options,
+                        index=detector_options.index(
+                            default_detector
+                        ),
+                        key=(
+                            "volume_exhaustion_"
+                            f"swing_window_{swing_timeframe}"
+                        ),
+                    )
+
         candle_limit = st.slider(
             "1m candles",
             min_value=60,
-            max_value=2000,
+            max_value=100000,
             value=180,
             step=20,
             key="volume_exhaustion_candle_limit",
@@ -8218,18 +8258,29 @@ if selected_section == "volume_exhaustion":
         swing_structure_at_event = {}
 
         if show_swings:
-            swing_bars = int(
-                swing_window.split("x")[0]
-            )
-            swing_detector = SwingDetector(
-                left_bars=swing_bars,
-                right_bars=swing_bars,
-                min_prominence_pct=(
-                    float(min_swing_prominence_pct)
-                ),
-            )
-
             for swing_timeframe in swing_timeframes:
+                swing_window = (
+                    swing_detector_windows.get(
+                        swing_timeframe,
+                        default_swing_detectors.get(
+                            swing_timeframe,
+                            "5x5",
+                        ),
+                    )
+                )
+
+                swing_bars = int(
+                    swing_window.split("x")[0]
+                )
+
+                swing_detector = SwingDetector(
+                    left_bars=swing_bars,
+                    right_bars=swing_bars,
+                    min_prominence_pct=(
+                        float(min_swing_prominence_pct)
+                    ),
+                )
+
                 if swing_timeframe == "1m":
                     swing_tf_candles_df = candles
                 else:
