@@ -31,10 +31,25 @@ TIMEFRAME_MS = {
 def build_btc_swing_context(
     buffer,
     price: float | None = None,
+    as_of_ts: int | None = None,
 ):
-    btc_1h = buffer.get_candles("BTCUSDT", "1h")
-    btc_4h = buffer.get_candles("BTCUSDT", "4h")
-    btc_1d = buffer.get_candles("BTCUSDT", "1d")
+    btc_1h = buffer.get_candles(
+        "BTCUSDT",
+        "1h",
+        as_of_ts=as_of_ts,
+    )
+
+    btc_4h = buffer.get_candles(
+        "BTCUSDT",
+        "4h",
+        as_of_ts=as_of_ts,
+    )
+
+    btc_1d = buffer.get_candles(
+        "BTCUSDT",
+        "1d",
+        as_of_ts=as_of_ts,
+    )
 
     df_1h = pd.DataFrame(btc_1h) if btc_1h else pd.DataFrame()
     df_4h = pd.DataFrame(btc_4h) if btc_4h else pd.DataFrame()
@@ -331,12 +346,19 @@ class SignalEngine:
 
         return result
 
-    def generate_signal(self, symbol: str):
+    def generate_signal(
+        self,
+        symbol: str,
+        as_of_ts: int | None = None,
+    ):
         if self.mode == "aggressive":
             return self.generate_aggressive_signal(symbol)
 
         if self.mode == "direction":
-            return self.generate_direction_signal(symbol)
+            return self.generate_direction_signal(
+                symbol,
+                as_of_ts=as_of_ts,
+            )
 
         return self.generate_default_signal(symbol)
     
@@ -721,17 +743,48 @@ class SignalEngine:
             near_swing_high=near_swing_high,
         )
         
-    def generate_direction_signal(self, symbol: str, update_last_ts=True):
+    def generate_direction_signal(
+        self,
+        symbol: str,
+        update_last_ts=True,
+        as_of_ts: int | None = None,
+    ):
         
-        candles_1m = self.buffer.get_candles(symbol, "1m")
-        candles_5m = self.buffer.get_candles(symbol, "5m")
-        candles_trigger = self.buffer.get_candles(symbol, self.trigger_tf)
+        candles_1m = self.buffer.get_candles(
+            symbol,
+            "1m",
+            as_of_ts=as_of_ts,
+        )
+
+        candles_5m = self.buffer.get_candles(
+            symbol,
+            "5m",
+            as_of_ts=as_of_ts,
+        )
+
+        candles_trigger = self.buffer.get_candles(
+            symbol,
+            self.trigger_tf,
+            as_of_ts=as_of_ts,
+        )
+
         candles_30m = self.buffer.get_candles(
             symbol,
             "30m",
+            as_of_ts=as_of_ts,
         )
-        candles_1h = self.buffer.get_candles(symbol, "1h")
-        candles_4h = self.buffer.get_candles(symbol, "4h")
+
+        candles_1h = self.buffer.get_candles(
+            symbol,
+            "1h",
+            as_of_ts=as_of_ts,
+        )
+
+        candles_4h = self.buffer.get_candles(
+            symbol,
+            "4h",
+            as_of_ts=as_of_ts,
+        )
 
         if not candles_1m or not candles_5m or not candles_trigger:
             return None
@@ -758,7 +811,13 @@ class SignalEngine:
         df_5m = pd.DataFrame(candles_5m)
         
         df_trigger = pd.DataFrame(candles_trigger) if candles_trigger else pd.DataFrame()
-        df_15m = pd.DataFrame(self.buffer.get_candles(symbol, "15m") or [])
+        df_15m = pd.DataFrame(
+            self.buffer.get_candles(
+                symbol,
+                "15m",
+                as_of_ts=as_of_ts,
+            ) or []
+        )
         df_30m = pd.DataFrame(
             candles_30m
         ) if candles_30m else pd.DataFrame()
@@ -919,6 +978,7 @@ class SignalEngine:
         
         btc_swing_context = build_btc_swing_context(
             buffer=self.buffer,
+            as_of_ts=as_of_ts,
         )
         
         move_5_bars_pct = move_bars_pct(df_15m, 5)

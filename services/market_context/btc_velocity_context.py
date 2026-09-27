@@ -49,11 +49,13 @@ class BTCVelocityContextService:
     def evaluate(
         self,
         buffer,
+        as_of_ts: int | None = None,
     ) -> BTCVelocityContext:
 
         candles_1m = buffer.get_candles(
             self.BTC_SYMBOL,
             "1m",
+            as_of_ts=as_of_ts,
         )
 
         if candles_1m is None or len(candles_1m) < 61:

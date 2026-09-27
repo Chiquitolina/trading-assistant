@@ -1151,7 +1151,10 @@ try:
                 # COMPRESSION SNAPSHOT LIVE
                 # =================================================
 
-                compression_snapshot = compression_snapshot_builder.build(symbol)
+                compression_snapshot = compression_snapshot_builder.build(
+                    symbol,
+                    as_of_ts=trigger_batch_boundary_ts,
+                )
 
                 if compression_snapshot:
                     compression_snapshot_manager.save(compression_snapshot)
@@ -1179,7 +1182,10 @@ try:
 
                 signal_started = time.perf_counter()
 
-                signal = signals.generate_signal(symbol)
+                signal = signals.generate_signal(
+                    symbol,
+                    as_of_ts=trigger_batch_boundary_ts,
+                )
 
                 elapsed_ms = (time.perf_counter() - signal_started) * 1000
 
@@ -1201,7 +1207,10 @@ try:
                     f"{symbol} delay={signal_delay_sec:.2f}s"
                 )
                 
-                btc_context = btc_context_service.evaluate(buffer)
+                btc_context = btc_context_service.evaluate(
+                    buffer,
+                    as_of_ts=trigger_batch_boundary_ts,
+                )
 
                 logger.debug(
                     f"[BTC CONTEXT] "
@@ -1230,6 +1239,7 @@ try:
                         tf=TRIGGER_TF,
                         btc_context=btc_context,
                         current_position=execution.get_position(symbol),
+                        as_of_ts=trigger_batch_boundary_ts,
                     )
 
                     trade_action = compression_result.trade_action

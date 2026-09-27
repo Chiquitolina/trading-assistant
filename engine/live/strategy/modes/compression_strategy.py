@@ -149,6 +149,7 @@ class CompressionStrategy:
         tf="15m",
         btc_context=None,
         current_position=None,
+        as_of_ts: int | None = None,
     ):
 
         if signal is None:
@@ -164,7 +165,11 @@ class CompressionStrategy:
                 signal_context={}
             )
 
-        candles = self.buffer.get_candles(symbol, tf)
+        candles = self.buffer.get_candles(
+            symbol,
+            tf,
+            as_of_ts=as_of_ts,
+        )
 
         if len(candles) < 80:
             trade_action = TradeAction(

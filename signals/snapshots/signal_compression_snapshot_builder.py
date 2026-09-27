@@ -55,12 +55,17 @@ class SignalCompressionSnapshotBuilder:
         symbol: str,
         df_symbol: pd.DataFrame | None,
         tf: str = "1h",
-        lookback: int = 168,  # 7 días de velas 1h
+        lookback: int = 168,
+        as_of_ts: int | None = None,
     ):
         if symbol == "BTCUSDT":
             return None, None, None, None, None
 
-        df_btc = self._df("BTCUSDT", tf)
+        df_btc = self._df(
+            "BTCUSDT",
+            tf,
+            as_of_ts=as_of_ts,
+        )
 
         if df_symbol is None or df_btc is None:
             return None, None, None, None, None
@@ -138,14 +143,22 @@ class SignalCompressionSnapshotBuilder:
             round(float(outperformance), 4),
         )
 
-    def build(self, symbol: str) -> SignalCompressionSnapshot | None:
+    def build(
+        self,
+        symbol: str,
+        as_of_ts: int | None = None,
+    ) -> SignalCompressionSnapshot | None:
 
         trigger_tf = self.trigger_tf
 
-        df_trigger = self._df(symbol, trigger_tf)
-        df_15m = self._df(symbol, "15m")
-        df_1h = self._df(symbol, "1h")
-        df_4h = self._df(symbol, "4h")
+        df_trigger = self._df(
+            symbol,
+            trigger_tf,
+            as_of_ts=as_of_ts,
+        )
+        df_15m = self._df(symbol, "15m", as_of_ts=as_of_ts)
+        df_1h = self._df(symbol, "1h", as_of_ts=as_of_ts)
+        df_4h = self._df(symbol, "4h", as_of_ts=as_of_ts)
 
         if df_trigger is None or df_trigger.empty:
             return None
@@ -217,7 +230,7 @@ class SignalCompressionSnapshotBuilder:
             snapshot.r2_vs_btc,
             snapshot.vol_ratio_vs_btc,
             snapshot.outperformance_7d,
-        ) = self._btc_metrics(symbol, df_1h)
+        ) = self._btc_metrics(symbol, df_1h, as_of_ts=as_of_ts,)
 
         # ==========================
         # TAGS
@@ -230,8 +243,17 @@ class SignalCompressionSnapshotBuilder:
     # HELPERS
     # ==========================================================
     
-    def _df(self, symbol: str, tf: str) -> pd.DataFrame | None:
-        candles = self.buffer.get_candles(symbol, tf)
+    def _df(
+        self,
+        symbol: str,
+        tf: str,
+        as_of_ts: int | None = None,
+    ) -> pd.DataFrame | None:
+        candles = self.buffer.get_candles(
+            symbol,
+            tf,
+            as_of_ts=as_of_ts,
+        )
 
         if not candles:
             return None

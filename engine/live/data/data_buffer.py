@@ -209,9 +209,49 @@ class DataBuffer:
             ][tf].get(int(close_time))
         )
 
-    def get_candles(self, symbol: str, tf: str):
+    def get_candles(
+        self,
+        symbol: str,
+        tf: str,
+        as_of_ts: int | None = None,
+    ):
         symbol = self._normalize_symbol(symbol)
-        return list(self.buffers[symbol].get(tf, []))
+
+        candles = list(
+            self.buffers[symbol].get(tf, [])
+        )
+
+        # Backward compatible:
+        # sin as_of_ts se comporta exactamente como antes.
+        if as_of_ts is None:
+            return candles
+
+        timeframe_ms = {
+            "1m": 60_000,
+            "5m": 300_000,
+            "15m": 900_000,
+            "30m": 1_800_000,
+            "1h": 3_600_000,
+            "4h": 14_400_000,
+            "1d": 86_400_000,
+        }.get(tf)
+
+        if timeframe_ms is None:
+            raise ValueError(
+                f"Unsupported timeframe for as_of lookup: {tf}"
+            )
+
+        boundary_ts = int(as_of_ts)
+
+        return [
+            candle
+            for candle in candles
+            if (
+                int(candle["timestamp"])
+                + timeframe_ms
+                - 1
+            ) <= boundary_ts
+        ]
 
     # ==========================================
     # REPLAY

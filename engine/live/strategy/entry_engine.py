@@ -23,11 +23,11 @@ class EntryEngine:
         self.buffer = buffer
         self.debug = debug
         self.status_writer = status_writer or StatusWriter()
-        
+
         self.config = config or {}
-        
+
         self.symbol = symbol
-        
+
         self.max_hold_candles = int(
             self.config.get("max_hold_candles", 24)
         )
@@ -40,8 +40,8 @@ class EntryEngine:
             "min_atr_pct",
             None
         )
-        
-            
+
+
     def _log_blocked_signal(self, trade_action: TradeAction, reason: str):
         signal = trade_action.signal
 
@@ -61,7 +61,7 @@ class EntryEngine:
             f"strategy={trade_action.strategy_name} | "
             f"router_reason={trade_action.reason}"
         )
-        
+
     def _append_paper_signal_csv(self, trade_action: TradeAction, reason: str):
         signal = trade_action.signal
 
@@ -96,7 +96,7 @@ class EntryEngine:
                 writer.writeheader()
 
             writer.writerow(row)
-        
+
     def _calculate_atr_pct(
         self,
         atr: float,
@@ -119,6 +119,12 @@ class EntryEngine:
 
         signal = trade_action.signal
 
+        as_of_ts = getattr(
+            signal,
+            "signal_ts",
+            None,
+        )
+
         side = trade_action.action.value
 
         if side not in ("LONG", "SHORT"):
@@ -128,7 +134,7 @@ class EntryEngine:
                 side=side,
             )
             return None
-        
+
         allow_longs = self.config.get("allow_longs", True)
         allow_shorts = self.config.get("allow_shorts", True)
         log_blocked = self.config.get("log_blocked_signals", True)
@@ -152,11 +158,19 @@ class EntryEngine:
             raise ValueError("EntryEngine: missing symbol from signal and self.symbol")
 
         df_entry = pd.DataFrame(
-            self.buffer.get_candles(plan_symbol, self.entry_tf)
+            self.buffer.get_candles(
+                plan_symbol,
+                self.entry_tf,
+                as_of_ts=as_of_ts,
+            )
         )
 
         df_atr = pd.DataFrame(
-            self.buffer.get_candles(plan_symbol, self.atr_tf)
+            self.buffer.get_candles(
+                plan_symbol,
+                self.atr_tf,
+                as_of_ts=as_of_ts,
+            )
         )
 
         if len(df_entry) < 20:
@@ -199,12 +213,12 @@ class EntryEngine:
                 atr_pct=None
             )
             return None
-        
+
         atr_pct = self._calculate_atr_pct(
             atr,
             entry
         )
-        
+
         #print(
         #    f"[ENTRY FILTER DEBUG] "
         #    f"symbol={plan_symbol} "
@@ -236,7 +250,7 @@ class EntryEngine:
             atr=atr,
             cfg=cfg
         )
-        
+
         # ==========================
         # FIXED TP / SL EXPERIMENT
         # ==========================
@@ -387,12 +401,12 @@ class EntryEngine:
 
             "atr": float(atr),
             "atr_pct": round(float(atr_pct), 4),
-            
+
             "risk_config": "AGGRESSIVE" if "aggressive" in strategy_name else "DEFAULT",
             "sl_mult": cfg["sl_mult"],
             "tp_mult": cfg["tp_mult"],
             "min_tp": cfg["min_tp"],
-                        
+
             # ==========================
             # RECENT MOVE CONTEXT - 15m
             # ==========================
@@ -401,7 +415,7 @@ class EntryEngine:
 
             "green_candles_last_10": getattr(signal, "green_candles_last_10", None),
             "red_candles_last_10": getattr(signal, "red_candles_last_10", None),
-             
+
             # ==========================
             # BTC SWING CONTEXT
             # ==========================
@@ -420,7 +434,7 @@ class EntryEngine:
             "btc_near_swing_low_1d": getattr(signal, "btc_near_swing_low_1d", None),
             "btc_near_swing_high_1d": getattr(signal, "btc_near_swing_high_1d", None),
         }
-        
+
         # ==========================
         # MULTI-TIMEFRAME EMA CONTEXT
         # ==========================
@@ -497,24 +511,36 @@ class EntryEngine:
                     field_name,
                     None,
                 )
-        
+
         # ==========================
         # LIQUIDITY CONTEXT
         # ==========================
         df_15m = pd.DataFrame(
-            self.buffer.get_candles(plan_symbol, "15m")
+            self.buffer.get_candles(
+                plan_symbol,
+                "15m",
+                as_of_ts=as_of_ts,
+            )
         )
 
         df_1h = pd.DataFrame(
-            self.buffer.get_candles(plan_symbol, "1h")
+            self.buffer.get_candles(
+                plan_symbol,
+                "1h",
+                as_of_ts=as_of_ts,
+            )
         )
 
         df_4h = pd.DataFrame(
-            self.buffer.get_candles(plan_symbol, "4h")
+            self.buffer.get_candles(
+                plan_symbol,
+                "4h",
+                as_of_ts=as_of_ts,
+            )
         )
 
         quote_volume_24h = getattr(signal, "quote_volume_24h", None)
-        
+
         #print(
         #    f"\n[LIQUIDITY DEBUG] {plan_symbol}"
         #)
@@ -558,7 +584,7 @@ class EntryEngine:
             signal_context=signal_context,
             max_hold_candles=self.max_hold_candles
         )
-        
+
         # ==========================
         # ✅ PLAN READY
         # ==========================
