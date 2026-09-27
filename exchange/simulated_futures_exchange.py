@@ -626,12 +626,19 @@ class SimulatedFuturesExchange:
             status = item.get("status")
 
 
+
             executable = (
+
                 status == "TRADING"
+
                 and tick_size > 0
+
                 and step_size > 0
+
                 and min_qty >= 0
+
                 and max_qty > 0
+
             )
 
 
@@ -1412,7 +1419,19 @@ class SimulatedFuturesExchange:
 
         quantity = float(quantity)
 
-        stop_price = float(stop_price)
+        stop_price = float(
+
+            self.normalize_price(
+
+                symbol,
+
+                stop_price,
+
+                price_rounding,
+
+            )
+
+        )
 
 
 
@@ -1528,7 +1547,19 @@ class SimulatedFuturesExchange:
 
         quantity = float(quantity)
 
-        price = float(price)
+        price = float(
+
+            self.normalize_price(
+
+                symbol,
+
+                price,
+
+                price_rounding,
+
+            )
+
+        )
 
 
 
