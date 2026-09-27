@@ -626,19 +626,12 @@ class SimulatedFuturesExchange:
             status = item.get("status")
 
 
-
             executable = (
-
                 status == "TRADING"
-
                 and tick_size > 0
-
                 and step_size > 0
-
-                and min_qty > 0
-
+                and min_qty >= 0
                 and max_qty > 0
-
             )
 
 
