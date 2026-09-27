@@ -49,7 +49,7 @@ MODE_CONFIG = {
     "compression": {
         "timeframes": ["1m", "5m", "15m", "30m", "1h", "4h"],
         "trigger_tf": MAIN_TF,
-        "min_atr_pct": 0.20,
+        "min_atr_pct": None,
         "min_atr": 120,
         "entry_tf": MAIN_TF,
         "atr_tf": MAIN_TF,

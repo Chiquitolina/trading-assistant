@@ -11742,6 +11742,14 @@ if selected_section == "overview":
         table_df,
         use_container_width=True,
         hide_index=True,
+        column_config={
+            "signal_atr_pct": st.column_config.NumberColumn(
+                "ATR %",
+                help="ATR porcentual al momento de la señal.",
+                format="%.4f%%",
+                width="small",
+            ),
+        },
         key="closed_trades_inspector_table",
         on_select="rerun",
         selection_mode="single-row",
