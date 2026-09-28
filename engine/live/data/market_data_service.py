@@ -1801,6 +1801,29 @@ class MarketDataService:
                 if self.bootstrap_closed_messages:
                     continue
 
+                # Antes del handoff final verificamos que
+                # el WS siga físicamente conectado.
+                #
+                # Si volvió a caer durante recovery,
+                # mantenemos el buffer activo y NO
+                # regresamos a publicación directa.
+                if not (
+                    self.ws
+                    and self.ws.is_connected
+                ):
+                    print(
+                        "[MARKET DATA RECOVERY] "
+                        "buffer handoff blocked: "
+                        "WS disconnected again"
+                    )
+
+                    return {
+                        "passes": passes,
+                        "published": published,
+                        "duplicates": duplicates,
+                        "released": False,
+                    }
+
                 # Handoff atómico:
                 # desde este punto los callbacks
                 # vuelven a publicar directamente.
@@ -1819,6 +1842,7 @@ class MarketDataService:
             "passes": passes,
             "published": published,
             "duplicates": duplicates,
+            "released": True,
         }
         
     def _run_ws_recovery(
@@ -1946,6 +1970,42 @@ class MarketDataService:
             flush_result = (
                 self._flush_ws_recovery_buffer()
             )
+            
+            if not flush_result.get(
+                "released",
+                False,
+            ):
+                redetected_at_ms = int(
+                    scan_until_ms
+                )
+
+                # La caída ocurrió mientras el recovery
+                # estaba ejecutándose, por lo que el loop
+                # principal todavía no pudo observarla.
+                #
+                # Dejamos explícitamente armado el estado
+                # para que el próximo reconnect dispare
+                # un recovery nuevo.
+                self.ws_was_connected = False
+
+                self.ws_disconnect_detected_at_ms = (
+                    redetected_at_ms
+                )
+
+                print(
+                    "[MARKET DATA RECOVERY] "
+                    "aborted safely: "
+                    "WS disconnected during recovery "
+                    f"detected_at={redetected_at_ms}"
+                )
+
+                return {
+                    "repair": repair_result,
+                    "flush": flush_result,
+                    "aborted": (
+                        "ws_disconnected_during_recovery"
+                    ),
+                }
 
             print(
                 "[MARKET DATA RECOVERY] "
