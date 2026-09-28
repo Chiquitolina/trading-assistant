@@ -39,9 +39,16 @@ REPLAY_PROVIDER_APPLIED_KEY = (
 # Último snapshot cross-sectional del mercado
 MARKET_FLOW_KEY_PREFIX = f"{KEY_PREFIX}:market-flow"
 
-# Configuración inicial
 HISTORY_MAXLEN = 400
 CLOSED_STREAM_MAXLEN = 200_000
+
+# Tiempo durante el cual recordamos qué candles
+# ya fueron emitidas al closed-candles stream.
+#
+# Sirve para evitar duplicados cuando una candle
+# recuperada por REST también llega tarde por WS.
+CLOSED_PUBLISHED_TTL_SECONDS = 6 * 60 * 60
+
 HEARTBEAT_TTL_SECONDS = 15
 PRODUCER_LOCK_TTL_SECONDS = 30
 
@@ -59,6 +66,17 @@ def normalize_timeframe(timeframe: str) -> str:
 
     return timeframe.lower()
 
+def closed_published_key(
+    timeframe: str,
+    candle_timestamp: int,
+) -> str:
+    timeframe = normalize_timeframe(timeframe)
+    candle_timestamp = int(candle_timestamp)
+
+    return (
+        f"{KEY_PREFIX}:closed-published:"
+        f"{timeframe}:{candle_timestamp}"
+    )
 
 def history_key(symbol: str, timeframe: str) -> str:
     symbol = normalize_symbol(symbol)

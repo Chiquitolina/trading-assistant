@@ -126,6 +126,87 @@ class DataBuffer:
         #    f"\033[94m[DATA LAYER]\033[0m "
         #    f"🕯️ STORED [{symbol}][{tf}] {candle['close']}"
         #)
+        
+        
+    def register_existing_closed_boundary(
+        self,
+        symbol: str,
+        tf: str,
+        close_time: int,
+        candle: dict,
+    ):
+        symbol = self._normalize_symbol(
+            symbol
+        )
+
+        if not symbol:
+            return False
+
+        if (
+            self.symbols
+            and symbol not in self.symbols
+        ):
+            return False
+
+        if tf not in self.timeframes:
+            return False
+
+        if not isinstance(candle, dict):
+            return False
+
+        try:
+            open_time = int(
+                candle["timestamp"]
+            )
+            close_time = int(
+                close_time
+            )
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            return False
+
+        boundary_candle = dict(
+            candle
+        )
+
+        boundary_candle["symbol"] = symbol
+        boundary_candle["timestamp"] = (
+            open_time
+        )
+        boundary_candle["closed_at"] = (
+            datetime.utcfromtimestamp(
+                close_time / 1000
+            )
+        )
+
+        # IMPORTANTE:
+        # esta candle YA está en buffers[] porque
+        # vino de load_historical().
+        #
+        # No hacemos append.
+        # No tocamos last_close_time.
+        # No tocamos last_ws_close_time.
+        # No retrocedemos _last_price/_last_timestamp.
+        self.closed_candles_by_boundary[
+            symbol
+        ][tf][close_time] = (
+            boundary_candle
+        )
+
+        with self.closed_events_lock:
+            self.closed_events.add(
+                (
+                    symbol,
+                    tf,
+                    close_time,
+                )
+            )
+
+        return True
 
     # ==========================================
     # EVENT CONSUMER

@@ -4,7 +4,19 @@ import threading
 
 import time
 
-
+from engine.live.data.redis_market_data_protocol import (
+    CLOSED_CANDLES_STREAM,
+    CLOSED_PUBLISHED_TTL_SECONDS,
+    CLOSED_STREAM_MAXLEN,
+    HISTORY_MAXLEN,
+    PRICE_CHANNEL,
+    closed_published_key,
+    history_key,
+    last_closed_key,
+    market_flow_key,
+    normalize_symbol,
+    normalize_timeframe,
+)
 
 import redis
 
@@ -25,31 +37,6 @@ from data.market_data import (
 COVERAGE_AUDIT_TIMEFRAME = "30m"
 
 COVERAGE_AUDIT_SETTLE_SECONDS = 15
-
-
-
-from engine.live.data.redis_market_data_protocol import (
-
-    CLOSED_CANDLES_STREAM,
-
-    CLOSED_STREAM_MAXLEN,
-
-    HISTORY_MAXLEN,
-
-    PRICE_CHANNEL,
-
-    history_key,
-
-    last_closed_key,
-
-    market_flow_key,
-
-    normalize_symbol,
-
-    normalize_timeframe,
-
-)
-
 
 
 class RedisMarketDataPublisher:
@@ -91,8 +78,182 @@ class RedisMarketDataPublisher:
 
 
         self._coverage_reported = set()
+        
+        self._publish_closed_candle_once_script = (
+            self.redis.register_script(
+                """
+                if redis.call(
+                    'SISMEMBER',
+                    KEYS[1],
+                    ARGV[1]
+                ) == 1 then
+                    redis.call(
+                        'EXPIRE',
+                        KEYS[1],
+                        ARGV[2]
+                    )
 
+                    return {0, ''}
+                end
 
+                local stream_id = redis.call(
+                    'XADD',
+                    KEYS[2],
+                    'MAXLEN',
+                    '~',
+                    ARGV[3],
+                    '*',
+                    'payload',
+                    ARGV[4]
+                )
+
+                redis.call(
+                    'SADD',
+                    KEYS[1],
+                    ARGV[1]
+                )
+
+                redis.call(
+                    'EXPIRE',
+                    KEYS[1],
+                    ARGV[2]
+                )
+
+                return {1, stream_id}
+                """
+            )
+        )
+        
+        self._upsert_closed_candle_history_script = (
+            self.redis.register_script(
+                """
+                local history_key = KEYS[1]
+                local last_closed_key = KEYS[2]
+
+                local candle_ts = tonumber(ARGV[1])
+                local serialized = ARGV[2]
+                local history_limit = tonumber(ARGV[3])
+
+                local length = redis.call(
+                    'LLEN',
+                    history_key
+                )
+
+                if length == 0 then
+                    redis.call(
+                        'RPUSH',
+                        history_key,
+                        serialized
+                    )
+                else
+                    local last_item = redis.call(
+                        'LINDEX',
+                        history_key,
+                        -1
+                    )
+
+                    local last_candle = cjson.decode(
+                        last_item
+                    )
+
+                    local last_ts = tonumber(
+                        last_candle['timestamp']
+                    )
+
+                    if candle_ts > last_ts then
+                        redis.call(
+                            'RPUSH',
+                            history_key,
+                            serialized
+                        )
+
+                    elseif candle_ts == last_ts then
+                        redis.call(
+                            'LSET',
+                            history_key,
+                            -1,
+                            serialized
+                        )
+
+                    else
+                        local handled = false
+
+                        for i = length - 1, 0, -1 do
+                            local item = redis.call(
+                                'LINDEX',
+                                history_key,
+                                i
+                            )
+
+                            local existing = cjson.decode(
+                                item
+                            )
+
+                            local existing_ts = tonumber(
+                                existing['timestamp']
+                            )
+
+                            if existing_ts == candle_ts then
+                                redis.call(
+                                    'LSET',
+                                    history_key,
+                                    i,
+                                    serialized
+                                )
+
+                                handled = true
+                                break
+                            end
+
+                            if existing_ts < candle_ts then
+                                redis.call(
+                                    'LINSERT',
+                                    history_key,
+                                    'AFTER',
+                                    item,
+                                    serialized
+                                )
+
+                                handled = true
+                                break
+                            end
+                        end
+
+                        if not handled then
+                            redis.call(
+                                'LPUSH',
+                                history_key,
+                                serialized
+                            )
+                        end
+                    end
+                end
+
+                redis.call(
+                    'LTRIM',
+                    history_key,
+                    -history_limit,
+                    -1
+                )
+
+                local newest = redis.call(
+                    'LINDEX',
+                    history_key,
+                    -1
+                )
+
+                if newest then
+                    redis.call(
+                        'SET',
+                        last_closed_key,
+                        newest
+                    )
+                end
+
+                return 1
+                """
+            )
+        )
 
     def ping(self):
 
@@ -779,7 +940,6 @@ class RedisMarketDataPublisher:
         )
 
 
-
     def _publish_closed_candle(
 
         self,
@@ -813,142 +973,59 @@ class RedisMarketDataPublisher:
         )
 
 
-
-        last_history_item = self.redis.lindex(
-
-            candle_history_key,
-
-            -1,
-
-        )
-
-
-
-        replace_last = False
-
-
-
-        if last_history_item:
-
-            try:
-
-                last_candle = json.loads(
-
-                    last_history_item
-
-                )
-
-
-
-                replace_last = (
-
-                    int(last_candle["timestamp"])
-
-                    == int(candle["timestamp"])
-
-                )
-
-
-
-            except (
-
-                KeyError,
-
-                TypeError,
-
-                ValueError,
-
-                json.JSONDecodeError,
-
-            ):
-
-                replace_last = False
-
-
-
-        pipeline = self.redis.pipeline(
-
-            transaction=True,
-
-        )
-
-
-
-        if replace_last:
-
-            pipeline.lset(
-
+        self._upsert_closed_candle_history_script(
+            keys=[
                 candle_history_key,
-
-                -1,
-
+                last_closed_key(
+                    symbol,
+                    timeframe,
+                ),
+            ],
+            args=[
+                int(candle["timestamp"]),
                 serialized,
+                history_limit,
+            ],
+        )
 
+        dedupe_key = closed_published_key(
+            timeframe=timeframe,
+            candle_timestamp=candle["timestamp"],
+        )
+
+        published_result = (
+            self._publish_closed_candle_once_script(
+                keys=[
+                    dedupe_key,
+                    CLOSED_CANDLES_STREAM,
+                ],
+                args=[
+                    symbol,
+                    CLOSED_PUBLISHED_TTL_SECONDS,
+                    CLOSED_STREAM_MAXLEN,
+                    serialized,
+                ],
             )
+        )
 
-        else:
+        inserted = (
+            int(published_result[0]) == 1
+        )
 
-            pipeline.rpush(
+        stream_id = (
+            published_result[1]
+            if inserted
+            else None
+        )
 
-                candle_history_key,
-
-                serialized,
-
+        if not inserted:
+            print(
+                "[CLOSED CANDLE DEDUPE] "
+                f"symbol={symbol} "
+                f"tf={timeframe} "
+                f"timestamp={candle['timestamp']} "
+                "stream_publish=skipped"
             )
-
-
-
-        pipeline.ltrim(
-
-            candle_history_key,
-
-            -history_limit,
-
-            -1,
-
-        )
-
-
-
-        pipeline.set(
-
-            last_closed_key(
-
-                symbol,
-
-                timeframe,
-
-            ),
-
-            serialized,
-
-        )
-
-
-
-        pipeline.xadd(
-
-            CLOSED_CANDLES_STREAM,
-
-            {
-
-                "payload": serialized,
-
-            },
-
-            maxlen=CLOSED_STREAM_MAXLEN,
-
-            approximate=True,
-
-        )
-
-
-
-        results = pipeline.execute()
-
-
-
-        stream_id = results[-1]
 
 
 

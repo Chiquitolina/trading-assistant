@@ -5,6 +5,8 @@ import time
 import pandas as pd
 import redis
 
+from config.timeframes import TIMEFRAME_CONFIGS
+
 from engine.live.data.redis_market_data_protocol import (
     CLOSED_CANDLES_STREAM,
     HEARTBEAT_KEY,
@@ -113,6 +115,20 @@ class RedisMarketDataProvider:
 
         self._stream_diag_xread_calls = 0
         self._stream_diag_xread_events = 0
+        
+        # ==========================================
+        # LIVE CLOSED-BOUNDARY BARRIER
+        # ==========================================
+        self._live_boundary_batches = {}
+        self._live_boundary_last_released = None
+
+        self._live_startup_history_loaded_at_ms = (
+            None
+        )
+
+        self._live_startup_seeded_boundaries = (
+            set()
+        )
 
         self.price_thread = None
         self.closed_thread = None
@@ -637,6 +653,17 @@ class RedisMarketDataProvider:
                         f"histories={loaded}/{total}"
                     )
 
+        if self.clock_mode == "real":
+            self._live_startup_history_loaded_at_ms = (
+                int(time.time() * 1000)
+            )
+
+            print(
+                "[PROVIDER BOUNDARY STARTUP] "
+                "history cutoff="
+                f"{self._live_startup_history_loaded_at_ms}"
+            )
+
         print(
             "[REDIS MARKET DATA] "
             f"history loaded "
@@ -903,9 +930,14 @@ class RedisMarketDataProvider:
                                 symbol in self.symbols
                                 and timeframe in self.timeframes
                             ):
-                                self._emit_closed_to_buffer(
-                                    payload
-                                )
+                                if self.clock_mode == "real":
+                                    self._queue_live_closed_payload(
+                                        payload
+                                    )
+                                else:
+                                    self._emit_closed_to_buffer(
+                                        payload
+                                    )
 
                             # En replay este ACK significa:
                             #
@@ -1056,6 +1088,438 @@ class RedisMarketDataProvider:
                         ts,
                         None,
                     )
+                    
+    def _timeframe_ms(
+        self,
+        timeframe,
+    ):
+        config = TIMEFRAME_CONFIGS.get(
+            timeframe,
+            {},
+        )
+
+        timeframe_ms = int(
+            config.get(
+                "ms_per_candle",
+                0,
+            )
+        )
+
+        if timeframe_ms <= 0:
+            raise ValueError(
+                "Invalid timeframe duration "
+                f"for {timeframe}"
+            )
+
+        return timeframe_ms
+
+
+    def _expected_timeframes_for_close(
+        self,
+        close_timestamp,
+    ):
+        boundary_end_ms = (
+            int(close_timestamp)
+            + 1
+        )
+
+        expected = [
+            timeframe
+            for timeframe in self.timeframes
+            if (
+                boundary_end_ms
+                % self._timeframe_ms(
+                    timeframe
+                )
+                == 0
+            )
+        ]
+
+        return sorted(
+            expected,
+            key=self._timeframe_ms,
+        )
+
+    def _seed_live_boundary_from_buffer(
+        self,
+        close_timestamp,
+    ):
+        close_timestamp = int(
+            close_timestamp
+        )
+
+        expected_timeframes = (
+            self._expected_timeframes_for_close(
+                close_timestamp
+            )
+        )
+
+        batch = (
+            self._live_boundary_batches
+            .setdefault(
+                close_timestamp,
+                {
+                    "payloads": {},
+                    "first_seen_at": (
+                        time.monotonic()
+                    ),
+                },
+            )
+        )
+
+        seeded = 0
+
+        for timeframe in expected_timeframes:
+            timeframe_ms = (
+                self._timeframe_ms(
+                    timeframe
+                )
+            )
+
+            expected_open_timestamp = (
+                close_timestamp
+                - timeframe_ms
+                + 1
+            )
+
+            for symbol in self.symbols:
+                candles = (
+                    self.buffer.get_candles(
+                        symbol,
+                        timeframe,
+                    )
+                )
+
+                matching_candle = None
+
+                for candle in reversed(candles):
+                    try:
+                        candle_timestamp = int(
+                            candle["timestamp"]
+                        )
+                    except (
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                    ):
+                        continue
+
+                    if (
+                        candle_timestamp
+                        == expected_open_timestamp
+                    ):
+                        matching_candle = candle
+                        break
+
+                    if (
+                        candle_timestamp
+                        < expected_open_timestamp
+                    ):
+                        break
+
+                if matching_candle is None:
+                    continue
+
+                key = (
+                    symbol,
+                    timeframe,
+                )
+
+                if key in batch["payloads"]:
+                    continue
+
+                batch["payloads"][key] = {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "timestamp": (
+                        expected_open_timestamp
+                    ),
+                    "close_timestamp": (
+                        close_timestamp
+                    ),
+                    "open": float(
+                        matching_candle["open"]
+                    ),
+                    "high": float(
+                        matching_candle["high"]
+                    ),
+                    "low": float(
+                        matching_candle["low"]
+                    ),
+                    "close": float(
+                        matching_candle["close"]
+                    ),
+                    "volume": float(
+                        matching_candle.get(
+                            "volume",
+                            0,
+                        )
+                    ),
+                    "quoteVolume": float(
+                        matching_candle.get(
+                            "quoteVolume",
+                            0,
+                        )
+                    ),
+                    "source": (
+                        "startup_history_seed"
+                    ),
+                }
+
+                seeded += 1
+
+        print(
+            "[PROVIDER BOUNDARY STARTUP] "
+            f"close_ts={close_timestamp} "
+            f"seeded={seeded}"
+        )
+
+        return seeded
+
+    def _queue_live_closed_payload(
+        self,
+        payload,
+    ):
+        symbol = str(
+            payload["symbol"]
+        ).upper()
+
+        timeframe = str(
+            payload["timeframe"]
+        ).lower()
+
+        timestamp = int(
+            payload["timestamp"]
+        )
+
+        close_timestamp = int(
+            payload.get(
+                "close_timestamp",
+                (
+                    timestamp
+                    + self._timeframe_ms(
+                        timeframe
+                    )
+                    - 1
+                ),
+            )
+        )
+
+        if (
+            self._live_boundary_last_released
+            is not None
+            and close_timestamp
+            <= self._live_boundary_last_released
+        ):
+            print(
+                "[PROVIDER BOUNDARY] "
+                "late event skipped "
+                f"symbol={symbol} "
+                f"tf={timeframe} "
+                f"close_ts={close_timestamp}"
+            )
+            return
+
+        startup_cutoff = (
+            self._live_startup_history_loaded_at_ms
+        )
+
+        if (
+            startup_cutoff is not None
+            and close_timestamp
+            <= startup_cutoff
+            and close_timestamp
+            not in self._live_startup_seeded_boundaries
+        ):
+            self._seed_live_boundary_from_buffer(
+                close_timestamp
+            )
+
+            self._live_startup_seeded_boundaries.add(
+                close_timestamp
+            )
+
+        batch = (
+            self._live_boundary_batches
+            .setdefault(
+                close_timestamp,
+                {
+                    "payloads": {},
+                    "first_seen_at": (
+                        time.monotonic()
+                    ),
+                },
+            )
+        )
+
+        key = (
+            symbol,
+            timeframe,
+        )
+
+        existing_payload = (
+            batch["payloads"].get(
+                key
+            )
+        )
+
+        # Si esta candle ya estaba en DataBuffer
+        # por el history bootstrap, conservamos
+        # ese seed. No queremos reenviarla como
+        # WS y correr el riesgo de appendear una
+        # candle vieja detrás de una más nueva.
+        if not (
+            isinstance(
+                existing_payload,
+                dict,
+            )
+            and existing_payload.get(
+                "source"
+            )
+            == "startup_history_seed"
+        ):
+            batch["payloads"][
+                key
+            ] = payload
+
+        self._flush_complete_live_boundaries()
+
+
+    def _flush_complete_live_boundaries(
+        self,
+    ):
+        while self._live_boundary_batches:
+            close_timestamp = min(
+                self._live_boundary_batches
+            )
+
+            batch = (
+                self._live_boundary_batches[
+                    close_timestamp
+                ]
+            )
+
+            expected_timeframes = (
+                self._expected_timeframes_for_close(
+                    close_timestamp
+                )
+            )
+
+            expected_keys = {
+                (
+                    symbol,
+                    timeframe,
+                )
+                for symbol in self.symbols
+                for timeframe
+                in expected_timeframes
+            }
+
+            present_keys = set(
+                batch["payloads"]
+            )
+
+            missing_keys = (
+                expected_keys
+                - present_keys
+            )
+
+            if missing_keys:
+                return
+
+            ordered_keys = sorted(
+                expected_keys,
+                key=lambda item: (
+                    item[0],
+                    self._timeframe_ms(
+                        item[1]
+                    ),
+                ),
+            )
+
+            payloads = [
+                batch["payloads"][key]
+                for key in ordered_keys
+            ]
+
+            del self._live_boundary_batches[
+                close_timestamp
+            ]
+
+            for payload in payloads:
+                if (
+                    payload.get("source")
+                    == "startup_history_seed"
+                ):
+                    registered = (
+                        self.buffer
+                        .register_existing_closed_boundary(
+                            symbol=payload[
+                                "symbol"
+                            ],
+                            tf=payload[
+                                "timeframe"
+                            ],
+                            close_time=int(
+                                payload[
+                                    "close_timestamp"
+                                ]
+                            ),
+                            candle=payload,
+                        )
+                    )
+
+                    if not registered:
+                        raise RuntimeError(
+                            "Could not register "
+                            "startup history boundary "
+                            f"symbol="
+                            f"{payload['symbol']} "
+                            f"tf="
+                            f"{payload['timeframe']} "
+                            f"close_ts="
+                            f"{payload['close_timestamp']}"
+                        )
+
+                else:
+                    self._emit_closed_to_buffer(
+                        payload
+                    )
+
+            # Sólo marcamos el boundary como aplicado
+            # después de haber cargado TODOS sus eventos
+            # en DataBuffer.
+            self._live_boundary_last_released = (
+                close_timestamp
+            )
+
+            print(
+                "[PROVIDER BOUNDARY RELEASE] "
+                f"close_ts={close_timestamp} "
+                f"timeframes="
+                f"{','.join(expected_timeframes)} "
+                f"events={len(payloads)} "
+                f"symbols={len(self.symbols)}"
+            )
+            
+    def is_live_boundary_applied(
+        self,
+        close_timestamp,
+    ):
+        if self.clock_mode != "real":
+            return True
+
+        last_released = (
+            self._live_boundary_last_released
+        )
+
+        if last_released is None:
+            return False
+
+        return (
+            int(last_released)
+            >= int(close_timestamp)
+        )
 
     def _emit_price_to_buffer(
         self,

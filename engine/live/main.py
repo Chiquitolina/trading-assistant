@@ -1062,18 +1062,58 @@ try:
 
         else:
 
-            # En live procesamos el boundary más viejo disponible.
+            # En LIVE procesamos siempre el boundary
+            # más viejo, pero solamente cuando:
+            #
+            # 1. llegaron TODOS los símbolos del trigger TF
+            # 2. el Redis provider terminó de aplicar
+            #    TODOS los TF que cierran en ese boundary
+            #
+            # Esto evita evaluar una boundary parcial.
             if pending_trigger_batches:
 
                 trigger_batch_boundary_ts = min(
                     pending_trigger_batches
                 )
 
-                symbols_to_process = sorted(
-                    pending_trigger_batches.pop(
-                        trigger_batch_boundary_ts
+                expected_symbols = set(
+                    SYMBOLS
+                )
+
+                boundary_symbols = (
+                    pending_trigger_batches.get(
+                        trigger_batch_boundary_ts,
+                        set(),
                     )
                 )
+
+                live_trigger_complete = (
+                    boundary_symbols
+                    == expected_symbols
+                )
+
+                live_boundary_applied = True
+
+                if (
+                    MARKET_DATA_PROVIDER == "redis"
+                    and MARKET_CLOCK_MODE == "real"
+                ):
+                    live_boundary_applied = (
+                        market_data
+                        .is_live_boundary_applied(
+                            trigger_batch_boundary_ts
+                        )
+                    )
+
+                if (
+                    live_trigger_complete
+                    and live_boundary_applied
+                ):
+                    symbols_to_process = sorted(
+                        pending_trigger_batches.pop(
+                            trigger_batch_boundary_ts
+                        )
+                    )
 
         if symbols_to_process:
 

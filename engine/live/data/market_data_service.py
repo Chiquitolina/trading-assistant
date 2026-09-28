@@ -39,6 +39,7 @@ from engine.live.data.redis_market_data_protocol import (
     STATUS_KEY,
 
     history_key,
+    last_closed_key,
 
 )
 
@@ -242,6 +243,9 @@ class MarketDataService:
         self.bootstrap_buffering = False
         self.bootstrap_closed_messages = []
         self.bootstrap_buffer_sequence = 0
+        self.ws_was_connected = False
+        self.ws_disconnect_detected_at_ms = None
+        self.ws_recovery_in_progress = False
 
 
 
@@ -351,34 +355,66 @@ class MarketDataService:
 
 
             while self.running:
-
-                if (
-
-                    self.ws
-
-                    and self.ws.is_connected
-
-                ):
-
-                    self.phase = "READY"
-
-                else:
-
-                    self.phase = "CONNECTING_WS"
-
-
-
-                self.publisher.report_closed_candle_coverage(
-
-                    expected_symbols=self.symbols
-
+                now_ms = int(
+                    time.time() * 1000
                 )
 
+                transition = (
+                    self._detect_ws_connection_transition(
+                        now_ms
+                    )
+                )
 
+                if transition is not None:
+                    if (
+                        transition["type"]
+                        == "disconnected"
+                    ):
+                        self.phase = "CONNECTING_WS"
+
+                        started = (
+                            self._begin_ws_recovery_buffering()
+                        )
+
+                        print(
+                            "[MARKET DATA RECOVERY] "
+                            "disconnect detected "
+                            f"at="
+                            f"{transition['detected_at_ms']} "
+                            f"buffer_started={started}"
+                        )
+
+                    elif (
+                        transition["type"]
+                        == "reconnected"
+                    ):
+                        self._run_ws_recovery(
+                            disconnected_at_ms=(
+                                transition[
+                                    "disconnected_at_ms"
+                                ]
+                            ),
+                            reconnected_at_ms=(
+                                transition[
+                                    "detected_at_ms"
+                                ]
+                            ),
+                        )
+
+                if not self.ws_recovery_in_progress:
+                    if (
+                        self.ws
+                        and self.ws.is_connected
+                    ):
+                        self.phase = "READY"
+                    else:
+                        self.phase = "CONNECTING_WS"
+
+                self.publisher.report_closed_candle_coverage(
+                    expected_symbols=self.symbols
+                )
 
                 self._maybe_publish_market_flow()
-
-
 
                 self.stop_event.wait(1)
 
@@ -1224,7 +1260,721 @@ class MarketDataService:
             "[MARKET DATA BOOTSTRAP] "
             "WS closed-candle buffering enabled"
         )
+        
+    def _timeframe_ms(
+        self,
+        timeframe,
+    ):
+        config = TIMEFRAME_CONFIGS.get(
+            timeframe,
+            {}
+        )
 
+        timeframe_ms = int(
+            config.get(
+                "ms_per_candle",
+                0,
+            )
+        )
+
+        if timeframe_ms <= 0:
+            raise ValueError(
+                "Invalid timeframe duration "
+                f"for {timeframe}"
+            )
+
+        return timeframe_ms
+
+
+    def _latest_fully_closed_open_timestamp(
+        self,
+        timeframe,
+        now_ms,
+    ):
+        timeframe_ms = self._timeframe_ms(
+            timeframe
+        )
+
+        return (
+            (int(now_ms) // timeframe_ms)
+            * timeframe_ms
+            - timeframe_ms
+        )
+        
+    def _begin_ws_recovery_buffering(self):
+        with self.bootstrap_lock:
+            if self.bootstrap_buffering:
+                return False
+
+            self.bootstrap_closed_messages = []
+            self.bootstrap_buffer_sequence = 0
+            self.bootstrap_buffering = True
+
+        print(
+            "[MARKET DATA RECOVERY] "
+            "WS closed-candle buffering enabled"
+        )
+
+        return True
+
+    def _detect_ws_connection_transition(
+        self,
+        now_ms,
+    ):
+        connected = bool(
+            self.ws
+            and self.ws.is_connected
+        )
+
+        if connected:
+            if not self.ws_was_connected:
+                self.ws_was_connected = True
+
+                if (
+                    self.ws_disconnect_detected_at_ms
+                    is not None
+                ):
+                    return {
+                        "type": "reconnected",
+                        "detected_at_ms": int(now_ms),
+                        "disconnected_at_ms": int(
+                            self.ws_disconnect_detected_at_ms
+                        ),
+                    }
+
+            return None
+
+        if self.ws_was_connected:
+            self.ws_was_connected = False
+
+            self.ws_disconnect_detected_at_ms = int(
+                now_ms
+            )
+
+            return {
+                "type": "disconnected",
+                "detected_at_ms": int(now_ms),
+            }
+
+        return None
+    
+    def _recovery_candidate_timestamps(
+        self,
+        timeframe,
+        disconnected_at_ms,
+        reconnected_at_ms,
+    ):
+        timeframe_ms = self._timeframe_ms(
+            timeframe
+        )
+
+        start_timestamp = (
+            self._latest_fully_closed_open_timestamp(
+                timeframe=timeframe,
+                now_ms=disconnected_at_ms,
+            )
+        )
+
+        end_timestamp = (
+            self._latest_fully_closed_open_timestamp(
+                timeframe=timeframe,
+                now_ms=reconnected_at_ms,
+            )
+        )
+
+        if end_timestamp < start_timestamp:
+            return []
+
+        return list(
+            range(
+                start_timestamp,
+                end_timestamp + timeframe_ms,
+                timeframe_ms,
+            )
+        )
+        
+    def _find_recovery_gaps(
+        self,
+        disconnected_at_ms,
+        reconnected_at_ms,
+    ):
+        gaps = {}
+        
+        with self.bootstrap_lock:
+            buffered_keys = {
+                (
+                    symbol,
+                    timeframe,
+                    int(open_timestamp),
+                )
+                for (
+                    _close_timestamp,
+                    symbol,
+                    timeframe,
+                    open_timestamp,
+                    _sequence,
+                    _message,
+                )
+                in self.bootstrap_closed_messages
+            }
+
+        for timeframe in self.timeframes:
+            candidate_timestamps = (
+                self._recovery_candidate_timestamps(
+                    timeframe=timeframe,
+                    disconnected_at_ms=(
+                        disconnected_at_ms
+                    ),
+                    reconnected_at_ms=(
+                        reconnected_at_ms
+                    ),
+                )
+            )
+
+            if not candidate_timestamps:
+                continue
+
+            candidate_set = {
+                int(timestamp)
+                for timestamp
+                in candidate_timestamps
+            }
+
+            # Alcanzan algunas candles extra porque
+            # durante recovery los cierres nuevos
+            # quedan bufferizados.
+            lookback = (
+                len(candidate_timestamps)
+                + 3
+            )
+
+            pipeline = (
+                self.publisher.redis.pipeline(
+                    transaction=False
+                )
+            )
+
+            for symbol in self.symbols:
+                pipeline.lrange(
+                    history_key(
+                        symbol,
+                        timeframe,
+                    ),
+                    -lookback,
+                    -1,
+                )
+
+            histories = pipeline.execute()
+
+            present_by_symbol = {}
+
+            for symbol, raw_history in zip(
+                self.symbols,
+                histories,
+            ):
+                present = set()
+
+                for raw_candle in raw_history:
+                    try:
+                        candle = json.loads(
+                            raw_candle
+                        )
+
+                        timestamp = int(
+                            candle["timestamp"]
+                        )
+
+                    except (
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                    ):
+                        continue
+
+                    if timestamp in candidate_set:
+                        present.add(timestamp)
+
+                present_by_symbol[symbol] = (
+                    present
+                )
+
+            timeframe_gaps = {}
+
+            for timestamp in candidate_timestamps:
+                missing_symbols = [
+                    symbol
+                    for symbol in self.symbols
+                    if (
+                        int(timestamp)
+                        not in present_by_symbol[
+                            symbol
+                        ]
+                        and (
+                            symbol,
+                            timeframe,
+                            int(timestamp),
+                        )
+                        not in buffered_keys
+                    )
+                ]
+
+                if missing_symbols:
+                    timeframe_gaps[
+                        int(timestamp)
+                    ] = missing_symbols
+
+            if timeframe_gaps:
+                gaps[timeframe] = (
+                    timeframe_gaps
+                )
+
+        return gaps
+    
+    def _repair_ws_recovery_gaps(
+        self,
+        gaps,
+        max_attempts=3,
+    ):
+        tasks = []
+
+        for timeframe, timeframe_gaps in gaps.items():
+            timeframe_ms = self._timeframe_ms(
+                timeframe
+            )
+
+            for (
+                candle_timestamp,
+                missing_symbols,
+            ) in timeframe_gaps.items():
+                candle_timestamp = int(
+                    candle_timestamp
+                )
+
+                close_timestamp = (
+                    candle_timestamp
+                    + timeframe_ms
+                    - 1
+                )
+
+                for symbol in sorted(
+                    set(missing_symbols)
+                ):
+                    tasks.append(
+                        (
+                            close_timestamp,
+                            symbol,
+                            timeframe,
+                            candle_timestamp,
+                        )
+                    )
+
+        # Mismo criterio temporal que usamos
+        # al vaciar el buffer de WS:
+        # primero cierre, luego símbolo y TF.
+        tasks.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+                self._timeframe_ms(
+                    item[2]
+                ),
+                item[3],
+            )
+        )
+
+        recovered = []
+        failed = []
+
+        print(
+            "[MARKET DATA RECOVERY] "
+            f"repair starting tasks={len(tasks)}"
+        )
+
+        for (
+            _close_timestamp,
+            symbol,
+            timeframe,
+            candle_timestamp,
+        ) in tasks:
+            if not self.running:
+                failed.append(
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": (
+                            candle_timestamp
+                        ),
+                        "error": (
+                            "service_stopping"
+                        ),
+                    }
+                )
+                continue
+
+            last_error = None
+            publication = None
+
+            for attempt in range(
+                1,
+                max_attempts + 1,
+            ):
+                try:
+                    candle = (
+                        fetch_closed_futures_candle(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            candle_timestamp=(
+                                candle_timestamp
+                            ),
+                        )
+                    )
+
+                    if candle is None:
+                        raise RuntimeError(
+                            "candle_unavailable"
+                        )
+
+                    publication = (
+                        self.publisher
+                        .publish_recovered_candle(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            candle=candle,
+                        )
+                    )
+
+                    if (
+                        int(
+                            publication[
+                                "timestamp"
+                            ]
+                        )
+                        != candle_timestamp
+                    ):
+                        raise RuntimeError(
+                            "published_timestamp_"
+                            "mismatch"
+                        )
+
+                    last_error = None
+                    break
+
+                except Exception as exc:
+                    last_error = (
+                        f"{type(exc).__name__}:"
+                        f"{exc}"
+                    )
+
+                    if attempt < max_attempts:
+                        if self.stop_event.wait(1):
+                            last_error = (
+                                "service_stopping"
+                            )
+                            break
+
+            if last_error is not None:
+                failed.append(
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": (
+                            candle_timestamp
+                        ),
+                        "error": last_error,
+                    }
+                )
+
+                print(
+                    "[MARKET DATA RECOVERY] "
+                    f"repair failed "
+                    f"symbol={symbol} "
+                    f"tf={timeframe} "
+                    f"timestamp="
+                    f"{candle_timestamp} "
+                    f"error={last_error}"
+                )
+
+                continue
+
+            recovered.append(
+                {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "timestamp": (
+                        candle_timestamp
+                    ),
+                }
+            )
+
+            # El general recovery también debe
+            # alimentar el batch de Market Flow.
+            if (
+                timeframe
+                == MARKET_FLOW_TIMEFRAME
+            ):
+                self._register_market_flow_close(
+                    symbol=symbol,
+                    candle_timestamp=(
+                        candle_timestamp
+                    ),
+                )
+
+        print(
+            "[MARKET DATA RECOVERY] "
+            f"repair completed "
+            f"requested={len(tasks)} "
+            f"recovered={len(recovered)} "
+            f"failed={len(failed)}"
+        )
+
+        return {
+            "requested": len(tasks),
+            "recovered": len(recovered),
+            "failed": len(failed),
+            "recovered_items": recovered,
+            "failed_items": failed,
+        }
+        
+    def _flush_ws_recovery_buffer(self):
+        published_keys = set()
+        published = 0
+        duplicates = 0
+        passes = 0
+
+        while True:
+            with self.bootstrap_lock:
+                batch = (
+                    self.bootstrap_closed_messages
+                )
+
+                self.bootstrap_closed_messages = []
+
+            if batch:
+                passes += 1
+
+                batch.sort(
+                    key=lambda item: (
+                        item[0],
+                        item[1],
+                        int(
+                            TIMEFRAME_CONFIGS.get(
+                                item[2],
+                                {},
+                            ).get(
+                                "ms_per_candle",
+                                10**18,
+                            )
+                        ),
+                        item[3],
+                        item[4],
+                    )
+                )
+
+                for (
+                    _close_timestamp,
+                    symbol,
+                    timeframe,
+                    open_timestamp,
+                    _sequence,
+                    message,
+                ) in batch:
+                    key = (
+                        symbol,
+                        timeframe,
+                        int(open_timestamp),
+                    )
+
+                    if key in published_keys:
+                        duplicates += 1
+                        continue
+
+                    self._process_ws_message(
+                        message,
+                        publish_price=False,
+                    )
+
+                    published_keys.add(key)
+                    published += 1
+
+            with self.bootstrap_lock:
+                if self.bootstrap_closed_messages:
+                    continue
+
+                # Handoff atómico:
+                # desde este punto los callbacks
+                # vuelven a publicar directamente.
+                self.bootstrap_buffering = False
+                break
+
+        print(
+            "[MARKET DATA RECOVERY] "
+            f"buffer flush complete "
+            f"passes={passes} "
+            f"published={published} "
+            f"duplicates={duplicates}"
+        )
+
+        return {
+            "passes": passes,
+            "published": published,
+            "duplicates": duplicates,
+        }
+        
+    def _run_ws_recovery(
+        self,
+        disconnected_at_ms,
+        reconnected_at_ms,
+    ):
+        if self.ws_recovery_in_progress:
+            return None
+
+        self.ws_recovery_in_progress = True
+        self.phase = "RECOVERING_WS"
+        self._write_status()
+
+        print(
+            "[MARKET DATA RECOVERY] "
+            f"starting disconnected_at="
+            f"{disconnected_at_ms} "
+            f"reconnected_at="
+            f"{reconnected_at_ms}"
+        )
+
+        try:
+            scan_until_ms = max(
+                int(reconnected_at_ms),
+                int(time.time() * 1000),
+            )
+
+            gaps = self._find_recovery_gaps(
+                disconnected_at_ms=(
+                    disconnected_at_ms
+                ),
+                reconnected_at_ms=(
+                    scan_until_ms
+                ),
+            )
+
+            gap_count = sum(
+                len(missing_symbols)
+                for timeframe_gaps
+                in gaps.values()
+                for missing_symbols
+                in timeframe_gaps.values()
+            )
+
+            print(
+                "[MARKET DATA RECOVERY] "
+                f"initial gaps={gap_count}"
+            )
+
+            repair_result = (
+                self._repair_ws_recovery_gaps(
+                    gaps
+                )
+            )
+
+            if repair_result["failed"] > 0:
+                raise RuntimeError(
+                    "WS recovery failed "
+                    f"for "
+                    f"{repair_result['failed']} "
+                    "candles"
+                )
+
+            # Segunda verificación.
+            #
+            # Mientras hacíamos REST pudo haber
+            # cerrado otra candle o incluso haber
+            # ocurrido otra interrupción.
+            verify_until_ms = (
+                scan_until_ms
+            )
+
+            remaining_gaps = (
+                self._find_recovery_gaps(
+                    disconnected_at_ms=(
+                        disconnected_at_ms
+                    ),
+                    reconnected_at_ms=(
+                        verify_until_ms
+                    ),
+                )
+            )
+
+            if remaining_gaps:
+                second_repair = (
+                    self._repair_ws_recovery_gaps(
+                        remaining_gaps
+                    )
+                )
+
+                if second_repair["failed"] > 0:
+                    raise RuntimeError(
+                        "WS recovery verification "
+                        "failed for "
+                        f"{second_repair['failed']} "
+                        "candles"
+                    )
+
+            # Verificación final antes de liberar
+            # nuevamente la publicación directa.
+            final_gaps = self._find_recovery_gaps(
+                disconnected_at_ms=(
+                    disconnected_at_ms
+                ),
+                reconnected_at_ms=(
+                    scan_until_ms
+                ),
+            )
+
+            if final_gaps:
+                final_gap_count = sum(
+                    len(missing_symbols)
+                    for timeframe_gaps
+                    in final_gaps.values()
+                    for missing_symbols
+                    in timeframe_gaps.values()
+                )
+
+                raise RuntimeError(
+                    "WS recovery incomplete: "
+                    f"{final_gap_count} gaps remain"
+                )
+
+            flush_result = (
+                self._flush_ws_recovery_buffer()
+            )
+
+            print(
+                "[MARKET DATA RECOVERY] "
+                "completed successfully "
+                f"buffer_published="
+                f"{flush_result['published']}"
+            )
+
+            self.ws_disconnect_detected_at_ms = (
+                None
+            )
+
+            return {
+                "repair": repair_result,
+                "flush": flush_result,
+            }
+
+        finally:
+            self.ws_recovery_in_progress = False
+
+            if (
+                self.ws
+                and self.ws.is_connected
+            ):
+                self.phase = "READY"
+            else:
+                self.phase = "CONNECTING_WS"
+
+            self._write_status()
 
     def _closed_ws_metadata(self, message):
         payload = message
