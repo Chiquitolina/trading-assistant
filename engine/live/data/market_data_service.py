@@ -103,6 +103,10 @@ MARKET_FLOW_SETTLE_SECONDS = 15
 
 WS_CONNECTING_FAILFAST_SECONDS = 180
 
+CLOSED_INTEGRITY_CHECK_SECONDS = 30
+CLOSED_INTEGRITY_SETTLE_SECONDS = 20
+CLOSED_INTEGRITY_LOOKBACK_SECONDS = 180
+
 # Evita publicar rankings construidos sobre
 
 # una porción demasiado pequeña del universo.
@@ -247,6 +251,7 @@ class MarketDataService:
         self.ws_disconnect_detected_at_ms = None
         self.ws_recovery_in_progress = False
         self.ws_connecting_since_monotonic = None
+        self.closed_integrity_last_check_monotonic = 0.0
 
 
         self.stop_event = threading.Event()
@@ -411,6 +416,9 @@ class MarketDataService:
                         self.phase = "READY"
                     else:
                         self.phase = "CONNECTING_WS"
+                        
+                self._check_closed_candle_integrity()
+
 
                 self.publisher.report_closed_candle_coverage(
                     expected_symbols=self.symbols
@@ -3092,6 +3100,183 @@ class MarketDataService:
             f"{snapshot['market_breadth_4h']}"
 
         )
+            
+    def _check_closed_candle_integrity(self):
+        if (
+            not self.running
+            or self.phase != "READY"
+            or self.ws_recovery_in_progress
+            or self.bootstrap_buffering
+            or self.ws is None
+            or not self.ws.is_connected
+        ):
+            return
+
+        now_monotonic = time.monotonic()
+
+        if (
+            now_monotonic
+            - self.closed_integrity_last_check_monotonic
+            < CLOSED_INTEGRITY_CHECK_SECONDS
+        ):
+            return
+
+        self.closed_integrity_last_check_monotonic = (
+            now_monotonic
+        )
+
+        now_ms = int(time.time() * 1000)
+
+        # No auditamos una candle que acaba de cerrar.
+        # Le damos tiempo al WS para completar el batch.
+        scan_until_ms = (
+            now_ms
+            - CLOSED_INTEGRITY_SETTLE_SECONDS * 1000
+        )
+
+        scan_from_ms = (
+            scan_until_ms
+            - CLOSED_INTEGRITY_LOOKBACK_SECONDS * 1000
+        )
+
+        gaps = self._find_recovery_gaps(
+            disconnected_at_ms=scan_from_ms,
+            reconnected_at_ms=scan_until_ms,
+        )
+
+        gap_count = sum(
+            len(missing_symbols)
+            for timeframe_gaps in gaps.values()
+            for missing_symbols
+            in timeframe_gaps.values()
+        )
+
+        if gap_count == 0:
+            return
+
+        print(
+            "[MARKET DATA INTEGRITY] "
+            f"gaps detected={gap_count} "
+            f"scan_from={scan_from_ms} "
+            f"scan_until={scan_until_ms}"
+        )
+
+        # A partir de acá bufferizamos nuevos closes,
+        # igual que durante recovery normal, para evitar
+        # carreras mientras reparamos por REST.
+        started = self._begin_ws_recovery_buffering()
+
+        if not started:
+            return
+
+        self.ws_recovery_in_progress = True
+        self.phase = "RECOVERING_WS"
+        self._write_status()
+
+        try:
+            # Recalculamos después de activar buffering.
+            # Alguna candle tardía pudo haber llegado entre
+            # la detección inicial y este momento.
+            gaps = self._find_recovery_gaps(
+                disconnected_at_ms=scan_from_ms,
+                reconnected_at_ms=scan_until_ms,
+            )
+
+            gap_count = sum(
+                len(missing_symbols)
+                for timeframe_gaps in gaps.values()
+                for missing_symbols
+                in timeframe_gaps.values()
+            )
+
+            if gap_count:
+                repair_result = (
+                    self._repair_ws_recovery_gaps(
+                        gaps
+                    )
+                )
+
+                if repair_result["failed"] > 0:
+                    raise RuntimeError(
+                        "Closed-candle integrity repair "
+                        f"failed for "
+                        f"{repair_result['failed']} candles"
+                    )
+
+            # Verificación: después del REST no puede
+            # quedar ningún gap en la ventana auditada.
+            remaining_gaps = self._find_recovery_gaps(
+                disconnected_at_ms=scan_from_ms,
+                reconnected_at_ms=scan_until_ms,
+            )
+
+            if remaining_gaps:
+                second_repair = (
+                    self._repair_ws_recovery_gaps(
+                        remaining_gaps
+                    )
+                )
+
+                if second_repair["failed"] > 0:
+                    raise RuntimeError(
+                        "Closed-candle integrity "
+                        "verification failed for "
+                        f"{second_repair['failed']} candles"
+                    )
+
+            final_gaps = self._find_recovery_gaps(
+                disconnected_at_ms=scan_from_ms,
+                reconnected_at_ms=scan_until_ms,
+            )
+
+            final_gap_count = sum(
+                len(missing_symbols)
+                for timeframe_gaps
+                in final_gaps.values()
+                for missing_symbols
+                in timeframe_gaps.values()
+            )
+
+            if final_gap_count:
+                raise RuntimeError(
+                    "Closed-candle integrity "
+                    f"incomplete: "
+                    f"{final_gap_count} gaps remain"
+                )
+
+            flush_result = (
+                self._flush_ws_recovery_buffer()
+            )
+
+            if not flush_result.get(
+                "released",
+                False,
+            ):
+                raise RuntimeError(
+                    "Closed-candle integrity repair "
+                    "could not release WS buffer"
+                )
+
+            print(
+                "[MARKET DATA INTEGRITY] "
+                f"repaired successfully "
+                f"initial_gaps={gap_count} "
+                f"buffer_published="
+                f"{flush_result['published']}"
+            )
+
+        finally:
+            self.ws_recovery_in_progress = False
+
+            if (
+                self.ws
+                and self.ws.is_connected
+            ):
+                self.phase = "READY"
+            else:
+                self.phase = "CONNECTING_WS"
+
+            self._write_status()
 
     def _check_ws_connection_watchdog(self):
         connected = bool(
