@@ -3,6 +3,7 @@ from typing import Optional
 from engine.live.journal.trade_journal import TradeJournal
 from datetime import datetime
 import random
+import os
 import time
 from engine.live.state_sync import ExchangeStateSync
 from models.position import Position
@@ -232,6 +233,36 @@ class ExecutionEngine:
 
         self.is_replay = (
             self.execution_mode == "replay"
+        )
+        
+        disable_position_limits_requested = (
+            os.getenv(
+                "FIDELITY_DISABLE_POSITION_LIMITS",
+                "0",
+            ).strip()
+            == "1"
+        )
+
+        if (
+            disable_position_limits_requested
+            and not (
+                self.is_replay
+                or self.is_testnet
+            )
+        ):
+            raise RuntimeError(
+                "FIDELITY_DISABLE_POSITION_LIMITS "
+                "is only allowed in replay or testnet"
+            )
+
+        self.disable_position_limits = (
+            disable_position_limits_requested
+        )
+
+        print(
+            "[EXECUTION CONFIG] "
+            f"disable_position_limits="
+            f"{self.disable_position_limits}"
         )
 
         self.position: Optional[Position] = None
@@ -1135,7 +1166,11 @@ class ExecutionEngine:
         if symbol in self.positions:
             return False
 
-        if self.open_positions_count() >= self.max_global_positions:
+        if (
+            not self.disable_position_limits
+            and self.open_positions_count()
+            >= self.max_global_positions
+        ):
             return False
 
         now = self._now_seconds()
@@ -1181,7 +1216,11 @@ class ExecutionEngine:
         
         try:
             
-            if len(self.positions) >= self.max_global_positions:
+            if (
+                not self.disable_position_limits
+                and len(self.positions)
+                >= self.max_global_positions
+            ):
                 print(
                     "\033[94m[EXECUTION ENGINE]\033[0m "
                     "⚠️ Max global local positions reached. Plan ignored.\n"
@@ -1243,11 +1282,17 @@ class ExecutionEngine:
                 print(f"❌ Error getting price | symbol={plan.symbol} | error={e}")
                 return False
 
+            position_count_for_sizing = (
+                0
+                if self.disable_position_limits
+                else len(self.positions)
+            )
+
             size_data = self.position_sizer.calculate(
                 total_balance=balance,
                 price=price,
                 leverage=leverage,
-                open_positions_count=len(self.positions)
+                open_positions_count=position_count_for_sizing,
             )
 
     #        print(f"""
