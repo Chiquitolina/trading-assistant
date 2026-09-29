@@ -7,9 +7,12 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 class BinanceExchange(BaseExchange):
 
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
+        
+        self.testnet = bool(testnet)
+
         self.client = Client(api_key, api_secret)
 
-        if testnet:
+        if self.testnet:
             self.client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
         print("\033[94m[EXCHANGE]\033[0m🔌 Connecting to Binance...")
