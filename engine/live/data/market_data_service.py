@@ -101,7 +101,7 @@ MARKET_FLOW_TIMEFRAME_MS = (
 
 MARKET_FLOW_SETTLE_SECONDS = 15
 
-
+WS_CONNECTING_FAILFAST_SECONDS = 180
 
 # Evita publicar rankings construidos sobre
 
@@ -246,7 +246,7 @@ class MarketDataService:
         self.ws_was_connected = False
         self.ws_disconnect_detected_at_ms = None
         self.ws_recovery_in_progress = False
-
+        self.ws_connecting_since_monotonic = None
 
 
         self.stop_event = threading.Event()
@@ -400,6 +400,8 @@ class MarketDataService:
                                 ]
                             ),
                         )
+                        
+                self._check_ws_connection_watchdog()
 
                 if not self.ws_recovery_in_progress:
                     if (
@@ -3091,6 +3093,67 @@ class MarketDataService:
 
         )
 
+    def _check_ws_connection_watchdog(self):
+        connected = bool(
+            self.ws
+            and self.ws.is_connected
+        )
+
+        now = time.monotonic()
+
+        if connected:
+            if (
+                self.ws_connecting_since_monotonic
+                is not None
+            ):
+                disconnected_for = (
+                    now
+                    - self.ws_connecting_since_monotonic
+                )
+
+                print(
+                    "[MARKET DATA WS WATCHDOG] "
+                    "connection recovered "
+                    f"after={disconnected_for:.1f}s"
+                )
+
+            self.ws_connecting_since_monotonic = None
+            return
+
+        if self.ws_connecting_since_monotonic is None:
+            self.ws_connecting_since_monotonic = now
+
+            print(
+                "[MARKET DATA WS WATCHDOG] "
+                "disconnected timer started "
+                f"timeout="
+                f"{WS_CONNECTING_FAILFAST_SECONDS}s"
+            )
+
+            return
+
+        disconnected_for = (
+            now
+            - self.ws_connecting_since_monotonic
+        )
+
+        if (
+            disconnected_for
+            < WS_CONNECTING_FAILFAST_SECONDS
+        ):
+            return
+
+        print(
+            "[MARKET DATA WS WATCHDOG] "
+            "FATAL websocket remained disconnected "
+            f"for={disconnected_for:.1f}s "
+            "forcing process restart"
+        )
+
+        raise RuntimeError(
+            "WebSocket stuck disconnected for "
+            f"{disconnected_for:.1f}s"
+        )
 
 
     def _start_websocket(self):
