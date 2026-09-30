@@ -153,6 +153,7 @@ class RedisMarketDataProvider:
         if (
             status.get("phase") != "READY"
             or status.get("running") is not True
+            or status.get("bootstrap_buffering") is True
         ):
             return False
 
@@ -580,6 +581,12 @@ class RedisMarketDataProvider:
         self.market_flow_last_error = None
 
         return result
+    
+    def _live_boundary_step_ms(self):
+        return min(
+            self._timeframe_ms(tf)
+            for tf in self.timeframes
+        )
 
     def _reject_market_flow(
         self,
@@ -833,6 +840,9 @@ class RedisMarketDataProvider:
                 self._stream_diag_xread_calls += 1
 
                 if not response:
+                    if self.clock_mode == "real":
+                        self._flush_complete_live_boundaries()
+
                     continue
 
                 response_event_count = sum(
@@ -1139,6 +1149,26 @@ class RedisMarketDataProvider:
             expected,
             key=self._timeframe_ms,
         )
+        
+    def _producer_ready_for_live_release(self):
+        try:
+            raw_status = self.redis.get(
+                STATUS_KEY
+            )
+
+            if not raw_status:
+                return False
+
+            status = json.loads(
+                raw_status
+            )
+
+            return self._is_service_ready(
+                status
+            )
+
+        except Exception:
+            return False
 
     def _seed_live_boundary_from_buffer(
         self,
@@ -1388,10 +1418,41 @@ class RedisMarketDataProvider:
     def _flush_complete_live_boundaries(
         self,
     ):
+        if (
+            self.clock_mode == "real"
+            and not self._producer_ready_for_live_release()
+        ):
+            return
+        
         while self._live_boundary_batches:
-            close_timestamp = min(
+            earliest_present = min(
                 self._live_boundary_batches
             )
+
+            if self._live_boundary_last_released is None:
+                close_timestamp = earliest_present
+            else:
+                expected_next = (
+                    int(self._live_boundary_last_released)
+                    + self._live_boundary_step_ms()
+                )
+
+                if earliest_present > expected_next:
+                    print(
+                        "[PROVIDER BOUNDARY] "
+                        "gap blocks release "
+                        f"expected={expected_next} "
+                        f"earliest_present={earliest_present}"
+                    )
+                    return
+
+                close_timestamp = expected_next
+
+                if (
+                    close_timestamp
+                    not in self._live_boundary_batches
+                ):
+                    return
 
             batch = (
                 self._live_boundary_batches[

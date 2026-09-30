@@ -1296,6 +1296,23 @@ class MarketDataService:
         return timeframe_ms
 
 
+    def _recovery_scan_until_ms(
+        self,
+        minimum_ms=None,
+    ):
+        settled_now_ms = (
+            int(time.time() * 1000)
+            - CLOSED_INTEGRITY_SETTLE_SECONDS * 1000
+        )
+
+        if minimum_ms is None:
+            return settled_now_ms
+
+        return max(
+            int(minimum_ms),
+            settled_now_ms,
+        )
+
     def _latest_fully_closed_open_timestamp(
         self,
         timeframe,
@@ -1876,9 +1893,10 @@ class MarketDataService:
         )
 
         try:
-            scan_until_ms = max(
-                int(reconnected_at_ms),
-                int(time.time() * 1000),
+            scan_until_ms = (
+                self._recovery_scan_until_ms(
+                    minimum_ms=reconnected_at_ms,
+                )
             )
 
             gaps = self._find_recovery_gaps(
@@ -1908,6 +1926,7 @@ class MarketDataService:
                     gaps
                 )
             )
+            
 
             if repair_result["failed"] > 0:
                 raise RuntimeError(
@@ -1923,7 +1942,9 @@ class MarketDataService:
             # cerrado otra candle o incluso haber
             # ocurrido otra interrupción.
             verify_until_ms = (
-                scan_until_ms
+                self._recovery_scan_until_ms(
+                    minimum_ms=scan_until_ms,
+                )
             )
 
             remaining_gaps = (
@@ -1954,12 +1975,18 @@ class MarketDataService:
 
             # Verificación final antes de liberar
             # nuevamente la publicación directa.
+            final_until_ms = (
+                self._recovery_scan_until_ms(
+                    minimum_ms=verify_until_ms,
+                )
+            )
+
             final_gaps = self._find_recovery_gaps(
                 disconnected_at_ms=(
                     disconnected_at_ms
                 ),
                 reconnected_at_ms=(
-                    scan_until_ms
+                    final_until_ms
                 ),
             )
 
@@ -3100,7 +3127,7 @@ class MarketDataService:
             f"{snapshot['market_breadth_4h']}"
 
         )
-            
+                
     def _check_closed_candle_integrity(self):
         if (
             not self.running
@@ -3161,9 +3188,8 @@ class MarketDataService:
             f"scan_until={scan_until_ms}"
         )
 
-        # A partir de acá bufferizamos nuevos closes,
-        # igual que durante recovery normal, para evitar
-        # carreras mientras reparamos por REST.
+        # Desde acá bufferizamos nuevos closes
+        # mientras hacemos repair REST.
         started = self._begin_ws_recovery_buffering()
 
         if not started:
@@ -3175,8 +3201,6 @@ class MarketDataService:
 
         try:
             # Recalculamos después de activar buffering.
-            # Alguna candle tardía pudo haber llegado entre
-            # la detección inicial y este momento.
             gaps = self._find_recovery_gaps(
                 disconnected_at_ms=scan_from_ms,
                 reconnected_at_ms=scan_until_ms,
@@ -3203,11 +3227,21 @@ class MarketDataService:
                         f"{repair_result['failed']} candles"
                     )
 
-            # Verificación: después del REST no puede
-            # quedar ningún gap en la ventana auditada.
-            remaining_gaps = self._find_recovery_gaps(
-                disconnected_at_ms=scan_from_ms,
-                reconnected_at_ms=scan_until_ms,
+            # El repair pudo tardar.
+            # Movemos el horizonte antes de verificar.
+            verify_scan_until_ms = (
+                self._recovery_scan_until_ms(
+                    minimum_ms=scan_until_ms,
+                )
+            )
+
+            remaining_gaps = (
+                self._find_recovery_gaps(
+                    disconnected_at_ms=scan_from_ms,
+                    reconnected_at_ms=(
+                        verify_scan_until_ms
+                    ),
+                )
             )
 
             if remaining_gaps:
@@ -3224,9 +3258,19 @@ class MarketDataService:
                         f"{second_repair['failed']} candles"
                     )
 
+            # El segundo repair también pudo tardar.
+            # Movemos el horizonte una vez más.
+            final_scan_until_ms = (
+                self._recovery_scan_until_ms(
+                    minimum_ms=verify_scan_until_ms,
+                )
+            )
+
             final_gaps = self._find_recovery_gaps(
                 disconnected_at_ms=scan_from_ms,
-                reconnected_at_ms=scan_until_ms,
+                reconnected_at_ms=(
+                    final_scan_until_ms
+                ),
             )
 
             final_gap_count = sum(
