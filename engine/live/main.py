@@ -362,9 +362,16 @@ if (
 
 if IS_REPLAY:
 
+    replay_initial_balance = float(
+        os.getenv(
+            "REPLAY_INITIAL_BALANCE",
+            "1000.0",
+        )
+    )
+
     exchange = SimulatedFuturesExchange(
         market_data=buffer,
-        initial_balance=1000.0,
+        initial_balance=replay_initial_balance,
     )
 
     print(
