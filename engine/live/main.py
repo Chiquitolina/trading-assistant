@@ -1735,15 +1735,41 @@ try:
         if (
             MARKET_DATA_PROVIDER == "redis"
             and MARKET_CLOCK_MODE == "replay"
-            and replay_boundary_complete
         ):
-            publish_replay_engine_ack(
-                replay_boundary_ts
+            trigger_tf_ms = int(
+                TIMEFRAME_CONFIGS[
+                    TRIGGER_TF
+                ]["ms_per_candle"]
             )
 
-            last_replay_boundary_ts = (
-                replay_boundary_ts
+            is_trigger_boundary = (
+                (
+                    int(replay_boundary_ts)
+                    + 1
+                )
+                % trigger_tf_ms
+                == 0
             )
+
+            replay_context_complete = (
+                replay_context_boundary
+                == set(SYMBOLS)
+            )
+
+            replay_boundary_processed = (
+                replay_boundary_complete
+                if is_trigger_boundary
+                else replay_context_complete
+            )
+
+            if replay_boundary_processed:
+                publish_replay_engine_ack(
+                    replay_boundary_ts
+                )
+
+                last_replay_boundary_ts = (
+                    replay_boundary_ts
+                )
         
         
 
