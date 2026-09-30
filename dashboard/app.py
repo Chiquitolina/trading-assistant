@@ -17783,9 +17783,17 @@ def fetch_recent_klines(symbol, interval="15m", limit=25):
     except Exception:
         return pd.DataFrame()
     
-def render_mini_chart(row):
+def render_mini_chart(
+    row,
+    timeframe,
+):
     symbol = row.get("symbol")
-    df = fetch_recent_klines(symbol, "15m", 25)
+
+    df = fetch_recent_klines(
+        symbol,
+        timeframe,
+        40,
+    )
 
     if df.empty:
         st.warning(f"No chart data for {symbol}")
@@ -17875,9 +17883,17 @@ def render_mini_chart(row):
         config={"displayModeBar": False},
     )
     
-def render_mini_line_chart(row):
+def render_mini_line_chart(
+    row,
+    timeframe,
+):
     symbol = row.get("symbol")
-    df = fetch_recent_klines(symbol, "15m", 40)
+
+    df = fetch_recent_klines(
+        symbol,
+        timeframe,
+        40,
+    )
 
     if df.empty:
         st.warning(f"No chart data for {symbol}")
@@ -17964,7 +17980,10 @@ def render_mini_line_chart(row):
     )
 
     
-def render_pipeline_card(row):
+def render_pipeline_card(
+    row,
+    timeframe,
+):
     state = row.get("state", "N/A")
     symbol = row.get("symbol", "N/A")
     color = state_color(state)
@@ -18078,7 +18097,7 @@ def render_pipeline_card(row):
                 """,
                 unsafe_allow_html=True,
             )
-        render_mini_chart(row)
+        render_mini_chart(row, timeframe)
         
 def event_badge(event):
     colors = {
@@ -21878,7 +21897,7 @@ if selected_section == "compression_pipeline":
             st.markdown(f"### {state} ({len(state_df)})")
 
             for _, row in state_df.iterrows():
-                render_pipeline_card(row)
+                render_pipeline_card(row, trigger_tf)
 
         # ============================================
         # WATCH HISTORY (SOLO SI HAY UN SÍMBOLO)
