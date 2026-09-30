@@ -166,6 +166,63 @@ MARKET_CLOCK_MODE = os.getenv(
     "real",
 ).strip().lower()
 
+def _latest_live_trigger_boundary_ms(
+    now_ms=None,
+):
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    timeframe_ms = int(
+        TIMEFRAME_CONFIGS[
+            TRIGGER_TF
+        ]["ms_per_candle"]
+    )
+
+    return (
+        (int(now_ms) // timeframe_ms)
+        * timeframe_ms
+        - 1
+    )
+
+
+def _is_live_entry_window_fresh(
+    window_id,
+):
+    if (
+        MARKET_DATA_PROVIDER != "redis"
+        or MARKET_CLOCK_MODE != "real"
+    ):
+        return True, None, None
+
+    boundary_ms = int(window_id)
+
+    if boundary_ms < 10_000_000_000:
+        boundary_ms *= 1000
+
+    now_ms = int(time.time() * 1000)
+
+    latest_boundary_ms = (
+        _latest_live_trigger_boundary_ms(
+            now_ms=now_ms,
+        )
+    )
+
+    age_ms = max(
+        0,
+        now_ms - boundary_ms,
+    )
+
+    is_fresh = (
+        boundary_ms
+        == latest_boundary_ms
+    )
+
+    return (
+        is_fresh,
+        latest_boundary_ms,
+        age_ms,
+    )
+
 HISTORY_FINGERPRINT = (
     os.getenv(
         "HISTORY_FINGERPRINT",
@@ -1538,6 +1595,30 @@ try:
                     # FINAL EXECUTION LOCK
                     # =================================================
 
+                    (
+                        entry_window_fresh,
+                        latest_live_boundary,
+                        entry_window_age_ms,
+                    ) = _is_live_entry_window_fresh(
+                        window_id
+                    )
+
+                    if not entry_window_fresh:
+                        candidate.reject(
+                            "stale_live_entry_boundary"
+                        )
+
+                        print(
+                            "[SELECTION BLOCKED] "
+                            f"symbol={symbol} "
+                            "reason=stale_live_entry_boundary "
+                            f"window={window_id} "
+                            f"latest={latest_live_boundary} "
+                            f"age_ms={entry_window_age_ms}"
+                        )
+
+                        continue
+
                     if opening_position:
                         candidate.reject("opening_position_lock")
 
@@ -1546,6 +1627,7 @@ try:
                             f"symbol={symbol} "
                             f"reason=opening_position_lock"
                         )
+
                         continue
 
                     if not execution.can_open_position(symbol):
