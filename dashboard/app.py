@@ -8245,6 +8245,16 @@ CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT = 0.10
 CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT = 0.20
 CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES = 360
 
+# The retest inspector is structural, so render it directly in 15m instead
+# of loading thousands of 1m candles. Eighty 15m candles cover 20 hours,
+# enough to show the pivot -> confirmation -> departure -> retest path plus
+# surrounding market context for the default six-hour retest horizon.
+CONFIRMED_SWING_RETEST_DETAIL_TIMEFRAME = "15m"
+CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES = 80
+CONFIRMED_SWING_RETEST_DETAIL_MIN_CANDLES = 40
+CONFIRMED_SWING_RETEST_DETAIL_MAX_CANDLES = 200
+CONFIRMED_SWING_RETEST_DETAIL_FETCH_MAX = 400
+
 VOLUME_EXHAUSTION_FIRST_TOUCH_MATRIX_SETUPS = tuple(
     (
         f"TP {tp_pct:.2f}% / SL {sl_pct:.2f}%",
@@ -9369,10 +9379,28 @@ def scan_confirmed_swing_retests_all_symbols(
 def build_confirmed_swing_retest_detail_chart(
     candles,
     retest_row,
+    chart_candle_limit=CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES,
 ):
+    """Render the selected confirmed-swing retest in structural 15m candles.
+
+    The scanner itself keeps using the causal 1m path for retest detection.
+    This function changes only the inspector visualization. The visible window
+    is anchored on the retest, keeps roughly 5/8 of the requested candles
+    before it, and expands backward when needed so the original pivot remains
+    visible.
+    """
     work = _prepare_confirmed_swing_retest_candles(candles)
     if work.empty:
         return go.Figure()
+
+    target_candles = int(chart_candle_limit)
+    target_candles = max(
+        CONFIRMED_SWING_RETEST_DETAIL_MIN_CANDLES,
+        min(
+            target_candles,
+            CONFIRMED_SWING_RETEST_DETAIL_MAX_CANDLES,
+        ),
+    )
 
     work["chart_time"] = pd.to_datetime(
         work["timestamp"],
@@ -9387,14 +9415,58 @@ def build_confirmed_swing_retest_detail_chart(
     retest_ts = int(retest_row["retest_timestamp"])
     swing_price = float(retest_row["swing_price"])
 
-    window_start = pivot_ts - 30 * 60_000
-    window_end = retest_ts + 30 * 60_000
-    visible = work.loc[
-        (work["timestamp"] >= window_start)
-        & (work["timestamp"] <= window_end)
+    timestamps = work["timestamp"].astype("int64").to_numpy()
+    if len(timestamps) == 0:
+        return go.Figure()
+
+    # Anchor the historical view on the retest. With the default 80 candles
+    # this gives about 50 candles before the event and 29 after it.
+    retest_index = int(
+        np.clip(
+            np.searchsorted(timestamps, retest_ts, side="right") - 1,
+            0,
+            len(timestamps) - 1,
+        )
+    )
+    pivot_index = int(
+        np.clip(
+            np.searchsorted(timestamps, pivot_ts, side="right") - 1,
+            0,
+            len(timestamps) - 1,
+        )
+    )
+
+    candles_before = int(round(target_candles * 0.625))
+    candles_after = max(0, target_candles - candles_before - 1)
+
+    start_index = retest_index - candles_before
+    end_index = retest_index + candles_after
+
+    # The pivot is part of the setup identity. If it lies just outside the
+    # requested window, shift the window left rather than hiding it.
+    if pivot_index < start_index:
+        start_index = pivot_index
+        end_index = max(
+            end_index,
+            start_index + target_candles - 1,
+        )
+
+    # Clamp while keeping as much of the requested candle count as possible.
+    if start_index < 0:
+        end_index += -start_index
+        start_index = 0
+
+    if end_index >= len(work):
+        overflow = end_index - (len(work) - 1)
+        start_index = max(0, start_index - overflow)
+        end_index = len(work) - 1
+
+    visible = work.iloc[
+        start_index : end_index + 1
     ].copy()
+
     if visible.empty:
-        visible = work.tail(500).copy()
+        visible = work.tail(target_candles).copy()
 
     fig = go.Figure()
     fig.add_trace(
@@ -9404,7 +9476,7 @@ def build_confirmed_swing_retest_detail_chart(
             high=visible["high"],
             low=visible["low"],
             close=visible["close"],
-            name="1m",
+            name=CONFIRMED_SWING_RETEST_DETAIL_TIMEFRAME,
         )
     )
 
@@ -9418,21 +9490,62 @@ def build_confirmed_swing_retest_detail_chart(
     )
 
     marker_rows = [
-        ("Pivot", pivot_ts, swing_price, "triangle-down" if retest_row.get("signal") == "SHORT" else "triangle-up"),
-        ("Confirmed", actionable_ts, float(retest_row.get("entry_price", swing_price)), "circle-open"),
-        ("Departure", departure_ts, float(retest_row["departure_price"]), "circle"),
-        (str(retest_row.get("status", "RETEST")), retest_ts, float(retest_row["retest_price"]), "diamond"),
+        (
+            "Pivot",
+            pivot_ts,
+            swing_price,
+            (
+                "triangle-down"
+                if retest_row.get("signal") == "SHORT"
+                else "triangle-up"
+            ),
+        ),
+        (
+            "Confirmed",
+            actionable_ts,
+            float(retest_row.get("entry_price", swing_price)),
+            "circle-open",
+        ),
+        (
+            "Departure",
+            departure_ts,
+            float(retest_row["departure_price"]),
+            "circle",
+        ),
+        (
+            str(retest_row.get("status", "RETEST")),
+            retest_ts,
+            float(retest_row["retest_price"]),
+            "diamond",
+        ),
     ]
 
+    visible_start_ts = int(visible["timestamp"].min())
+    # A 15m candle represents the interval beginning at its timestamp. Keep
+    # markers from the final visible candle visible throughout that interval.
+    visible_end_ts = int(visible["timestamp"].max()) + 15 * 60_000
+
     for label, timestamp, price, marker_symbol in marker_rows:
+        if not (visible_start_ts <= int(timestamp) <= visible_end_ts):
+            continue
+
         fig.add_trace(
             go.Scatter(
-                x=[pd.to_datetime(timestamp, unit="ms", utc=True).tz_convert(TZ)],
+                x=[
+                    pd.to_datetime(
+                        timestamp,
+                        unit="ms",
+                        utc=True,
+                    ).tz_convert(TZ)
+                ],
                 y=[price],
                 mode="markers+text",
                 text=[label],
                 textposition="top center",
-                marker={"size": 11, "symbol": marker_symbol},
+                marker={
+                    "size": 11,
+                    "symbol": marker_symbol,
+                },
                 name=label,
                 hovertemplate=(
                     f"<b>{label}</b><br>"
@@ -9443,18 +9556,18 @@ def build_confirmed_swing_retest_detail_chart(
         )
 
     fig.update_layout(
-        height=560,
+        height=620,
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         title=(
             f"{retest_row.get('symbol', '')} · "
             f"{retest_row.get('timeframe', '')} confirmed swing retest · "
-            f"{retest_row.get('signal', '')}"
+            f"{retest_row.get('signal', '')} · "
+            f"{len(visible)} × 15m"
         ),
         margin={"l": 10, "r": 10, "t": 45, "b": 10},
     )
     return fig
-
 
 def render_confirmed_swing_retest_scanner(
     retests_df,
@@ -9558,21 +9671,76 @@ def render_confirmed_swing_retest_scanner(
     )
     selected_retest = view.loc[lookup[selected_label]]
 
+    detail_chart_candle_limit = st.slider(
+        "15m candles in inspector",
+        min_value=CONFIRMED_SWING_RETEST_DETAIL_MIN_CANDLES,
+        max_value=CONFIRMED_SWING_RETEST_DETAIL_MAX_CANDLES,
+        value=CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES,
+        step=10,
+        key="confirmed_swing_retest_detail_candle_limit",
+        help=(
+            "Only the inspector changes. Retest detection remains causal on "
+            "the original 1m path. 80 candles = about 20 hours of 15m context."
+        ),
+    )
+
+    # Fetch only enough 15m history to cover the selected historical retest,
+    # its pivot, and the requested chart context. The all-symbol scanner stays
+    # cached and is not rebuilt when this visual control changes.
+    retest_age_min = pd.to_numeric(
+        selected_retest.get("retest_age_min"),
+        errors="coerce",
+    )
+    pivot_to_retest_min = pd.to_numeric(
+        selected_retest.get("pivot_to_retest_min"),
+        errors="coerce",
+    )
+
+    historical_span_min = 0.0
+    if pd.notna(retest_age_min):
+        historical_span_min += max(0.0, float(retest_age_min))
+    if pd.notna(pivot_to_retest_min):
+        historical_span_min += max(0.0, float(pivot_to_retest_min))
+
+    required_history_bars = int(
+        np.ceil(historical_span_min / 15.0)
+    )
+    detail_fetch_limit = min(
+        CONFIRMED_SWING_RETEST_DETAIL_FETCH_MAX,
+        max(
+            int(detail_chart_candle_limit) + 20,
+            required_history_bars + 20,
+        ),
+    )
+
     detail_candles = load_volume_exhaustion_research_candles(
         symbol=str(selected_retest["symbol"]),
-        timeframe="1m",
-        limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+        timeframe=CONFIRMED_SWING_RETEST_DETAIL_TIMEFRAME,
+        limit=detail_fetch_limit,
     )
-    detail_fig = build_confirmed_swing_retest_detail_chart(
-        candles=detail_candles,
-        retest_row=selected_retest,
-    )
-    st.plotly_chart(
-        detail_fig,
-        use_container_width=True,
-        key="confirmed_swing_retest_detail_chart",
-        config={"displaylogo": False, "scrollZoom": True},
-    )
+
+    if detail_candles is None or detail_candles.empty:
+        st.warning(
+            "No 15m candles are available for this confirmed swing retest."
+        )
+    else:
+        detail_fig = build_confirmed_swing_retest_detail_chart(
+            candles=detail_candles,
+            retest_row=selected_retest,
+            chart_candle_limit=detail_chart_candle_limit,
+        )
+        st.caption(
+            f"Historical inspector: {detail_chart_candle_limit} × 15m "
+            f"≈ {detail_chart_candle_limit * 15 / 60:.1f} hours. "
+            "Pivot, confirmation, departure and retest markers keep their "
+            "original timestamps."
+        )
+        st.plotly_chart(
+            detail_fig,
+            use_container_width=True,
+            key="confirmed_swing_retest_detail_chart",
+            config={"displaylogo": False, "scrollZoom": True},
+        )
 
     details = {
         "symbol": selected_retest.get("symbol"),
