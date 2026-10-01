@@ -70,7 +70,18 @@ from dashboard.charts.trade_inspector_chart import (
     build_trade_inspector_chart,
 )
 
+from engine.live.research.swing_detector import (
+    SwingDetector,
+)
+
 TRADES_FILE = BASE_DIR / "trades.csv"
+VOLUME_EXHAUSTION_EVENTS_FILE = (
+    BASE_DIR / "volume_exhaustion_events.csv"
+)
+
+VOLUME_EXHAUSTION_OUTCOMES_FILE = (
+    BASE_DIR / "volume_exhaustion_outcomes.csv"
+)
 
 DASHBOARD_CACHE_DIR = (
     BASE_DIR
@@ -7447,6 +7458,7 @@ if trigger_tf in (None, "", "N/A"):
 
 DASHBOARD_SECTIONS = {
     "overview": "📊 Overview",
+    "volume_exhaustion": "⚡ Volume Exhaustion",
     "geometry_scanner": "📐 Geometry Scanner",
     "btc_correlation": "₿ BTC Correlation",
     "btc_alignment": "🧭 BTC Alignment Edge",
@@ -7485,12 +7497,3626 @@ selected_section = st.sidebar.radio(
 
 if (
     df_raw.empty
-    and selected_section != "geometry_scanner"
+    and selected_section not in {
+        "geometry_scanner",
+        "volume_exhaustion",
+    }
 ):
     st.markdown("---")
     st.info("📭 No trades yet")
     st.stop()
     
+def load_volume_exhaustion_events():
+    modified_ns = get_file_modified_ns(
+        VOLUME_EXHAUSTION_EVENTS_FILE
+    )
+
+    if modified_ns is None:
+        return pd.DataFrame()
+
+    events = load_csv_cached(
+        VOLUME_EXHAUSTION_EVENTS_FILE,
+        modified_ns,
+    ).copy()
+
+    if events.empty:
+        return events
+
+    numeric_columns = [
+        "candle_open_timestamp",
+        "candle_close_timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "relative_volume",
+        "volume_3m_ratio",
+        "high_volume_candles_5m",
+        "move_3m_pct",
+        "move_5m_pct",
+        "rsi_1m",
+        "close_location",
+        "efficiency_3m",
+    ]
+
+    for column in numeric_columns:
+        if column in events.columns:
+            events[column] = pd.to_numeric(
+                events[column],
+                errors="coerce",
+            )
+
+    if "symbol" in events.columns:
+        events["symbol"] = (
+            events["symbol"]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+        )
+
+    if "move_3m_pct" in events.columns:
+        events["potential_side"] = np.select(
+            [
+                events["move_3m_pct"] < 0,
+                events["move_3m_pct"] > 0,
+            ],
+            [
+                "LONG",
+                "SHORT",
+            ],
+            default="NEUTRAL",
+        )
+    else:
+        events["potential_side"] = "NEUTRAL"
+
+    timestamp_column = (
+        "candle_open_timestamp"
+        if "candle_open_timestamp" in events.columns
+        else "candle_close_timestamp"
+    )
+
+    if timestamp_column in events.columns:
+        events["event_time_utc"] = pd.to_datetime(
+            events[timestamp_column],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+
+        events["event_time_local"] = (
+            events["event_time_utc"]
+            .dt.tz_convert(TZ)
+        )
+
+    return events
+
+
+
+def load_volume_exhaustion_outcomes():
+    modified_ns = get_file_modified_ns(
+        VOLUME_EXHAUSTION_OUTCOMES_FILE
+    )
+
+    if modified_ns is None:
+        return pd.DataFrame()
+
+    outcomes = load_csv_cached(
+        VOLUME_EXHAUSTION_OUTCOMES_FILE,
+        modified_ns,
+    ).copy()
+
+    if outcomes.empty:
+        return outcomes
+
+    numeric_columns = [
+        "candle_open_timestamp",
+        "candle_close_timestamp",
+        "entry_price",
+    ]
+
+    for timeframe in ["5m", "15m", "30m"]:
+        numeric_columns.extend([
+            f"future_swing_{timeframe}_pivot_timestamp",
+            f"future_swing_{timeframe}_confirmed_timestamp",
+            f"future_swing_{timeframe}_price",
+            f"future_swing_{timeframe}_pivot_distance_pct",
+            f"future_swing_{timeframe}_confirmed_after_min",
+        ])
+
+    for column in numeric_columns:
+        if column in outcomes.columns:
+            outcomes[column] = pd.to_numeric(
+                outcomes[column],
+                errors="coerce",
+            )
+
+    for timeframe in ["5m", "15m", "30m"]:
+        column = f"future_swing_{timeframe}_became_swing"
+
+        if column not in outcomes.columns:
+            continue
+
+        normalized = (
+            outcomes[column]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+
+        outcomes[column] = normalized.isin(
+            ["true", "1", "1.0", "yes"]
+        )
+
+    if "symbol" in outcomes.columns:
+        outcomes["symbol"] = (
+            outcomes["symbol"]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+        )
+
+    if "potential_side" in outcomes.columns:
+        outcomes["potential_side"] = (
+            outcomes["potential_side"]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+        )
+
+    return outcomes
+
+
+def build_volume_exhaustion_outcome_research(
+    outcomes,
+    events,
+):
+    if outcomes.empty:
+        return pd.DataFrame()
+
+    research = outcomes.copy()
+
+    if (
+        not events.empty
+        and "event_id" in research.columns
+        and "event_id" in events.columns
+    ):
+        event_feature_columns = [
+            "event_id",
+            "relative_volume",
+            "volume_3m_ratio",
+            "high_volume_candles_5m",
+            "move_3m_pct",
+            "move_5m_pct",
+            "rsi_1m",
+            "close_location",
+            "efficiency_3m",
+        ]
+
+        event_feature_columns = [
+            column
+            for column in event_feature_columns
+            if column in events.columns
+        ]
+
+        event_features = (
+            events[event_feature_columns]
+            .drop_duplicates(
+                subset=["event_id"],
+                keep="last",
+            )
+            .copy()
+        )
+
+        research = research.merge(
+            event_features,
+            on="event_id",
+            how="left",
+            suffixes=("", "_event"),
+        )
+
+        for feature_column in event_feature_columns:
+            if feature_column == "event_id":
+                continue
+
+            event_column = f"{feature_column}_event"
+
+            if event_column not in research.columns:
+                continue
+
+            if feature_column not in research.columns:
+                research[feature_column] = research[event_column]
+            else:
+                research[feature_column] = (
+                    research[feature_column]
+                    .combine_first(research[event_column])
+                )
+
+            research = research.drop(columns=[event_column])
+
+    for timeframe in ["5m", "15m", "30m"]:
+        column = f"future_swing_{timeframe}_became_swing"
+        if column not in research.columns:
+            research[column] = False
+        research[column] = research[column].fillna(False).astype(bool)
+
+    swing_5m = research["future_swing_5m_became_swing"]
+    swing_15m = research["future_swing_15m_became_swing"]
+    swing_30m = research["future_swing_30m_became_swing"]
+
+    research["swing_outcome_class"] = np.select(
+        [
+            swing_5m & swing_15m & swing_30m,
+            swing_5m & swing_15m & ~swing_30m,
+            swing_5m & ~swing_15m & ~swing_30m,
+            ~swing_5m & ~swing_15m & ~swing_30m,
+        ],
+        [
+            "5M_15M_30M",
+            "5M_15M",
+            "5M_ONLY",
+            "NO_SWING",
+        ],
+        default="OTHER_PATTERN",
+    )
+
+    event_reference_ts = pd.Series(
+        np.nan,
+        index=research.index,
+        dtype="float64",
+    )
+
+    if "candle_close_timestamp" in research.columns:
+        event_reference_ts = pd.to_numeric(
+            research["candle_close_timestamp"],
+            errors="coerce",
+        )
+
+    if "candle_open_timestamp" in research.columns:
+        event_open_ts = pd.to_numeric(
+            research["candle_open_timestamp"],
+            errors="coerce",
+        )
+        event_reference_ts = event_reference_ts.combine_first(
+            event_open_ts + 60_000
+        )
+
+    for timeframe in ["5m", "15m", "30m"]:
+        pivot_column = f"future_swing_{timeframe}_pivot_timestamp"
+        confirmed_after_column = (
+            f"future_swing_{timeframe}_confirmed_after_min"
+        )
+        pivot_after_column = (
+            f"future_swing_{timeframe}_pivot_after_min"
+        )
+        lag_column = (
+            f"future_swing_{timeframe}_confirmation_lag_min"
+        )
+
+        if pivot_column in research.columns:
+            pivot_ts = pd.to_numeric(
+                research[pivot_column],
+                errors="coerce",
+            )
+            research[pivot_after_column] = (
+                pivot_ts - event_reference_ts
+            ) / 60_000.0
+        else:
+            research[pivot_after_column] = np.nan
+
+        if confirmed_after_column in research.columns:
+            confirmed_after = pd.to_numeric(
+                research[confirmed_after_column],
+                errors="coerce",
+            )
+            research[lag_column] = (
+                confirmed_after
+                - research[pivot_after_column]
+            )
+        else:
+            research[lag_column] = np.nan
+
+    return research
+
+
+def render_volume_exhaustion_outcome_research(events):
+    st.markdown("---")
+    st.markdown("### 🧬 Future Swing Outcome Research")
+    st.caption(
+        "Future swings are labels observed after T0. "
+        "They are never used as entry-time features."
+    )
+
+    outcomes = load_volume_exhaustion_outcomes()
+
+    if outcomes.empty:
+        st.info(
+            "No completed +180m volume exhaustion outcomes "
+            "are available yet."
+        )
+        st.caption(
+            f"Expected file: {VOLUME_EXHAUSTION_OUTCOMES_FILE}"
+        )
+        return
+
+    swing_columns = [
+        column
+        for column in outcomes.columns
+        if column.startswith("future_swing_")
+    ]
+
+    if len(swing_columns) < 18:
+        st.warning(
+            "The outcomes file does not contain the complete "
+            "future-swing schema yet."
+        )
+        st.caption(
+            f"Detected {len(swing_columns)} future_swing columns; "
+            "expected 18."
+        )
+        return
+
+    research = build_volume_exhaustion_outcome_research(
+        outcomes=outcomes,
+        events=events,
+    )
+
+    filter_1, filter_2 = st.columns([1, 2])
+
+    with filter_1:
+        outcome_side = st.selectbox(
+            "Outcome side",
+            ["ALL", "LONG", "SHORT"],
+            key="volume_exhaustion_outcome_side",
+        )
+
+    filtered = research.copy()
+
+    if (
+        outcome_side != "ALL"
+        and "potential_side" in filtered.columns
+    ):
+        filtered = filtered[
+            filtered["potential_side"].eq(outcome_side)
+        ].copy()
+
+    class_order = [
+        "NO_SWING",
+        "5M_ONLY",
+        "5M_15M",
+        "5M_15M_30M",
+        "OTHER_PATTERN",
+    ]
+
+    present_classes = set(
+        filtered["swing_outcome_class"]
+        .dropna()
+        .astype(str)
+    )
+    available_classes = [
+        c for c in class_order if c in present_classes
+    ]
+
+    with filter_2:
+        selected_classes = st.multiselect(
+            "Swing outcome classes",
+            options=available_classes,
+            default=available_classes,
+            key="volume_exhaustion_outcome_classes",
+        )
+
+    if selected_classes:
+        filtered = filtered[
+            filtered["swing_outcome_class"].isin(
+                selected_classes
+            )
+        ].copy()
+    else:
+        filtered = filtered.iloc[0:0].copy()
+
+    if filtered.empty:
+        st.info(
+            "No completed outcomes match the selected filters."
+        )
+        return
+
+    summary_1, summary_2, summary_3, summary_4 = st.columns(4)
+    summary_1.metric("Completed outcomes", len(filtered))
+    summary_2.metric(
+        "5m swing",
+        f"{filtered['future_swing_5m_became_swing'].mean() * 100:.1f}%",
+    )
+    summary_3.metric(
+        "15m swing",
+        f"{filtered['future_swing_15m_became_swing'].mean() * 100:.1f}%",
+    )
+    summary_4.metric(
+        "30m swing",
+        f"{filtered['future_swing_30m_became_swing'].mean() * 100:.1f}%",
+    )
+
+    st.markdown("#### Swing outcome classification")
+    counts = filtered["swing_outcome_class"].value_counts()
+    classification_rows = []
+    for outcome_class in class_order:
+        count = int(counts.get(outcome_class, 0))
+        if count == 0:
+            continue
+        classification_rows.append({
+            "swing_outcome_class": outcome_class,
+            "outcomes": count,
+            "share_pct": round(
+                count / len(filtered) * 100.0,
+                2,
+            ),
+        })
+
+    st.dataframe(
+        pd.DataFrame(classification_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("#### Pivot & confirmation timing")
+    timing_rows = []
+
+    for timeframe in ["5m", "15m", "30m"]:
+        became_column = f"future_swing_{timeframe}_became_swing"
+        pivot_after_column = f"future_swing_{timeframe}_pivot_after_min"
+        confirmed_after_column = (
+            f"future_swing_{timeframe}_confirmed_after_min"
+        )
+        lag_column = (
+            f"future_swing_{timeframe}_confirmation_lag_min"
+        )
+        distance_column = (
+            f"future_swing_{timeframe}_pivot_distance_pct"
+        )
+
+        hits = filtered[filtered[became_column]].copy()
+        if hits.empty:
+            continue
+
+        timing_rows.append({
+            "timeframe": timeframe,
+            "swings": len(hits),
+            "swing_rate_pct": len(hits) / len(filtered) * 100.0,
+            "median_pivot_after_min": pd.to_numeric(
+                hits[pivot_after_column], errors="coerce"
+            ).median(),
+            "median_confirmed_after_min": pd.to_numeric(
+                hits[confirmed_after_column], errors="coerce"
+            ).median(),
+            "median_confirmation_lag_min": pd.to_numeric(
+                hits[lag_column], errors="coerce"
+            ).median(),
+            "median_pivot_distance_pct": pd.to_numeric(
+                hits[distance_column], errors="coerce"
+            ).median(),
+        })
+
+    timing_df = pd.DataFrame(timing_rows)
+    if not timing_df.empty:
+        for column in timing_df.columns:
+            if column not in {"timeframe", "swings"}:
+                timing_df[column] = pd.to_numeric(
+                    timing_df[column], errors="coerce"
+                ).round(3)
+        st.dataframe(
+            timing_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    feature_columns = [
+        "relative_volume",
+        "volume_3m_ratio",
+        "high_volume_candles_5m",
+        "move_3m_pct",
+        "move_5m_pct",
+        "rsi_1m",
+        "close_location",
+        "efficiency_3m",
+    ]
+    feature_columns = [
+        c for c in feature_columns if c in filtered.columns
+    ]
+
+    if feature_columns:
+        st.markdown("#### T0 features by future swing class")
+        st.caption(
+            "Medians only. These features were known at T0; "
+            "the swing class is a future label."
+        )
+        feature_source = filtered.copy()
+        for column in feature_columns:
+            feature_source[column] = pd.to_numeric(
+                feature_source[column], errors="coerce"
+            )
+        feature_summary = (
+            feature_source
+            .groupby("swing_outcome_class", observed=False)[feature_columns]
+            .median()
+            .reindex([c for c in class_order if c in set(feature_source["swing_outcome_class"])])
+            .reset_index()
+        )
+        feature_summary[feature_columns] = (
+            feature_summary[feature_columns].round(4)
+        )
+        st.dataframe(
+            feature_summary,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    outcome_metric_candidates = {
+        "return_30m": ["return_30m", "return_30m_pct"],
+        "mfe_30m": ["mfe_30m", "mfe_30m_pct"],
+        "mae_30m": ["mae_30m", "mae_30m_pct"],
+    }
+    outcome_metric_columns = {}
+    for display_name, candidates in outcome_metric_candidates.items():
+        selected_column = next(
+            (c for c in candidates if c in filtered.columns),
+            None,
+        )
+        if selected_column is not None:
+            outcome_metric_columns[display_name] = selected_column
+
+    if outcome_metric_columns:
+        st.markdown("#### 30m price outcome by swing class")
+        price_source = filtered.copy()
+        for column in outcome_metric_columns.values():
+            price_source[column] = pd.to_numeric(
+                price_source[column], errors="coerce"
+            )
+        price_summary = (
+            price_source
+            .groupby("swing_outcome_class", observed=False)[
+                list(outcome_metric_columns.values())
+            ]
+            .median()
+            .reset_index()
+            .rename(columns={
+                source: display
+                for display, source
+                in outcome_metric_columns.items()
+            })
+        )
+        for column in outcome_metric_columns:
+            if column in price_summary.columns:
+                price_summary[column] = price_summary[column].round(4)
+        st.dataframe(
+            price_summary,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("#### Completed outcome rows")
+    raw_columns = [
+        "event_id",
+        "symbol",
+        "potential_side",
+        "swing_outcome_class",
+        "future_swing_5m_pivot_after_min",
+        "future_swing_5m_confirmed_after_min",
+        "future_swing_5m_pivot_distance_pct",
+        "future_swing_15m_pivot_after_min",
+        "future_swing_15m_confirmed_after_min",
+        "future_swing_15m_pivot_distance_pct",
+        "future_swing_30m_pivot_after_min",
+        "future_swing_30m_confirmed_after_min",
+        "future_swing_30m_pivot_distance_pct",
+    ]
+    raw_columns = [
+        c for c in raw_columns if c in filtered.columns
+    ]
+    raw_display = filtered[raw_columns].copy()
+    for column in raw_display.columns:
+        if column.endswith("_min") or column.endswith("_pct"):
+            raw_display[column] = pd.to_numeric(
+                raw_display[column], errors="coerce"
+            ).round(3)
+    st.dataframe(
+        raw_display,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def get_volume_exhaustion_swing_confirmation_info(
+    point,
+    timeframe_candles,
+    swing_timeframe,
+):
+    if (
+        point is None
+        or point.confirmed_timestamp is None
+        or point.price is None
+        or timeframe_candles is None
+        or timeframe_candles.empty
+    ):
+        return None
+
+    work = timeframe_candles.copy()
+
+    if (
+        "timestamp" not in work.columns
+        or "close" not in work.columns
+    ):
+        return None
+
+    work["timestamp"] = pd.to_numeric(
+        work["timestamp"],
+        errors="coerce",
+    )
+    work["close"] = pd.to_numeric(
+        work["close"],
+        errors="coerce",
+    )
+    work = (
+        work
+        .dropna(subset=["timestamp", "close"])
+        .sort_values("timestamp")
+    )
+
+    confirmed_ts = int(point.confirmed_timestamp)
+    confirmation_rows = work[
+        work["timestamp"].eq(confirmed_ts)
+    ]
+
+    if confirmation_rows.empty:
+        return None
+
+    confirmation_row = confirmation_rows.iloc[-1]
+    confirmation_close = float(confirmation_row["close"])
+    pivot_price = float(point.price)
+
+    if pivot_price <= 0:
+        return None
+
+    if point.side == "LOW":
+        move_pct = (
+            confirmation_close / pivot_price - 1.0
+        ) * 100.0
+    elif point.side == "HIGH":
+        move_pct = (
+            pivot_price / confirmation_close - 1.0
+        ) * 100.0
+    else:
+        return None
+
+    timeframe_ms = {
+        "1m": 60_000,
+        "3m": 3 * 60_000,
+        "5m": 5 * 60_000,
+        "15m": 15 * 60_000,
+        "30m": 30 * 60_000,
+        "1h": 60 * 60_000,
+        "2h": 2 * 60 * 60_000,
+        "4h": 4 * 60 * 60_000,
+    }.get(str(swing_timeframe))
+
+    # confirmed_timestamp identifies the confirming candle. Its close
+    # becomes actionable only when that candle has fully closed.
+    actionable_timestamp = confirmed_ts
+    if timeframe_ms is not None:
+        actionable_timestamp += timeframe_ms
+
+    return {
+        "move_pct": float(move_pct),
+        "confirmation_close": confirmation_close,
+        "confirmation_candle_timestamp": confirmed_ts,
+        "actionable_timestamp": actionable_timestamp,
+    }
+
+
+
+
+# Compact scenarios kept in the original first-touch summary.
+VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS = (
+    ("TP 0.20% / SL 0.20%", 0.20, 0.20),
+    ("TP 0.30% / SL 0.20%", 0.30, 0.20),
+    ("TP 0.30% / SL 0.30%", 0.30, 0.30),
+    ("TP 0.50% / SL 0.25%", 0.50, 0.25),
+)
+
+# Full TP x SL research grid. Outcomes are precomputed while each symbol is
+# already in memory so the dashboard can pivot instantly without reloading
+# candles every time the matrix controls change.
+VOLUME_EXHAUSTION_FIRST_TOUCH_TP_LEVELS = (
+    0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.00,
+)
+VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS = (
+    0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.00,
+)
+
+# First-touch research is intentionally independent from the chart candle
+# slider. Ask Redis for a generous history and use whatever is actually
+# available. Complete forward windows are validated separately, so gaps
+# (for example a stopped WebSocket) are never bridged silently.
+VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT = 5000
+VOLUME_EXHAUSTION_FIRST_TOUCH_HORIZON_MINUTES = 60
+
+VOLUME_EXHAUSTION_FIRST_TOUCH_MATRIX_SETUPS = tuple(
+    (
+        f"TP {tp_pct:.2f}% / SL {sl_pct:.2f}%",
+        tp_pct,
+        sl_pct,
+    )
+    for tp_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_TP_LEVELS
+    for sl_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS
+)
+
+# Deduplicate because the four compact scenarios are also present in the grid.
+VOLUME_EXHAUSTION_FIRST_TOUCH_ALL_SETUPS = tuple({
+    (float(tp_pct), float(sl_pct)): (label, float(tp_pct), float(sl_pct))
+    for label, tp_pct, sl_pct in (
+        VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS
+        + VOLUME_EXHAUSTION_FIRST_TOUCH_MATRIX_SETUPS
+    )
+}.values())
+
+
+def _volume_exhaustion_first_touch_key(tp_pct, sl_pct):
+    def token(value):
+        return f"{float(value):.2f}".replace(".", "p")
+
+    return f"ft_tp_{token(tp_pct)}_sl_{token(sl_pct)}"
+
+
+def _volume_exhaustion_first_touch_replay(
+    one_minute,
+    actionable_ts,
+    entry_price,
+    signal_side,
+    tp_pct,
+    sl_pct,
+    horizon_minutes=60,
+):
+    """Replay TP/SL chronologically from the actionable confirmation time.
+
+    If TP and SL are both touched inside the same 1m candle, the ordering is
+    unknowable from OHLC alone, so the result is AMBIGUOUS instead of making
+    a favorable assumption. A complete horizon with no touch exits at the
+    final 1m close (TIME). An incomplete horizon is not scored.
+    """
+    if one_minute is None or one_minute.empty or entry_price <= 0:
+        return None
+
+    horizon_end = int(actionable_ts) + int(horizon_minutes) * 60_000
+    last_candle_close_ms = int(one_minute["timestamp"].max()) + 60_000
+    if last_candle_close_ms < horizon_end:
+        return {
+            "result": "INCOMPLETE",
+            "gross_pct": np.nan,
+            "touch_min": np.nan,
+        }
+
+    future = one_minute[
+        (one_minute["timestamp"] >= int(actionable_ts))
+        & (one_minute["timestamp"] < horizon_end)
+    ].copy()
+
+    if future.empty:
+        return {
+            "result": "INCOMPLETE",
+            "gross_pct": np.nan,
+            "touch_min": np.nan,
+        }
+
+    tp_fraction = float(tp_pct) / 100.0
+    sl_fraction = float(sl_pct) / 100.0
+
+    if signal_side == "LONG":
+        tp_price = entry_price * (1.0 + tp_fraction)
+        sl_price = entry_price * (1.0 - sl_fraction)
+    else:
+        tp_price = entry_price * (1.0 - tp_fraction)
+        sl_price = entry_price * (1.0 + sl_fraction)
+
+    for _, candle in future.iterrows():
+        high = float(candle["high"])
+        low = float(candle["low"])
+
+        if signal_side == "LONG":
+            tp_hit = high >= tp_price
+            sl_hit = low <= sl_price
+        else:
+            tp_hit = low <= tp_price
+            sl_hit = high >= sl_price
+
+        candle_ts = int(candle["timestamp"])
+        touch_min = max(
+            1.0,
+            (candle_ts - int(actionable_ts)) / 60_000.0 + 1.0,
+        )
+
+        if tp_hit and sl_hit:
+            return {
+                "result": "AMBIGUOUS",
+                "gross_pct": np.nan,
+                "touch_min": touch_min,
+            }
+        if tp_hit:
+            return {
+                "result": "TP",
+                "gross_pct": float(tp_pct),
+                "touch_min": touch_min,
+            }
+        if sl_hit:
+            return {
+                "result": "SL",
+                "gross_pct": -float(sl_pct),
+                "touch_min": touch_min,
+            }
+
+    final_close = float(future.iloc[-1]["close"])
+    if signal_side == "LONG":
+        gross_pct = (final_close / entry_price - 1.0) * 100.0
+    else:
+        gross_pct = (entry_price / final_close - 1.0) * 100.0
+
+    return {
+        "result": "TIME",
+        "gross_pct": float(gross_pct),
+        "touch_min": float(horizon_minutes),
+    }
+
+def _volume_exhaustion_complete_future_window(
+    one_minute,
+    actionable_ts,
+    horizon_minutes,
+):
+    """Return an exact contiguous 1m forward window or None.
+
+    This prevents a WebSocket/data gap from being interpreted as a valid
+    60-minute replay merely because newer candles exist after the gap.
+    """
+    if one_minute is None or one_minute.empty:
+        return None
+
+    actionable_ts = int(actionable_ts)
+    horizon_minutes = int(horizon_minutes)
+    horizon_end = actionable_ts + horizon_minutes * 60_000
+
+    future = one_minute[
+        (one_minute["timestamp"] >= actionable_ts)
+        & (one_minute["timestamp"] < horizon_end)
+    ][["timestamp", "high", "low", "close"]].copy()
+
+    if len(future) != horizon_minutes:
+        return None
+
+    future = future.sort_values("timestamp").reset_index(drop=True)
+    timestamps = pd.to_numeric(
+        future["timestamp"], errors="coerce"
+    ).to_numpy(dtype="float64")
+
+    if np.isnan(timestamps).any():
+        return None
+
+    expected = (
+        actionable_ts
+        + np.arange(horizon_minutes, dtype="int64") * 60_000
+    )
+    if not np.array_equal(timestamps.astype("int64"), expected):
+        return None
+
+    return future
+
+
+def _volume_exhaustion_first_touch_replay_grid(
+    one_minute,
+    actionable_ts,
+    entry_price,
+    signal_side,
+    horizon_minutes=VOLUME_EXHAUSTION_FIRST_TOUCH_HORIZON_MINUTES,
+):
+    """Replay the complete TP x SL grid from one shared 1m path.
+
+    TP and SL first-hit candles are calculated once per threshold instead of
+    rescanning up to 60 candles for every one of the 81 matrix cells.
+    """
+    results = {}
+    setups = VOLUME_EXHAUSTION_FIRST_TOUCH_ALL_SETUPS
+
+    future = _volume_exhaustion_complete_future_window(
+        one_minute=one_minute,
+        actionable_ts=actionable_ts,
+        horizon_minutes=horizon_minutes,
+    )
+
+    if future is None or entry_price <= 0:
+        for _, tp_pct, sl_pct in setups:
+            results[_volume_exhaustion_first_touch_key(tp_pct, sl_pct)] = {
+                "result": "INCOMPLETE",
+                "gross_pct": np.nan,
+                "touch_min": np.nan,
+            }
+        return results
+
+    highs = pd.to_numeric(future["high"], errors="coerce").to_numpy()
+    lows = pd.to_numeric(future["low"], errors="coerce").to_numpy()
+    timestamps = pd.to_numeric(
+        future["timestamp"], errors="coerce"
+    ).to_numpy(dtype="int64")
+
+    if (
+        np.isnan(highs).any()
+        or np.isnan(lows).any()
+        or signal_side not in {"LONG", "SHORT"}
+    ):
+        for _, tp_pct, sl_pct in setups:
+            results[_volume_exhaustion_first_touch_key(tp_pct, sl_pct)] = {
+                "result": "INCOMPLETE",
+                "gross_pct": np.nan,
+                "touch_min": np.nan,
+            }
+        return results
+
+    def first_hit(mask):
+        indexes = np.flatnonzero(mask)
+        return int(indexes[0]) if indexes.size else None
+
+    tp_first = {}
+    sl_first = {}
+
+    for tp_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_TP_LEVELS:
+        fraction = float(tp_pct) / 100.0
+        if signal_side == "LONG":
+            price = entry_price * (1.0 + fraction)
+            tp_first[float(tp_pct)] = first_hit(highs >= price)
+        else:
+            price = entry_price * (1.0 - fraction)
+            tp_first[float(tp_pct)] = first_hit(lows <= price)
+
+    for sl_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS:
+        fraction = float(sl_pct) / 100.0
+        if signal_side == "LONG":
+            price = entry_price * (1.0 - fraction)
+            sl_first[float(sl_pct)] = first_hit(lows <= price)
+        else:
+            price = entry_price * (1.0 + fraction)
+            sl_first[float(sl_pct)] = first_hit(highs >= price)
+
+    final_close = float(future.iloc[-1]["close"])
+    time_gross = (
+        (final_close / entry_price - 1.0) * 100.0
+        if signal_side == "LONG"
+        else (entry_price / final_close - 1.0) * 100.0
+    )
+
+    for _, tp_pct, sl_pct in setups:
+        tp_idx = tp_first.get(float(tp_pct))
+        sl_idx = sl_first.get(float(sl_pct))
+        replay_key = _volume_exhaustion_first_touch_key(tp_pct, sl_pct)
+
+        if tp_idx is None and sl_idx is None:
+            results[replay_key] = {
+                "result": "TIME",
+                "gross_pct": float(time_gross),
+                "touch_min": float(horizon_minutes),
+            }
+            continue
+
+        if tp_idx is not None and sl_idx is not None and tp_idx == sl_idx:
+            touch_idx = tp_idx
+            result = "AMBIGUOUS"
+            gross_pct = np.nan
+        elif sl_idx is None or (
+            tp_idx is not None and tp_idx < sl_idx
+        ):
+            touch_idx = tp_idx
+            result = "TP"
+            gross_pct = float(tp_pct)
+        else:
+            touch_idx = sl_idx
+            result = "SL"
+            gross_pct = -float(sl_pct)
+
+        touch_min = max(
+            1.0,
+            (int(timestamps[touch_idx]) - int(actionable_ts))
+            / 60_000.0
+            + 1.0,
+        )
+        results[replay_key] = {
+            "result": result,
+            "gross_pct": gross_pct,
+            "touch_min": float(touch_min),
+        }
+
+    return results
+
+
+def build_volume_exhaustion_confirmation_edge_study(
+    candles,
+    swing_points_by_timeframe=None,
+    swing_candles_by_timeframe=None,
+    swing_detector_windows=None,
+    max_confirmation_move_pct=None,
+    horizons=(5, 15, 30, 60),
+):
+    """Measure forward MFE/MAE from the first actionable swing confirmation.
+
+    Research-only and forward-safe:
+    - pivot/confirmation come from the selected SwingDetector configuration;
+    - entry reference is the confirming HTF candle close;
+    - forward excursion starts at actionable_timestamp, i.e. after that
+      confirming candle has closed;
+    - only swings whose pivot is inside the visible 1m candle window are used;
+    - a horizon is populated only when the full horizon exists in the visible
+      1m window, avoiding partial-window bias near the right edge.
+    """
+    if (
+        candles is None
+        or candles.empty
+        or not swing_points_by_timeframe
+    ):
+        return pd.DataFrame()
+
+    one_minute = candles.copy()
+    required = {"timestamp", "high", "low", "close"}
+    if not required.issubset(one_minute.columns):
+        return pd.DataFrame()
+
+    for column in ["timestamp", "high", "low", "close"]:
+        one_minute[column] = pd.to_numeric(
+            one_minute[column],
+            errors="coerce",
+        )
+
+    one_minute = (
+        one_minute
+        .dropna(subset=["timestamp", "high", "low", "close"])
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+
+    if one_minute.empty:
+        return pd.DataFrame()
+
+    visible_start_ms = int(one_minute["timestamp"].min())
+    visible_end_ms = int(one_minute["timestamp"].max())
+    last_candle_close_ms = visible_end_ms + 60_000
+
+    rows = []
+
+    for swing_timeframe, swing_points in (
+        swing_points_by_timeframe.items()
+    ):
+        timeframe_candles = None
+        if swing_candles_by_timeframe:
+            timeframe_candles = swing_candles_by_timeframe.get(
+                swing_timeframe
+            )
+
+        detector_name = None
+        if swing_detector_windows:
+            detector_name = swing_detector_windows.get(
+                swing_timeframe
+            )
+
+        for point in swing_points:
+            if point.pivot_timestamp is None:
+                continue
+
+            pivot_ts = int(point.pivot_timestamp)
+            if not (
+                visible_start_ms
+                <= pivot_ts
+                <= visible_end_ms
+            ):
+                continue
+
+            info = get_volume_exhaustion_swing_confirmation_info(
+                point=point,
+                timeframe_candles=timeframe_candles,
+                swing_timeframe=swing_timeframe,
+            )
+
+            if info is None:
+                continue
+
+            move_pct = float(info["move_pct"])
+            if (
+                max_confirmation_move_pct is not None
+                and move_pct
+                > float(max_confirmation_move_pct)
+            ):
+                continue
+
+            actionable_ts = int(info["actionable_timestamp"])
+            if not (
+                visible_start_ms
+                <= actionable_ts
+                <= visible_end_ms + 60_000
+            ):
+                continue
+
+            entry_price = float(info["confirmation_close"])
+            if entry_price <= 0:
+                continue
+
+            signal_side = (
+                "SHORT"
+                if point.side == "HIGH"
+                else "LONG"
+                if point.side == "LOW"
+                else None
+            )
+            if signal_side is None:
+                continue
+
+            row = {
+                "timeframe": str(swing_timeframe),
+                "detector": detector_name or "—",
+                "signal": signal_side,
+                "pivot_timestamp": pivot_ts,
+                "actionable_timestamp": actionable_ts,
+                "pivot_price": float(point.price),
+                "entry_price": entry_price,
+                "pivot_to_confirmation_pct": move_pct,
+                "prominence_pct": float(point.prominence_pct),
+            }
+
+            for horizon in horizons:
+                horizon = int(horizon)
+                horizon_end = (
+                    actionable_ts
+                    + horizon * 60_000
+                )
+
+                mfe_col = f"mfe_{horizon}m_pct"
+                mae_col = f"mae_{horizon}m_pct"
+
+                # Require an exact contiguous 1m forward horizon. A data
+                # outage must not be bridged by candles that arrive later.
+                future = _volume_exhaustion_complete_future_window(
+                    one_minute=one_minute,
+                    actionable_ts=actionable_ts,
+                    horizon_minutes=horizon,
+                )
+
+                if future is None:
+                    row[mfe_col] = np.nan
+                    row[mae_col] = np.nan
+                    continue
+
+                max_high = float(future["high"].max())
+                min_low = float(future["low"].min())
+
+                if signal_side == "LONG":
+                    mfe = (
+                        max_high / entry_price - 1.0
+                    ) * 100.0
+                    mae = (
+                        1.0 - min_low / entry_price
+                    ) * 100.0
+                else:
+                    mfe = (
+                        1.0 - min_low / entry_price
+                    ) * 100.0
+                    mae = (
+                        max_high / entry_price - 1.0
+                    ) * 100.0
+
+                row[mfe_col] = max(0.0, float(mfe))
+                row[mae_col] = max(0.0, float(mae))
+
+            replay_grid = _volume_exhaustion_first_touch_replay_grid(
+                one_minute=one_minute,
+                actionable_ts=actionable_ts,
+                entry_price=entry_price,
+                signal_side=signal_side,
+                horizon_minutes=(
+                    VOLUME_EXHAUSTION_FIRST_TOUCH_HORIZON_MINUTES
+                ),
+            )
+
+            for _, tp_pct, sl_pct in (
+                VOLUME_EXHAUSTION_FIRST_TOUCH_ALL_SETUPS
+            ):
+                replay_key = _volume_exhaustion_first_touch_key(
+                    tp_pct,
+                    sl_pct,
+                )
+                replay = replay_grid[replay_key]
+                row[f"{replay_key}_result"] = replay["result"]
+                row[f"{replay_key}_gross_pct"] = replay["gross_pct"]
+                row[f"{replay_key}_touch_min"] = replay["touch_min"]
+
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    result["pivot_time"] = pd.to_datetime(
+        result["pivot_timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+    result["confirmation_available"] = pd.to_datetime(
+        result["actionable_timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+
+    return result.sort_values(
+        ["actionable_timestamp", "timeframe"],
+        ascending=[False, True],
+    ).reset_index(drop=True)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def build_volume_exhaustion_confirmation_study_all_symbols(
+    symbols,
+    candle_limit,
+    swing_timeframes,
+    swing_detector_items,
+    min_swing_prominence_pct,
+    max_confirmation_move_pct,
+):
+    """Build the same forward-safe confirmation study for many symbols.
+
+    The selected pivot → confirmation distance is applied here too, so the
+    all-symbol bucket study uses the exact same signal universe as the chart.
+    """
+    detector_windows = dict(swing_detector_items)
+    frames = []
+
+    for symbol in symbols:
+        one_minute = (
+            geometry_scanner_data_service
+            .get_closed_candles(
+                symbol=str(symbol),
+                timeframe="1m",
+                limit=int(candle_limit),
+            )
+        )
+
+        if one_minute is None or one_minute.empty:
+            continue
+
+        points_by_timeframe = {}
+        candles_by_timeframe = {}
+
+        for swing_timeframe in swing_timeframes:
+            detector_name = detector_windows.get(
+                swing_timeframe,
+                "5x5",
+            )
+            swing_bars = int(
+                str(detector_name).split("x")[0]
+            )
+            detector = SwingDetector(
+                left_bars=swing_bars,
+                right_bars=swing_bars,
+                min_prominence_pct=float(
+                    min_swing_prominence_pct
+                ),
+            )
+
+            if swing_timeframe == "1m":
+                timeframe_candles = one_minute
+            else:
+                timeframe_candles = (
+                    geometry_scanner_data_service
+                    .get_closed_candles(
+                        symbol=str(symbol),
+                        timeframe=str(swing_timeframe),
+                        limit=400,
+                    )
+                )
+
+            if (
+                timeframe_candles is None
+                or timeframe_candles.empty
+            ):
+                continue
+
+            candles_by_timeframe[
+                swing_timeframe
+            ] = timeframe_candles.copy()
+
+            points_by_timeframe[
+                swing_timeframe
+            ] = detector.detect_all(
+                timeframe_candles.to_dict(
+                    orient="records"
+                )
+            )
+
+        symbol_study = (
+            build_volume_exhaustion_confirmation_edge_study(
+                candles=one_minute,
+                swing_points_by_timeframe=(
+                    points_by_timeframe
+                ),
+                swing_candles_by_timeframe=(
+                    candles_by_timeframe
+                ),
+                swing_detector_windows=detector_windows,
+                max_confirmation_move_pct=(
+                    float(max_confirmation_move_pct)
+                    if max_confirmation_move_pct is not None
+                    else None
+                ),
+            )
+        )
+
+        if symbol_study.empty:
+            continue
+
+        symbol_study.insert(0, "symbol", str(symbol))
+        frames.append(symbol_study)
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+
+def filter_volume_exhaustion_confirmation_study_by_move(
+    study_df,
+    max_confirmation_move_pct,
+):
+    """Apply the pivot→confirmation filter without rebuilding candle replays."""
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+    if max_confirmation_move_pct is None:
+        return study_df.copy()
+    if "pivot_to_confirmation_pct" not in study_df.columns:
+        return pd.DataFrame()
+
+    distance = pd.to_numeric(
+        study_df["pivot_to_confirmation_pct"],
+        errors="coerce",
+    )
+    return study_df.loc[
+        distance.le(float(max_confirmation_move_pct))
+    ].copy().reset_index(drop=True)
+
+
+def build_volume_exhaustion_confirmation_bucket_summary(
+    study_df,
+):
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+
+    work = study_df.copy()
+    work["pivot_to_confirmation_pct"] = pd.to_numeric(
+        work["pivot_to_confirmation_pct"],
+        errors="coerce",
+    )
+    work = work.dropna(
+        subset=["pivot_to_confirmation_pct"]
+    )
+
+    if work.empty:
+        return pd.DataFrame()
+
+    bucket_edges = [
+        -np.inf,
+        0.05,
+        0.10,
+        0.20,
+        0.30,
+        0.50,
+        0.75,
+        1.00,
+        np.inf,
+    ]
+    bucket_labels = [
+        "≤ 0.05%",
+        "0.05–0.10%",
+        "0.10–0.20%",
+        "0.20–0.30%",
+        "0.30–0.50%",
+        "0.50–0.75%",
+        "0.75–1.00%",
+        "> 1.00%",
+    ]
+
+    work["Distance bucket"] = pd.cut(
+        work["pivot_to_confirmation_pct"],
+        bins=bucket_edges,
+        labels=bucket_labels,
+        include_lowest=True,
+        right=True,
+    )
+
+    rows = []
+    group_columns = [
+        "timeframe",
+        "detector",
+        "signal",
+        "Distance bucket",
+    ]
+
+    for group_key, group in work.groupby(
+        group_columns,
+        dropna=False,
+        observed=True,
+        sort=False,
+    ):
+        timeframe, detector, signal, distance_bucket = (
+            group_key
+        )
+        row = {
+            "Timeframe": timeframe,
+            "Detector": detector,
+            "Signal": signal,
+            "Distance bucket": str(distance_bucket),
+            "N": len(group),
+            "Symbols": (
+                group["symbol"].nunique()
+                if "symbol" in group.columns
+                else 1
+            ),
+            "Distance med %": group[
+                "pivot_to_confirmation_pct"
+            ].median(),
+        }
+
+        for horizon in [5, 15, 30, 60]:
+            mfe_col = f"mfe_{horizon}m_pct"
+            mae_col = f"mae_{horizon}m_pct"
+
+            if (
+                mfe_col not in group.columns
+                or mae_col not in group.columns
+            ):
+                continue
+
+            valid = (
+                group[mfe_col].notna()
+                & group[mae_col].notna()
+            )
+            row[f"N +{horizon}m"] = int(valid.sum())
+            row[f"MFE +{horizon}m med %"] = (
+                group.loc[valid, mfe_col].median()
+                if valid.any()
+                else np.nan
+            )
+            row[f"MAE +{horizon}m med %"] = (
+                group.loc[valid, mae_col].median()
+                if valid.any()
+                else np.nan
+            )
+
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    numeric_columns = [
+        column
+        for column in result.columns
+        if column.endswith("%")
+    ]
+    result[numeric_columns] = (
+        result[numeric_columns].round(4)
+    )
+
+    bucket_order = {
+        label: index
+        for index, label in enumerate(bucket_labels)
+    }
+    result["_bucket_order"] = (
+        result["Distance bucket"]
+        .map(bucket_order)
+        .fillna(len(bucket_order))
+    )
+    result = (
+        result
+        .sort_values(
+            [
+                "Timeframe",
+                "Detector",
+                "Signal",
+                "_bucket_order",
+            ]
+        )
+        .drop(columns=["_bucket_order"])
+        .reset_index(drop=True)
+    )
+
+    return result
+
+
+
+def build_volume_exhaustion_first_touch_summary(
+    study_df,
+    scope_name,
+    round_trip_fee_pct,
+):
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    fee_pct = float(round_trip_fee_pct)
+
+    for setup_label, tp_pct, sl_pct in (
+        VOLUME_EXHAUSTION_FIRST_TOUCH_SETUPS
+    ):
+        replay_key = _volume_exhaustion_first_touch_key(
+            tp_pct,
+            sl_pct,
+        )
+        result_col = f"{replay_key}_result"
+        gross_col = f"{replay_key}_gross_pct"
+
+        if (
+            result_col not in study_df.columns
+            or gross_col not in study_df.columns
+        ):
+            continue
+
+        complete = study_df[
+            study_df[result_col].isin(
+                ["TP", "SL", "TIME", "AMBIGUOUS"]
+            )
+        ].copy()
+        scored = complete[
+            complete[result_col].isin(["TP", "SL", "TIME"])
+        ].copy()
+
+        if scored.empty:
+            continue
+
+        scored["_net_pct"] = (
+            pd.to_numeric(
+                scored[gross_col],
+                errors="coerce",
+            )
+            - fee_pct
+        )
+        scored = scored.dropna(subset=["_net_pct"])
+        if scored.empty:
+            continue
+
+        wins = scored["_net_pct"] > 0
+        losses = scored["_net_pct"] < 0
+        gross_profit = scored.loc[wins, "_net_pct"].sum()
+        gross_loss = -scored.loc[losses, "_net_pct"].sum()
+        profit_factor = (
+            gross_profit / gross_loss
+            if gross_loss > 0
+            else np.inf
+            if gross_profit > 0
+            else np.nan
+        )
+
+        tp_count = int((scored[result_col] == "TP").sum())
+        sl_count = int((scored[result_col] == "SL").sum())
+        time_count = int((scored[result_col] == "TIME").sum())
+        ambiguous_count = int(
+            (complete[result_col] == "AMBIGUOUS").sum()
+        )
+
+        rows.append({
+            "Universe": scope_name,
+            "Setup": setup_label,
+            "N scored": len(scored),
+            "TP": tp_count,
+            "SL": sl_count,
+            "Time exit": time_count,
+            "Ambiguous": ambiguous_count,
+            "Net WR %": wins.mean() * 100.0,
+            "PF net": profit_factor,
+            "Net sum %": scored["_net_pct"].sum(),
+            "Net avg %": scored["_net_pct"].mean(),
+            "Net median %": scored["_net_pct"].median(),
+        })
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    for column in [
+        "Net WR %",
+        "PF net",
+        "Net sum %",
+        "Net avg %",
+        "Net median %",
+    ]:
+        if column in result.columns:
+            result[column] = pd.to_numeric(
+                result[column],
+                errors="coerce",
+            ).round(4)
+
+    return result
+
+
+
+def build_volume_exhaustion_first_touch_breakdown(
+    study_df,
+    round_trip_fee_pct,
+    breakdown,
+):
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+
+    work = study_df.copy()
+    if breakdown == "signal":
+        work["Breakdown"] = work["signal"].astype(str)
+        breakdown_order = ["LONG", "SHORT"]
+    elif breakdown == "distance":
+        distance = pd.to_numeric(
+            work["pivot_to_confirmation_pct"],
+            errors="coerce",
+        )
+        labels = [
+            "≤ 0.025%",
+            "0.025–0.050%",
+            "0.050–0.075%",
+            "0.075–0.100%",
+            "0.10–0.20%",
+            "0.20–0.30%",
+            "0.30–0.50%",
+            "0.50–1.00%",
+            "> 1.00%",
+        ]
+        work["Breakdown"] = pd.cut(
+            distance,
+            bins=[
+                -np.inf,
+                0.025,
+                0.050,
+                0.075,
+                0.100,
+                0.20,
+                0.30,
+                0.50,
+                1.00,
+                np.inf,
+            ],
+            labels=labels,
+            include_lowest=True,
+            right=True,
+        ).astype(str)
+        breakdown_order = labels
+    else:
+        return pd.DataFrame()
+
+    rows = []
+    for breakdown_value, group in work.groupby(
+        "Breakdown",
+        dropna=False,
+        observed=True,
+    ):
+        summary = build_volume_exhaustion_first_touch_summary(
+            group,
+            str(breakdown_value),
+            round_trip_fee_pct,
+        )
+        if summary.empty:
+            continue
+        summary = summary.rename(columns={"Universe": "Breakdown"})
+        rows.append(summary)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.concat(rows, ignore_index=True)
+    order_map = {
+        value: index
+        for index, value in enumerate(breakdown_order)
+    }
+    result["_order"] = (
+        result["Breakdown"]
+        .map(order_map)
+        .fillna(len(order_map))
+    )
+    return (
+        result
+        .sort_values(["Setup", "_order"])
+        .drop(columns=["_order"])
+        .reset_index(drop=True)
+    )
+
+def build_volume_exhaustion_first_touch_matrix(
+    study_df,
+    round_trip_fee_pct,
+    metric,
+):
+    """Build a TP(rows) x SL(columns) matrix from chronological first touches."""
+    if study_df is None or study_df.empty:
+        return pd.DataFrame()
+
+    fee_pct = float(round_trip_fee_pct)
+    rows = []
+
+    for tp_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_TP_LEVELS:
+        row = {"TP %": float(tp_pct)}
+
+        for sl_pct in VOLUME_EXHAUSTION_FIRST_TOUCH_SL_LEVELS:
+            replay_key = _volume_exhaustion_first_touch_key(
+                tp_pct,
+                sl_pct,
+            )
+            result_col = f"{replay_key}_result"
+            gross_col = f"{replay_key}_gross_pct"
+
+            if (
+                result_col not in study_df.columns
+                or gross_col not in study_df.columns
+            ):
+                row[f"SL {sl_pct:.2f}%"] = np.nan
+                continue
+
+            complete = study_df[
+                study_df[result_col].isin(
+                    ["TP", "SL", "TIME", "AMBIGUOUS"]
+                )
+            ].copy()
+            scored = complete[
+                complete[result_col].isin(["TP", "SL", "TIME"])
+            ].copy()
+
+            if scored.empty:
+                row[f"SL {sl_pct:.2f}%"] = np.nan
+                continue
+
+            scored["_net_pct"] = (
+                pd.to_numeric(scored[gross_col], errors="coerce")
+                - fee_pct
+            )
+            scored = scored.dropna(subset=["_net_pct"])
+            if scored.empty:
+                row[f"SL {sl_pct:.2f}%"] = np.nan
+                continue
+
+            wins = scored["_net_pct"] > 0
+            losses = scored["_net_pct"] < 0
+            gross_profit = scored.loc[wins, "_net_pct"].sum()
+            gross_loss = -scored.loc[losses, "_net_pct"].sum()
+            pf_net = (
+                gross_profit / gross_loss
+                if gross_loss > 0
+                else np.inf
+                if gross_profit > 0
+                else np.nan
+            )
+
+            if metric == "PF net":
+                value = pf_net
+            elif metric == "Net WR %":
+                value = wins.mean() * 100.0
+            elif metric == "Net avg %":
+                value = scored["_net_pct"].mean()
+            elif metric == "Net sum %":
+                value = scored["_net_pct"].sum()
+            elif metric == "N scored":
+                value = len(scored)
+            elif metric == "Ambiguous %":
+                value = (
+                    (complete[result_col] == "AMBIGUOUS").mean() * 100.0
+                    if len(complete)
+                    else np.nan
+                )
+            else:
+                value = np.nan
+
+            row[f"SL {sl_pct:.2f}%"] = value
+
+        rows.append(row)
+
+    result = pd.DataFrame(rows).set_index("TP %")
+    if metric == "N scored":
+        return result.round(0)
+    return result.round(4)
+
+
+def render_volume_exhaustion_first_touch_matrix(
+    filtered_study_df,
+    control_study_df,
+    round_trip_fee_pct,
+    max_confirmation_move_pct,
+):
+    st.markdown("##### TP × SL matrix")
+    st.caption(
+        "Rows are TP %, columns are SL %. Every cell replays the same "
+        "confirmation signals chronologically for 60m. Same-candle TP+SL "
+        "touches remain AMBIGUOUS and are excluded from PF/WR/net metrics."
+    )
+
+    universe_options = ["Filtered"]
+    if control_study_df is not None and not control_study_df.empty:
+        universe_options.append("CONTROL · all confirmed swings")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        universe = st.selectbox(
+            "Matrix universe",
+            universe_options,
+            key="volume_exhaustion_ft_matrix_universe",
+        )
+    with c2:
+        metric = st.selectbox(
+            "Matrix metric",
+            [
+                "PF net",
+                "Net avg %",
+                "Net WR %",
+                "Net sum %",
+                "N scored",
+                "Ambiguous %",
+            ],
+            key="volume_exhaustion_ft_matrix_metric",
+        )
+    with c3:
+        signal_filter = st.selectbox(
+            "Matrix signal",
+            ["ALL", "LONG", "SHORT"],
+            key="volume_exhaustion_ft_matrix_signal",
+        )
+
+    source = (
+        control_study_df.copy()
+        if universe == "CONTROL · all confirmed swings"
+        else filtered_study_df.copy()
+    )
+
+    if source is None or source.empty:
+        st.info("No first-touch rows are available for the matrix.")
+        return
+
+    timeframe_values = (
+        sorted(source["timeframe"].dropna().astype(str).unique().tolist())
+        if "timeframe" in source.columns
+        else []
+    )
+    detector_values = (
+        sorted(source["detector"].dropna().astype(str).unique().tolist())
+        if "detector" in source.columns
+        else []
+    )
+
+    c4, c5 = st.columns(2)
+    with c4:
+        timeframe_filter = st.selectbox(
+            "Matrix swing timeframe",
+            ["ALL"] + timeframe_values,
+            key="volume_exhaustion_ft_matrix_timeframe",
+        )
+    with c5:
+        detector_filter = st.selectbox(
+            "Matrix detector",
+            ["ALL"] + detector_values,
+            key="volume_exhaustion_ft_matrix_detector",
+        )
+
+    if signal_filter != "ALL" and "signal" in source.columns:
+        source = source[source["signal"].astype(str).eq(signal_filter)]
+    if timeframe_filter != "ALL" and "timeframe" in source.columns:
+        source = source[source["timeframe"].astype(str).eq(timeframe_filter)]
+    if detector_filter != "ALL" and "detector" in source.columns:
+        source = source[source["detector"].astype(str).eq(detector_filter)]
+
+    if source.empty:
+        st.info("No confirmations match the matrix filters.")
+        return
+
+    matrix = build_volume_exhaustion_first_touch_matrix(
+        source,
+        round_trip_fee_pct,
+        metric,
+    )
+    if matrix.empty:
+        st.info("No complete first-touch scenarios are available for this matrix.")
+        return
+
+    distance_text = (
+        "all distances"
+        if universe == "CONTROL · all confirmed swings"
+        or max_confirmation_move_pct is None
+        else f"pivot→confirmation ≤ {float(max_confirmation_move_pct):.2f}%"
+    )
+    st.caption(
+        f"Signals in selected matrix universe: {len(source)} · "
+        f"{distance_text} · fees {float(round_trip_fee_pct):.3f}% round trip."
+    )
+    st.dataframe(
+        matrix,
+        use_container_width=True,
+    )
+
+    stacked = (
+        matrix
+        .stack(dropna=True)
+        .rename("Value")
+        .reset_index()
+        .rename(columns={"level_1": "SL"})
+    )
+    if not stacked.empty and metric != "N scored":
+        top = stacked.sort_values("Value", ascending=False).head(10)
+        with st.expander("Top 10 matrix cells", expanded=False):
+            st.dataframe(top, use_container_width=True, hide_index=True)
+
+
+def render_volume_exhaustion_first_touch_replay(
+    filtered_study_df,
+    control_study_df,
+    max_confirmation_move_pct,
+):
+    st.markdown("#### First-touch replay from confirmation")
+    st.caption(
+        "Chronological 1m replay from the first actionable confirmation. "
+        "This research uses the available candle history independently from "
+        "the chart bars selector. TP/SL are checked candle by candle for 60m; "
+        "a missing 1m candle makes that forward window INCOMPLETE. If both are "
+        "touched inside the same 1m candle, the case is AMBIGUOUS and is "
+        "excluded from WR/PF instead of assuming an intrabar order."
+    )
+
+    round_trip_fee_pct = st.number_input(
+        "Round-trip fees %",
+        min_value=0.0,
+        value=0.08,
+        step=0.01,
+        format="%.3f",
+        key="volume_exhaustion_first_touch_fee_pct",
+        help=(
+            "Applied once to each scored replay result. Change this to "
+            "match the execution/fee assumption you want to test."
+        ),
+    )
+
+    if max_confirmation_move_pct is None:
+        filtered_label = "Selected distance universe"
+    else:
+        filtered_label = (
+            f"Filtered ≤ {float(max_confirmation_move_pct):.2f}%"
+        )
+
+    summaries = []
+    filtered_summary = build_volume_exhaustion_first_touch_summary(
+        filtered_study_df,
+        filtered_label,
+        round_trip_fee_pct,
+    )
+    if not filtered_summary.empty:
+        summaries.append(filtered_summary)
+
+    control_summary = build_volume_exhaustion_first_touch_summary(
+        control_study_df,
+        "CONTROL · all confirmed swings",
+        round_trip_fee_pct,
+    )
+    if not control_summary.empty:
+        summaries.append(control_summary)
+
+    if not summaries:
+        st.info(
+            "No complete +60m confirmations are available for first-touch replay yet."
+        )
+        return
+
+    comparison = pd.concat(summaries, ignore_index=True)
+    st.dataframe(
+        comparison,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    render_volume_exhaustion_first_touch_matrix(
+        filtered_study_df=filtered_study_df,
+        control_study_df=control_study_df,
+        round_trip_fee_pct=round_trip_fee_pct,
+        max_confirmation_move_pct=max_confirmation_move_pct,
+    )
+
+    signal_breakdown = (
+        build_volume_exhaustion_first_touch_breakdown(
+            filtered_study_df,
+            round_trip_fee_pct,
+            breakdown="signal",
+        )
+    )
+    if not signal_breakdown.empty:
+        with st.expander(
+            "Filtered replay by LONG / SHORT",
+            expanded=False,
+        ):
+            st.dataframe(
+                signal_breakdown,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    distance_breakdown = (
+        build_volume_exhaustion_first_touch_breakdown(
+            filtered_study_df,
+            round_trip_fee_pct,
+            breakdown="distance",
+        )
+    )
+    if not distance_breakdown.empty:
+        with st.expander(
+            "Filtered replay by pivot → confirmation distance",
+            expanded=False,
+        ):
+            st.dataframe(
+                distance_breakdown,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.caption(
+        "The control uses the same symbols, candle window, swing timeframes, "
+        "detectors and prominence setting, but without the pivot → confirmation "
+        "distance filter. Net metrics subtract the fee assumption above."
+    )
+
+def render_volume_exhaustion_confirmation_bucket_study(
+    study_df,
+    candle_limit,
+    scope_label,
+    max_confirmation_move_pct,
+):
+    st.markdown("#### Pivot → confirmation buckets")
+
+    if study_df is None or study_df.empty:
+        st.info(
+            "No confirmed swings are available for the "
+            "selected study scope and candle window."
+        )
+        return
+
+    bucket_df = (
+        build_volume_exhaustion_confirmation_bucket_summary(
+            study_df
+        )
+    )
+
+    if bucket_df.empty:
+        st.info("No distance buckets could be calculated.")
+        return
+
+    symbol_count = (
+        study_df["symbol"].nunique()
+        if "symbol" in study_df.columns
+        else 1
+    )
+    complete_30 = (
+        study_df["mfe_30m_pct"].notna().sum()
+        if "mfe_30m_pct" in study_df.columns
+        else 0
+    )
+
+    if max_confirmation_move_pct is None:
+        distance_scope_text = "all pivot → confirmation distances"
+    else:
+        distance_scope_text = (
+            "pivot → confirmation "
+            f"≤ {float(max_confirmation_move_pct):.2f}%"
+        )
+
+    st.caption(
+        f"Scope: {scope_label} · "
+        f"up to {int(candle_limit)} available 1m candles per symbol · "
+        f"{distance_scope_text}."
+    )
+
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Symbols analyzed", int(symbol_count))
+    metric_2.metric("Confirmations", len(study_df))
+    metric_3.metric("Complete +30m", int(complete_30))
+    metric_4.metric(
+        "Median distance",
+        (
+            f"{study_df['pivot_to_confirmation_pct'].median():.3f}%"
+        ),
+    )
+
+    st.dataframe(
+        bucket_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander(
+        f"Bucket study confirmations ({len(study_df)})",
+        expanded=False,
+    ):
+        detail_columns = [
+            "symbol",
+            "timeframe",
+            "detector",
+            "signal",
+            "pivot_time",
+            "confirmation_available",
+            "pivot_to_confirmation_pct",
+            "prominence_pct",
+            "mfe_5m_pct",
+            "mae_5m_pct",
+            "mfe_15m_pct",
+            "mae_15m_pct",
+            "mfe_30m_pct",
+            "mae_30m_pct",
+            "mfe_60m_pct",
+            "mae_60m_pct",
+        ]
+        detail = study_df[
+            [
+                column
+                for column in detail_columns
+                if column in study_df.columns
+            ]
+        ].copy()
+
+        numeric_detail_columns = [
+            column
+            for column in detail.columns
+            if column.endswith("_pct")
+        ]
+        if numeric_detail_columns:
+            detail[numeric_detail_columns] = (
+                detail[numeric_detail_columns].round(6)
+            )
+
+        st.dataframe(
+            detail,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def render_volume_exhaustion_confirmation_edge_study(
+    study_df,
+    candle_limit,
+    max_confirmation_move_pct,
+):
+    st.markdown("#### Pivot → confirmation edge study")
+
+    if study_df is None or study_df.empty:
+        st.info(
+            "No confirmed swings inside the selected candle window "
+            "match the current pivot → confirmation distance."
+        )
+        return
+
+    st.caption(
+        "Forward-safe research from the confirmation close. "
+        f"Window: last {int(candle_limit)} 1m candles · "
+        "distance filter: "
+        f"≤ {float(max_confirmation_move_pct):.2f}% · "
+        "MFE/MAE use only complete future horizons."
+    )
+
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Matching confirmations", len(study_df))
+    metric_2.metric(
+        "Median distance",
+        f"{study_df['pivot_to_confirmation_pct'].median():.3f}%",
+    )
+
+    complete_30 = study_df["mfe_30m_pct"].notna().sum()
+    metric_3.metric("Complete +30m", int(complete_30))
+
+    if complete_30:
+        median_mfe_30 = study_df["mfe_30m_pct"].median()
+        median_mae_30 = study_df["mae_30m_pct"].median()
+        metric_4.metric(
+            "Median MFE / MAE +30m",
+            f"{median_mfe_30:.3f}% / {median_mae_30:.3f}%",
+        )
+    else:
+        metric_4.metric("Median MFE / MAE +30m", "—")
+
+    summary_rows = []
+    group_columns = ["timeframe", "detector", "signal"]
+
+    for group_key, group in study_df.groupby(
+        group_columns,
+        dropna=False,
+        observed=True,
+    ):
+        timeframe, detector, signal = group_key
+        summary_row = {
+            "Timeframe": timeframe,
+            "Detector": detector,
+            "Signal": signal,
+            "N": len(group),
+            "Distance med %": group[
+                "pivot_to_confirmation_pct"
+            ].median(),
+        }
+
+        for horizon in [5, 15, 30, 60]:
+            mfe_col = f"mfe_{horizon}m_pct"
+            mae_col = f"mae_{horizon}m_pct"
+            valid = group[mfe_col].notna()
+            summary_row[f"N +{horizon}m"] = int(valid.sum())
+            summary_row[f"MFE +{horizon}m med %"] = (
+                group.loc[valid, mfe_col].median()
+                if valid.any()
+                else np.nan
+            )
+            summary_row[f"MAE +{horizon}m med %"] = (
+                group.loc[valid, mae_col].median()
+                if valid.any()
+                else np.nan
+            )
+
+        summary_rows.append(summary_row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    numeric_summary_cols = [
+        column
+        for column in summary_df.columns
+        if column.endswith("%")
+    ]
+    summary_df[numeric_summary_cols] = (
+        summary_df[numeric_summary_cols].round(4)
+    )
+
+    st.dataframe(
+        summary_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander(
+        f"Matching confirmations ({len(study_df)})",
+        expanded=False,
+    ):
+        detail_columns = [
+            "timeframe",
+            "detector",
+            "signal",
+            "pivot_time",
+            "confirmation_available",
+            "pivot_price",
+            "entry_price",
+            "pivot_to_confirmation_pct",
+            "prominence_pct",
+            "mfe_5m_pct",
+            "mae_5m_pct",
+            "mfe_15m_pct",
+            "mae_15m_pct",
+            "mfe_30m_pct",
+            "mae_30m_pct",
+            "mfe_60m_pct",
+            "mae_60m_pct",
+        ]
+        detail = study_df[
+            [c for c in detail_columns if c in study_df.columns]
+        ].copy()
+
+        numeric_detail_cols = [
+            c
+            for c in detail.columns
+            if (
+                c.endswith("_pct")
+                or c in {"pivot_price", "entry_price"}
+            )
+        ]
+        detail[numeric_detail_cols] = (
+            detail[numeric_detail_cols].round(6)
+        )
+
+        st.dataframe(
+            detail,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+def build_volume_exhaustion_chart(
+    candles,
+    event_row,
+    swing_points_by_timeframe=None,
+    swing_candles_by_timeframe=None,
+    max_confirmation_move_pct=None,
+):
+    candles = candles.copy()
+
+    if candles.empty:
+        return go.Figure()
+
+    candles["timestamp"] = pd.to_numeric(
+        candles["timestamp"],
+        errors="coerce",
+    )
+
+    for column in ["open", "high", "low", "close"]:
+        candles[column] = pd.to_numeric(
+            candles[column],
+            errors="coerce",
+        )
+
+    candles["chart_time"] = pd.to_datetime(
+        candles["timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+
+    candles = (
+        candles
+        .dropna(
+            subset=[
+                "timestamp",
+                "chart_time",
+                "open",
+                "high",
+                "low",
+                "close",
+            ]
+        )
+        .sort_values("chart_time")
+        .reset_index(drop=True)
+    )
+
+    if candles.empty:
+        return go.Figure()
+
+    visible_start_ms = int(candles["timestamp"].min())
+    visible_end_ms = int(candles["timestamp"].max())
+
+    visible_start_time = candles["chart_time"].iloc[0]
+    visible_end_time = candles["chart_time"].iloc[-1]
+
+    # Give the last 1m candle a small amount of visual breathing room
+    # without allowing overlays to redefine the chart window.
+    visible_end_with_padding = (
+        visible_end_time
+        + pd.Timedelta(minutes=1)
+    )
+
+    fig = go.Figure()
+
+    # Candles always define the chart itself.
+    fig.add_trace(
+        go.Candlestick(
+            x=candles["chart_time"],
+            open=candles["open"],
+            high=candles["high"],
+            low=candles["low"],
+            close=candles["close"],
+            name="1m",
+        )
+    )
+
+    # Swings are overlays only. A HTF detector can use a long history,
+    # but only pivots inside the currently visible 1m window are drawn.
+    if swing_points_by_timeframe:
+        for swing_timeframe, swing_points in (
+            swing_points_by_timeframe.items()
+        ):
+            visible_swing_points = [
+                point
+                for point in swing_points
+                if (
+                    point.pivot_timestamp is not None
+                    and visible_start_ms
+                    <= int(point.pivot_timestamp)
+                    <= visible_end_ms
+                )
+            ]
+
+            timeframe_candles = None
+            if swing_candles_by_timeframe:
+                timeframe_candles = (
+                    swing_candles_by_timeframe.get(
+                        swing_timeframe
+                    )
+                )
+
+            swing_confirmation_info = {}
+            filtered_swing_points = []
+
+            for point in visible_swing_points:
+                confirmation_info = (
+                    get_volume_exhaustion_swing_confirmation_info(
+                        point=point,
+                        timeframe_candles=timeframe_candles,
+                        swing_timeframe=swing_timeframe,
+                    )
+                )
+
+                swing_confirmation_info[id(point)] = (
+                    confirmation_info
+                )
+
+                if max_confirmation_move_pct is None:
+                    filtered_swing_points.append(point)
+                    continue
+
+                if confirmation_info is None:
+                    continue
+
+                if (
+                    confirmation_info["move_pct"]
+                    <= float(max_confirmation_move_pct)
+                ):
+                    filtered_swing_points.append(point)
+
+            visible_swing_points = filtered_swing_points
+
+            swing_highs = [
+                point
+                for point in visible_swing_points
+                if point.side == "HIGH"
+            ]
+
+            swing_lows = [
+                point
+                for point in visible_swing_points
+                if point.side == "LOW"
+            ]
+
+            if swing_highs:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[
+                            pd.to_datetime(
+                                point.pivot_timestamp,
+                                unit="ms",
+                                utc=True,
+                            ).tz_convert(TZ)
+                            for point in swing_highs
+                        ],
+                        y=[
+                            point.price
+                            for point in swing_highs
+                        ],
+                        mode="markers",
+                        marker={
+                            "size": 10,
+                            "symbol": "triangle-down",
+                        },
+                        name=f"Swing high {swing_timeframe}",
+                        customdata=[
+                            [
+                                point.confirmed_timestamp,
+                                point.prominence_pct,
+                                (
+                                    swing_confirmation_info.get(
+                                        id(point)
+                                    ) or {}
+                                ).get("move_pct"),
+                            ]
+                            for point in swing_highs
+                        ],
+                        hovertemplate=(
+                            f"<b>Swing high {swing_timeframe}</b><br>"
+                            "Pivot: %{x}<br>"
+                            "Price: %{y:.8f}<br>"
+                            "Confirmed ms: %{customdata[0]}<br>"
+                            "Prominence: %{customdata[1]:.4f}%<br>"
+                            "Pivot → confirmation: "
+                            "%{customdata[2]:.4f}%"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+            if swing_lows:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[
+                            pd.to_datetime(
+                                point.pivot_timestamp,
+                                unit="ms",
+                                utc=True,
+                            ).tz_convert(TZ)
+                            for point in swing_lows
+                        ],
+                        y=[
+                            point.price
+                            for point in swing_lows
+                        ],
+                        mode="markers",
+                        marker={
+                            "size": 10,
+                            "symbol": "triangle-up",
+                        },
+                        name=f"Swing low {swing_timeframe}",
+                        customdata=[
+                            [
+                                point.confirmed_timestamp,
+                                point.prominence_pct,
+                                (
+                                    swing_confirmation_info.get(
+                                        id(point)
+                                    ) or {}
+                                ).get("move_pct"),
+                            ]
+                            for point in swing_lows
+                        ],
+                        hovertemplate=(
+                            f"<b>Swing low {swing_timeframe}</b><br>"
+                            "Pivot: %{x}<br>"
+                            "Price: %{y:.8f}<br>"
+                            "Confirmed ms: %{customdata[0]}<br>"
+                            "Prominence: %{customdata[1]:.4f}%<br>"
+                            "Pivot → confirmation: "
+                            "%{customdata[2]:.4f}%"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+            confirmation_points = []
+            for point in visible_swing_points:
+                info = swing_confirmation_info.get(id(point))
+                if info is None:
+                    continue
+
+                actionable_ts = int(info["actionable_timestamp"])
+                if not (
+                    visible_start_ms
+                    <= actionable_ts
+                    <= visible_end_ms + 60_000
+                ):
+                    continue
+
+                confirmation_points.append((point, info))
+
+            if confirmation_points:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[
+                            pd.to_datetime(
+                                info["actionable_timestamp"],
+                                unit="ms",
+                                utc=True,
+                            ).tz_convert(TZ)
+                            for _, info in confirmation_points
+                        ],
+                        y=[
+                            info["confirmation_close"]
+                            for _, info in confirmation_points
+                        ],
+                        mode="markers",
+                        marker={
+                            "size": 7,
+                            "symbol": "circle-open",
+                        },
+                        name=(
+                            f"Confirmation {swing_timeframe}"
+                        ),
+                        customdata=[
+                            [
+                                point.side,
+                                info["move_pct"],
+                                point.price,
+                            ]
+                            for point, info in confirmation_points
+                        ],
+                        hovertemplate=(
+                            f"<b>{swing_timeframe} confirmation</b><br>"
+                            "Available: %{x}<br>"
+                            "Confirmation close: %{y:.8f}<br>"
+                            "Side: %{customdata[0]}<br>"
+                            "Pivot price: %{customdata[2]:.8f}<br>"
+                            "Pivot → confirmation: "
+                            "%{customdata[1]:.4f}%"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+    event_timestamp = event_row.get(
+        "candle_open_timestamp"
+    )
+
+    if pd.notna(event_timestamp):
+        event_timestamp = int(event_timestamp)
+
+        # An old stored event must not stretch/compress the live chart.
+        # Only draw it when it belongs to the current visible candle window.
+        event_is_visible = (
+            visible_start_ms
+            <= event_timestamp
+            <= visible_end_ms
+        )
+
+        if event_is_visible:
+            event_time = pd.to_datetime(
+                event_timestamp,
+                unit="ms",
+                utc=True,
+            ).tz_convert(TZ)
+
+            event_price = event_row.get("close")
+            potential_side = str(
+                event_row.get(
+                    "potential_side",
+                    "NEUTRAL",
+                )
+            )
+
+            fig.add_vline(
+                x=event_time.timestamp() * 1000,
+                line_dash="dash",
+                line_width=1,
+                annotation_text=(
+                    f"{potential_side} candidate"
+                ),
+                annotation_position="top",
+            )
+
+            if pd.notna(event_price):
+                marker_symbol = (
+                    "triangle-up"
+                    if potential_side == "LONG"
+                    else "triangle-down"
+                    if potential_side == "SHORT"
+                    else "circle"
+                )
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=[event_time],
+                        y=[float(event_price)],
+                        mode="markers+text",
+                        text=[potential_side],
+                        textposition="top center",
+                        marker={
+                            "size": 14,
+                            "symbol": marker_symbol,
+                        },
+                        name="Exhaustion event",
+                        hovertemplate=(
+                            "<b>%{text} candidate</b><br>"
+                            "Time: %{x}<br>"
+                            "Close: %{y:.8f}"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+    fig.update_layout(
+        height=620,
+        margin={
+            "l": 10,
+            "r": 10,
+            "t": 45,
+            "b": 10,
+        },
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        title=(
+            f"{event_row.get('symbol', '')} · "
+            "1m live development"
+        ),
+    )
+
+    # Critical: the visible X range is owned exclusively by the 1m candles.
+    # Neither old events nor HTF swing history can expand it.
+    fig.update_xaxes(
+        range=[
+            visible_start_time,
+            visible_end_with_padding,
+        ],
+        autorange=False,
+    )
+
+    return fig
+
+
+if selected_section == "volume_exhaustion":
+    st.markdown("## ⚡ Volume Exhaustion")
+    st.caption(
+        "Research-only inspector. LONG/SHORT are potential "
+        "exhaustion directions, not trading signals."
+    )
+
+    @st.fragment(run_every="5s")
+    def render_volume_exhaustion_live():
+        events = load_volume_exhaustion_events()
+
+        if events.empty:
+            st.info(
+                "No volume exhaustion events have been "
+                "persisted yet."
+            )
+            st.caption(
+                f"Expected file: "
+                f"{VOLUME_EXHAUSTION_EVENTS_FILE}"
+            )
+            return
+
+        valid_events = events[
+            events["potential_side"].isin(
+                ["LONG", "SHORT"]
+            )
+        ].copy()
+
+        if valid_events.empty:
+            st.info(
+                "Events exist, but none can currently be "
+                "classified as potential LONG/SHORT."
+            )
+            return
+
+        long_events = valid_events[
+            valid_events["potential_side"].eq("LONG")
+        ]
+        short_events = valid_events[
+            valid_events["potential_side"].eq("SHORT")
+        ]
+
+        summary_1, summary_2, summary_3, summary_4 = (
+            st.columns(4)
+        )
+
+        summary_1.metric(
+            "Events",
+            len(valid_events),
+        )
+        summary_2.metric(
+            "Potential LONG",
+            len(long_events),
+        )
+        summary_3.metric(
+            "Potential SHORT",
+            len(short_events),
+        )
+        summary_4.metric(
+            "Symbols",
+            valid_events["symbol"].nunique(),
+        )
+
+        control_1, control_2, control_3 = st.columns(
+            [1, 1.4, 2.6]
+        )
+
+        with control_1:
+            selected_side = st.selectbox(
+                "Side",
+                ["ALL", "LONG", "SHORT"],
+                key="volume_exhaustion_side",
+            )
+
+        side_events = valid_events.copy()
+
+        if selected_side != "ALL":
+            side_events = side_events[
+                side_events["potential_side"].eq(
+                    selected_side
+                )
+            ].copy()
+
+        symbols = sorted(
+            side_events["symbol"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+
+        if not symbols:
+            st.info(
+                "No symbols match the selected side."
+            )
+            return
+
+        with control_2:
+            selected_symbol = st.selectbox(
+                "Symbol",
+                symbols,
+                key="volume_exhaustion_symbol",
+            )
+
+        symbol_events = side_events[
+            side_events["symbol"].eq(
+                selected_symbol
+            )
+        ].copy()
+
+        if "event_time_utc" in symbol_events.columns:
+            symbol_events = symbol_events.sort_values(
+                "event_time_utc",
+                ascending=False,
+            )
+
+        event_options = []
+        event_lookup = {}
+
+        for index, row in symbol_events.iterrows():
+            local_time = row.get("event_time_local")
+
+            if pd.notna(local_time):
+                time_label = local_time.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            else:
+                time_label = str(
+                    row.get(
+                        "candle_open_timestamp",
+                        index,
+                    )
+                )
+
+            label = (
+                f"{time_label} · "
+                f"{row.get('potential_side', '—')} · "
+                f"RSI {row.get('rsi_1m', float('nan')):.1f} · "
+                f"Vol {row.get('relative_volume', float('nan')):.2f}x"
+            )
+
+            event_options.append(label)
+            event_lookup[label] = index
+
+        with control_3:
+            selected_event_label = st.selectbox(
+                "Event",
+                event_options,
+                key="volume_exhaustion_event",
+            )
+
+        selected_event = symbol_events.loc[
+            event_lookup[selected_event_label]
+        ]
+
+        metric_1, metric_2, metric_3, metric_4 = (
+            st.columns(4)
+        )
+
+        metric_1.metric(
+            "Potential",
+            selected_event.get(
+                "potential_side",
+                "—",
+            ),
+        )
+        metric_2.metric(
+            "RSI 1m",
+            (
+                f"{float(selected_event['rsi_1m']):.1f}"
+                if pd.notna(
+                    selected_event.get("rsi_1m")
+                )
+                else "—"
+            ),
+        )
+        metric_3.metric(
+            "Relative volume",
+            (
+                f"{float(selected_event['relative_volume']):.2f}x"
+                if pd.notna(
+                    selected_event.get(
+                        "relative_volume"
+                    )
+                )
+                else "—"
+            ),
+        )
+        metric_4.metric(
+            "High-volume candles 5m",
+            (
+                int(
+                    selected_event[
+                        "high_volume_candles_5m"
+                    ]
+                )
+                if pd.notna(
+                    selected_event.get(
+                        "high_volume_candles_5m"
+                    )
+                )
+                else "—"
+            ),
+        )
+
+        metric_5, metric_6, metric_7, metric_8 = (
+            st.columns(4)
+        )
+
+        for column in [
+            "move_3m_pct",
+            "move_5m_pct",
+            "volume_3m_ratio",
+            "close_location",
+        ]:
+            if column not in selected_event.index:
+                selected_event[column] = np.nan
+
+        metric_5.metric(
+            "Move 3m",
+            (
+                f"{float(selected_event['move_3m_pct']):.3f}%"
+                if pd.notna(
+                    selected_event["move_3m_pct"]
+                )
+                else "—"
+            ),
+        )
+        metric_6.metric(
+            "Move 5m",
+            (
+                f"{float(selected_event['move_5m_pct']):.3f}%"
+                if pd.notna(
+                    selected_event["move_5m_pct"]
+                )
+                else "—"
+            ),
+        )
+        metric_7.metric(
+            "Volume 3m",
+            (
+                f"{float(selected_event['volume_3m_ratio']):.2f}x"
+                if pd.notna(
+                    selected_event["volume_3m_ratio"]
+                )
+                else "—"
+            ),
+        )
+        metric_8.metric(
+            "Close location",
+            (
+                f"{float(selected_event['close_location']):.2f}"
+                if pd.notna(
+                    selected_event["close_location"]
+                )
+                else "—"
+            ),
+        )
+
+        swing_control_1, swing_control_2 = (
+            st.columns([1.2, 2.2])
+        )
+
+        with swing_control_1:
+            show_swings = st.checkbox(
+                "Show swings",
+                value=True,
+                key="volume_exhaustion_show_swings",
+            )
+
+        with swing_control_2:
+            min_swing_prominence_pct = st.number_input(
+                "Min swing prominence %",
+                min_value=0.0,
+                value=0.0,
+                step=0.05,
+                format="%.2f",
+                key="volume_exhaustion_swing_prominence",
+            )
+
+        swing_timeframes = st.multiselect(
+            "Swing timeframes",
+            options=["1m", "5m", "15m", "30m", "1h"],
+            default=["1m", "5m", "15m"],
+            key="volume_exhaustion_swing_timeframes",
+        )
+
+        default_swing_detectors = {
+            "1m": "5x5",
+            "5m": "5x5",
+            "15m": "3x3",
+            "30m": "3x3",
+            "1h": "2x2",
+        }
+
+        swing_detector_windows = {}
+
+        if show_swings and swing_timeframes:
+            st.caption("Swing detector by timeframe")
+
+            detector_columns = st.columns(
+                len(swing_timeframes)
+            )
+
+            for detector_column, swing_timeframe in zip(
+                detector_columns,
+                swing_timeframes,
+            ):
+                detector_options = [
+                    "2x2",
+                    "3x3",
+                    "5x5",
+                ]
+                default_detector = (
+                    default_swing_detectors.get(
+                        swing_timeframe,
+                        "5x5",
+                    )
+                )
+
+                with detector_column:
+                    swing_detector_windows[
+                        swing_timeframe
+                    ] = st.selectbox(
+                        f"{swing_timeframe} detector",
+                        detector_options,
+                        index=detector_options.index(
+                            default_detector
+                        ),
+                        key=(
+                            "volume_exhaustion_"
+                            f"swing_window_{swing_timeframe}"
+                        ),
+                    )
+
+        confirmation_filter_1, confirmation_filter_2 = (
+            st.columns([1.5, 2.0])
+        )
+
+        with confirmation_filter_1:
+            filter_by_confirmation_move = st.checkbox(
+                "Filter by pivot → confirmation move",
+                value=False,
+                key=(
+                    "volume_exhaustion_"
+                    "filter_confirmation_move"
+                ),
+            )
+
+        with confirmation_filter_2:
+            max_confirmation_move_pct = st.number_input(
+                "Max pivot → confirmation move %",
+                min_value=0.0,
+                value=0.30,
+                step=0.05,
+                format="%.2f",
+                disabled=not filter_by_confirmation_move,
+                key=(
+                    "volume_exhaustion_"
+                    "max_confirmation_move_pct"
+                ),
+            )
+
+        candle_limit = st.slider(
+            "Chart 1m candles",
+            min_value=60,
+            max_value=5000,
+            value=180,
+            step=20,
+            key="volume_exhaustion_candle_limit",
+        )
+
+        candles = (
+            geometry_scanner_data_service
+            .get_closed_candles(
+                symbol=selected_symbol,
+                timeframe="1m",
+                limit=int(candle_limit),
+            )
+        )
+
+        if candles.empty:
+            st.error(
+                "Could not load live 1m candles for "
+                f"{selected_symbol}."
+            )
+            st.code(
+                str(
+                    geometry_scanner_data_service
+                    .last_error
+                )
+            )
+            return
+
+        event_ts = selected_event.get(
+            "candle_open_timestamp"
+        )
+
+        if pd.notna(event_ts):
+            event_ts = int(event_ts)
+            oldest_ts = int(
+                pd.to_numeric(
+                    candles["timestamp"],
+                    errors="coerce",
+                ).dropna().min()
+            )
+
+            if event_ts < oldest_ts:
+                st.warning(
+                    "The selected event is older than the "
+                    "current Redis candle window. The event "
+                    "remains stored, but its original candles "
+                    "are no longer in this live buffer."
+                )
+
+        swing_points_by_timeframe = {}
+        swing_candles_by_timeframe = {}
+        swing_structure_at_event = {}
+
+        if show_swings:
+            for swing_timeframe in swing_timeframes:
+                swing_window = (
+                    swing_detector_windows.get(
+                        swing_timeframe,
+                        default_swing_detectors.get(
+                            swing_timeframe,
+                            "5x5",
+                        ),
+                    )
+                )
+
+                swing_bars = int(
+                    swing_window.split("x")[0]
+                )
+
+                swing_detector = SwingDetector(
+                    left_bars=swing_bars,
+                    right_bars=swing_bars,
+                    min_prominence_pct=(
+                        float(min_swing_prominence_pct)
+                    ),
+                )
+
+                if swing_timeframe == "1m":
+                    swing_tf_candles_df = candles
+                else:
+                    swing_tf_candles_df = (
+                        geometry_scanner_data_service
+                        .get_closed_candles(
+                            symbol=selected_symbol,
+                            timeframe=swing_timeframe,
+                            limit=400,
+                        )
+                    )
+
+                if swing_tf_candles_df.empty:
+                    continue
+
+                swing_candles_by_timeframe[
+                    swing_timeframe
+                ] = swing_tf_candles_df.copy()
+
+                swing_tf_candles = (
+                    swing_tf_candles_df.to_dict(
+                        orient="records"
+                    )
+                )
+
+                swing_points_by_timeframe[
+                    swing_timeframe
+                ] = swing_detector.detect_all(
+                    swing_tf_candles
+                )
+
+                if pd.notna(event_ts):
+                    swing_structure_at_event[
+                        swing_timeframe
+                    ] = {
+                        "high": (
+                            swing_detector
+                            .last_confirmed_high(
+                                swing_tf_candles,
+                                as_of_timestamp=int(event_ts),
+                            )
+                        ),
+                        "low": (
+                            swing_detector
+                            .last_confirmed_low(
+                                swing_tf_candles,
+                                as_of_timestamp=int(event_ts),
+                            )
+                        ),
+                    }
+
+        figure = build_volume_exhaustion_chart(
+            candles=candles,
+            event_row=selected_event,
+            swing_points_by_timeframe=swing_points_by_timeframe,
+            swing_candles_by_timeframe=(
+                swing_candles_by_timeframe
+            ),
+            max_confirmation_move_pct=(
+                float(max_confirmation_move_pct)
+                if filter_by_confirmation_move
+                else None
+            ),
+        )
+
+        st.plotly_chart(
+            figure,
+            use_container_width=True,
+            key="volume_exhaustion_live_chart",
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+        )
+
+
+        # Analyze every confirmed swing visible in the same candle window
+        # using the exact pivot → confirmation distance selected above.
+        confirmation_edge_study_df = (
+            build_volume_exhaustion_confirmation_edge_study(
+                candles=candles,
+                swing_points_by_timeframe=swing_points_by_timeframe,
+                swing_candles_by_timeframe=(
+                    swing_candles_by_timeframe
+                ),
+                swing_detector_windows=swing_detector_windows,
+                max_confirmation_move_pct=(
+                    float(max_confirmation_move_pct)
+                    if filter_by_confirmation_move
+                    else float(max_confirmation_move_pct)
+                ),
+            )
+        )
+
+        render_volume_exhaustion_confirmation_edge_study(
+            study_df=confirmation_edge_study_df,
+            candle_limit=candle_limit,
+            max_confirmation_move_pct=max_confirmation_move_pct,
+        )
+
+        st.markdown("---")
+
+        bucket_max_confirmation_move_pct = (
+            float(max_confirmation_move_pct)
+            if filter_by_confirmation_move
+            else None
+        )
+
+        bucket_scope = st.selectbox(
+            "Bucket study scope",
+            ["Selected symbol", "All symbols"],
+            key="volume_exhaustion_bucket_scope",
+            help=(
+                "Research uses all 1m candles currently available in Redis. "
+                "It is independent from the chart candle slider above."
+            ),
+        )
+
+        research_symbols = (
+            (str(selected_symbol),)
+            if bucket_scope == "Selected symbol"
+            else tuple(
+                sorted(
+                    valid_events["symbol"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+            )
+        )
+
+        st.caption(
+            "Research window: automatic · uses every 1m candle currently "
+            "available (up to "
+            f"{VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT:,} requested per symbol). "
+            "The chart candle selector does not limit First-Touch, MFE/MAE or "
+            "the TP × SL matrix. Forward windows with missing 1m candles are "
+            "marked INCOMPLETE and excluded."
+        )
+
+        # Build the expensive replay universe ONCE, without the distance
+        # filter. The filtered universe is then just an in-memory slice.
+        with st.spinner(
+            "Building First-Touch research from available candle history..."
+        ):
+            control_study_df = (
+                build_volume_exhaustion_confirmation_study_all_symbols(
+                    symbols=research_symbols,
+                    candle_limit=(
+                        VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+                    ),
+                    swing_timeframes=tuple(swing_timeframes),
+                    swing_detector_items=tuple(
+                        sorted(swing_detector_windows.items())
+                    ),
+                    min_swing_prominence_pct=float(
+                        min_swing_prominence_pct
+                    ),
+                    max_confirmation_move_pct=None,
+                )
+            )
+
+        bucket_study_df = (
+            filter_volume_exhaustion_confirmation_study_by_move(
+                control_study_df,
+                bucket_max_confirmation_move_pct,
+            )
+        )
+
+        bucket_scope_label = (
+            str(selected_symbol)
+            if bucket_scope == "Selected symbol"
+            else f"All symbols ({len(research_symbols)} available)"
+        )
+
+        render_volume_exhaustion_confirmation_bucket_study(
+            study_df=bucket_study_df,
+            candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+            scope_label=bucket_scope_label,
+            max_confirmation_move_pct=(
+                bucket_max_confirmation_move_pct
+            ),
+        )
+
+        render_volume_exhaustion_first_touch_replay(
+            filtered_study_df=bucket_study_df,
+            control_study_df=control_study_df,
+            max_confirmation_move_pct=(
+                bucket_max_confirmation_move_pct
+            ),
+        )
+
+        latest_candle_ts = pd.to_datetime(
+            pd.to_numeric(
+                candles["timestamp"],
+                errors="coerce",
+            ).dropna().max(),
+            unit="ms",
+            utc=True,
+        ).tz_convert(TZ)
+
+        st.caption(
+            "Auto-refresh: 5s · chart uses closed 1m "
+            "candles from Redis · latest candle: "
+            f"{latest_candle_ts.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+        if show_swings:
+            st.markdown("### Structure at event")
+
+            event_price = selected_event.get("close")
+            structure_rows = []
+
+            timeframe_ms = {
+                "1m": 60_000,
+                "5m": 5 * 60_000,
+                "15m": 15 * 60_000,
+                "30m": 30 * 60_000,
+                "1h": 60 * 60_000,
+            }
+
+            if (
+                pd.notna(event_ts)
+                and pd.notna(event_price)
+            ):
+                event_price_float = float(event_price)
+
+                for swing_timeframe in swing_timeframes:
+                    structure = (
+                        swing_structure_at_event.get(
+                            swing_timeframe,
+                            {},
+                        )
+                    )
+
+                    for side_label, side_key in (
+                        ("LOW", "low"),
+                        ("HIGH", "high"),
+                    ):
+                        swing_point = structure.get(side_key)
+
+                        if swing_point is None:
+                            continue
+
+                        swing_price = float(swing_point.price)
+                        distance_pct = (
+                            (
+                                event_price_float
+                                - swing_price
+                            )
+                            / swing_price
+                            * 100.0
+                        )
+
+                        bar_ms = timeframe_ms.get(
+                            swing_timeframe
+                        )
+                        age_bars = None
+
+                        if bar_ms:
+                            age_bars = max(
+                                0,
+                                int(
+                                    (
+                                        int(event_ts)
+                                        - int(
+                                            swing_point
+                                            .pivot_timestamp
+                                        )
+                                    )
+                                    // bar_ms
+                                ),
+                            )
+
+                        structure_rows.append({
+                            "timeframe": swing_timeframe,
+                            "side": side_label,
+                            "swing_price": swing_price,
+                            "distance_pct": distance_pct,
+                            "abs_distance_pct": abs(distance_pct),
+                            "age_bars": age_bars,
+                            "pivot_time": (
+                                pd.to_datetime(
+                                    int(
+                                        swing_point
+                                        .pivot_timestamp
+                                    ),
+                                    unit="ms",
+                                    utc=True,
+                                )
+                                .tz_convert(TZ)
+                                .strftime("%Y-%m-%d %H:%M")
+                            ),
+                            "confirmed_time": (
+                                pd.to_datetime(
+                                    int(
+                                        swing_point
+                                        .confirmed_timestamp
+                                    ),
+                                    unit="ms",
+                                    utc=True,
+                                )
+                                .tz_convert(TZ)
+                                .strftime("%Y-%m-%d %H:%M")
+                            ),
+                        })
+
+            if structure_rows:
+                structure_df = pd.DataFrame(structure_rows)
+
+                display_structure_df = structure_df[
+                    [
+                        "timeframe",
+                        "side",
+                        "swing_price",
+                        "distance_pct",
+                        "age_bars",
+                        "pivot_time",
+                        "confirmed_time",
+                    ]
+                ].copy()
+
+                display_structure_df[
+                    "swing_price"
+                ] = display_structure_df[
+                    "swing_price"
+                ].round(8)
+
+                display_structure_df[
+                    "distance_pct"
+                ] = display_structure_df[
+                    "distance_pct"
+                ].round(4)
+
+                st.dataframe(
+                    display_structure_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.caption(
+                    "Confluence is descriptive only. "
+                    "The threshold is adjustable for research "
+                    "and is not a trading filter."
+                )
+
+                confluence_threshold_pct = st.number_input(
+                    "Swing confluence distance %",
+                    min_value=0.0,
+                    value=0.20,
+                    step=0.05,
+                    format="%.2f",
+                    key=(
+                        "volume_exhaustion_"
+                        "swing_confluence_distance"
+                    ),
+                )
+
+                low_confluence = int(
+                    (
+                        structure_df["side"].eq("LOW")
+                        & structure_df[
+                            "abs_distance_pct"
+                        ].le(
+                            float(confluence_threshold_pct)
+                        )
+                    ).sum()
+                )
+
+                high_confluence = int(
+                    (
+                        structure_df["side"].eq("HIGH")
+                        & structure_df[
+                            "abs_distance_pct"
+                        ].le(
+                            float(confluence_threshold_pct)
+                        )
+                    ).sum()
+                )
+
+                conf_1, conf_2, conf_3 = st.columns(3)
+
+                conf_1.metric(
+                    "LOW confluence",
+                    low_confluence,
+                )
+                conf_2.metric(
+                    "HIGH confluence",
+                    high_confluence,
+                )
+                conf_3.metric(
+                    "Threshold",
+                    f"{float(confluence_threshold_pct):.2f}%",
+                )
+
+                selected_potential_side = str(
+                    selected_event.get(
+                        "potential_side",
+                        "NEUTRAL",
+                    )
+                )
+
+                if selected_potential_side == "LONG":
+                    st.caption(
+                        "LONG research context: "
+                        f"{low_confluence} selected timeframe(s) "
+                        "have a confirmed swing LOW within "
+                        f"{float(confluence_threshold_pct):.2f}% "
+                        "of the event price."
+                    )
+                elif selected_potential_side == "SHORT":
+                    st.caption(
+                        "SHORT research context: "
+                        f"{high_confluence} selected timeframe(s) "
+                        "have a confirmed swing HIGH within "
+                        f"{float(confluence_threshold_pct):.2f}% "
+                        "of the event price."
+                    )
+            else:
+                st.info(
+                    "No confirmed swing structure is available "
+                    "for the selected event and timeframes."
+                )
+
+            st.caption(
+                "Structure uses only swings confirmed at or "
+                "before the selected event timestamp."
+            )
+
+        table_columns = [
+            "event_time_local",
+            "symbol",
+            "potential_side",
+            "relative_volume",
+            "volume_3m_ratio",
+            "high_volume_candles_5m",
+            "move_3m_pct",
+            "move_5m_pct",
+            "rsi_1m",
+            "close_location",
+            "event_id",
+        ]
+
+        table_columns = [
+            column
+            for column in table_columns
+            if column in side_events.columns
+        ]
+
+        st.markdown("### Detected candidates")
+        st.dataframe(
+            side_events.sort_values(
+                "event_time_utc",
+                ascending=False,
+            )[table_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        render_volume_exhaustion_outcome_research(
+            events=events,
+        )
+
+    render_volume_exhaustion_live()
+
+
 if selected_section == "geometry_scanner":
     st.markdown("## 📐 Geometry Scanner")
 
@@ -11742,14 +15368,6 @@ if selected_section == "overview":
         table_df,
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "signal_atr_pct": st.column_config.NumberColumn(
-                "ATR %",
-                help="ATR porcentual al momento de la señal.",
-                format="%.4f%%",
-                width="small",
-            ),
-        },
         key="closed_trades_inspector_table",
         on_select="rerun",
         selection_mode="single-row",
@@ -17783,17 +21401,9 @@ def fetch_recent_klines(symbol, interval="15m", limit=25):
     except Exception:
         return pd.DataFrame()
     
-def render_mini_chart(
-    row,
-    timeframe,
-):
+def render_mini_chart(row):
     symbol = row.get("symbol")
-
-    df = fetch_recent_klines(
-        symbol,
-        timeframe,
-        40,
-    )
+    df = fetch_recent_klines(symbol, "15m", 25)
 
     if df.empty:
         st.warning(f"No chart data for {symbol}")
@@ -17883,17 +21493,9 @@ def render_mini_chart(
         config={"displayModeBar": False},
     )
     
-def render_mini_line_chart(
-    row,
-    timeframe,
-):
+def render_mini_line_chart(row):
     symbol = row.get("symbol")
-
-    df = fetch_recent_klines(
-        symbol,
-        timeframe,
-        40,
-    )
+    df = fetch_recent_klines(symbol, "15m", 40)
 
     if df.empty:
         st.warning(f"No chart data for {symbol}")
@@ -17980,10 +21582,7 @@ def render_mini_line_chart(
     )
 
     
-def render_pipeline_card(
-    row,
-    timeframe,
-):
+def render_pipeline_card(row):
     state = row.get("state", "N/A")
     symbol = row.get("symbol", "N/A")
     color = state_color(state)
@@ -18097,7 +21696,7 @@ def render_pipeline_card(
                 """,
                 unsafe_allow_html=True,
             )
-        render_mini_chart(row, timeframe)
+        render_mini_chart(row)
         
 def event_badge(event):
     colors = {
@@ -21897,7 +25496,7 @@ if selected_section == "compression_pipeline":
             st.markdown(f"### {state} ({len(state_df)})")
 
             for _, row in state_df.iterrows():
-                render_pipeline_card(row, trigger_tf)
+                render_pipeline_card(row)
 
         # ============================================
         # WATCH HISTORY (SOLO SI HAY UN SÍMBOLO)

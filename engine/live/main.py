@@ -10,6 +10,14 @@ from engine.live.journal.compression_fidelity_journal import (
     CompressionFidelityJournal,
 )
 
+from engine.live.research.volume_exhaustion_collector import (
+    VolumeExhaustionCollector,
+)
+
+from engine.live.research.volume_exhaustion_outcome_tracker import (
+    VolumeExhaustionOutcomeTracker,
+)
+
 from engine.replay.fidelity.history_fingerprint import (
     write_history_fingerprint,
 )
@@ -320,6 +328,25 @@ else:
         f"{MARKET_DATA_PROVIDER!r}. "
         "Expected 'local' or 'redis'."
     )
+    
+volume_exhaustion_collector = (
+    VolumeExhaustionCollector(
+        buffer=buffer,
+        timeframe="1m",
+        baseline_lookback=30,
+        min_relative_volume=2.0,
+        rsi_period=14,
+    )
+)
+
+volume_exhaustion_outcome_tracker = (
+    VolumeExhaustionOutcomeTracker(
+        buffer=buffer,
+        outcomes_path=(
+            "volume_exhaustion_outcomes.csv"
+        ),
+    )
+)
 
 signal_journal = SignalJournal(
     "live_signals_multi_asset.csv"
@@ -872,9 +899,92 @@ try:
             )
 
         for context_symbol, context_close_time in context_events:
+            context_close_time = int(
+                context_close_time
+            )
+
             pending_context_batches[
-                int(context_close_time)
+                context_close_time
             ].add(context_symbol)
+
+            # ==========================================
+            # VOLUME EXHAUSTION OUTCOMES
+            # ==========================================
+            #
+            # IMPORTANTE:
+            # Primero actualizamos eventos ANTERIORES
+            # con esta nueva vela.
+            #
+            # Después evaluamos si esta misma vela
+            # crea un evento NUEVO.
+            #
+            # De esta forma T0 nunca cuenta como T+1.
+            # ==========================================
+
+            context_candle = (
+                buffer.closed_candle_at(
+                    context_symbol,
+                    "1m",
+                    context_close_time,
+                )
+            )
+
+            if context_candle is not None:
+
+                completed_outcomes = (
+                    volume_exhaustion_outcome_tracker
+                    .on_candle(
+                        symbol=context_symbol,
+                        close_time=context_close_time,
+                        candle=context_candle,
+                    )
+                )
+
+                for outcome in completed_outcomes:
+                    print(
+                        "[VOLUME EXHAUSTION OUTCOME] "
+                        f"symbol={outcome['symbol']} "
+                        f"side={outcome['potential_side']} "
+                        f"r5={outcome['return_5m_pct']:.3f}% "
+                        f"mfe5={outcome['mfe_5m_pct']:.3f}% "
+                        f"mae5={outcome['mae_5m_pct']:.3f}% "
+                        f"r30={outcome['return_30m_pct']:.3f}% "
+                        f"mfe30={outcome['mfe_30m_pct']:.3f}% "
+                        f"mae30={outcome['mae_30m_pct']:.3f}%"
+                    )
+
+            # ==========================================
+            # DETECT NEW EVENT
+            # ==========================================
+
+            event = (
+                volume_exhaustion_collector.evaluate(
+                    symbol=context_symbol,
+                    close_time=context_close_time,
+                )
+            )
+
+            if event:
+
+                registered = (
+                    volume_exhaustion_outcome_tracker
+                    .register(event)
+                )
+
+                print(
+                    "[VOLUME EXHAUSTION CANDIDATE] "
+                    f"symbol={event['symbol']} "
+                    f"dir={event['candle_direction']} "
+                    f"vol={event['relative_volume']:.2f}x "
+                    f"vol3m={event['volume_3m_ratio']:.2f}x "
+                    f"hv5={event['high_volume_candles_5m']} "
+                    f"move3m={event['move_3m_pct']:.3f}% "
+                    f"move5m={event['move_5m_pct']:.3f}% "
+                    f"rsi={event['rsi_1m']:.1f} "
+                    f"closeLoc={event['close_location']:.2f} "
+                    f"eff3m={event['efficiency_3m']:.4f} "
+                    f"tracking={registered}"
+                )
             
         replay_context_symbols = []
 
