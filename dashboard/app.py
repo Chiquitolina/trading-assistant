@@ -11397,26 +11397,13 @@ if selected_section == "volume_exhaustion":
             ),
         )
 
-        retest_timeframe_options = [
-            str(value)
-            for value in swing_timeframes
-        ]
-        if not retest_timeframe_options:
-            retest_timeframe_options = ["15m"]
-        retest_default_tf = (
-            "15m"
-            if "15m" in retest_timeframe_options
-            else retest_timeframe_options[0]
-        )
-        retest_timeframe_filter = st.selectbox(
-            "Retest scanner timeframe",
-            retest_timeframe_options,
-            index=retest_timeframe_options.index(retest_default_tf),
-            key="confirmed_swing_retest_timeframe_filter",
-            help=(
-                "Only this swing timeframe is scanned in All symbols mode. "
-                "This avoids rebuilding unrelated 1m/5m/30m/1h swings."
-            ),
+        # Confirmed-swing retest research is intentionally fixed to 15m.
+        # This is the structural timeframe we want to study and it avoids
+        # spending CPU scanning unrelated 1m/5m/30m/1h swing sets.
+        retest_timeframe_filter = "15m"
+        st.caption(
+            "Retest scanner timeframe: 15m only. "
+            "The detector still follows the 15m detector setting above."
         )
         retest_recent_minutes = st.number_input(
             "Max age since retest (minutes)",
@@ -11711,11 +11698,16 @@ if selected_section == "volume_exhaustion":
                 )
             )
 
-        # Lightweight all-symbol retest scan: only one selected swing timeframe,
-        # no MFE/MAE calculation and no 81-cell First-Touch replay.
-        selected_retest_timeframes = (str(retest_timeframe_filter),)
+        # Lightweight all-symbol retest scan: 15m only, no MFE/MAE
+        # calculation and no 81-cell First-Touch replay.
+        selected_retest_timeframes = ("15m",)
+        retest_detector_windows = dict(swing_detector_windows)
+        retest_detector_windows.setdefault(
+            "15m",
+            default_swing_detectors.get("15m", "3x3"),
+        )
         with st.spinner(
-            f"Scanning {retest_timeframe_filter} confirmed swing retests "
+            f"Scanning 15m confirmed swing retests "
             f"across {len(retest_symbols)} symbol(s)..."
         ):
             confirmed_swing_retests_df = (
@@ -11723,7 +11715,7 @@ if selected_section == "volume_exhaustion":
                     symbols=retest_symbols,
                     swing_timeframes=selected_retest_timeframes,
                     swing_detector_items=tuple(
-                        sorted(swing_detector_windows.items())
+                        sorted(retest_detector_windows.items())
                     ),
                     min_swing_prominence_pct=float(
                         min_swing_prominence_pct
