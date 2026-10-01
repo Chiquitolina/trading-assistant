@@ -12819,6 +12819,195 @@ def render_confirmed_swing_reaction_geometry_mfe(view):
             f"{overall_net['TIME_EXIT %']:.1f}%",
         )
 
+    # ---------------------------------------------------------
+    # SAME-COHORT HORIZON COMPARISON
+    #
+    # This removes sample drift between 60m / 120m / 180m / ...
+    # comparisons. The cohort is fixed by the currently selected
+    # TIME_EXIT horizon; every shorter horizon is evaluated on those
+    # exact same REACTION events.
+    # ---------------------------------------------------------
+    def _has_complete_horizon(value, horizon):
+        if not isinstance(
+            value,
+            (list, tuple, set, np.ndarray),
+        ):
+            return False
+
+        try:
+            return int(horizon) in {
+                int(item)
+                for item in value
+            }
+        except (TypeError, ValueError):
+            return False
+
+    same_cohort = geometry.loc[
+        geometry.get(
+            "first_touch_complete_horizons",
+            pd.Series(
+                [[] for _ in range(len(geometry))],
+                index=geometry.index,
+                dtype=object,
+            ),
+        ).apply(
+            lambda value: _has_complete_horizon(
+                value,
+                net_horizon,
+            )
+        )
+    ].copy()
+
+    comparison_horizons = [
+        int(horizon)
+        for horizon in CONFIRMED_SWING_TIME_EXIT_HORIZONS
+        if int(horizon) <= int(net_horizon)
+    ]
+
+    if not same_cohort.empty and comparison_horizons:
+        st.markdown("##### Same-cohort TIME_EXIT comparison")
+        st.caption(
+            f"Cohort fixed at {net_horizon}m completeness. Every row below "
+            "uses the exact same underlying events within each group; only "
+            "the TIME_EXIT changes. This prevents 60m/120m/180m results from "
+            "looking different simply because older events have more future "
+            "data available."
+        )
+
+        cohort_groups = [
+            ("ALL REACTION", same_cohort),
+            (
+                "PENETRATION < 0%",
+                same_cohort.loc[
+                    same_cohort["penetration_pct"] < 0
+                ].copy(),
+            ),
+            (
+                "PENETRATION >= 0%",
+                same_cohort.loc[
+                    same_cohort["penetration_pct"] >= 0
+                ].copy(),
+            ),
+        ]
+
+        same_cohort_rows = []
+
+        for group_label, group_df in cohort_groups:
+            if group_df.empty:
+                continue
+
+            fixed_n = len(group_df)
+
+            for horizon in comparison_horizons:
+                stats = _confirmed_swing_net_stats(
+                    group_df,
+                    tp_pct=net_tp,
+                    sl_pct=net_sl,
+                    horizon_min=horizon,
+                    fee_per_side_pct=fee_per_side,
+                )
+
+                if stats is None:
+                    continue
+
+                same_cohort_rows.append({
+                    "Group": group_label,
+                    "Cohort max": f"{net_horizon}m",
+                    "TIME_EXIT": f"{horizon}m",
+                    "N": int(stats["N"]),
+                    "Fixed cohort N": int(fixed_n),
+                    "Win rate %": round(
+                        stats["Win rate %"],
+                        2,
+                    ),
+                    "Avg net %": round(
+                        stats["Avg net %"],
+                        4,
+                    ),
+                    "Median net %": round(
+                        stats["Median net %"],
+                        4,
+                    ),
+                    "Profit factor": (
+                        round(
+                            stats["Profit factor"],
+                            3,
+                        )
+                        if np.isfinite(
+                            stats["Profit factor"]
+                        )
+                        else np.inf
+                    ),
+                    "Total net %": round(
+                        stats["Total net %"],
+                        4,
+                    ),
+                    "TP %": round(
+                        stats["TP %"],
+                        2,
+                    ),
+                    "SL %": round(
+                        stats["SL %"],
+                        2,
+                    ),
+                    "Ambiguous→SL %": round(
+                        stats["Ambiguous→SL %"],
+                        2,
+                    ),
+                    "TIME_EXIT %": round(
+                        stats["TIME_EXIT %"],
+                        2,
+                    ),
+                })
+
+        if same_cohort_rows:
+            same_cohort_table = pd.DataFrame(
+                same_cohort_rows
+            )
+            st.dataframe(
+                same_cohort_table,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # Compact trend table focused on the two penetration regimes.
+            penetration_same = same_cohort_table.loc[
+                same_cohort_table["Group"].isin(
+                    [
+                        "PENETRATION < 0%",
+                        "PENETRATION >= 0%",
+                    ]
+                )
+            ].copy()
+
+            if not penetration_same.empty:
+                st.markdown(
+                    "###### Same-cohort penetration split"
+                )
+                st.caption(
+                    "This is the clean test of the current sweep/reclaim "
+                    "hypothesis: negative versus non-negative penetration "
+                    "on exactly the same events at every holding horizon."
+                )
+                st.dataframe(
+                    penetration_same[
+                        [
+                            "Group",
+                            "TIME_EXIT",
+                            "N",
+                            "Win rate %",
+                            "Avg net %",
+                            "Profit factor",
+                            "Total net %",
+                            "TP %",
+                            "SL %",
+                            "TIME_EXIT %",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
     def _net_bucket_table(
         bucket_column,
         ordered_labels,
