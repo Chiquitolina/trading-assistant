@@ -13008,6 +13008,292 @@ def render_confirmed_swing_reaction_geometry_mfe(view):
                     hide_index=True,
                 )
 
+
+    # ---------------------------------------------------------
+    # CHRONOLOGICAL SPLIT VALIDATION
+    #
+    # Candidate frozen from the current research hypothesis:
+    # REACTION + penetration >= 0%
+    # TP 1% / SL 1% / TIME_EXIT 120m
+    #
+    # This is deliberately a coarse, chronological stability check.
+    # It does NOT search for a better threshold inside each half.
+    # ---------------------------------------------------------
+    st.markdown("##### Chronological split validation")
+    st.caption(
+        "Frozen candidate: REACTION + penetration ≥ 0%, TP 1.00%, "
+        "SL 1.00%, TIME_EXIT 120m. Events are sorted by retest timestamp "
+        "and split into an EARLY half and a LATE half. No threshold is "
+        "re-optimized inside either half. Fees use the current Fee per side "
+        "control above."
+    )
+
+    chrono_candidate = geometry.loc[
+        pd.to_numeric(
+            geometry["penetration_pct"],
+            errors="coerce",
+        ).ge(0.0)
+    ].copy()
+
+    if (
+        not chrono_candidate.empty
+        and "retest_timestamp" in chrono_candidate.columns
+    ):
+        chrono_candidate["retest_timestamp"] = pd.to_numeric(
+            chrono_candidate["retest_timestamp"],
+            errors="coerce",
+        )
+        chrono_candidate = (
+            chrono_candidate
+            .dropna(subset=["retest_timestamp"])
+            .sort_values(
+                ["retest_timestamp", "symbol"],
+                ascending=[True, True],
+            )
+            .reset_index(drop=True)
+        )
+
+        # Keep only events with a complete, contiguous 120m path.
+        def _has_120m_complete(value):
+            if not isinstance(
+                value,
+                (list, tuple, set, np.ndarray),
+            ):
+                return False
+
+            try:
+                return 120 in {
+                    int(item)
+                    for item in value
+                }
+            except (TypeError, ValueError):
+                return False
+
+        chrono_candidate = chrono_candidate.loc[
+            chrono_candidate.get(
+                "first_touch_complete_horizons",
+                pd.Series(
+                    [[] for _ in range(len(chrono_candidate))],
+                    index=chrono_candidate.index,
+                    dtype=object,
+                ),
+            ).apply(_has_120m_complete)
+        ].copy().reset_index(drop=True)
+
+        if len(chrono_candidate) >= 2:
+            split_idx = len(chrono_candidate) // 2
+
+            early = chrono_candidate.iloc[:split_idx].copy()
+            late = chrono_candidate.iloc[split_idx:].copy()
+
+            chrono_groups = [
+                ("FULL", chrono_candidate),
+                ("EARLY 50%", early),
+                ("LATE 50%", late),
+            ]
+
+            chrono_rows = []
+
+            for group_name, group_df in chrono_groups:
+                if group_df.empty:
+                    continue
+
+                stats = _confirmed_swing_net_stats(
+                    group_df,
+                    tp_pct=1.00,
+                    sl_pct=1.00,
+                    horizon_min=120,
+                    fee_per_side_pct=fee_per_side,
+                )
+
+                if stats is None:
+                    continue
+
+                start_ts = int(
+                    pd.to_numeric(
+                        group_df["retest_timestamp"],
+                        errors="coerce",
+                    ).min()
+                )
+                end_ts = int(
+                    pd.to_numeric(
+                        group_df["retest_timestamp"],
+                        errors="coerce",
+                    ).max()
+                )
+
+                start_text = (
+                    pd.to_datetime(
+                        start_ts,
+                        unit="ms",
+                        utc=True,
+                    )
+                    .strftime("%Y-%m-%d %H:%M UTC")
+                )
+                end_text = (
+                    pd.to_datetime(
+                        end_ts,
+                        unit="ms",
+                        utc=True,
+                    )
+                    .strftime("%Y-%m-%d %H:%M UTC")
+                )
+
+                long_count = int(
+                    group_df.get(
+                        "signal",
+                        pd.Series("", index=group_df.index),
+                    )
+                    .astype(str)
+                    .eq("LONG")
+                    .sum()
+                )
+                short_count = int(
+                    group_df.get(
+                        "signal",
+                        pd.Series("", index=group_df.index),
+                    )
+                    .astype(str)
+                    .eq("SHORT")
+                    .sum()
+                )
+
+                chrono_rows.append({
+                    "Split": group_name,
+                    "N": int(stats["N"]),
+                    "Start": start_text,
+                    "End": end_text,
+                    "LONG": long_count,
+                    "SHORT": short_count,
+                    "Win rate %": round(
+                        stats["Win rate %"],
+                        2,
+                    ),
+                    "Avg net %": round(
+                        stats["Avg net %"],
+                        4,
+                    ),
+                    "Median net %": round(
+                        stats["Median net %"],
+                        4,
+                    ),
+                    "Profit factor": (
+                        round(
+                            stats["Profit factor"],
+                            3,
+                        )
+                        if np.isfinite(
+                            stats["Profit factor"]
+                        )
+                        else np.inf
+                    ),
+                    "Total net %": round(
+                        stats["Total net %"],
+                        4,
+                    ),
+                    "TP %": round(
+                        stats["TP %"],
+                        2,
+                    ),
+                    "SL %": round(
+                        stats["SL %"],
+                        2,
+                    ),
+                    "TIME_EXIT %": round(
+                        stats["TIME_EXIT %"],
+                        2,
+                    ),
+                    "Ambiguous→SL %": round(
+                        stats["Ambiguous→SL %"],
+                        2,
+                    ),
+                })
+
+            if chrono_rows:
+                chrono_table = pd.DataFrame(
+                    chrono_rows
+                )
+                st.dataframe(
+                    chrono_table,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                early_row = next(
+                    (
+                        row
+                        for row in chrono_rows
+                        if row["Split"] == "EARLY 50%"
+                    ),
+                    None,
+                )
+                late_row = next(
+                    (
+                        row
+                        for row in chrono_rows
+                        if row["Split"] == "LATE 50%"
+                    ),
+                    None,
+                )
+
+                if (
+                    early_row is not None
+                    and late_row is not None
+                ):
+                    c1, c2, c3, c4 = st.columns(4)
+
+                    c1.metric(
+                        "EARLY Avg net",
+                        f"{early_row['Avg net %']:.4f}%",
+                    )
+                    c2.metric(
+                        "LATE Avg net",
+                        f"{late_row['Avg net %']:.4f}%",
+                    )
+                    c3.metric(
+                        "EARLY PF",
+                        (
+                            f"{early_row['Profit factor']:.3f}"
+                            if np.isfinite(
+                                early_row["Profit factor"]
+                            )
+                            else "∞"
+                        ),
+                    )
+                    c4.metric(
+                        "LATE PF",
+                        (
+                            f"{late_row['Profit factor']:.3f}"
+                            if np.isfinite(
+                                late_row["Profit factor"]
+                            )
+                            else "∞"
+                        ),
+                    )
+
+                    avg_delta = (
+                        float(late_row["Avg net %"])
+                        - float(early_row["Avg net %"])
+                    )
+
+                    st.caption(
+                        "Late minus early Avg net: "
+                        f"{avg_delta:+.4f} percentage points per trade. "
+                        "The useful stability signal is not that both halves "
+                        "must be identical, but whether the sign and general "
+                        "magnitude survive chronologically."
+                    )
+        else:
+            st.info(
+                "Not enough complete 120m REACTION + penetration ≥ 0% "
+                "events to split chronologically yet."
+            )
+    else:
+        st.info(
+            "Chronological validation needs retest_timestamp plus complete "
+            "120m path data."
+        )
+
     def _net_bucket_table(
         bucket_column,
         ordered_labels,
