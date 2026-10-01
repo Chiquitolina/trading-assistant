@@ -922,7 +922,18 @@ try:
 
         if IS_REPLAY:
 
-            for replay_symbol in replay_context_symbols:
+            replay_open_symbols = set(
+                exchange.positions.keys()
+            )
+
+            replay_symbols_to_check = (
+                replay_context_boundary
+                & replay_open_symbols
+            )
+
+            for replay_symbol in sorted(
+                replay_symbols_to_check
+            ):
 
                 candle = buffer.closed_candle_at(
                     replay_symbol,
