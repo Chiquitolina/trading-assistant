@@ -9187,6 +9187,185 @@ def build_confirmed_swing_retests_from_confirmation_study(
     )
 
 
+
+@st.cache_data(ttl=120, show_spinner=False)
+def scan_confirmed_swing_retests_all_symbols(
+    symbols,
+    swing_timeframes,
+    swing_detector_items,
+    min_swing_prominence_pct,
+    retest_tolerance_pct,
+    min_departure_pct,
+    max_age_minutes,
+    max_retest_age_minutes,
+):
+    """Lightweight all-symbol confirmed-swing retest scanner.
+
+    This path intentionally does NOT build MFE/MAE or the 81-cell First-Touch
+    TP×SL grid. It detects only the requested swing timeframe(s), then checks
+    the 1m path for a causal move-away + retest. This keeps the live scanner
+    independent from the heavier research matrix.
+    """
+    symbols = tuple(str(symbol) for symbol in symbols)
+    swing_timeframes = tuple(str(tf) for tf in swing_timeframes)
+    detector_windows = dict(swing_detector_items)
+
+    max_age_minutes = max(1, int(max_age_minutes))
+    max_retest_age_minutes = max(1, int(max_retest_age_minutes))
+
+    # To find every retest that can still be "recent", we only need the recent
+    # window plus the maximum confirmation→retest horizon, with a small warmup.
+    one_minute_limit = min(
+        int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
+        max(
+            300,
+            int(max_retest_age_minutes + max_age_minutes + 120),
+        ),
+    )
+
+    rows = []
+
+    for symbol in symbols:
+        one_minute = load_volume_exhaustion_research_candles(
+            symbol=symbol,
+            timeframe="1m",
+            limit=one_minute_limit,
+        )
+        prepared = _prepare_confirmed_swing_retest_candles(one_minute)
+        if prepared.empty:
+            continue
+
+        latest_ts = int(prepared["timestamp"].max())
+        earliest_retest_ts = (
+            latest_ts - max_retest_age_minutes * 60_000
+        )
+        earliest_actionable_ts = (
+            earliest_retest_ts - max_age_minutes * 60_000
+        )
+
+        for swing_timeframe in swing_timeframes:
+            detector_name = detector_windows.get(
+                swing_timeframe,
+                "5x5",
+            )
+            try:
+                swing_bars = int(str(detector_name).split("x")[0])
+            except (TypeError, ValueError):
+                swing_bars = 5
+
+            detector = SwingDetector(
+                left_bars=swing_bars,
+                right_bars=swing_bars,
+                min_prominence_pct=float(min_swing_prominence_pct),
+            )
+
+            if swing_timeframe == "1m":
+                timeframe_candles = prepared
+            else:
+                timeframe_candles = load_volume_exhaustion_research_candles(
+                    symbol=symbol,
+                    timeframe=swing_timeframe,
+                    limit=400,
+                )
+
+            if timeframe_candles is None or timeframe_candles.empty:
+                continue
+
+            points = detector.detect_all(
+                timeframe_candles.to_dict(orient="records")
+            )
+
+            for point in points:
+                if point.pivot_timestamp is None:
+                    continue
+
+                info = get_volume_exhaustion_swing_confirmation_info(
+                    point=point,
+                    timeframe_candles=timeframe_candles,
+                    swing_timeframe=swing_timeframe,
+                )
+                if info is None:
+                    continue
+
+                actionable_ts = int(info["actionable_timestamp"])
+                if (
+                    actionable_ts < earliest_actionable_ts
+                    or actionable_ts > latest_ts + 60_000
+                ):
+                    continue
+
+                signal_side = (
+                    "SHORT"
+                    if point.side == "HIGH"
+                    else "LONG"
+                    if point.side == "LOW"
+                    else None
+                )
+                if signal_side is None:
+                    continue
+
+                try:
+                    prominence_pct = float(point.prominence_pct)
+                except (TypeError, ValueError):
+                    prominence_pct = np.nan
+
+                swing_row = {
+                    "timeframe": swing_timeframe,
+                    "detector": detector_name,
+                    "signal": signal_side,
+                    "pivot_timestamp": int(point.pivot_timestamp),
+                    "actionable_timestamp": actionable_ts,
+                    "pivot_price": float(point.price),
+                    "entry_price": float(info["confirmation_close"]),
+                    "pivot_to_confirmation_pct": float(info["move_pct"]),
+                    "prominence_pct": prominence_pct,
+                }
+
+                retest = _find_confirmed_swing_retest(
+                    one_minute=prepared,
+                    swing_row=swing_row,
+                    retest_tolerance_pct=float(retest_tolerance_pct),
+                    min_departure_pct=float(min_departure_pct),
+                    max_age_minutes=max_age_minutes,
+                )
+                if retest is None:
+                    continue
+
+                retest_ts = int(retest["retest_timestamp"])
+                if retest_ts < earliest_retest_ts:
+                    continue
+
+                retest["symbol"] = symbol
+                retest["retest_age_min"] = max(
+                    0.0,
+                    (latest_ts - retest_ts) / 60_000.0,
+                )
+                rows.append(retest)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    for source_col, target_col in [
+        ("pivot_timestamp", "pivot_time"),
+        ("actionable_timestamp", "confirmation_available"),
+        ("departure_timestamp", "departure_time"),
+        ("retest_timestamp", "retest_time"),
+    ]:
+        result[target_col] = pd.to_datetime(
+            pd.to_numeric(result[source_col], errors="coerce"),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        ).dt.tz_convert(TZ)
+
+    return (
+        result
+        .sort_values("retest_timestamp", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
 def build_confirmed_swing_retest_detail_chart(
     candles,
     retest_row,
@@ -11218,6 +11397,36 @@ if selected_section == "volume_exhaustion":
             ),
         )
 
+        retest_timeframe_options = [
+            str(value)
+            for value in swing_timeframes
+        ]
+        if not retest_timeframe_options:
+            retest_timeframe_options = ["15m"]
+        retest_default_tf = (
+            "15m"
+            if "15m" in retest_timeframe_options
+            else retest_timeframe_options[0]
+        )
+        retest_timeframe_filter = st.selectbox(
+            "Retest scanner timeframe",
+            retest_timeframe_options,
+            index=retest_timeframe_options.index(retest_default_tf),
+            key="confirmed_swing_retest_timeframe_filter",
+            help=(
+                "Only this swing timeframe is scanned in All symbols mode. "
+                "This avoids rebuilding unrelated 1m/5m/30m/1h swings."
+            ),
+        )
+        retest_recent_minutes = st.number_input(
+            "Max age since retest (minutes)",
+            min_value=1,
+            max_value=10080,
+            value=1440,
+            step=60,
+            key="confirmed_swing_retest_recent_minutes",
+        )
+
         candle_limit = st.slider(
             "Chart 1m candles",
             min_value=60,
@@ -11472,30 +11681,25 @@ if selected_section == "volume_exhaustion":
             else (str(selected_symbol),)
         )
 
-        combined_research_symbols = tuple(
-            sorted(set(research_symbols) | set(retest_symbols))
-        )
-
         st.caption(
-            "Research window: automatic · uses every 1m candle currently "
-            "available (up to "
+            "Research window: automatic · First-Touch/MFE/MAE uses every "
+            "1m candle currently available (up to "
             f"{VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT:,} requested per symbol). "
-            "The chart candle selector does not limit First-Touch, MFE/MAE or "
-            "the TP × SL matrix. Forward windows with missing 1m candles are "
-            "marked INCOMPLETE and excluded."
+            "The confirmed-swing retest scanner is separate and lightweight: "
+            "it scans only the selected retest timeframe and does not build "
+            "the TP × SL matrix for every symbol."
         )
 
-        # Build the expensive replay universe ONCE, without the distance
-        # filter. The filtered universe is then just an in-memory slice.
+        # Heavy First-Touch/MFE/MAE research is built only for the bucket scope.
+        # A Selected-symbol bucket must not trigger an all-symbol replay merely
+        # because the retest scanner is set to All symbols.
         with st.spinner(
-            "Building shared swing research universe from available candle history..."
+            "Building First-Touch research universe..."
         ):
-            combined_research_study_df = (
+            control_study_df = (
                 build_volume_exhaustion_confirmation_study_all_symbols(
-                    symbols=combined_research_symbols,
-                    candle_limit=(
-                        VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
-                    ),
+                    symbols=research_symbols,
+                    candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
                     swing_timeframes=tuple(swing_timeframes),
                     swing_detector_items=tuple(
                         sorted(swing_detector_windows.items())
@@ -11507,49 +11711,27 @@ if selected_section == "volume_exhaustion":
                 )
             )
 
-        if combined_research_study_df.empty:
-            control_study_df = pd.DataFrame()
-            retest_study_source = pd.DataFrame()
-        else:
-            control_study_df = combined_research_study_df.loc[
-                combined_research_study_df["symbol"]
-                .astype(str)
-                .isin(set(research_symbols))
-            ].copy().reset_index(drop=True)
-            retest_study_source = combined_research_study_df.loc[
-                combined_research_study_df["symbol"]
-                .astype(str)
-                .isin(set(retest_symbols))
-            ].copy().reset_index(drop=True)
-
-        retest_timeframe_options = ["ALL"] + [
-            str(value)
-            for value in swing_timeframes
-        ]
-        retest_timeframe_filter = st.selectbox(
-            "Retest scanner timeframe",
-            retest_timeframe_options,
-            key="confirmed_swing_retest_timeframe_filter",
-        )
-        retest_recent_minutes = st.number_input(
-            "Max age since retest (minutes)",
-            min_value=1,
-            max_value=10080,
-            value=1440,
-            step=60,
-            key="confirmed_swing_retest_recent_minutes",
-        )
-
-        # The scanner is intentionally independent from the pivot→confirmation
-        # distance filter used by the First-Touch matrix.
-        with st.spinner("Scanning confirmed swing retests..."):
+        # Lightweight all-symbol retest scan: only one selected swing timeframe,
+        # no MFE/MAE calculation and no 81-cell First-Touch replay.
+        selected_retest_timeframes = (str(retest_timeframe_filter),)
+        with st.spinner(
+            f"Scanning {retest_timeframe_filter} confirmed swing retests "
+            f"across {len(retest_symbols)} symbol(s)..."
+        ):
             confirmed_swing_retests_df = (
-                build_confirmed_swing_retests_from_confirmation_study(
-                    study_df=retest_study_source,
+                scan_confirmed_swing_retests_all_symbols(
+                    symbols=retest_symbols,
+                    swing_timeframes=selected_retest_timeframes,
+                    swing_detector_items=tuple(
+                        sorted(swing_detector_windows.items())
+                    ),
+                    min_swing_prominence_pct=float(
+                        min_swing_prominence_pct
+                    ),
                     retest_tolerance_pct=float(retest_tolerance_pct),
                     min_departure_pct=float(min_retest_departure_pct),
                     max_age_minutes=int(retest_max_age_minutes),
-                    candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+                    max_retest_age_minutes=int(retest_recent_minutes),
                 )
             )
 
@@ -11557,7 +11739,7 @@ if selected_section == "volume_exhaustion":
             retests_df=confirmed_swing_retests_df,
             reaction_filter=retest_reaction_filter,
             side_filter=retest_side_filter,
-            timeframe_filter=retest_timeframe_filter,
+            timeframe_filter=str(retest_timeframe_filter),
             max_retest_age_minutes=int(retest_recent_minutes),
         )
 
