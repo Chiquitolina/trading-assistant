@@ -8944,6 +8944,114 @@ def _prepare_confirmed_swing_retest_candles(one_minute):
     )
 
 
+def _build_confirmed_swing_retest_forward_cache(one_minute):
+    """Precompute gap-safe forward excursion data for retest ranking.
+
+    A REACTION only becomes known at the close of its retest candle, so the
+    forward path intentionally begins on the NEXT 1m candle. Suffix extrema
+    are reset at every timestamp gap; historical ranking never bridges unseen
+    market data.
+    """
+    work = _prepare_confirmed_swing_retest_candles(one_minute)
+    if work.empty:
+        return None
+
+    timestamps = work["timestamp"].astype("int64").to_numpy()
+    highs = work["high"].astype(float).to_numpy()
+    lows = work["low"].astype(float).to_numpy()
+    closes = work["close"].astype(float).to_numpy()
+
+    size = len(work)
+    suffix_high = np.empty(size, dtype=float)
+    suffix_low = np.empty(size, dtype=float)
+    segment_end = np.empty(size, dtype=np.int64)
+
+    for idx in range(size - 1, -1, -1):
+        is_segment_end = (
+            idx == size - 1
+            or int(timestamps[idx + 1]) != int(timestamps[idx]) + 60_000
+        )
+
+        if is_segment_end:
+            suffix_high[idx] = highs[idx]
+            suffix_low[idx] = lows[idx]
+            segment_end[idx] = idx
+        else:
+            suffix_high[idx] = max(highs[idx], suffix_high[idx + 1])
+            suffix_low[idx] = min(lows[idx], suffix_low[idx + 1])
+            segment_end[idx] = segment_end[idx + 1]
+
+    return {
+        "timestamps": timestamps,
+        "suffix_high": suffix_high,
+        "suffix_low": suffix_low,
+        "segment_end": segment_end,
+        "closes": closes,
+    }
+
+
+def _attach_confirmed_swing_reaction_run(retest, forward_cache):
+    """Attach post-REACTION favorable/adverse excursion metrics.
+
+    Metrics are observational/research-only. They start on the next 1m candle
+    after the REACTION close, so the reaction candle itself cannot contribute
+    hindsight to its own ranking.
+    """
+    retest = dict(retest)
+
+    retest["reaction_mfe_pct"] = np.nan
+    retest["reaction_mae_pct"] = np.nan
+    retest["reaction_current_pct"] = np.nan
+    retest["reaction_observed_min"] = 0.0
+
+    if not bool(retest.get("reaction")) or not forward_cache:
+        return retest
+
+    try:
+        retest_ts = int(retest["retest_timestamp"])
+        baseline = float(retest["retest_close"])
+        side = str(retest["signal"]).upper()
+    except (KeyError, TypeError, ValueError):
+        return retest
+
+    if baseline <= 0 or side not in {"LONG", "SHORT"}:
+        return retest
+
+    timestamps = forward_cache["timestamps"]
+    next_ts = retest_ts + 60_000
+    start_idx = int(np.searchsorted(timestamps, next_ts, side="left"))
+
+    if (
+        start_idx >= len(timestamps)
+        or int(timestamps[start_idx]) != next_ts
+    ):
+        return retest
+
+    end_idx = int(forward_cache["segment_end"][start_idx])
+    max_high = float(forward_cache["suffix_high"][start_idx])
+    min_low = float(forward_cache["suffix_low"][start_idx])
+    last_close = float(forward_cache["closes"][end_idx])
+
+    if side == "LONG":
+        mfe_pct = (max_high / baseline - 1.0) * 100.0
+        mae_pct = max(0.0, (1.0 - min_low / baseline) * 100.0)
+        current_pct = (last_close / baseline - 1.0) * 100.0
+    else:
+        mfe_pct = (1.0 - min_low / baseline) * 100.0
+        mae_pct = max(0.0, (max_high / baseline - 1.0) * 100.0)
+        current_pct = (1.0 - last_close / baseline) * 100.0
+
+    retest["reaction_mfe_pct"] = max(0.0, float(mfe_pct))
+    retest["reaction_mae_pct"] = float(mae_pct)
+    retest["reaction_current_pct"] = float(current_pct)
+    retest["reaction_observed_min"] = max(
+        0.0,
+        (int(timestamps[end_idx]) - retest_ts) / 60_000.0,
+    )
+
+    return retest
+
+
 def _find_confirmed_swing_retest(
     one_minute,
     swing_row,
@@ -9154,6 +9262,9 @@ def build_confirmed_swing_retests_from_confirmation_study(
             continue
 
         latest_ts = int(prepared["timestamp"].max())
+        forward_cache = _build_confirmed_swing_retest_forward_cache(
+            prepared
+        )
 
         for _, swing_row in symbol_study.iterrows():
             retest = _find_confirmed_swing_retest(
@@ -9170,6 +9281,10 @@ def build_confirmed_swing_retests_from_confirmation_study(
             retest["retest_age_min"] = max(
                 0.0,
                 (latest_ts - int(retest["retest_timestamp"])) / 60_000.0,
+            )
+            retest = _attach_confirmed_swing_reaction_run(
+                retest,
+                forward_cache,
             )
             rows.append(retest)
 
@@ -9246,6 +9361,9 @@ def scan_confirmed_swing_retests_all_symbols(
             continue
 
         latest_ts = int(prepared["timestamp"].max())
+        forward_cache = _build_confirmed_swing_retest_forward_cache(
+            prepared
+        )
         earliest_retest_ts = (
             latest_ts - max_retest_age_minutes * 60_000
         )
@@ -9349,6 +9467,10 @@ def scan_confirmed_swing_retests_all_symbols(
                 retest["retest_age_min"] = max(
                     0.0,
                     (latest_ts - retest_ts) / 60_000.0,
+                )
+                retest = _attach_confirmed_swing_reaction_run(
+                    retest,
+                    forward_cache,
                 )
                 rows.append(retest)
 
@@ -9581,7 +9703,10 @@ def render_confirmed_swing_retest_scanner(
         "A swing is known only after confirmation. Price must then move away "
         "from the swing and later return to its level. REACTION means the "
         "retest candle closed back on the expected side with a directional "
-        "close. Data gaps terminate the path instead of being bridged."
+        "close. Reactions are ranked by post-reaction MFE: the maximum "
+        "favorable move observed AFTER the reaction became known. The "
+        "reaction candle itself is excluded, and data gaps terminate the "
+        "path instead of being bridged."
     )
 
     if retests_df is None or retests_df.empty:
@@ -9604,6 +9729,26 @@ def render_confirmed_swing_retest_scanner(
         <= float(max_retest_age_minutes)
     ].copy()
 
+    if "reaction_mfe_pct" in view.columns:
+        view["reaction_mfe_pct"] = pd.to_numeric(
+            view["reaction_mfe_pct"],
+            errors="coerce",
+        )
+        view["_reaction_rank"] = view["reaction"].fillna(False).astype(int)
+        view = (
+            view
+            .sort_values(
+                [
+                    "_reaction_rank",
+                    "reaction_mfe_pct",
+                    "retest_timestamp",
+                ],
+                ascending=[False, False, False],
+                na_position="last",
+            )
+            .drop(columns=["_reaction_rank"])
+        )
+
     if view.empty:
         st.info("Retests exist, but none match the selected scanner filters.")
         return
@@ -9623,6 +9768,10 @@ def render_confirmed_swing_retest_scanner(
         "swing_price",
         "retest_price",
         "retest_distance_pct",
+        "reaction_mfe_pct",
+        "reaction_mae_pct",
+        "reaction_current_pct",
+        "reaction_observed_min",
         "max_departure_pct",
         "confirmed_to_retest_min",
         "retest_age_min",
@@ -9634,6 +9783,10 @@ def render_confirmed_swing_retest_scanner(
         "swing_price",
         "retest_price",
         "retest_distance_pct",
+        "reaction_mfe_pct",
+        "reaction_mae_pct",
+        "reaction_current_pct",
+        "reaction_observed_min",
         "max_departure_pct",
         "confirmed_to_retest_min",
         "retest_age_min",
@@ -9655,10 +9808,19 @@ def render_confirmed_swing_retest_scanner(
             time_text = retest_time.strftime("%Y-%m-%d %H:%M")
         else:
             time_text = str(row.get("retest_timestamp", index))
+        reaction_mfe = pd.to_numeric(
+            row.get("reaction_mfe_pct"),
+            errors="coerce",
+        )
+        reaction_run_text = (
+            f" · run +{float(reaction_mfe):.2f}%"
+            if pd.notna(reaction_mfe)
+            else ""
+        )
         label = (
             f"{row.get('symbol', '—')} · {row.get('timeframe', '—')} "
             f"{row.get('detector', '—')} · {row.get('signal', '—')} · "
-            f"{row.get('status', '—')} · "
+            f"{row.get('status', '—')}{reaction_run_text} · "
             f"swing {float(row.get('swing_price', 0.0)):.8g} · {time_text}"
         )
         labels.append(label)
@@ -9751,6 +9913,10 @@ def render_confirmed_swing_retest_scanner(
         "swing_price": selected_retest.get("swing_price"),
         "retest_price": selected_retest.get("retest_price"),
         "retest_distance_pct": selected_retest.get("retest_distance_pct"),
+        "reaction_mfe_pct": selected_retest.get("reaction_mfe_pct"),
+        "reaction_mae_pct": selected_retest.get("reaction_mae_pct"),
+        "reaction_current_pct": selected_retest.get("reaction_current_pct"),
+        "reaction_observed_min": selected_retest.get("reaction_observed_min"),
         "max_departure_pct": selected_retest.get("max_departure_pct"),
         "confirmed_to_retest_min": selected_retest.get("confirmed_to_retest_min"),
         "pivot_to_confirmation_pct": selected_retest.get("pivot_to_confirmation_pct"),
