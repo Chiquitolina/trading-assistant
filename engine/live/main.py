@@ -18,6 +18,10 @@ from engine.live.research.volume_exhaustion_outcome_tracker import (
     VolumeExhaustionOutcomeTracker,
 )
 
+from engine.live.research.volume_exhaustion_replay_strategy import (
+    VolumeExhaustionReplayStrategy,
+)
+
 from engine.replay.fidelity.history_fingerprint import (
     write_history_fingerprint,
 )
@@ -336,14 +340,19 @@ volume_exhaustion_collector = (
         baseline_lookback=30,
         min_relative_volume=2.0,
         rsi_period=14,
+        events_path=os.getenv(
+            "VOLUME_EXHAUSTION_EVENTS_PATH",
+            "volume_exhaustion_events.csv",
+        ),
     )
 )
 
 volume_exhaustion_outcome_tracker = (
     VolumeExhaustionOutcomeTracker(
         buffer=buffer,
-        outcomes_path=(
-            "volume_exhaustion_outcomes.csv"
+        outcomes_path=os.getenv(
+            "VOLUME_EXHAUSTION_OUTCOMES_PATH",
+            "volume_exhaustion_outcomes.csv",
         ),
     )
 )
@@ -430,6 +439,129 @@ IS_REPLAY = (
     MARKET_DATA_PROVIDER == "redis"
     and MARKET_CLOCK_MODE == "replay"
 )
+
+VE_REPLAY_ENABLED = (
+    os.getenv(
+        "VE_REPLAY_ENABLED",
+        "0",
+    ).strip()
+    == "1"
+)
+
+volume_exhaustion_replay_strategy = None
+
+if VE_REPLAY_ENABLED:
+
+    if not IS_REPLAY:
+        raise RuntimeError(
+            "VE_REPLAY_ENABLED can only be used "
+            "with MARKET_CLOCK_MODE=replay"
+        )
+
+    volume_exhaustion_replay_strategy = (
+        VolumeExhaustionReplayStrategy(
+            buffer=buffer,
+
+            trades_path=os.getenv(
+                "VE_REPLAY_TRADES_PATH",
+                (
+                    "volume_exhaustion_"
+                    "replay_trades.csv"
+                ),
+            ),
+
+            rsi_max=float(
+                os.getenv(
+                    "VE_RSI_MAX",
+                    "25",
+                )
+            ),
+
+            relative_volume_min=float(
+                os.getenv(
+                    "VE_REL_VOL_MIN",
+                    "2.5",
+                )
+            ),
+
+            volume_3m_min=float(
+                os.getenv(
+                    "VE_VOL3M_MIN",
+                    "2.0",
+                )
+            ),
+
+            hv5_min=int(
+                os.getenv(
+                    "VE_HV5_MIN",
+                    "2",
+                )
+            ),
+
+            move_3m_max=float(
+                os.getenv(
+                    "VE_MOVE3M_MAX",
+                    "-0.75",
+                )
+            ),
+
+            running_low_lookback=int(
+                os.getenv(
+                    "VE_LOW_LOOKBACK",
+                    "30",
+                )
+            ),
+
+            max_distance_low_pct=float(
+                os.getenv(
+                    "VE_LOW_DISTANCE_MAX_PCT",
+                    "0.15",
+                )
+            ),
+
+            confirmation_bars=int(
+                os.getenv(
+                    "VE_CONFIRM_BARS",
+                    "3",
+                )
+            ),
+
+            tp_pct=float(
+                os.getenv(
+                    "VE_TP_PCT",
+                    "0.75",
+                )
+            ),
+
+            sl_pct=float(
+                os.getenv(
+                    "VE_SL_PCT",
+                    "0.50",
+                )
+            ),
+
+            max_hold_bars=int(
+                os.getenv(
+                    "VE_MAX_HOLD_BARS",
+                    "30",
+                )
+            ),
+
+            notional_usdt=float(
+                os.getenv(
+                    "VE_NOTIONAL_USDT",
+                    "100",
+                )
+            ),
+
+            taker_fee_pct=float(
+                os.getenv(
+                    "VE_TAKER_FEE_PCT",
+                    "0.05",
+                )
+            ),
+        )
+    )
 
 if (
     MARKET_CLOCK_MODE == "replay"
@@ -953,6 +1085,19 @@ try:
                         f"mae30={outcome['mae_30m_pct']:.3f}%"
                     )
 
+                if (
+                    volume_exhaustion_replay_strategy
+                    is not None
+                ):
+                    (
+                        volume_exhaustion_replay_strategy
+                        .on_candle(
+                            symbol=context_symbol,
+                            close_time=context_close_time,
+                            candle=context_candle,
+                        )
+                    )
+
             # ==========================================
             # DETECT NEW EVENT
             # ==========================================
@@ -970,6 +1115,15 @@ try:
                     volume_exhaustion_outcome_tracker
                     .register(event)
                 )
+                
+                if (
+                    volume_exhaustion_replay_strategy
+                    is not None
+                ):
+                    (
+                        volume_exhaustion_replay_strategy
+                        .on_event(event)
+                    )
 
                 print(
                     "[VOLUME EXHAUSTION CANDIDATE] "
