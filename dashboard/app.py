@@ -7459,6 +7459,7 @@ if trigger_tf in (None, "", "N/A"):
 DASHBOARD_SECTIONS = {
     "overview": "📊 Overview",
     "volume_exhaustion": "⚡ Volume Exhaustion",
+    "swing_sweep_reclaim": "🧹 Swing Sweep → Reclaim",
     "geometry_scanner": "📐 Geometry Scanner",
     "btc_correlation": "₿ BTC Correlation",
     "btc_alignment": "🧭 BTC Alignment Edge",
@@ -7500,6 +7501,7 @@ if (
     and selected_section not in {
         "geometry_scanner",
         "volume_exhaustion",
+        "swing_sweep_reclaim",
     }
 ):
     st.markdown("---")
@@ -8244,6 +8246,11 @@ VOLUME_EXHAUSTION_FIRST_TOUCH_HORIZON_MINUTES = 60
 CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT = 0.10
 CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT = 0.20
 CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES = 360
+
+# Separate Sweep -> Reclaim strategy research.
+# This does NOT modify the existing first-touch / REACTION scanner above.
+CONFIRMED_SWING_SWEEP_DEFAULT_MIN_PENETRATION_PCT = 0.00
+CONFIRMED_SWING_SWEEP_DEFAULT_MAX_RECLAIM_MINUTES = 15
 
 # The retest inspector is structural, so render it directly in 15m instead
 # of loading thousands of 1m candles. Eighty 15m candles cover 20 hours,
@@ -15800,6 +15807,1991 @@ def build_volume_exhaustion_chart(
     )
 
     return fig
+
+
+
+
+# ============================================================
+# CONFIRMED 15m SWING · SWEEP -> RECLAIM
+# Separate research strategy. Existing retest/touch logic above
+# remains unchanged.
+# ============================================================
+
+def _find_confirmed_swing_sweep_reclaim(
+    one_minute,
+    swing_row,
+    min_sweep_penetration_pct,
+    min_departure_pct,
+    max_age_minutes,
+    max_reclaim_minutes,
+):
+    """Find the first causal Sweep -> Reclaim after a confirmed swing.
+
+    LONG:
+      1) confirmed LOW swing
+      2) price moves away upward
+      3) a later 1m low trades below the swing (sweep)
+      4) a closed 1m candle closes back >= swing (reclaim)
+      5) hypothetical entry starts at the NEXT consecutive 1m open
+
+    SHORT is the exact mirror.
+
+    A sweep and reclaim may happen on the same 1m candle. A departure and
+    sweep are NOT accepted on the same 1m candle because their intrabar order
+    is unknowable from OHLC alone.
+
+    Any 1m timestamp gap terminates the trusted path.
+    """
+    work = _prepare_confirmed_swing_retest_candles(one_minute)
+    if work.empty:
+        return None
+
+    try:
+        actionable_ts = int(swing_row["actionable_timestamp"])
+        pivot_ts = int(swing_row["pivot_timestamp"])
+        swing_price = float(swing_row["pivot_price"])
+        signal_side = str(swing_row["signal"]).upper()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    if swing_price <= 0 or signal_side not in {"LONG", "SHORT"}:
+        return None
+
+    min_penetration = max(
+        0.0,
+        float(min_sweep_penetration_pct),
+    )
+    departure = max(0.0, float(min_departure_pct))
+    max_age_minutes = max(1, int(max_age_minutes))
+    max_reclaim_minutes = max(1, int(max_reclaim_minutes))
+
+    sweep_deadline = (
+        actionable_ts
+        + max_age_minutes * 60_000
+    )
+    observation_end = (
+        sweep_deadline
+        + max_reclaim_minutes * 60_000
+    )
+
+    future = work.loc[
+        (work["timestamp"] >= actionable_ts)
+        & (work["timestamp"] <= observation_end)
+    ].copy()
+
+    if future.empty:
+        return None
+
+    timestamps = (
+        future["timestamp"]
+        .astype("int64")
+        .to_numpy()
+    )
+
+    if int(timestamps[0]) != actionable_ts:
+        return None
+
+    expected = (
+        actionable_ts
+        + np.arange(
+            len(timestamps),
+            dtype="int64",
+        ) * 60_000
+    )
+    mismatch = np.flatnonzero(
+        timestamps != expected
+    )
+    if len(mismatch):
+        future = future.iloc[
+            : int(mismatch[0])
+        ].copy()
+
+    if future.empty:
+        return None
+
+    rows = list(
+        future.to_dict(orient="records")
+    )
+
+    departed = False
+    departure_ts = None
+    departure_price = None
+    max_departure_pct = 0.0
+
+    sweep_row = None
+    sweep_penetration_pct = np.nan
+
+    for candle in rows:
+        candle_ts = int(candle["timestamp"])
+        high = float(candle["high"])
+        low = float(candle["low"])
+
+        if signal_side == "LONG":
+            away_pct = max(
+                0.0,
+                (
+                    high / swing_price
+                    - 1.0
+                ) * 100.0,
+            )
+        else:
+            away_pct = max(
+                0.0,
+                (
+                    1.0
+                    - low / swing_price
+                ) * 100.0,
+            )
+
+        max_departure_pct = max(
+            max_departure_pct,
+            away_pct,
+        )
+
+        if (
+            not departed
+            and away_pct >= departure
+        ):
+            departed = True
+            departure_ts = candle_ts
+            departure_price = (
+                high
+                if signal_side == "LONG"
+                else low
+            )
+
+            # We cannot know whether departure or sweep
+            # happened first inside this same 1m candle.
+            continue
+
+        if (
+            not departed
+            or departure_ts is None
+            or candle_ts <= departure_ts
+        ):
+            continue
+
+        if candle_ts > sweep_deadline:
+            break
+
+        if signal_side == "LONG":
+            penetration_pct = (
+                1.0 - low / swing_price
+            ) * 100.0
+            swept = (
+                low < swing_price
+                and penetration_pct
+                >= min_penetration
+            )
+        else:
+            penetration_pct = (
+                high / swing_price - 1.0
+            ) * 100.0
+            swept = (
+                high > swing_price
+                and penetration_pct
+                >= min_penetration
+            )
+
+        if not swept:
+            continue
+
+        sweep_row = dict(candle)
+        sweep_penetration_pct = max(
+            0.0,
+            float(penetration_pct),
+        )
+        break
+
+    if sweep_row is None:
+        return None
+
+    sweep_ts = int(
+        sweep_row["timestamp"]
+    )
+    sweep_open = float(
+        sweep_row["open"]
+    )
+    sweep_high = float(
+        sweep_row["high"]
+    )
+    sweep_low = float(
+        sweep_row["low"]
+    )
+    sweep_close = float(
+        sweep_row["close"]
+    )
+
+    sweep_range = max(
+        sweep_high - sweep_low,
+        0.0,
+    )
+    sweep_close_location = (
+        (
+            sweep_close - sweep_low
+        ) / sweep_range
+        if sweep_range > 0
+        else 0.5
+    )
+
+    sweep_price = (
+        sweep_low
+        if signal_side == "LONG"
+        else sweep_high
+    )
+
+    reclaim_deadline = (
+        sweep_ts
+        + max_reclaim_minutes * 60_000
+    )
+    reclaim_row = None
+
+    # Same-candle sweep+reclaim is valid:
+    # the sweep extreme necessarily occurs before candle close.
+    for candle in rows:
+        candle_ts = int(candle["timestamp"])
+
+        if candle_ts < sweep_ts:
+            continue
+        if candle_ts > reclaim_deadline:
+            break
+
+        close = float(candle["close"])
+
+        reclaimed = (
+            close >= swing_price
+            if signal_side == "LONG"
+            else close <= swing_price
+        )
+
+        if reclaimed:
+            reclaim_row = dict(candle)
+            break
+
+    latest_observed_ts = int(
+        future["timestamp"].max()
+    )
+
+    if reclaim_row is None:
+        full_reclaim_window = (
+            latest_observed_ts
+            >= reclaim_deadline
+        )
+        sweep_status = (
+            "SWEEP_EXPIRED"
+            if full_reclaim_window
+            else "SWEEP_PENDING"
+        )
+
+        # Existing downstream research calls the event
+        # a "retest". Until reclaim exists, these aliases
+        # point to the sweep itself.
+        event_ts = sweep_ts
+        event_price = sweep_price
+        event_open = sweep_open
+        event_high = sweep_high
+        event_low = sweep_low
+        event_close = sweep_close
+        event_close_location = (
+            sweep_close_location
+        )
+
+        reclaim_ts = np.nan
+        reclaim_price = np.nan
+        reclaim_open = np.nan
+        reclaim_high = np.nan
+        reclaim_low = np.nan
+        reclaim_close = np.nan
+        reclaim_close_location = np.nan
+        sweep_to_reclaim_min = np.nan
+        reaction = False
+
+        compatibility_status = (
+            "TOUCH_FAILED"
+            if sweep_status == "SWEEP_EXPIRED"
+            else "TOUCH_INDECISIVE"
+        )
+    else:
+        sweep_status = "RECLAIMED"
+
+        reclaim_ts = int(
+            reclaim_row["timestamp"]
+        )
+        reclaim_open = float(
+            reclaim_row["open"]
+        )
+        reclaim_high = float(
+            reclaim_row["high"]
+        )
+        reclaim_low = float(
+            reclaim_row["low"]
+        )
+        reclaim_close = float(
+            reclaim_row["close"]
+        )
+
+        reclaim_range = max(
+            reclaim_high - reclaim_low,
+            0.0,
+        )
+        reclaim_close_location = (
+            (
+                reclaim_close
+                - reclaim_low
+            ) / reclaim_range
+            if reclaim_range > 0
+            else 0.5
+        )
+
+        reclaim_price = reclaim_close
+        sweep_to_reclaim_min = float(
+            (
+                reclaim_ts - sweep_ts
+            ) / 60_000.0
+        )
+
+        # For all existing post-event analysis,
+        # the RECLAIM candle is the signal candle.
+        event_ts = reclaim_ts
+        event_price = reclaim_close
+        event_open = reclaim_open
+        event_high = reclaim_high
+        event_low = reclaim_low
+        event_close = reclaim_close
+        event_close_location = (
+            reclaim_close_location
+        )
+
+        reaction = True
+        compatibility_status = "REACTION"
+
+    return {
+        "signal": signal_side,
+        "timeframe": str(
+            swing_row.get(
+                "timeframe",
+                "—",
+            )
+        ),
+        "detector": str(
+            swing_row.get(
+                "detector",
+                "—",
+            )
+        ),
+
+        "pivot_timestamp": pivot_ts,
+        "actionable_timestamp": actionable_ts,
+        "swing_price": swing_price,
+
+        # Existing detail-chart compatibility:
+        # this is the confirmation close.
+        "entry_price": pd.to_numeric(
+            swing_row.get(
+                "entry_price",
+                swing_price,
+            ),
+            errors="coerce",
+        ),
+
+        "prominence_pct": pd.to_numeric(
+            swing_row.get(
+                "prominence_pct",
+            ),
+            errors="coerce",
+        ),
+        "pivot_to_confirmation_pct": (
+            pd.to_numeric(
+                swing_row.get(
+                    "pivot_to_confirmation_pct",
+                ),
+                errors="coerce",
+            )
+        ),
+
+        "departure_timestamp": int(
+            departure_ts
+        ),
+        "departure_price": float(
+            departure_price
+        ),
+        "max_departure_pct": float(
+            max_departure_pct
+        ),
+
+        "sweep_timestamp": sweep_ts,
+        "sweep_price": float(
+            sweep_price
+        ),
+        "sweep_open": sweep_open,
+        "sweep_high": sweep_high,
+        "sweep_low": sweep_low,
+        "sweep_close": sweep_close,
+        "sweep_close_location": float(
+            sweep_close_location
+        ),
+        "sweep_penetration_pct": float(
+            sweep_penetration_pct
+        ),
+        "confirmed_to_sweep_min": float(
+            (
+                sweep_ts
+                - actionable_ts
+            ) / 60_000.0
+        ),
+        "pivot_to_sweep_min": float(
+            (
+                sweep_ts
+                - pivot_ts
+            ) / 60_000.0
+        ),
+
+        "reclaim_timestamp": reclaim_ts,
+        "reclaim_price": reclaim_price,
+        "reclaim_open": reclaim_open,
+        "reclaim_high": reclaim_high,
+        "reclaim_low": reclaim_low,
+        "reclaim_close": reclaim_close,
+        "reclaim_close_location": (
+            reclaim_close_location
+        ),
+        "sweep_to_reclaim_min": (
+            sweep_to_reclaim_min
+        ),
+        "reclaim_same_candle": bool(
+            reaction
+            and pd.notna(
+                sweep_to_reclaim_min
+            )
+            and float(
+                sweep_to_reclaim_min
+            ) == 0.0
+        ),
+        "sweep_status": sweep_status,
+
+        # Compatibility aliases for the existing analysis suite.
+        # On RECLAIMED rows these refer to the reclaim candle.
+        "retest_timestamp": int(
+            event_ts
+        ),
+        "retest_price": float(
+            event_price
+        ),
+        "retest_distance_pct": float(
+            abs(
+                event_price
+                / swing_price
+                - 1.0
+            )
+            * 100.0
+        ),
+
+        # Geometry analysis now means actual sweep depth.
+        "penetration_pct": float(
+            sweep_penetration_pct
+        ),
+
+        "retest_open": float(
+            event_open
+        ),
+        "retest_high": float(
+            event_high
+        ),
+        "retest_low": float(
+            event_low
+        ),
+        "retest_close": float(
+            event_close
+        ),
+        "retest_close_location": float(
+            event_close_location
+        ),
+
+        "confirmed_to_retest_min": float(
+            (
+                event_ts
+                - actionable_ts
+            ) / 60_000.0
+        ),
+        "pivot_to_retest_min": float(
+            (
+                event_ts
+                - pivot_ts
+            ) / 60_000.0
+        ),
+
+        "reaction": bool(reaction),
+
+        # Internal compatibility only; the new UI displays sweep_status.
+        "status": compatibility_status,
+        "touch_failed": (
+            compatibility_status
+            == "TOUCH_FAILED"
+        ),
+        "touch_indecisive": (
+            compatibility_status
+            == "TOUCH_INDECISIVE"
+        ),
+    }
+
+
+@st.cache_data(
+    ttl=120,
+    show_spinner=False,
+)
+def scan_confirmed_swing_sweep_reclaims_all_symbols(
+    symbols,
+    detector_name,
+    min_swing_prominence_pct,
+    min_sweep_penetration_pct,
+    min_departure_pct,
+    max_age_minutes,
+    max_reclaim_minutes,
+    max_event_age_minutes,
+):
+    """Lightweight 15m confirmed-swing Sweep -> Reclaim scanner."""
+    symbols = tuple(
+        str(symbol)
+        for symbol in symbols
+    )
+
+    max_age_minutes = max(
+        1,
+        int(max_age_minutes),
+    )
+    max_reclaim_minutes = max(
+        1,
+        int(max_reclaim_minutes),
+    )
+    max_event_age_minutes = max(
+        1,
+        int(max_event_age_minutes),
+    )
+
+    one_minute_limit = min(
+        int(
+            VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+        ),
+        max(
+            300,
+            int(
+                max_event_age_minutes
+                + max_age_minutes
+                + max_reclaim_minutes
+                + 120
+            ),
+        ),
+    )
+
+    try:
+        swing_bars = int(
+            str(detector_name)
+            .split("x")[0]
+        )
+    except (TypeError, ValueError):
+        swing_bars = 5
+        detector_name = "5x5"
+
+    rows = []
+
+    for symbol in symbols:
+        one_minute = (
+            load_volume_exhaustion_research_candles(
+                symbol=symbol,
+                timeframe="1m",
+                limit=one_minute_limit,
+            )
+        )
+
+        prepared = (
+            _prepare_confirmed_swing_retest_candles(
+                one_minute
+            )
+        )
+        if prepared.empty:
+            continue
+
+        latest_ts = int(
+            prepared["timestamp"].max()
+        )
+
+        forward_cache = (
+            _build_confirmed_swing_retest_forward_cache(
+                prepared
+            )
+        )
+
+        earliest_event_ts = (
+            latest_ts
+            - max_event_age_minutes
+            * 60_000
+        )
+        earliest_actionable_ts = (
+            earliest_event_ts
+            - (
+                max_age_minutes
+                + max_reclaim_minutes
+            )
+            * 60_000
+        )
+
+        timeframe_candles = (
+            load_volume_exhaustion_research_candles(
+                symbol=symbol,
+                timeframe="15m",
+                limit=400,
+            )
+        )
+
+        if (
+            timeframe_candles is None
+            or timeframe_candles.empty
+        ):
+            continue
+
+        detector = SwingDetector(
+            left_bars=swing_bars,
+            right_bars=swing_bars,
+            min_prominence_pct=float(
+                min_swing_prominence_pct
+            ),
+        )
+
+        points = detector.detect_all(
+            timeframe_candles.to_dict(
+                orient="records"
+            )
+        )
+
+        for point in points:
+            if point.pivot_timestamp is None:
+                continue
+
+            info = (
+                get_volume_exhaustion_swing_confirmation_info(
+                    point=point,
+                    timeframe_candles=(
+                        timeframe_candles
+                    ),
+                    swing_timeframe="15m",
+                )
+            )
+            if info is None:
+                continue
+
+            actionable_ts = int(
+                info[
+                    "actionable_timestamp"
+                ]
+            )
+
+            if (
+                actionable_ts
+                < earliest_actionable_ts
+                or actionable_ts
+                > latest_ts + 60_000
+            ):
+                continue
+
+            signal_side = (
+                "SHORT"
+                if point.side == "HIGH"
+                else "LONG"
+                if point.side == "LOW"
+                else None
+            )
+            if signal_side is None:
+                continue
+
+            try:
+                prominence_pct = float(
+                    point.prominence_pct
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                prominence_pct = np.nan
+
+            swing_row = {
+                "timeframe": "15m",
+                "detector": str(
+                    detector_name
+                ),
+                "signal": signal_side,
+                "pivot_timestamp": int(
+                    point.pivot_timestamp
+                ),
+                "actionable_timestamp": (
+                    actionable_ts
+                ),
+                "pivot_price": float(
+                    point.price
+                ),
+                "entry_price": float(
+                    info[
+                        "confirmation_close"
+                    ]
+                ),
+                "pivot_to_confirmation_pct": (
+                    float(
+                        info["move_pct"]
+                    )
+                ),
+                "prominence_pct": (
+                    prominence_pct
+                ),
+            }
+
+            setup = (
+                _find_confirmed_swing_sweep_reclaim(
+                    one_minute=prepared,
+                    swing_row=swing_row,
+                    min_sweep_penetration_pct=(
+                        min_sweep_penetration_pct
+                    ),
+                    min_departure_pct=(
+                        min_departure_pct
+                    ),
+                    max_age_minutes=(
+                        max_age_minutes
+                    ),
+                    max_reclaim_minutes=(
+                        max_reclaim_minutes
+                    ),
+                )
+            )
+
+            if setup is None:
+                continue
+
+            event_ts = int(
+                setup[
+                    "retest_timestamp"
+                ]
+            )
+
+            if event_ts < earliest_event_ts:
+                continue
+
+            setup["symbol"] = symbol
+            setup["retest_age_min"] = max(
+                0.0,
+                (
+                    latest_ts
+                    - event_ts
+                ) / 60_000.0,
+            )
+
+            # Volume features are evaluated on the reclaim candle for
+            # successful setups, and on the sweep for pending/expired ones.
+            setup = (
+                _attach_confirmed_swing_volume_context(
+                    setup,
+                    prepared,
+                )
+            )
+
+            # MFE/MAE begins AFTER reclaim for RECLAIMED rows.
+            setup = (
+                _attach_confirmed_swing_reaction_run(
+                    setup,
+                    forward_cache,
+                )
+            )
+
+            # TP/SL/Time Exit only exists after a causal reclaim.
+            if bool(
+                setup.get(
+                    "reaction",
+                    False,
+                )
+            ):
+                setup = (
+                    _attach_confirmed_swing_order_recovery_analysis(
+                        setup,
+                        forward_cache,
+                    )
+                )
+
+            rows.append(setup)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+
+    for (
+        source_col,
+        target_col,
+    ) in [
+        (
+            "pivot_timestamp",
+            "pivot_time",
+        ),
+        (
+            "actionable_timestamp",
+            "confirmation_available",
+        ),
+        (
+            "departure_timestamp",
+            "departure_time",
+        ),
+        (
+            "sweep_timestamp",
+            "sweep_time",
+        ),
+        (
+            "reclaim_timestamp",
+            "reclaim_time",
+        ),
+        (
+            "retest_timestamp",
+            "retest_time",
+        ),
+    ]:
+        if source_col not in result.columns:
+            continue
+
+        result[target_col] = pd.to_datetime(
+            pd.to_numeric(
+                result[source_col],
+                errors="coerce",
+            ),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        ).dt.tz_convert(TZ)
+
+    return (
+        result
+        .sort_values(
+            "retest_timestamp",
+            ascending=False,
+        )
+        .reset_index(drop=True)
+    )
+
+
+def build_confirmed_swing_sweep_reclaim_detail_chart(
+    candles,
+    setup_row,
+    chart_candle_limit=(
+        CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES
+    ),
+):
+    """15m structural inspector for Pivot -> Confirmed -> Sweep -> Reclaim."""
+    work = (
+        _prepare_confirmed_swing_retest_candles(
+            candles
+        )
+    )
+    if work.empty:
+        return go.Figure()
+
+    target_candles = max(
+        CONFIRMED_SWING_RETEST_DETAIL_MIN_CANDLES,
+        min(
+            int(chart_candle_limit),
+            CONFIRMED_SWING_RETEST_DETAIL_MAX_CANDLES,
+        ),
+    )
+
+    work["chart_time"] = pd.to_datetime(
+        work["timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+
+    pivot_ts = int(
+        setup_row["pivot_timestamp"]
+    )
+    actionable_ts = int(
+        setup_row[
+            "actionable_timestamp"
+        ]
+    )
+    departure_ts = int(
+        setup_row[
+            "departure_timestamp"
+        ]
+    )
+    sweep_ts = int(
+        setup_row[
+            "sweep_timestamp"
+        ]
+    )
+    swing_price = float(
+        setup_row["swing_price"]
+    )
+
+    reclaim_ts_raw = pd.to_numeric(
+        setup_row.get(
+            "reclaim_timestamp",
+        ),
+        errors="coerce",
+    )
+
+    anchor_ts = (
+        int(reclaim_ts_raw)
+        if pd.notna(reclaim_ts_raw)
+        else sweep_ts
+    )
+
+    timestamps = (
+        work["timestamp"]
+        .astype("int64")
+        .to_numpy()
+    )
+    if len(timestamps) == 0:
+        return go.Figure()
+
+    anchor_index = int(
+        np.clip(
+            np.searchsorted(
+                timestamps,
+                anchor_ts,
+                side="right",
+            )
+            - 1,
+            0,
+            len(timestamps) - 1,
+        )
+    )
+
+    pivot_index = int(
+        np.clip(
+            np.searchsorted(
+                timestamps,
+                pivot_ts,
+                side="right",
+            )
+            - 1,
+            0,
+            len(timestamps) - 1,
+        )
+    )
+
+    candles_before = int(
+        round(
+            target_candles
+            * 0.625
+        )
+    )
+    candles_after = max(
+        0,
+        target_candles
+        - candles_before
+        - 1,
+    )
+
+    start_index = (
+        anchor_index
+        - candles_before
+    )
+    end_index = (
+        anchor_index
+        + candles_after
+    )
+
+    if pivot_index < start_index:
+        start_index = pivot_index
+        end_index = max(
+            end_index,
+            start_index
+            + target_candles
+            - 1,
+        )
+
+    if start_index < 0:
+        end_index += -start_index
+        start_index = 0
+
+    if end_index >= len(work):
+        overflow = (
+            end_index
+            - (len(work) - 1)
+        )
+        start_index = max(
+            0,
+            start_index - overflow,
+        )
+        end_index = len(work) - 1
+
+    visible = work.iloc[
+        start_index : end_index + 1
+    ].copy()
+
+    if visible.empty:
+        visible = work.tail(
+            target_candles
+        ).copy()
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Candlestick(
+            x=visible["chart_time"],
+            open=visible["open"],
+            high=visible["high"],
+            low=visible["low"],
+            close=visible["close"],
+            name="15m",
+        )
+    )
+
+    fig.add_hline(
+        y=swing_price,
+        line_dash="dash",
+        annotation_text=(
+            f"15m swing "
+            f"{setup_row.get('signal', '—')}"
+        ),
+    )
+
+    marker_rows = [
+        (
+            "Pivot",
+            pivot_ts,
+            swing_price,
+            (
+                "triangle-down"
+                if setup_row.get(
+                    "signal"
+                ) == "SHORT"
+                else "triangle-up"
+            ),
+        ),
+        (
+            "Confirmed",
+            actionable_ts,
+            float(
+                setup_row.get(
+                    "entry_price",
+                    swing_price,
+                )
+            ),
+            "circle-open",
+        ),
+        (
+            "Departure",
+            departure_ts,
+            float(
+                setup_row[
+                    "departure_price"
+                ]
+            ),
+            "circle",
+        ),
+        (
+            "SWEEP",
+            sweep_ts,
+            float(
+                setup_row[
+                    "sweep_price"
+                ]
+            ),
+            "diamond-open",
+        ),
+    ]
+
+    if pd.notna(
+        reclaim_ts_raw
+    ):
+        marker_rows.append(
+            (
+                "RECLAIM",
+                int(reclaim_ts_raw),
+                float(
+                    setup_row[
+                        "reclaim_price"
+                    ]
+                ),
+                "diamond",
+            )
+        )
+
+    visible_start_ts = int(
+        visible["timestamp"].min()
+    )
+    visible_end_ts = (
+        int(
+            visible["timestamp"].max()
+        )
+        + 15 * 60_000
+    )
+
+    for (
+        label,
+        timestamp,
+        price,
+        marker_symbol,
+    ) in marker_rows:
+        if not (
+            visible_start_ts
+            <= int(timestamp)
+            <= visible_end_ts
+        ):
+            continue
+
+        fig.add_trace(
+            go.Scatter(
+                x=[
+                    pd.to_datetime(
+                        timestamp,
+                        unit="ms",
+                        utc=True,
+                    ).tz_convert(TZ)
+                ],
+                y=[price],
+                mode="markers+text",
+                text=[label],
+                textposition="top center",
+                marker={
+                    "size": 12,
+                    "symbol": (
+                        marker_symbol
+                    ),
+                },
+                name=label,
+                hovertemplate=(
+                    f"<b>{label}</b><br>"
+                    "Time: %{x}<br>"
+                    "Price: %{y:.8f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        height=620,
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        title=(
+            f"{setup_row.get('symbol', '')} · "
+            "15m Sweep → Reclaim · "
+            f"{setup_row.get('signal', '')} · "
+            f"{len(visible)} × 15m"
+        ),
+        margin={
+            "l": 10,
+            "r": 10,
+            "t": 45,
+            "b": 10,
+        },
+    )
+
+    return fig
+
+
+def render_confirmed_swing_sweep_reclaim_scanner(
+    setups_df,
+    status_filter,
+    side_filter,
+    max_event_age_minutes,
+):
+    """Render the separate Sweep -> Reclaim strategy research."""
+    st.markdown(
+        "### Confirmed Swing Sweep → Reclaim"
+    )
+    st.caption(
+        "This is a separate strategy from the existing first-touch retest. "
+        "The level must first be swept: LONG trades below a confirmed 15m "
+        "swing LOW; SHORT trades above a confirmed 15m swing HIGH. A signal "
+        "exists only after a closed 1m candle reclaims the swing. Hypothetical "
+        "execution then starts at the next consecutive 1m open."
+    )
+
+    if (
+        setups_df is None
+        or setups_df.empty
+    ):
+        st.info(
+            "No Sweep → Reclaim setups match the current research window."
+        )
+        return
+
+    view = setups_df.copy()
+
+    if status_filter != "ALL":
+        view = view.loc[
+            view[
+                "sweep_status"
+            ]
+            .astype(str)
+            .eq(
+                status_filter
+            )
+        ].copy()
+
+    if side_filter != "ALL":
+        view = view.loc[
+            view["signal"]
+            .astype(str)
+            .eq(side_filter)
+        ].copy()
+
+    view = view.loc[
+        pd.to_numeric(
+            view[
+                "retest_age_min"
+            ],
+            errors="coerce",
+        )
+        <= float(
+            max_event_age_minutes
+        )
+    ].copy()
+
+    if view.empty:
+        st.info(
+            "Sweep setups exist, but none match the selected filters."
+        )
+        return
+
+    reclaimed_mask = (
+        view["sweep_status"]
+        .astype(str)
+        .eq("RECLAIMED")
+    )
+    pending_mask = (
+        view["sweep_status"]
+        .astype(str)
+        .eq("SWEEP_PENDING")
+    )
+    expired_mask = (
+        view["sweep_status"]
+        .astype(str)
+        .eq("SWEEP_EXPIRED")
+    )
+
+    m1, m2, m3, m4, m5 = (
+        st.columns(5)
+    )
+    m1.metric(
+        "Sweeps",
+        len(view),
+    )
+    m2.metric(
+        "Reclaimed",
+        int(
+            reclaimed_mask.sum()
+        ),
+    )
+    m3.metric(
+        "Pending",
+        int(
+            pending_mask.sum()
+        ),
+    )
+    m4.metric(
+        "Expired",
+        int(
+            expired_mask.sum()
+        ),
+    )
+    m5.metric(
+        "Reclaim rate",
+        (
+            f"{reclaimed_mask.mean() * 100:.1f}%"
+        ),
+    )
+
+    # --------------------------------------------------------
+    # Sweep -> reclaim latency / depth research.
+    # --------------------------------------------------------
+    reclaimed = view.loc[
+        reclaimed_mask
+    ].copy()
+
+    if not reclaimed.empty:
+        latency = pd.to_numeric(
+            reclaimed[
+                "sweep_to_reclaim_min"
+            ],
+            errors="coerce",
+        )
+        penetration = pd.to_numeric(
+            reclaimed[
+                "sweep_penetration_pct"
+            ],
+            errors="coerce",
+        )
+
+        q1, q2, q3, q4 = (
+            st.columns(4)
+        )
+        q1.metric(
+            "Same-candle reclaim",
+            (
+                f"{reclaimed['reclaim_same_candle'].fillna(False).mean() * 100:.1f}%"
+            ),
+        )
+        q2.metric(
+            "Median sweep→reclaim",
+            (
+                f"{latency.median():.1f}m"
+                if latency.notna().any()
+                else "—"
+            ),
+        )
+        q3.metric(
+            "Median sweep depth",
+            (
+                f"{penetration.median():.3f}%"
+                if penetration.notna().any()
+                else "—"
+            ),
+        )
+        q4.metric(
+            "LONG / SHORT",
+            (
+                f"{int(reclaimed['signal'].eq('LONG').sum())} / "
+                f"{int(reclaimed['signal'].eq('SHORT').sum())}"
+            ),
+        )
+
+        # Reuse the complete existing analytics suite, but ONLY on
+        # setups that actually reclaimed. The compatibility status is
+        # REACTION and penetration_pct is the true sweep depth.
+        st.markdown("---")
+        st.markdown(
+            "#### Reclaimed setup performance"
+        )
+        st.caption(
+            "Everything below reuses the same MFE/MAE, TP/SL path-order, "
+            "volume, geometry, fees, TIME_EXIT and chronological validation "
+            "already used by the touch strategy. Here, however, the signal "
+            "candle is the RECLAIM candle and penetration is actual sweep depth."
+        )
+
+        render_confirmed_swing_window_summary(
+            reclaimed
+        )
+        render_confirmed_swing_reaction_overview(
+            reclaimed
+        )
+        render_confirmed_swing_path_order_analysis(
+            reclaimed
+        )
+        render_confirmed_swing_reaction_geometry_mfe(
+            reclaimed
+        )
+        render_confirmed_swing_volume_mfe_analysis(
+            reclaimed
+        )
+
+    # --------------------------------------------------------
+    # Full event table.
+    # --------------------------------------------------------
+    st.markdown("---")
+    st.markdown(
+        "#### Sweep / reclaim events"
+    )
+
+    display_columns = [
+        "symbol",
+        "signal",
+        "detector",
+        "sweep_status",
+        "swing_price",
+        "sweep_price",
+        "sweep_penetration_pct",
+        "reclaim_price",
+        "sweep_to_reclaim_min",
+        "reclaim_same_candle",
+        "max_departure_pct",
+        "confirmed_to_sweep_min",
+        "first_touch_entry_price",
+        "reaction_mfe_60m_pct",
+        "reaction_mae_60m_pct",
+        "sweep_time",
+        "reclaim_time",
+    ]
+
+    display_columns = [
+        column
+        for column
+        in display_columns
+        if column in view.columns
+    ]
+
+    display = view[
+        display_columns
+    ].copy()
+
+    for column in [
+        "swing_price",
+        "sweep_price",
+        "sweep_penetration_pct",
+        "reclaim_price",
+        "sweep_to_reclaim_min",
+        "max_departure_pct",
+        "confirmed_to_sweep_min",
+        "first_touch_entry_price",
+        "reaction_mfe_60m_pct",
+        "reaction_mae_60m_pct",
+    ]:
+        if column in display.columns:
+            display[column] = (
+                pd.to_numeric(
+                    display[column],
+                    errors="coerce",
+                )
+                .round(4)
+            )
+
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # --------------------------------------------------------
+    # Inspector.
+    # --------------------------------------------------------
+    labels = []
+    lookup = {}
+
+    for index, row in view.iterrows():
+        event_time = (
+            row.get(
+                "reclaim_time"
+            )
+            if pd.notna(
+                row.get(
+                    "reclaim_time"
+                )
+            )
+            else row.get(
+                "sweep_time"
+            )
+        )
+
+        if pd.notna(event_time):
+            time_text = (
+                event_time.strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+            )
+        else:
+            time_text = str(
+                row.get(
+                    "sweep_timestamp",
+                    index,
+                )
+            )
+
+        latency_value = pd.to_numeric(
+            row.get(
+                "sweep_to_reclaim_min"
+            ),
+            errors="coerce",
+        )
+        latency_text = (
+            f" · reclaim {float(latency_value):.0f}m"
+            if pd.notna(
+                latency_value
+            )
+            else ""
+        )
+
+        label = (
+            f"{row.get('symbol', '—')} · "
+            f"{row.get('signal', '—')} · "
+            f"{row.get('sweep_status', '—')} · "
+            f"sweep {float(row.get('sweep_penetration_pct', 0.0)):.3f}%"
+            f"{latency_text} · {time_text}"
+        )
+
+        labels.append(label)
+        lookup[label] = index
+
+    selected_label = st.selectbox(
+        "Inspect Sweep → Reclaim setup",
+        labels,
+        key=(
+            "sweep_reclaim_event_select"
+        ),
+    )
+    selected_setup = view.loc[
+        lookup[
+            selected_label
+        ]
+    ]
+
+    detail_candle_limit = st.slider(
+        "15m candles in Sweep → Reclaim inspector",
+        min_value=(
+            CONFIRMED_SWING_RETEST_DETAIL_MIN_CANDLES
+        ),
+        max_value=(
+            CONFIRMED_SWING_RETEST_DETAIL_MAX_CANDLES
+        ),
+        value=(
+            CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES
+        ),
+        step=10,
+        key=(
+            "sweep_reclaim_detail_candle_limit"
+        ),
+    )
+
+    event_age = pd.to_numeric(
+        selected_setup.get(
+            "retest_age_min"
+        ),
+        errors="coerce",
+    )
+    pivot_to_event = pd.to_numeric(
+        selected_setup.get(
+            "pivot_to_retest_min"
+        ),
+        errors="coerce",
+    )
+
+    historical_span_min = 0.0
+    if pd.notna(event_age):
+        historical_span_min += max(
+            0.0,
+            float(event_age),
+        )
+    if pd.notna(pivot_to_event):
+        historical_span_min += max(
+            0.0,
+            float(pivot_to_event),
+        )
+
+    required_history_bars = int(
+        np.ceil(
+            historical_span_min
+            / 15.0
+        )
+    )
+
+    detail_fetch_limit = min(
+        CONFIRMED_SWING_RETEST_DETAIL_FETCH_MAX,
+        max(
+            int(
+                detail_candle_limit
+            )
+            + 20,
+            required_history_bars
+            + 20,
+        ),
+    )
+
+    detail_candles = (
+        load_volume_exhaustion_research_candles(
+            symbol=str(
+                selected_setup[
+                    "symbol"
+                ]
+            ),
+            timeframe="15m",
+            limit=detail_fetch_limit,
+        )
+    )
+
+    if (
+        detail_candles is None
+        or detail_candles.empty
+    ):
+        st.warning(
+            "No 15m candles are available for this Sweep → Reclaim setup."
+        )
+    else:
+        detail_fig = (
+            build_confirmed_swing_sweep_reclaim_detail_chart(
+                candles=detail_candles,
+                setup_row=selected_setup,
+                chart_candle_limit=(
+                    detail_candle_limit
+                ),
+            )
+        )
+
+        st.caption(
+            "Detection remains causal on 1m. The 15m chart is only a "
+            "structural inspector and marks Pivot → Confirmed → Departure "
+            "→ SWEEP → RECLAIM."
+        )
+
+        st.plotly_chart(
+            detail_fig,
+            use_container_width=True,
+            key=(
+                "sweep_reclaim_detail_chart"
+            ),
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+        )
+
+    detail_fields = [
+        "symbol",
+        "signal",
+        "detector",
+        "sweep_status",
+        "swing_price",
+        "pivot_time",
+        "confirmation_available",
+        "departure_time",
+        "departure_price",
+        "max_departure_pct",
+        "sweep_time",
+        "sweep_price",
+        "sweep_penetration_pct",
+        "sweep_close",
+        "sweep_close_location",
+        "reclaim_time",
+        "reclaim_price",
+        "reclaim_close_location",
+        "sweep_to_reclaim_min",
+        "reclaim_same_candle",
+        "first_touch_entry_price",
+    ]
+
+    detail_data = {
+        field: selected_setup.get(
+            field
+        )
+        for field in detail_fields
+        if field in selected_setup.index
+    }
+
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Field": key,
+                    "Value": value,
+                }
+                for (
+                    key,
+                    value,
+                ) in detail_data.items()
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+if selected_section == "swing_sweep_reclaim":
+    st.markdown(
+        "## 🧹 Confirmed Swing Sweep → Reclaim"
+    )
+    st.caption(
+        "Separate research tab. The original confirmed-swing first-touch "
+        "strategy remains unchanged in Volume Exhaustion. Here a touch alone "
+        "does nothing: price must sweep through the confirmed 15m swing and "
+        "then reclaim it before a hypothetical entry is allowed."
+    )
+
+    events = (
+        load_volume_exhaustion_events()
+    )
+
+    if (
+        events is None
+        or events.empty
+        or "symbol"
+        not in events.columns
+    ):
+        st.info(
+            "No symbol universe is available from the Volume Exhaustion "
+            "journal yet."
+        )
+    else:
+        available_symbols = tuple(
+            sorted(
+                events[
+                    "symbol"
+                ]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+        )
+
+        if not available_symbols:
+            st.info(
+                "No symbols are available for Sweep → Reclaim research."
+            )
+        else:
+            c1, c2, c3 = (
+                st.columns(3)
+            )
+
+            with c1:
+                sweep_scope = (
+                    st.selectbox(
+                        "Scanner scope",
+                        [
+                            "All symbols",
+                            "Selected symbol",
+                        ],
+                        key=(
+                            "sweep_reclaim_scope"
+                        ),
+                    )
+                )
+
+            with c2:
+                selected_sweep_symbol = (
+                    st.selectbox(
+                        "Selected symbol",
+                        options=list(
+                            available_symbols
+                        ),
+                        key=(
+                            "sweep_reclaim_symbol"
+                        ),
+                    )
+                )
+
+            with c3:
+                sweep_detector = (
+                    st.selectbox(
+                        "15m swing detector",
+                        options=[
+                            "2x2",
+                            "3x3",
+                            "5x5",
+                        ],
+                        index=2,
+                        key=(
+                            "sweep_reclaim_detector"
+                        ),
+                        help=(
+                            "5x5 means the 15m pivot is known only after "
+                            "five right-side 15m candles confirm it."
+                        ),
+                    )
+                )
+
+            c4, c5, c6 = (
+                st.columns(3)
+            )
+
+            with c4:
+                sweep_min_prominence = (
+                    st.number_input(
+                        "Min swing prominence %",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.05,
+                        format="%.3f",
+                        key=(
+                            "sweep_reclaim_min_prominence"
+                        ),
+                    )
+                )
+
+            with c5:
+                sweep_min_departure = (
+                    st.number_input(
+                        "Min move-away before sweep %",
+                        min_value=0.0,
+                        value=(
+                            CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
+                        ),
+                        step=0.05,
+                        format="%.3f",
+                        key=(
+                            "sweep_reclaim_min_departure"
+                        ),
+                    )
+                )
+
+            with c6:
+                sweep_min_penetration = (
+                    st.number_input(
+                        "Min sweep penetration %",
+                        min_value=0.0,
+                        value=(
+                            CONFIRMED_SWING_SWEEP_DEFAULT_MIN_PENETRATION_PCT
+                        ),
+                        step=0.01,
+                        format="%.3f",
+                        key=(
+                            "sweep_reclaim_min_penetration"
+                        ),
+                        help=(
+                            "0.000% means any real break through the swing "
+                            "counts. Later we can bucket sweep depth instead "
+                            "of hard-coding a threshold."
+                        ),
+                    )
+                )
+
+            c7, c8, c9 = (
+                st.columns(3)
+            )
+
+            with c7:
+                sweep_max_age = (
+                    st.number_input(
+                        "Max minutes confirmation → sweep",
+                        min_value=15,
+                        max_value=2880,
+                        value=(
+                            CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
+                        ),
+                        step=30,
+                        key=(
+                            "sweep_reclaim_max_sweep_age"
+                        ),
+                    )
+                )
+
+            with c8:
+                sweep_max_reclaim = (
+                    st.number_input(
+                        "Max minutes sweep → reclaim",
+                        min_value=1,
+                        max_value=180,
+                        value=(
+                            CONFIRMED_SWING_SWEEP_DEFAULT_MAX_RECLAIM_MINUTES
+                        ),
+                        step=1,
+                        key=(
+                            "sweep_reclaim_max_reclaim"
+                        ),
+                    )
+                )
+
+            with c9:
+                sweep_recent_minutes = (
+                    st.number_input(
+                        "Max age since event (minutes)",
+                        min_value=1,
+                        max_value=10080,
+                        value=1440,
+                        step=60,
+                        key=(
+                            "sweep_reclaim_recent_minutes"
+                        ),
+                    )
+                )
+
+            c10, c11 = (
+                st.columns(2)
+            )
+
+            with c10:
+                sweep_status_filter = (
+                    st.selectbox(
+                        "Sweep status",
+                        [
+                            "ALL",
+                            "RECLAIMED",
+                            "SWEEP_PENDING",
+                            "SWEEP_EXPIRED",
+                        ],
+                        key=(
+                            "sweep_reclaim_status_filter"
+                        ),
+                    )
+                )
+
+            with c11:
+                sweep_side_filter = (
+                    st.selectbox(
+                        "Side",
+                        [
+                            "ALL",
+                            "LONG",
+                            "SHORT",
+                        ],
+                        key=(
+                            "sweep_reclaim_side_filter"
+                        ),
+                    )
+                )
+
+            scan_symbols = (
+                available_symbols
+                if sweep_scope
+                == "All symbols"
+                else (
+                    str(
+                        selected_sweep_symbol
+                    ),
+                )
+            )
+
+            st.caption(
+                "Structure timeframe: 15m only · detection/reclaim path: "
+                "closed 1m candles · no lookahead · same-candle "
+                "sweep+reclaim is allowed · entry research starts next 1m."
+            )
+
+            with st.spinner(
+                f"Scanning confirmed 15m swing sweeps across "
+                f"{len(scan_symbols)} symbol(s)..."
+            ):
+                sweep_reclaim_df = (
+                    scan_confirmed_swing_sweep_reclaims_all_symbols(
+                        symbols=(
+                            scan_symbols
+                        ),
+                        detector_name=(
+                            sweep_detector
+                        ),
+                        min_swing_prominence_pct=(
+                            float(
+                                sweep_min_prominence
+                            )
+                        ),
+                        min_sweep_penetration_pct=(
+                            float(
+                                sweep_min_penetration
+                            )
+                        ),
+                        min_departure_pct=(
+                            float(
+                                sweep_min_departure
+                            )
+                        ),
+                        max_age_minutes=(
+                            int(
+                                sweep_max_age
+                            )
+                        ),
+                        max_reclaim_minutes=(
+                            int(
+                                sweep_max_reclaim
+                            )
+                        ),
+                        max_event_age_minutes=(
+                            int(
+                                sweep_recent_minutes
+                            )
+                        ),
+                    )
+                )
+
+            render_confirmed_swing_sweep_reclaim_scanner(
+                setups_df=(
+                    sweep_reclaim_df
+                ),
+                status_filter=(
+                    sweep_status_filter
+                ),
+                side_filter=(
+                    sweep_side_filter
+                ),
+                max_event_age_minutes=(
+                    int(
+                        sweep_recent_minutes
+                    )
+                ),
+            )
 
 
 if selected_section == "volume_exhaustion":
