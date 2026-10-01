@@ -8967,6 +8967,7 @@ def _build_confirmed_swing_retest_forward_cache(one_minute):
         return None
 
     timestamps = work["timestamp"].astype("int64").to_numpy()
+    opens = work["open"].astype(float).to_numpy()
     highs = work["high"].astype(float).to_numpy()
     lows = work["low"].astype(float).to_numpy()
     closes = work["close"].astype(float).to_numpy()
@@ -8993,6 +8994,7 @@ def _build_confirmed_swing_retest_forward_cache(one_minute):
 
     return {
         "timestamps": timestamps,
+        "opens": opens,
         "highs": highs,
         "lows": lows,
         "suffix_high": suffix_high,
@@ -9160,6 +9162,295 @@ def _attach_confirmed_swing_reaction_run(retest, forward_cache):
 
     return retest
 
+
+
+
+CONFIRMED_SWING_FIRST_TOUCH_TP_GRID = (
+    0.25, 0.50, 0.75, 1.00, 1.50, 2.00,
+)
+
+CONFIRMED_SWING_FIRST_TOUCH_SL_GRID = (
+    0.25, 0.50, 0.75, 1.00, 1.50, 2.00,
+)
+
+
+def _confirmed_swing_first_touch_key(tp_pct, sl_pct):
+    return f"tp={float(tp_pct):.2f}|sl={float(sl_pct):.2f}"
+
+
+def _attach_confirmed_swing_order_recovery_analysis(
+    retest,
+    forward_cache,
+):
+    """Chronological research after the first-touch candle.
+
+    Status is known only after that 1m candle closes, therefore hypothetical
+    execution begins at the OPEN of the next consecutive 1m candle.
+
+    TOUCH_FAILED never flips direction. Recovery only studies whether the
+    original confirmed swing level is later reclaimed.
+    """
+    retest = dict(retest)
+
+    retest["first_touch_entry_price"] = np.nan
+    retest["first_touch_60m_complete"] = False
+    retest["first_touch_60m_results"] = {}
+
+    retest["failure_recovery_status"] = None
+    retest["failure_recovered"] = False
+    retest["failure_reclaim_timestamp"] = np.nan
+    retest["failure_reclaim_close"] = np.nan
+    retest["failure_recovery_minutes"] = np.nan
+    retest["failure_recovery_observed_min"] = 0.0
+    retest["failure_mae_before_reclaim_pct"] = np.nan
+    retest["failure_post_reclaim_mfe_60m_pct"] = np.nan
+    retest["failure_post_reclaim_mae_60m_pct"] = np.nan
+    retest["failure_post_reclaim_return_60m_pct"] = np.nan
+    retest["failure_post_reclaim_60m_complete"] = False
+
+    if not forward_cache:
+        return retest
+
+    try:
+        retest_ts = int(retest["retest_timestamp"])
+        swing_price = float(retest["swing_price"])
+        retest_close = float(retest["retest_close"])
+        side = str(retest["signal"]).upper()
+        status = str(retest.get("status", ""))
+    except (KeyError, TypeError, ValueError):
+        return retest
+
+    if (
+        swing_price <= 0
+        or retest_close <= 0
+        or side not in {"LONG", "SHORT"}
+    ):
+        return retest
+
+    timestamps = forward_cache["timestamps"]
+    opens = forward_cache["opens"]
+    highs = forward_cache["highs"]
+    lows = forward_cache["lows"]
+    closes = forward_cache["closes"]
+
+    next_ts = retest_ts + 60_000
+    start_idx = int(np.searchsorted(timestamps, next_ts, side="left"))
+
+    if (
+        start_idx >= len(timestamps)
+        or int(timestamps[start_idx]) != next_ts
+    ):
+        return retest
+
+    segment_end = int(forward_cache["segment_end"][start_idx])
+    entry_price = float(opens[start_idx])
+
+    if entry_price <= 0:
+        return retest
+
+    retest["first_touch_entry_price"] = entry_price
+
+    # 60m TP/SL first-touch matrix.
+    horizon_end = start_idx + 60 - 1
+
+    if (
+        horizon_end <= segment_end
+        and horizon_end < len(timestamps)
+    ):
+        retest["first_touch_60m_complete"] = True
+        result_map = {}
+
+        for tp_pct in CONFIRMED_SWING_FIRST_TOUCH_TP_GRID:
+            for sl_pct in CONFIRMED_SWING_FIRST_TOUCH_SL_GRID:
+                if side == "LONG":
+                    tp_price = entry_price * (
+                        1.0 + float(tp_pct) / 100.0
+                    )
+                    sl_price = entry_price * (
+                        1.0 - float(sl_pct) / 100.0
+                    )
+                else:
+                    tp_price = entry_price * (
+                        1.0 - float(tp_pct) / 100.0
+                    )
+                    sl_price = entry_price * (
+                        1.0 + float(sl_pct) / 100.0
+                    )
+
+                outcome = "NO_HIT"
+                hit_minutes = np.nan
+
+                for idx in range(start_idx, horizon_end + 1):
+                    high = float(highs[idx])
+                    low = float(lows[idx])
+
+                    if side == "LONG":
+                        tp_hit = high >= tp_price
+                        sl_hit = low <= sl_price
+                    else:
+                        tp_hit = low <= tp_price
+                        sl_hit = high >= sl_price
+
+                    minutes_from_entry = float(
+                        (
+                            int(timestamps[idx])
+                            - int(timestamps[start_idx])
+                        ) / 60_000.0
+                    )
+
+                    # Conservative same-1m ambiguity rule.
+                    if tp_hit and sl_hit:
+                        outcome = "SL_AMBIGUOUS"
+                        hit_minutes = minutes_from_entry
+                        break
+                    if sl_hit:
+                        outcome = "SL"
+                        hit_minutes = minutes_from_entry
+                        break
+                    if tp_hit:
+                        outcome = "TP"
+                        hit_minutes = minutes_from_entry
+                        break
+
+                result_map[
+                    _confirmed_swing_first_touch_key(tp_pct, sl_pct)
+                ] = {
+                    "outcome": outcome,
+                    "hit_minutes": hit_minutes,
+                }
+
+        retest["first_touch_60m_results"] = result_map
+
+    # Failure recovery: same original setup direction, never reverse.
+    if status != "TOUCH_FAILED":
+        return retest
+
+    recovery_end = min(
+        segment_end,
+        start_idx + 180 - 1,
+    )
+
+    if recovery_end < start_idx:
+        retest["failure_recovery_status"] = "PENDING_INCOMPLETE"
+        return retest
+
+    retest["failure_recovery_observed_min"] = float(
+        recovery_end - start_idx + 1
+    )
+
+    reclaim_idx = None
+
+    for idx in range(start_idx, recovery_end + 1):
+        close = float(closes[idx])
+
+        reclaimed = (
+            close >= swing_price
+            if side == "LONG"
+            else close <= swing_price
+        )
+
+        if reclaimed:
+            reclaim_idx = idx
+            break
+
+    if reclaim_idx is None:
+        full_180 = (
+            start_idx + 180 - 1 <= segment_end
+            and start_idx + 180 - 1 < len(timestamps)
+        )
+        retest["failure_recovery_status"] = (
+            "STRUCTURAL_FAIL_180M"
+            if full_180
+            else "PENDING_INCOMPLETE"
+        )
+        return retest
+
+    reclaim_close = float(closes[reclaim_idx])
+
+    retest["failure_recovery_status"] = "RECOVERED"
+    retest["failure_recovered"] = True
+    retest["failure_reclaim_timestamp"] = int(
+        timestamps[reclaim_idx]
+    )
+    retest["failure_reclaim_close"] = reclaim_close
+    retest["failure_recovery_minutes"] = float(
+        (
+            int(timestamps[reclaim_idx])
+            - retest_ts
+        ) / 60_000.0
+    )
+
+    pre_high = float(np.max(highs[start_idx : reclaim_idx + 1]))
+    pre_low = float(np.min(lows[start_idx : reclaim_idx + 1]))
+
+    if side == "LONG":
+        mae_before_reclaim = max(
+            0.0,
+            (1.0 - pre_low / retest_close) * 100.0,
+        )
+    else:
+        mae_before_reclaim = max(
+            0.0,
+            (pre_high / retest_close - 1.0) * 100.0,
+        )
+
+    retest["failure_mae_before_reclaim_pct"] = float(
+        mae_before_reclaim
+    )
+
+    # Evaluate 60m only after the reclaim itself is known.
+    post_start = reclaim_idx + 1
+    post_end = post_start + 60 - 1
+
+    if (
+        post_start < len(timestamps)
+        and post_start <= segment_end
+        and int(timestamps[post_start])
+        == int(timestamps[reclaim_idx]) + 60_000
+        and post_end <= segment_end
+        and post_end < len(timestamps)
+        and reclaim_close > 0
+    ):
+        post_high = float(np.max(highs[post_start : post_end + 1]))
+        post_low = float(np.min(lows[post_start : post_end + 1]))
+        post_close = float(closes[post_end])
+
+        if side == "LONG":
+            post_mfe = (
+                post_high / reclaim_close - 1.0
+            ) * 100.0
+            post_mae = max(
+                0.0,
+                (1.0 - post_low / reclaim_close) * 100.0,
+            )
+            post_return = (
+                post_close / reclaim_close - 1.0
+            ) * 100.0
+        else:
+            post_mfe = (
+                1.0 - post_low / reclaim_close
+            ) * 100.0
+            post_mae = max(
+                0.0,
+                (post_high / reclaim_close - 1.0) * 100.0,
+            )
+            post_return = (
+                1.0 - post_close / reclaim_close
+            ) * 100.0
+
+        retest["failure_post_reclaim_mfe_60m_pct"] = max(
+            0.0,
+            float(post_mfe),
+        )
+        retest["failure_post_reclaim_mae_60m_pct"] = float(
+            post_mae
+        )
+        retest["failure_post_reclaim_return_60m_pct"] = float(
+            post_return
+        )
+        retest["failure_post_reclaim_60m_complete"] = True
+
+    return retest
 
 
 
@@ -9663,6 +9954,10 @@ def build_confirmed_swing_retests_from_confirmation_study(
                 retest,
                 forward_cache,
             )
+            retest = _attach_confirmed_swing_order_recovery_analysis(
+                retest,
+                forward_cache,
+            )
             rows.append(retest)
 
     if not rows:
@@ -9850,6 +10145,10 @@ def scan_confirmed_swing_retests_all_symbols(
                     prepared,
                 )
                 retest = _attach_confirmed_swing_reaction_run(
+                    retest,
+                    forward_cache,
+                )
+                retest = _attach_confirmed_swing_order_recovery_analysis(
                     retest,
                     forward_cache,
                 )
@@ -10155,7 +10454,10 @@ def render_confirmed_swing_window_summary(view):
         "General snapshot of the first confirmed-swing retests currently "
         "inside the scanner window/filters. Favorable and adverse excursion "
         "start on the NEXT 1m candle after the first-touch candle, so the "
-        "classification candle itself does not inflate the result."
+        "classification candle itself does not inflate the result. "
+        "TOUCH_FAILED is shown as IMMEDIATE FAIL: it means the first retest "
+        "did not hold on that 1m candle; it never means taking the opposite "
+        "trade."
     )
 
     s1, s2, s3, s4 = st.columns(4)
@@ -10191,7 +10493,7 @@ def render_confirmed_swing_window_summary(view):
         f"{reactions} · {rate(reactions):.1f}%",
     )
     s6.metric(
-        "FAILED",
+        "IMMEDIATE FAIL",
         f"{failed} · {rate(failed):.1f}%",
     )
     s7.metric(
@@ -10342,6 +10644,15 @@ def render_confirmed_swing_reaction_overview(view):
         "reaction_body_pct",
         "reaction_close_strength",
         "reaction_rejection_wick_share",
+        "first_touch_entry_price",
+        "first_touch_60m_complete",
+        "failure_recovery_status",
+        "failure_recovery_minutes",
+        "failure_recovery_observed_min",
+        "failure_mae_before_reclaim_pct",
+        "failure_post_reclaim_mfe_60m_pct",
+        "failure_post_reclaim_mae_60m_pct",
+        "failure_post_reclaim_return_60m_pct",
         "max_departure_pct",
         "confirmed_to_retest_min",
         "retest_distance_pct",
@@ -10737,6 +11048,700 @@ def render_confirmed_swing_reaction_overview(view):
             )
 
 
+
+
+
+
+
+def render_confirmed_swing_path_order_analysis(view):
+    """Chronological edge analysis for confirmed-swing first retests."""
+    if view is None or view.empty:
+        return
+
+    work = view.copy()
+
+    numeric_columns = [
+        "touch_mfe_15m_pct",
+        "touch_mae_15m_pct",
+        "touch_return_15m_pct",
+        "touch_mfe_30m_pct",
+        "touch_mae_30m_pct",
+        "touch_return_30m_pct",
+        "touch_mfe_60m_pct",
+        "touch_mae_60m_pct",
+        "touch_return_60m_pct",
+        "failure_recovery_minutes",
+        "failure_recovery_observed_min",
+        "failure_mae_before_reclaim_pct",
+        "failure_post_reclaim_mfe_60m_pct",
+        "failure_post_reclaim_mae_60m_pct",
+        "failure_post_reclaim_return_60m_pct",
+    ]
+
+    for column in numeric_columns:
+        if column in work.columns:
+            work[column] = pd.to_numeric(
+                work[column],
+                errors="coerce",
+            )
+
+    statuses = (
+        work.get(
+            "status",
+            pd.Series("", index=work.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+
+    st.markdown("#### Path order / first-touch analysis")
+    st.caption(
+        "This answers what MFE/MAE alone cannot: what happened FIRST? "
+        "The first-touch status is known only when that 1m candle closes, so "
+        "hypothetical execution starts at the OPEN of the next consecutive "
+        "1m candle. If TP and SL are both touched inside the same 1m candle, "
+        "the result is conservatively counted as SL_AMBIGUOUS."
+    )
+
+    # ---------------------------------------------------------
+    # Equal-horizon MFE/MAE by status.
+    # ---------------------------------------------------------
+    equal_rows = []
+
+    status_labels = {
+        "REACTION": "REACTION",
+        "TOUCH_INDECISIVE": "INDECISIVE",
+        "TOUCH_FAILED": "IMMEDIATE_FAIL",
+    }
+
+    for raw_status, label in status_labels.items():
+        subset = work.loc[
+            statuses.eq(raw_status)
+        ].copy()
+
+        if subset.empty:
+            continue
+
+        for horizon in (15, 30, 60):
+            mfe_col = f"touch_mfe_{horizon}m_pct"
+            mae_col = f"touch_mae_{horizon}m_pct"
+            ret_col = f"touch_return_{horizon}m_pct"
+
+            if not all(
+                column in subset.columns
+                for column in (mfe_col, mae_col, ret_col)
+            ):
+                continue
+
+            complete = subset.dropna(
+                subset=[mfe_col, mae_col, ret_col]
+            )
+
+            if complete.empty:
+                continue
+
+            avg_mfe = float(complete[mfe_col].mean())
+            avg_mae = float(complete[mae_col].mean())
+
+            equal_rows.append({
+                "Status": label,
+                "Horizon": f"{horizon}m",
+                "N complete": len(complete),
+                "Avg MFE %": round(avg_mfe, 4),
+                "Median MFE %": round(
+                    float(complete[mfe_col].median()),
+                    4,
+                ),
+                "Avg MAE %": round(avg_mae, 4),
+                "Median MAE %": round(
+                    float(complete[mae_col].median()),
+                    4,
+                ),
+                "MFE/MAE": (
+                    round(avg_mfe / avg_mae, 3)
+                    if avg_mae > 0
+                    else np.nan
+                ),
+                "Avg return %": round(
+                    float(complete[ret_col].mean()),
+                    4,
+                ),
+                "Positive close %": round(
+                    float((complete[ret_col] > 0).mean() * 100.0),
+                    2,
+                ),
+            })
+
+    if equal_rows:
+        st.markdown("##### Equal-horizon comparison by status")
+        st.dataframe(
+            pd.DataFrame(equal_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ---------------------------------------------------------
+    # First-touch TP/SL order.
+    # ---------------------------------------------------------
+    eligible_mask = work.get(
+        "first_touch_60m_complete",
+        pd.Series(False, index=work.index),
+    )
+    eligible = work.loc[
+        eligible_mask.fillna(False).astype(bool)
+    ].copy()
+
+    if not eligible.empty:
+        c1, c2, c3 = st.columns(3)
+
+        tp_options = list(
+            CONFIRMED_SWING_FIRST_TOUCH_TP_GRID
+        )
+        sl_options = list(
+            CONFIRMED_SWING_FIRST_TOUCH_SL_GRID
+        )
+
+        with c1:
+            selected_tp = st.selectbox(
+                "First-touch TP %",
+                options=tp_options,
+                index=tp_options.index(0.50),
+                key="confirmed_swing_first_touch_tp",
+            )
+
+        with c2:
+            selected_sl = st.selectbox(
+                "First-touch SL %",
+                options=sl_options,
+                index=sl_options.index(0.50),
+                key="confirmed_swing_first_touch_sl",
+            )
+
+        with c3:
+            matrix_status = st.selectbox(
+                "TP/SL matrix status",
+                options=[
+                    "REACTION",
+                    "INDECISIVE",
+                    "IMMEDIATE_FAIL",
+                ],
+                index=0,
+                key="confirmed_swing_first_touch_matrix_status",
+            )
+
+        selected_key = _confirmed_swing_first_touch_key(
+            selected_tp,
+            selected_sl,
+        )
+
+        compare_map = {
+            "REACTION": "REACTION",
+            "INDECISIVE": "TOUCH_INDECISIVE",
+            "IMMEDIATE_FAIL": "TOUCH_FAILED",
+        }
+
+        comparison_rows = []
+
+        for label, raw_status in compare_map.items():
+            subset = eligible.loc[
+                eligible["status"]
+                .astype(str)
+                .eq(raw_status)
+            ]
+
+            outcomes = []
+            hit_minutes = []
+
+            for result_map in subset.get(
+                "first_touch_60m_results",
+                pd.Series(dtype=object),
+            ):
+                if not isinstance(result_map, dict):
+                    continue
+
+                result = result_map.get(selected_key)
+                if not isinstance(result, dict):
+                    continue
+
+                outcome = str(
+                    result.get("outcome", "NO_HIT")
+                )
+                outcomes.append(outcome)
+
+                minute = pd.to_numeric(
+                    result.get("hit_minutes"),
+                    errors="coerce",
+                )
+                if pd.notna(minute):
+                    hit_minutes.append(float(minute))
+
+            if not outcomes:
+                continue
+
+            n = len(outcomes)
+            tp_count = sum(
+                outcome == "TP"
+                for outcome in outcomes
+            )
+            ambiguous_count = sum(
+                outcome == "SL_AMBIGUOUS"
+                for outcome in outcomes
+            )
+            sl_count = sum(
+                outcome in {"SL", "SL_AMBIGUOUS"}
+                for outcome in outcomes
+            )
+            no_hit_count = sum(
+                outcome == "NO_HIT"
+                for outcome in outcomes
+            )
+
+            comparison_rows.append({
+                "Status": label,
+                "N": n,
+                "TP first %": round(
+                    tp_count / n * 100.0,
+                    2,
+                ),
+                "SL first %": round(
+                    sl_count / n * 100.0,
+                    2,
+                ),
+                "Ambiguous→SL %": round(
+                    ambiguous_count / n * 100.0,
+                    2,
+                ),
+                "No hit 60m %": round(
+                    no_hit_count / n * 100.0,
+                    2,
+                ),
+                "Median first-hit min": (
+                    round(float(np.median(hit_minutes)), 2)
+                    if hit_minutes
+                    else np.nan
+                ),
+            })
+
+        st.markdown(
+            f"##### First-touch order — TP {selected_tp:.2f}% / "
+            f"SL {selected_sl:.2f}%"
+        )
+
+        if comparison_rows:
+            st.dataframe(
+                pd.DataFrame(comparison_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # Full TP-before-SL matrix for one status.
+        matrix_raw_status = compare_map[matrix_status]
+        matrix_subset = eligible.loc[
+            eligible["status"]
+            .astype(str)
+            .eq(matrix_raw_status)
+        ]
+
+        if not matrix_subset.empty:
+            z = []
+            custom = []
+
+            for tp_pct in tp_options:
+                z_row = []
+                custom_row = []
+
+                for sl_pct in sl_options:
+                    key = _confirmed_swing_first_touch_key(
+                        tp_pct,
+                        sl_pct,
+                    )
+
+                    outcomes = []
+
+                    for result_map in matrix_subset.get(
+                        "first_touch_60m_results",
+                        pd.Series(dtype=object),
+                    ):
+                        if not isinstance(result_map, dict):
+                            continue
+
+                        result = result_map.get(key)
+                        if not isinstance(result, dict):
+                            continue
+
+                        outcomes.append(
+                            str(
+                                result.get(
+                                    "outcome",
+                                    "NO_HIT",
+                                )
+                            )
+                        )
+
+                    if not outcomes:
+                        z_row.append(np.nan)
+                        custom_row.append([0, 0, 0, 0])
+                        continue
+
+                    n = len(outcomes)
+                    tp_count = sum(
+                        outcome == "TP"
+                        for outcome in outcomes
+                    )
+                    sl_count = sum(
+                        outcome in {"SL", "SL_AMBIGUOUS"}
+                        for outcome in outcomes
+                    )
+                    ambiguous_count = sum(
+                        outcome == "SL_AMBIGUOUS"
+                        for outcome in outcomes
+                    )
+                    no_hit_count = sum(
+                        outcome == "NO_HIT"
+                        for outcome in outcomes
+                    )
+
+                    z_row.append(
+                        tp_count / n * 100.0
+                    )
+                    custom_row.append([
+                        n,
+                        sl_count / n * 100.0,
+                        ambiguous_count / n * 100.0,
+                        no_hit_count / n * 100.0,
+                    ])
+
+                z.append(z_row)
+                custom.append(custom_row)
+
+            fig = go.Figure(
+                data=go.Heatmap(
+                    z=z,
+                    x=[
+                        f"SL {value:.2f}%"
+                        for value in sl_options
+                    ],
+                    y=[
+                        f"TP {value:.2f}%"
+                        for value in tp_options
+                    ],
+                    customdata=np.array(custom),
+                    colorbar={"title": "TP first %"},
+                    hovertemplate=(
+                        "<b>%{y} / %{x}</b><br>"
+                        "TP first: %{z:.2f}%<br>"
+                        "N: %{customdata[0]:.0f}<br>"
+                        "SL first: %{customdata[1]:.2f}%<br>"
+                        "Ambiguous→SL: %{customdata[2]:.2f}%<br>"
+                        "No hit: %{customdata[3]:.2f}%"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+            fig.update_layout(
+                title=(
+                    f"{matrix_status} · TP before SL within 60m"
+                ),
+                xaxis_title="Stop loss",
+                yaxis_title="Take profit",
+                height=470,
+                margin={
+                    "l": 10,
+                    "r": 10,
+                    "t": 50,
+                    "b": 10,
+                },
+            )
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                key="confirmed_swing_first_touch_heatmap",
+                config={"displaylogo": False},
+            )
+
+    # ---------------------------------------------------------
+    # Recovery after an immediate fail.
+    # ---------------------------------------------------------
+    failures = work.loc[
+        statuses.eq("TOUCH_FAILED")
+    ].copy()
+
+    if failures.empty:
+        return
+
+    recovery_status = (
+        failures.get(
+            "failure_recovery_status",
+            pd.Series("", index=failures.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+
+    recovered_mask = recovery_status.eq("RECOVERED")
+    structural_mask = recovery_status.eq(
+        "STRUCTURAL_FAIL_180M"
+    )
+    pending_mask = recovery_status.eq(
+        "PENDING_INCOMPLETE"
+    )
+
+    recovered = failures.loc[
+        recovered_mask
+    ].copy()
+
+    st.markdown("##### Recovery after IMMEDIATE_FAIL")
+    st.caption(
+        "An immediate fail never creates an opposite trade. This only studies "
+        "whether the ORIGINAL 15m swing is later reclaimed on a closed 1m "
+        "candle. RECOVERED is research for a possible second opportunity, not "
+        "an execution rule."
+    )
+
+    r1, r2, r3, r4, r5 = st.columns(5)
+    r1.metric("Immediate fails", len(failures))
+    r2.metric("Recovered", int(recovered_mask.sum()))
+    r3.metric(
+        "Structural fail 180m",
+        int(structural_mask.sum()),
+    )
+    r4.metric(
+        "Pending / censored",
+        int(pending_mask.sum()),
+    )
+    r5.metric(
+        "Median recovery",
+        (
+            f"{recovered['failure_recovery_minutes'].median():.1f}m"
+            if (
+                not recovered.empty
+                and recovered[
+                    "failure_recovery_minutes"
+                ].notna().any()
+            )
+            else "—"
+        ),
+    )
+
+    recovery_rows = []
+
+    recovery_minutes_all = pd.to_numeric(
+        failures.get(
+            "failure_recovery_minutes",
+            pd.Series(np.nan, index=failures.index),
+        ),
+        errors="coerce",
+    )
+    observed_minutes_all = pd.to_numeric(
+        failures.get(
+            "failure_recovery_observed_min",
+            pd.Series(0.0, index=failures.index),
+        ),
+        errors="coerce",
+    ).fillna(0.0)
+
+    for horizon in (15, 30, 60, 120, 180):
+        eligible_h_mask = (
+            recovery_minutes_all.notna()
+            | observed_minutes_all.ge(float(horizon))
+        )
+        eligible_h = failures.loc[
+            eligible_h_mask
+        ]
+
+        if eligible_h.empty:
+            continue
+
+        eligible_recovery = pd.to_numeric(
+            eligible_h["failure_recovery_minutes"],
+            errors="coerce",
+        )
+
+        recovered_h = int(
+            eligible_recovery.le(float(horizon)).sum()
+        )
+
+        recovery_rows.append({
+            "Within": f"{horizon}m",
+            "N eligible": len(eligible_h),
+            "Recovered": recovered_h,
+            "Recovery rate %": round(
+                recovered_h / len(eligible_h) * 100.0,
+                2,
+            ),
+        })
+
+    if recovery_rows:
+        st.markdown("###### Reclaim rate by horizon")
+        st.dataframe(
+            pd.DataFrame(recovery_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if recovered.empty:
+        return
+
+    mae_before = pd.to_numeric(
+        recovered.get(
+            "failure_mae_before_reclaim_pct",
+            pd.Series(dtype=float),
+        ),
+        errors="coerce",
+    ).dropna()
+
+    post_complete_mask = recovered.get(
+        "failure_post_reclaim_60m_complete",
+        pd.Series(False, index=recovered.index),
+    ).fillna(False).astype(bool)
+
+    post_complete = recovered.loc[
+        post_complete_mask
+    ].copy()
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric(
+        "Avg MAE before reclaim",
+        (
+            f"{mae_before.mean():.3f}%"
+            if not mae_before.empty
+            else "—"
+        ),
+    )
+    p2.metric(
+        "Post-reclaim 60m N",
+        len(post_complete),
+    )
+    p3.metric(
+        "Post-reclaim Avg MFE60",
+        (
+            f"{post_complete['failure_post_reclaim_mfe_60m_pct'].mean():.3f}%"
+            if (
+                not post_complete.empty
+                and post_complete[
+                    "failure_post_reclaim_mfe_60m_pct"
+                ].notna().any()
+            )
+            else "—"
+        ),
+    )
+    p4.metric(
+        "Post-reclaim Avg MAE60",
+        (
+            f"{post_complete['failure_post_reclaim_mae_60m_pct'].mean():.3f}%"
+            if (
+                not post_complete.empty
+                and post_complete[
+                    "failure_post_reclaim_mae_60m_pct"
+                ].notna().any()
+            )
+            else "—"
+        ),
+    )
+
+    if not post_complete.empty:
+        post_mfe = pd.to_numeric(
+            post_complete[
+                "failure_post_reclaim_mfe_60m_pct"
+            ],
+            errors="coerce",
+        )
+        post_mae = pd.to_numeric(
+            post_complete[
+                "failure_post_reclaim_mae_60m_pct"
+            ],
+            errors="coerce",
+        )
+        post_return = pd.to_numeric(
+            post_complete[
+                "failure_post_reclaim_return_60m_pct"
+            ],
+            errors="coerce",
+        )
+
+        avg_post_mfe = float(post_mfe.mean())
+        avg_post_mae = float(post_mae.mean())
+
+        st.markdown("###### What happens after reclaim?")
+        st.dataframe(
+            pd.DataFrame([{
+                "N complete": len(post_complete),
+                "Avg MFE60 %": round(avg_post_mfe, 4),
+                "Median MFE60 %": round(
+                    float(post_mfe.median()),
+                    4,
+                ),
+                "Avg MAE60 %": round(avg_post_mae, 4),
+                "Median MAE60 %": round(
+                    float(post_mae.median()),
+                    4,
+                ),
+                "MFE/MAE": (
+                    round(avg_post_mfe / avg_post_mae, 3)
+                    if avg_post_mae > 0
+                    else np.nan
+                ),
+                "Avg return60 %": round(
+                    float(post_return.mean()),
+                    4,
+                ),
+                "Positive close %": round(
+                    float((post_return > 0).mean() * 100.0),
+                    2,
+                ),
+            }]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    top_columns = [
+        "symbol",
+        "signal",
+        "retest_time",
+        "swing_price",
+        "failure_recovery_minutes",
+        "failure_mae_before_reclaim_pct",
+        "failure_reclaim_close",
+        "failure_post_reclaim_mfe_60m_pct",
+        "failure_post_reclaim_mae_60m_pct",
+        "failure_post_reclaim_return_60m_pct",
+    ]
+    top_columns = [
+        column
+        for column in top_columns
+        if column in recovered.columns
+    ]
+
+    recovered_top = (
+        recovered
+        .sort_values(
+            "failure_post_reclaim_mfe_60m_pct",
+            ascending=False,
+            na_position="last",
+        )
+        .head(25)
+        [top_columns]
+        .copy()
+    )
+
+    for column in recovered_top.columns:
+        if column in {
+            "symbol",
+            "signal",
+            "retest_time",
+        }:
+            continue
+        recovered_top[column] = pd.to_numeric(
+            recovered_top[column],
+            errors="coerce",
+        ).round(4)
+
+    st.markdown("###### Top recovered immediate fails")
+    st.dataframe(
+        recovered_top,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 
@@ -11313,6 +12318,7 @@ def render_confirmed_swing_retest_scanner(
 
     render_confirmed_swing_window_summary(view)
     render_confirmed_swing_reaction_overview(view)
+    render_confirmed_swing_path_order_analysis(view)
     render_confirmed_swing_volume_mfe_analysis(view)
 
     display_columns = [
@@ -11372,6 +12378,13 @@ def render_confirmed_swing_retest_scanner(
         "reaction_body_pct",
         "reaction_close_strength",
         "reaction_rejection_wick_share",
+        "first_touch_entry_price",
+        "failure_recovery_minutes",
+        "failure_recovery_observed_min",
+        "failure_mae_before_reclaim_pct",
+        "failure_post_reclaim_mfe_60m_pct",
+        "failure_post_reclaim_mae_60m_pct",
+        "failure_post_reclaim_return_60m_pct",
         "max_departure_pct",
         "confirmed_to_retest_min",
         "retest_age_min",
