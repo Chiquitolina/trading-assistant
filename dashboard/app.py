@@ -11745,6 +11745,614 @@ def render_confirmed_swing_path_order_analysis(view):
 
 
 
+
+
+CONFIRMED_SWING_PENETRATION_BINS = (
+    -np.inf,
+    0.0,
+    0.05,
+    0.10,
+    0.15,
+    0.25,
+    np.inf,
+)
+
+CONFIRMED_SWING_PENETRATION_LABELS = (
+    "<0%",
+    "0–0.05%",
+    "0.05–0.10%",
+    "0.10–0.15%",
+    "0.15–0.25%",
+    ">0.25%",
+)
+
+CONFIRMED_SWING_RANGE_BINS = (
+    -np.inf,
+    0.25,
+    0.50,
+    0.75,
+    1.00,
+    1.50,
+    np.inf,
+)
+
+CONFIRMED_SWING_RANGE_LABELS = (
+    "<0.25%",
+    "0.25–0.50%",
+    "0.50–0.75%",
+    "0.75–1.00%",
+    "1.00–1.50%",
+    ">1.50%",
+)
+
+
+def _confirmed_swing_tp_first_rate(rows, tp_pct, sl_pct):
+    """TP-first rate from already-computed causal first-touch result maps."""
+    if rows is None or rows.empty:
+        return np.nan, 0
+
+    key = _confirmed_swing_first_touch_key(tp_pct, sl_pct)
+    outcomes = []
+
+    for result_map in rows.get(
+        "first_touch_60m_results",
+        pd.Series(dtype=object),
+    ):
+        if not isinstance(result_map, dict):
+            continue
+
+        result = result_map.get(key)
+        if not isinstance(result, dict):
+            continue
+
+        outcomes.append(
+            str(result.get("outcome", "NO_HIT"))
+        )
+
+    if not outcomes:
+        return np.nan, 0
+
+    tp_count = sum(
+        outcome == "TP"
+        for outcome in outcomes
+    )
+
+    return (
+        float(tp_count / len(outcomes) * 100.0),
+        len(outcomes),
+    )
+
+
+def _confirmed_swing_geometry_bucket_row(
+    subset,
+    label_column,
+    label_value,
+):
+    """Build one geometry bucket row with fixed-horizon and path-order stats."""
+    row = {
+        label_column: str(label_value),
+        "N": len(subset),
+    }
+
+    for horizon in (15, 30, 60):
+        mfe_col = f"reaction_mfe_{horizon}m_pct"
+        mae_col = f"reaction_mae_{horizon}m_pct"
+
+        if (
+            mfe_col not in subset.columns
+            or mae_col not in subset.columns
+        ):
+            row[f"N {horizon}m"] = 0
+            row[f"Avg MFE{horizon} %"] = np.nan
+            row[f"Avg MAE{horizon} %"] = np.nan
+            continue
+
+        complete = subset.dropna(
+            subset=[mfe_col, mae_col]
+        )
+
+        row[f"N {horizon}m"] = len(complete)
+
+        if complete.empty:
+            row[f"Avg MFE{horizon} %"] = np.nan
+            row[f"Avg MAE{horizon} %"] = np.nan
+        else:
+            row[f"Avg MFE{horizon} %"] = round(
+                float(complete[mfe_col].mean()),
+                4,
+            )
+            row[f"Avg MAE{horizon} %"] = round(
+                float(complete[mae_col].mean()),
+                4,
+            )
+
+    complete_60 = subset.dropna(
+        subset=[
+            "reaction_mfe_60m_pct",
+            "reaction_mae_60m_pct",
+        ]
+    )
+
+    if complete_60.empty:
+        row["MFE/MAE 60m"] = np.nan
+    else:
+        avg_mfe_60 = float(
+            complete_60["reaction_mfe_60m_pct"].mean()
+        )
+        avg_mae_60 = float(
+            complete_60["reaction_mae_60m_pct"].mean()
+        )
+        row["MFE/MAE 60m"] = (
+            round(avg_mfe_60 / avg_mae_60, 3)
+            if avg_mae_60 > 0
+            else np.nan
+        )
+
+    tp_specs = (
+        (0.50, 0.50, "TP0.5 before SL0.5 %"),
+        (1.00, 0.50, "TP1 before SL0.5 %"),
+        (1.00, 1.00, "TP1 before SL1 %"),
+    )
+
+    for tp_pct, sl_pct, column in tp_specs:
+        rate, n_order = _confirmed_swing_tp_first_rate(
+            subset,
+            tp_pct,
+            sl_pct,
+        )
+        row[column] = (
+            round(rate, 2)
+            if pd.notna(rate)
+            else np.nan
+        )
+        row[f"N {column}"] = int(n_order)
+
+    return row
+
+
+def render_confirmed_swing_reaction_geometry_mfe(view):
+    """Analyze penetration × reaction-range geometry against later excursion."""
+    if view is None or view.empty:
+        return
+
+    statuses = (
+        view.get(
+            "status",
+            pd.Series("", index=view.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+
+    reactions = view.loc[
+        statuses.eq("REACTION")
+    ].copy()
+
+    if reactions.empty:
+        return
+
+    numeric_columns = [
+        "penetration_pct",
+        "reaction_range_pct",
+        "reaction_mfe_15m_pct",
+        "reaction_mae_15m_pct",
+        "reaction_mfe_30m_pct",
+        "reaction_mae_30m_pct",
+        "reaction_mfe_60m_pct",
+        "reaction_mae_60m_pct",
+    ]
+
+    for column in numeric_columns:
+        if column in reactions.columns:
+            reactions[column] = pd.to_numeric(
+                reactions[column],
+                errors="coerce",
+            )
+
+    required_geometry = [
+        "penetration_pct",
+        "reaction_range_pct",
+    ]
+
+    if not all(
+        column in reactions.columns
+        for column in required_geometry
+    ):
+        return
+
+    geometry = reactions.dropna(
+        subset=required_geometry
+    ).copy()
+
+    if geometry.empty:
+        return
+
+    geometry["_penetration_bucket"] = pd.cut(
+        geometry["penetration_pct"],
+        bins=CONFIRMED_SWING_PENETRATION_BINS,
+        labels=CONFIRMED_SWING_PENETRATION_LABELS,
+        right=False,
+        include_lowest=True,
+    )
+
+    geometry["_range_bucket"] = pd.cut(
+        geometry["reaction_range_pct"],
+        bins=CONFIRMED_SWING_RANGE_BINS,
+        labels=CONFIRMED_SWING_RANGE_LABELS,
+        right=False,
+        include_lowest=True,
+    )
+
+    st.markdown("#### REACTION GEOMETRY × MFE")
+    st.caption(
+        "Only REACTION events are included. Penetration measures how far the "
+        "retest candle pushed through the confirmed 15m swing before the "
+        "reaction. Reaction range is the full 1m candle range as a percentage "
+        "of its open. Forward MFE/MAE uses equal 15m/30m/60m windows; TP/SL "
+        "columns use the causal next-1m-open first-touch simulation."
+    )
+
+    # ---------------------------------------------------------
+    # Penetration buckets.
+    # ---------------------------------------------------------
+    penetration_rows = []
+
+    for bucket in CONFIRMED_SWING_PENETRATION_LABELS:
+        subset = geometry.loc[
+            geometry["_penetration_bucket"]
+            .astype(str)
+            .eq(str(bucket))
+        ].copy()
+
+        if subset.empty:
+            continue
+
+        penetration_rows.append(
+            _confirmed_swing_geometry_bucket_row(
+                subset,
+                "Penetration",
+                bucket,
+            )
+        )
+
+    if penetration_rows:
+        st.markdown("##### Penetration buckets")
+        st.dataframe(
+            pd.DataFrame(penetration_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ---------------------------------------------------------
+    # Reaction-range buckets.
+    # ---------------------------------------------------------
+    range_rows = []
+
+    for bucket in CONFIRMED_SWING_RANGE_LABELS:
+        subset = geometry.loc[
+            geometry["_range_bucket"]
+            .astype(str)
+            .eq(str(bucket))
+        ].copy()
+
+        if subset.empty:
+            continue
+
+        range_rows.append(
+            _confirmed_swing_geometry_bucket_row(
+                subset,
+                "Reaction range",
+                bucket,
+            )
+        )
+
+    if range_rows:
+        st.markdown("##### Reaction-range buckets")
+        st.dataframe(
+            pd.DataFrame(range_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ---------------------------------------------------------
+    # 2D penetration × range matrix.
+    # ---------------------------------------------------------
+    matrix_c1, matrix_c2 = st.columns([2.0, 1.0])
+
+    with matrix_c1:
+        matrix_metric = st.selectbox(
+            "Geometry matrix metric",
+            options=[
+                "MFE/MAE 60m",
+                "Avg MFE60 %",
+                "Avg MAE60 %",
+                "TP0.5 before SL0.5 %",
+                "TP1 before SL0.5 %",
+                "TP1 before SL1 %",
+                "N",
+            ],
+            index=0,
+            key="confirmed_swing_geometry_matrix_metric",
+        )
+
+    with matrix_c2:
+        matrix_min_n = st.selectbox(
+            "Minimum N / cell",
+            options=[1, 3, 5, 10, 15, 20],
+            index=2,
+            key="confirmed_swing_geometry_matrix_min_n",
+        )
+
+    matrix_values = []
+    matrix_custom = []
+
+    for penetration_bucket in CONFIRMED_SWING_PENETRATION_LABELS:
+        z_row = []
+        custom_row = []
+
+        for range_bucket in CONFIRMED_SWING_RANGE_LABELS:
+            subset = geometry.loc[
+                geometry["_penetration_bucket"]
+                .astype(str)
+                .eq(str(penetration_bucket))
+                & geometry["_range_bucket"]
+                .astype(str)
+                .eq(str(range_bucket))
+            ].copy()
+
+            n_total = len(subset)
+
+            avg_mfe = np.nan
+            avg_mae = np.nan
+            ratio = np.nan
+            n_60 = 0
+
+            if (
+                "reaction_mfe_60m_pct" in subset.columns
+                and "reaction_mae_60m_pct" in subset.columns
+            ):
+                complete_60 = subset.dropna(
+                    subset=[
+                        "reaction_mfe_60m_pct",
+                        "reaction_mae_60m_pct",
+                    ]
+                )
+                n_60 = len(complete_60)
+
+                if not complete_60.empty:
+                    avg_mfe = float(
+                        complete_60[
+                            "reaction_mfe_60m_pct"
+                        ].mean()
+                    )
+                    avg_mae = float(
+                        complete_60[
+                            "reaction_mae_60m_pct"
+                        ].mean()
+                    )
+                    ratio = (
+                        avg_mfe / avg_mae
+                        if avg_mae > 0
+                        else np.nan
+                    )
+
+            tp_05_05, n_order_05_05 = (
+                _confirmed_swing_tp_first_rate(
+                    subset,
+                    0.50,
+                    0.50,
+                )
+            )
+            tp_10_05, n_order_10_05 = (
+                _confirmed_swing_tp_first_rate(
+                    subset,
+                    1.00,
+                    0.50,
+                )
+            )
+            tp_10_10, n_order_10_10 = (
+                _confirmed_swing_tp_first_rate(
+                    subset,
+                    1.00,
+                    1.00,
+                )
+            )
+
+            metric_map = {
+                "MFE/MAE 60m": ratio,
+                "Avg MFE60 %": avg_mfe,
+                "Avg MAE60 %": avg_mae,
+                "TP0.5 before SL0.5 %": tp_05_05,
+                "TP1 before SL0.5 %": tp_10_05,
+                "TP1 before SL1 %": tp_10_10,
+                "N": float(n_total),
+            }
+
+            support_n_map = {
+                "MFE/MAE 60m": n_60,
+                "Avg MFE60 %": n_60,
+                "Avg MAE60 %": n_60,
+                "TP0.5 before SL0.5 %": n_order_05_05,
+                "TP1 before SL0.5 %": n_order_10_05,
+                "TP1 before SL1 %": n_order_10_10,
+                "N": n_total,
+            }
+
+            support_n = int(
+                support_n_map.get(
+                    matrix_metric,
+                    n_total,
+                )
+            )
+            value = metric_map.get(
+                matrix_metric,
+                np.nan,
+            )
+
+            if (
+                support_n < int(matrix_min_n)
+                or pd.isna(value)
+            ):
+                z_row.append(np.nan)
+            else:
+                z_row.append(float(value))
+
+            custom_row.append([
+                n_total,
+                n_60,
+                avg_mfe,
+                avg_mae,
+                ratio,
+                tp_05_05,
+                tp_10_05,
+                tp_10_10,
+            ])
+
+        matrix_values.append(z_row)
+        matrix_custom.append(custom_row)
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=matrix_values,
+            x=list(CONFIRMED_SWING_RANGE_LABELS),
+            y=list(CONFIRMED_SWING_PENETRATION_LABELS),
+            customdata=np.array(
+                matrix_custom,
+                dtype=float,
+            ),
+            colorbar={
+                "title": matrix_metric,
+            },
+            hovertemplate=(
+                "<b>Penetration %{y}</b><br>"
+                "Range %{x}<br>"
+                "N total: %{customdata[0]:.0f}<br>"
+                "N complete 60m: %{customdata[1]:.0f}<br>"
+                "Avg MFE60: %{customdata[2]:.3f}%<br>"
+                "Avg MAE60: %{customdata[3]:.3f}%<br>"
+                "MFE/MAE60: %{customdata[4]:.3f}x<br>"
+                "TP0.5/SL0.5 first: %{customdata[5]:.2f}%<br>"
+                "TP1/SL0.5 first: %{customdata[6]:.2f}%<br>"
+                "TP1/SL1 first: %{customdata[7]:.2f}%"
+                "<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title=(
+            f"Penetration × reaction range · {matrix_metric} "
+            f"(min N={matrix_min_n})"
+        ),
+        xaxis_title="Reaction range",
+        yaxis_title="Penetration",
+        height=520,
+        margin={
+            "l": 10,
+            "r": 10,
+            "t": 55,
+            "b": 10,
+        },
+    )
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key="confirmed_swing_geometry_matrix",
+        config={"displaylogo": False},
+    )
+
+    # ---------------------------------------------------------
+    # Top supported geometry cells, useful for quickly spotting
+    # combinations worth replaying without hiding the denominator.
+    # ---------------------------------------------------------
+    cell_rows = []
+
+    for penetration_bucket in CONFIRMED_SWING_PENETRATION_LABELS:
+        for range_bucket in CONFIRMED_SWING_RANGE_LABELS:
+            subset = geometry.loc[
+                geometry["_penetration_bucket"]
+                .astype(str)
+                .eq(str(penetration_bucket))
+                & geometry["_range_bucket"]
+                .astype(str)
+                .eq(str(range_bucket))
+            ]
+
+            if subset.empty:
+                continue
+
+            complete_60 = subset.dropna(
+                subset=[
+                    "reaction_mfe_60m_pct",
+                    "reaction_mae_60m_pct",
+                ]
+            )
+
+            if complete_60.empty:
+                continue
+
+            avg_mfe = float(
+                complete_60["reaction_mfe_60m_pct"].mean()
+            )
+            avg_mae = float(
+                complete_60["reaction_mae_60m_pct"].mean()
+            )
+
+            tp_10_05, n_order = (
+                _confirmed_swing_tp_first_rate(
+                    subset,
+                    1.00,
+                    0.50,
+                )
+            )
+
+            cell_rows.append({
+                "Penetration": penetration_bucket,
+                "Reaction range": range_bucket,
+                "N total": len(subset),
+                "N 60m": len(complete_60),
+                "Avg MFE60 %": round(avg_mfe, 4),
+                "Avg MAE60 %": round(avg_mae, 4),
+                "MFE/MAE60": (
+                    round(avg_mfe / avg_mae, 3)
+                    if avg_mae > 0
+                    else np.nan
+                ),
+                "TP1 before SL0.5 %": (
+                    round(tp_10_05, 2)
+                    if pd.notna(tp_10_05)
+                    else np.nan
+                ),
+                "N TP1/SL0.5": int(n_order),
+            })
+
+    if cell_rows:
+        cells = pd.DataFrame(cell_rows)
+        cells = cells.loc[
+            cells["N 60m"].ge(5)
+        ].copy()
+
+        if not cells.empty:
+            cells = cells.sort_values(
+                ["MFE/MAE60", "N 60m"],
+                ascending=[False, False],
+            )
+
+            st.markdown(
+                "##### Best-supported geometry cells "
+                "(research ranking, min N60 = 5)"
+            )
+            st.caption(
+                "This table is exploratory, not an execution ranking. "
+                "Large ratios from small samples can disappear out of sample."
+            )
+            st.dataframe(
+                cells.head(20),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+
 def render_confirmed_swing_volume_mfe_analysis(view):
     """Compare reaction-time volume fingerprints with later fixed-horizon MFE."""
     if view is None or view.empty:
@@ -12319,6 +12927,7 @@ def render_confirmed_swing_retest_scanner(
     render_confirmed_swing_window_summary(view)
     render_confirmed_swing_reaction_overview(view)
     render_confirmed_swing_path_order_analysis(view)
+    render_confirmed_swing_reaction_geometry_mfe(view)
     render_confirmed_swing_volume_mfe_analysis(view)
 
     display_columns = [
