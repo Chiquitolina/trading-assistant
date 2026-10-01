@@ -220,8 +220,40 @@ def detect_compression(
     max_volume_ratio: float = 1.10,
     max_body_pct: float = 0.55,
     min_score: int = 3,
+    base_window_mode: str = "overlap",
 ):
-    if df is None or len(df) < base_lookback + lookback:
+    base_window_mode = (
+        str(base_window_mode)
+        .strip()
+        .lower()
+    )
+
+    if base_window_mode not in {
+        "overlap",
+        "separate",
+    }:
+        raise ValueError(
+            "base_window_mode must be "
+            "'overlap' or 'separate'"
+        )
+
+
+    if base_window_mode == "separate":
+
+        required_candles = (
+            base_lookback
+            + lookback
+        )
+
+    else:
+
+        required_candles = max(
+            base_lookback,
+            lookback,
+        )
+
+
+    if df is None or len(df) < required_candles:
         return {
             "is_compression": False,
             "score": 0,
@@ -245,7 +277,7 @@ def detect_compression(
 
     d = d.dropna(subset=required_cols).reset_index(drop=True)
 
-    if len(d) < base_lookback + lookback:
+    if len(d) < required_candles:
         return {
             "is_compression": False,
             "score": 0,
@@ -265,8 +297,42 @@ def detect_compression(
     d["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     d["atr"] = d["tr"].rolling(14).mean()
 
-    recent = d.tail(lookback)
-    base = d.tail(base_lookback)
+
+    recent = d.tail(
+        lookback
+    )
+
+
+    if base_window_mode == "overlap":
+
+        # Ejemplo 10 / 40:
+        #
+        # BASE:   [---------------- 40 ----------------]
+        # RECENT:                               [--10--]
+        #
+        # Las 10 recientes están incluidas
+        # dentro de las 40 de referencia.
+
+        base = d.tail(
+            base_lookback
+        )
+
+    else:
+
+        # Ejemplo 10 / 40:
+        #
+        # BASE:   [--------- 40 ---------]
+        # RECENT:                         [--10--]
+        #
+        # No comparten ninguna vela.
+
+        base = d.iloc[
+            -(
+                base_lookback
+                + lookback
+            ):
+            -lookback
+        ]
 
     recent_range_avg = recent["range"].mean()
     base_range_avg = base["range"].mean()
@@ -342,6 +408,8 @@ def detect_compression(
 
         "lookback": lookback,
         "base_lookback": base_lookback,
+        
+        "base_window_mode": base_window_mode,
 
         "range_ratio": round(float(range_ratio), 4),
         "atr_ratio": round(float(atr_ratio), 4),

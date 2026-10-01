@@ -1,4 +1,5 @@
 import pandas as pd
+import os
 
 from enums.actions import Action
 from models.trade_action import TradeAction
@@ -32,6 +33,95 @@ class CompressionStrategy:
         self.journal = journal
         self.fidelity_journal = fidelity_journal
         self.market_flow_provider = market_flow_provider
+        
+        # ==========================================================
+        # COMPRESSION DETECTOR CONFIG
+        # ==========================================================
+
+        self.compression_lookback = int(
+            os.getenv(
+                "COMPRESSION_LOOKBACK",
+                "10",
+            )
+        )
+
+        self.compression_base_size_mode = (
+            os.getenv(
+                "COMPRESSION_BASE_SIZE_MODE",
+                "fixed",
+            )
+            .strip()
+            .lower()
+        )
+
+        self.compression_base_fixed_lookback = int(
+            os.getenv(
+                "COMPRESSION_BASE_LOOKBACK",
+                "40",
+            )
+        )
+
+        self.compression_base_window_mode = (
+            os.getenv(
+                "COMPRESSION_BASE_WINDOW_MODE",
+                "overlap",
+            )
+            .strip()
+            .lower()
+        )
+
+
+        if self.compression_lookback <= 0:
+            raise ValueError(
+                "COMPRESSION_LOOKBACK must be > 0"
+            )
+
+
+        if self.compression_base_size_mode not in {
+            "fixed",
+            "x4",
+        }:
+            raise ValueError(
+                "COMPRESSION_BASE_SIZE_MODE "
+                "must be 'fixed' or 'x4'"
+            )
+
+
+        if self.compression_base_window_mode not in {
+            "overlap",
+            "separate",
+        }:
+            raise ValueError(
+                "COMPRESSION_BASE_WINDOW_MODE "
+                "must be 'overlap' or 'separate'"
+            )
+
+
+        if self.compression_base_size_mode == "x4":
+
+            self.compression_base_lookback = (
+                self.compression_lookback * 4
+            )
+
+        else:
+
+            if self.compression_base_fixed_lookback <= 0:
+                raise ValueError(
+                    "COMPRESSION_BASE_LOOKBACK must be > 0"
+                )
+
+            self.compression_base_lookback = (
+                self.compression_base_fixed_lookback
+            )
+
+
+        print(
+            "[COMPRESSION CONFIG] "
+            f"lookback={self.compression_lookback} "
+            f"base_size_mode={self.compression_base_size_mode} "
+            f"base_lookback={self.compression_base_lookback} "
+            f"base_window_mode={self.compression_base_window_mode}"
+        )
 
         self.machine = CompressionStateMachine(
             max_watch_candles=max_watch_candles,
@@ -74,6 +164,23 @@ class CompressionStrategy:
             "compression_score": compression_state.get("compression_score") or compression.get("score"),
             "compression_reasons": compression.get("reasons"),
             "compression_is_compression": compression.get("is_compression"),
+            
+            
+            "compression_lookback": compression.get(
+                "lookback"
+            ),
+
+            "compression_base_lookback": compression.get(
+                "base_lookback"
+            ),
+
+            "compression_base_size_mode": (
+                self.compression_base_size_mode
+            ),
+
+            "compression_base_window_mode": compression.get(
+                "base_window_mode"
+            ),
 
             "compression_high": compression_state.get("compression_high"),
             "compression_low": compression_state.get("compression_low"),
@@ -170,8 +277,32 @@ class CompressionStrategy:
             tf,
             as_of_ts=as_of_ts,
         )
+                
+        if self.compression_base_window_mode == "separate":
 
-        if len(candles) < 80:
+            required_detector_candles = (
+                self.compression_base_lookback
+                + self.compression_lookback
+                + 1
+            )
+
+        else:
+
+            required_detector_candles = (
+                max(
+                    self.compression_base_lookback,
+                    self.compression_lookback,
+                )
+                + 1
+            )
+
+
+        required_candles = max(
+            80,
+            required_detector_candles,
+        )
+
+        if len(candles) < required_candles:
             trade_action = TradeAction(
                 action=Action.HOLD,
                 signal=signal,
@@ -202,8 +333,11 @@ class CompressionStrategy:
 
         compression = detect_compression(
             prev_df,
-            lookback=10,
-            base_lookback=40,
+            lookback=self.compression_lookback,
+            base_lookback=self.compression_base_lookback,
+            base_window_mode=(
+                self.compression_base_window_mode
+            ),
             max_range_ratio=0.65,
             max_atr_ratio=0.75,
             max_volume_ratio=0.95,
