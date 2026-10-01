@@ -9173,6 +9173,14 @@ CONFIRMED_SWING_FIRST_TOUCH_SL_GRID = (
     0.25, 0.50, 0.75, 1.00, 1.50, 2.00,
 )
 
+CONFIRMED_SWING_TIME_EXIT_HORIZONS = (
+    60,
+    120,
+    180,
+    240,
+    360,
+)
+
 
 def _confirmed_swing_first_touch_key(tp_pct, sl_pct):
     return f"tp={float(tp_pct):.2f}|sl={float(sl_pct):.2f}"
@@ -9195,6 +9203,15 @@ def _attach_confirmed_swing_order_recovery_analysis(
     retest["first_touch_entry_price"] = np.nan
     retest["first_touch_60m_complete"] = False
     retest["first_touch_60m_results"] = {}
+
+    # Compact chronological research payload:
+    # - one first-hit result per TP/SL pair, scanned up to 360m;
+    # - one directional TIME_EXIT return per complete horizon.
+    # This lets the dashboard test longer holding windows without re-reading
+    # candles or creating hindsight.
+    retest["first_touch_path_results_360m"] = {}
+    retest["first_touch_time_exit_returns"] = {}
+    retest["first_touch_complete_horizons"] = []
 
     retest["failure_recovery_status"] = None
     retest["failure_recovered"] = False
@@ -9320,6 +9337,128 @@ def _attach_confirmed_swing_order_recovery_analysis(
                 }
 
         retest["first_touch_60m_results"] = result_map
+
+    # ------------------------------------------------------------
+    # Generic path research up to 360m.
+    #
+    # We store the FIRST TP/SL event once. A selected dashboard horizon then
+    # accepts that hit only if hit_bar <= horizon; otherwise the position is
+    # closed at that horizon's candle close (TIME_EXIT).
+    # ------------------------------------------------------------
+    available_bars = max(
+        0,
+        min(
+            int(segment_end) - int(start_idx) + 1,
+            len(timestamps) - int(start_idx),
+        ),
+    )
+
+    complete_horizons = []
+    time_exit_returns = {}
+
+    for horizon in CONFIRMED_SWING_TIME_EXIT_HORIZONS:
+        horizon = int(horizon)
+
+        if available_bars < horizon:
+            continue
+
+        horizon_idx = start_idx + horizon - 1
+        horizon_close = float(closes[horizon_idx])
+
+        if side == "LONG":
+            directional_return = (
+                horizon_close / entry_price - 1.0
+            ) * 100.0
+        else:
+            directional_return = (
+                1.0 - horizon_close / entry_price
+            ) * 100.0
+
+        complete_horizons.append(horizon)
+        time_exit_returns[str(horizon)] = float(
+            directional_return
+        )
+
+    retest["first_touch_complete_horizons"] = (
+        complete_horizons
+    )
+    retest["first_touch_time_exit_returns"] = (
+        time_exit_returns
+    )
+
+    max_scan_bars = min(
+        available_bars,
+        max(CONFIRMED_SWING_TIME_EXIT_HORIZONS),
+    )
+
+    if max_scan_bars > 0:
+        path_results = {}
+
+        for tp_pct in CONFIRMED_SWING_FIRST_TOUCH_TP_GRID:
+            for sl_pct in CONFIRMED_SWING_FIRST_TOUCH_SL_GRID:
+                if side == "LONG":
+                    tp_price = entry_price * (
+                        1.0 + float(tp_pct) / 100.0
+                    )
+                    sl_price = entry_price * (
+                        1.0 - float(sl_pct) / 100.0
+                    )
+                else:
+                    tp_price = entry_price * (
+                        1.0 - float(tp_pct) / 100.0
+                    )
+                    sl_price = entry_price * (
+                        1.0 + float(sl_pct) / 100.0
+                    )
+
+                first_outcome = "NO_HIT"
+                first_hit_bar = np.nan
+                first_hit_minutes = np.nan
+
+                for offset in range(max_scan_bars):
+                    idx = start_idx + offset
+                    high = float(highs[idx])
+                    low = float(lows[idx])
+
+                    if side == "LONG":
+                        tp_hit = high >= tp_price
+                        sl_hit = low <= sl_price
+                    else:
+                        tp_hit = low <= tp_price
+                        sl_hit = high >= sl_price
+
+                    if tp_hit and sl_hit:
+                        first_outcome = "SL_AMBIGUOUS"
+                        first_hit_bar = int(offset + 1)
+                        first_hit_minutes = float(offset)
+                        break
+
+                    if sl_hit:
+                        first_outcome = "SL"
+                        first_hit_bar = int(offset + 1)
+                        first_hit_minutes = float(offset)
+                        break
+
+                    if tp_hit:
+                        first_outcome = "TP"
+                        first_hit_bar = int(offset + 1)
+                        first_hit_minutes = float(offset)
+                        break
+
+                path_results[
+                    _confirmed_swing_first_touch_key(
+                        tp_pct,
+                        sl_pct,
+                    )
+                ] = {
+                    "outcome": first_outcome,
+                    "hit_bar": first_hit_bar,
+                    "hit_minutes": first_hit_minutes,
+                }
+
+        retest["first_touch_path_results_360m"] = (
+            path_results
+        )
 
     # Failure recovery: same original setup direction, never reverse.
     if status != "TOUCH_FAILED":
@@ -11910,6 +12049,216 @@ def _confirmed_swing_geometry_bucket_row(
     return row
 
 
+
+
+def _confirmed_swing_net_result_for_row(
+    row,
+    tp_pct,
+    sl_pct,
+    horizon_min,
+    fee_per_side_pct,
+):
+    """Resolve one causal hypothetical trade to TP, SL, or TIME_EXIT.
+
+    Same-1m TP+SL remains conservative SL_AMBIGUOUS. Increasing the holding
+    horizon reduces early NO_HIT/TIME_EXIT cases, but cannot remove genuine
+    intrabar ambiguity.
+    """
+    try:
+        horizon_min = int(horizon_min)
+        tp_pct = float(tp_pct)
+        sl_pct = float(sl_pct)
+        fee_per_side_pct = float(fee_per_side_pct)
+    except (TypeError, ValueError):
+        return None
+
+    complete_horizons = row.get(
+        "first_touch_complete_horizons",
+        [],
+    )
+
+    if not isinstance(
+        complete_horizons,
+        (list, tuple, set, np.ndarray),
+    ):
+        return None
+
+    try:
+        complete_horizons = {
+            int(value)
+            for value in complete_horizons
+        }
+    except (TypeError, ValueError):
+        return None
+
+    if horizon_min not in complete_horizons:
+        return None
+
+    path_results = row.get(
+        "first_touch_path_results_360m",
+        {},
+    )
+    time_exit_returns = row.get(
+        "first_touch_time_exit_returns",
+        {},
+    )
+
+    if (
+        not isinstance(path_results, dict)
+        or not isinstance(time_exit_returns, dict)
+    ):
+        return None
+
+    key = _confirmed_swing_first_touch_key(
+        tp_pct,
+        sl_pct,
+    )
+    path_result = path_results.get(key)
+
+    if not isinstance(path_result, dict):
+        return None
+
+    outcome = str(
+        path_result.get("outcome", "NO_HIT")
+    )
+
+    hit_bar = pd.to_numeric(
+        path_result.get("hit_bar"),
+        errors="coerce",
+    )
+
+    roundtrip_fee_pct = max(
+        0.0,
+        fee_per_side_pct * 2.0,
+    )
+
+    if (
+        outcome in {"TP", "SL", "SL_AMBIGUOUS"}
+        and pd.notna(hit_bar)
+        and int(hit_bar) <= horizon_min
+    ):
+        if outcome == "TP":
+            gross_pct = tp_pct
+        else:
+            gross_pct = -sl_pct
+
+        exit_reason = outcome
+    else:
+        exit_return = pd.to_numeric(
+            time_exit_returns.get(
+                str(horizon_min),
+            ),
+            errors="coerce",
+        )
+
+        if pd.isna(exit_return):
+            return None
+
+        gross_pct = float(exit_return)
+        exit_reason = "TIME_EXIT"
+
+    net_pct = float(gross_pct) - roundtrip_fee_pct
+
+    return {
+        "exit_reason": exit_reason,
+        "gross_pct": float(gross_pct),
+        "fees_pct": float(roundtrip_fee_pct),
+        "net_pct": float(net_pct),
+    }
+
+
+def _confirmed_swing_net_stats(
+    rows,
+    tp_pct,
+    sl_pct,
+    horizon_min,
+    fee_per_side_pct,
+):
+    """Aggregate causal net expectancy and PF for a dataframe subset."""
+    if rows is None or rows.empty:
+        return None
+
+    results = []
+
+    for _, row in rows.iterrows():
+        result = _confirmed_swing_net_result_for_row(
+            row,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon_min=horizon_min,
+            fee_per_side_pct=fee_per_side_pct,
+        )
+        if result is not None:
+            results.append(result)
+
+    if not results:
+        return None
+
+    result_df = pd.DataFrame(results)
+    net = pd.to_numeric(
+        result_df["net_pct"],
+        errors="coerce",
+    ).dropna()
+
+    if net.empty:
+        return None
+
+    positive_sum = float(
+        net.loc[net > 0].sum()
+    )
+    negative_sum = float(
+        net.loc[net < 0].sum()
+    )
+
+    profit_factor = (
+        positive_sum / abs(negative_sum)
+        if negative_sum < 0
+        else (
+            np.inf
+            if positive_sum > 0
+            else np.nan
+        )
+    )
+
+    n = len(net)
+    tp_count = int(
+        result_df["exit_reason"].eq("TP").sum()
+    )
+    sl_count = int(
+        result_df["exit_reason"].eq("SL").sum()
+    )
+    ambiguous_count = int(
+        result_df["exit_reason"]
+        .eq("SL_AMBIGUOUS")
+        .sum()
+    )
+    time_exit_count = int(
+        result_df["exit_reason"]
+        .eq("TIME_EXIT")
+        .sum()
+    )
+
+    return {
+        "N": n,
+        "Win rate %": float(
+            (net > 0).mean() * 100.0
+        ),
+        "Avg net %": float(net.mean()),
+        "Median net %": float(net.median()),
+        "Total net %": float(net.sum()),
+        "Profit factor": float(profit_factor),
+        "TP %": tp_count / n * 100.0,
+        "SL %": sl_count / n * 100.0,
+        "Ambiguous→SL %": (
+            ambiguous_count / n * 100.0
+        ),
+        "TIME_EXIT %": (
+            time_exit_count / n * 100.0
+        ),
+    }
+
+
+
 def render_confirmed_swing_reaction_geometry_mfe(view):
     """Analyze penetration × reaction-range geometry against later excursion."""
     if view is None or view.empty:
@@ -12351,6 +12700,466 @@ def render_confirmed_swing_reaction_geometry_mfe(view):
                 hide_index=True,
             )
 
+
+
+    # ---------------------------------------------------------
+    # NET EXPECTANCY / PROFIT FACTOR BY GEOMETRY
+    # ---------------------------------------------------------
+    st.markdown("#### NET EXPECTANCY / PF by geometry")
+    st.caption(
+        "Causal hypothetical execution: enter at the OPEN of the next 1m "
+        "candle after REACTION is known. Exit at TP, SL, or the selected "
+        "TIME_EXIT horizon. Same-1m TP+SL remains conservative "
+        "SL_AMBIGUOUS → SL. A longer TIME_EXIT reduces unresolved/no-hit "
+        "cases, but it cannot remove true intrabar ambiguity. Net results "
+        "subtract the configured fee on entry and exit; slippage and funding "
+        "are not included."
+    )
+
+    net_c1, net_c2, net_c3, net_c4 = st.columns(4)
+
+    tp_options = list(
+        CONFIRMED_SWING_FIRST_TOUCH_TP_GRID
+    )
+    sl_options = list(
+        CONFIRMED_SWING_FIRST_TOUCH_SL_GRID
+    )
+    horizon_options = list(
+        CONFIRMED_SWING_TIME_EXIT_HORIZONS
+    )
+
+    with net_c1:
+        net_tp = st.selectbox(
+            "Net study TP %",
+            options=tp_options,
+            index=tp_options.index(1.00),
+            key="confirmed_swing_geometry_net_tp",
+        )
+
+    with net_c2:
+        net_sl = st.selectbox(
+            "Net study SL %",
+            options=sl_options,
+            index=sl_options.index(1.00),
+            key="confirmed_swing_geometry_net_sl",
+        )
+
+    with net_c3:
+        net_horizon = st.selectbox(
+            "TIME_EXIT",
+            options=horizon_options,
+            index=horizon_options.index(180),
+            format_func=lambda value: f"{value}m",
+            key="confirmed_swing_geometry_net_horizon",
+        )
+
+    with net_c4:
+        fee_per_side = st.number_input(
+            "Fee per side %",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.05,
+            step=0.01,
+            format="%.3f",
+            key="confirmed_swing_geometry_fee_per_side",
+        )
+
+    overall_net = _confirmed_swing_net_stats(
+        geometry,
+        tp_pct=net_tp,
+        sl_pct=net_sl,
+        horizon_min=net_horizon,
+        fee_per_side_pct=fee_per_side,
+    )
+
+    if overall_net is None:
+        st.info(
+            "No REACTION events have a complete contiguous path for the "
+            f"selected {net_horizon}m TIME_EXIT yet."
+        )
+    else:
+        o1, o2, o3, o4, o5 = st.columns(5)
+        o1.metric("N complete", int(overall_net["N"]))
+        o2.metric(
+            "Net win rate",
+            f"{overall_net['Win rate %']:.2f}%",
+        )
+        o3.metric(
+            "Avg net / trade",
+            f"{overall_net['Avg net %']:.4f}%",
+        )
+        o4.metric(
+            "Profit factor",
+            (
+                f"{overall_net['Profit factor']:.3f}"
+                if np.isfinite(overall_net["Profit factor"])
+                else "∞"
+            ),
+        )
+        o5.metric(
+            "Total net %",
+            f"{overall_net['Total net %']:.3f}%",
+        )
+
+        o6, o7, o8, o9 = st.columns(4)
+        o6.metric(
+            "TP exits",
+            f"{overall_net['TP %']:.1f}%",
+        )
+        o7.metric(
+            "SL exits",
+            f"{overall_net['SL %']:.1f}%",
+        )
+        o8.metric(
+            "Ambiguous→SL",
+            f"{overall_net['Ambiguous→SL %']:.1f}%",
+        )
+        o9.metric(
+            "TIME_EXIT",
+            f"{overall_net['TIME_EXIT %']:.1f}%",
+        )
+
+    def _net_bucket_table(
+        bucket_column,
+        ordered_labels,
+        output_label,
+    ):
+        rows = []
+
+        for bucket_name in ordered_labels:
+            subset = geometry.loc[
+                geometry[bucket_column]
+                .astype(str)
+                .eq(str(bucket_name))
+            ].copy()
+
+            stats = _confirmed_swing_net_stats(
+                subset,
+                tp_pct=net_tp,
+                sl_pct=net_sl,
+                horizon_min=net_horizon,
+                fee_per_side_pct=fee_per_side,
+            )
+
+            if stats is None:
+                continue
+
+            rows.append({
+                output_label: str(bucket_name),
+                "N": int(stats["N"]),
+                "Win rate %": round(
+                    stats["Win rate %"],
+                    2,
+                ),
+                "Avg net %": round(
+                    stats["Avg net %"],
+                    4,
+                ),
+                "Median net %": round(
+                    stats["Median net %"],
+                    4,
+                ),
+                "Profit factor": (
+                    round(stats["Profit factor"], 3)
+                    if np.isfinite(stats["Profit factor"])
+                    else np.inf
+                ),
+                "Total net %": round(
+                    stats["Total net %"],
+                    4,
+                ),
+                "TP %": round(stats["TP %"], 2),
+                "SL %": round(stats["SL %"], 2),
+                "Ambiguous→SL %": round(
+                    stats["Ambiguous→SL %"],
+                    2,
+                ),
+                "TIME_EXIT %": round(
+                    stats["TIME_EXIT %"],
+                    2,
+                ),
+            })
+
+        return pd.DataFrame(rows)
+
+    penetration_net = _net_bucket_table(
+        "_penetration_bucket",
+        CONFIRMED_SWING_PENETRATION_LABELS,
+        "Penetration",
+    )
+    range_net = _net_bucket_table(
+        "_range_bucket",
+        CONFIRMED_SWING_RANGE_LABELS,
+        "Reaction range",
+    )
+
+    if not penetration_net.empty:
+        st.markdown(
+            f"##### Net by penetration · TP {net_tp:.2f}% / "
+            f"SL {net_sl:.2f}% / exit {net_horizon}m"
+        )
+        st.dataframe(
+            penetration_net,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not range_net.empty:
+        st.markdown(
+            f"##### Net by reaction range · TP {net_tp:.2f}% / "
+            f"SL {net_sl:.2f}% / exit {net_horizon}m"
+        )
+        st.dataframe(
+            range_net,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ---------------------------------------------------------
+    # Coarser 3×3 geometry view: more support per cell and less
+    # temptation to overfit the fine 6×6 research grid.
+    # ---------------------------------------------------------
+    coarse = geometry.copy()
+
+    coarse["_penetration_coarse"] = pd.cut(
+        coarse["penetration_pct"],
+        bins=[-np.inf, 0.0, 0.10, np.inf],
+        labels=[
+            "<0%",
+            "0–0.10%",
+            ">=0.10%",
+        ],
+        right=False,
+        include_lowest=True,
+    )
+
+    coarse["_range_coarse"] = pd.cut(
+        coarse["reaction_range_pct"],
+        bins=[-np.inf, 0.25, 0.50, np.inf],
+        labels=[
+            "<0.25%",
+            "0.25–0.50%",
+            ">=0.50%",
+        ],
+        right=False,
+        include_lowest=True,
+    )
+
+    coarse_metric_c1, coarse_metric_c2 = st.columns(
+        [2.0, 1.0]
+    )
+
+    with coarse_metric_c1:
+        net_matrix_metric = st.selectbox(
+            "Net geometry matrix metric",
+            options=[
+                "Profit factor",
+                "Avg net %",
+                "Win rate %",
+                "Total net %",
+                "TIME_EXIT %",
+                "N",
+            ],
+            index=0,
+            key="confirmed_swing_net_geometry_matrix_metric",
+        )
+
+    with coarse_metric_c2:
+        net_matrix_min_n = st.selectbox(
+            "Net matrix min N / cell",
+            options=[1, 3, 5, 10, 15, 20, 30],
+            index=3,
+            key="confirmed_swing_net_geometry_matrix_min_n",
+        )
+
+    coarse_pen_labels = [
+        "<0%",
+        "0–0.10%",
+        ">=0.10%",
+    ]
+    coarse_range_labels = [
+        "<0.25%",
+        "0.25–0.50%",
+        ">=0.50%",
+    ]
+
+    z = []
+    custom = []
+    coarse_rows = []
+
+    for pen_bucket in coarse_pen_labels:
+        z_row = []
+        custom_row = []
+
+        for range_bucket in coarse_range_labels:
+            subset = coarse.loc[
+                coarse["_penetration_coarse"]
+                .astype(str)
+                .eq(pen_bucket)
+                & coarse["_range_coarse"]
+                .astype(str)
+                .eq(range_bucket)
+            ].copy()
+
+            stats = _confirmed_swing_net_stats(
+                subset,
+                tp_pct=net_tp,
+                sl_pct=net_sl,
+                horizon_min=net_horizon,
+                fee_per_side_pct=fee_per_side,
+            )
+
+            if stats is None:
+                z_row.append(np.nan)
+                custom_row.append(
+                    [0, np.nan, np.nan, np.nan, np.nan, np.nan]
+                )
+                continue
+
+            coarse_rows.append({
+                "Penetration": pen_bucket,
+                "Reaction range": range_bucket,
+                "N": int(stats["N"]),
+                "Win rate %": round(
+                    stats["Win rate %"],
+                    2,
+                ),
+                "Avg net %": round(
+                    stats["Avg net %"],
+                    4,
+                ),
+                "Profit factor": (
+                    round(stats["Profit factor"], 3)
+                    if np.isfinite(stats["Profit factor"])
+                    else np.inf
+                ),
+                "Total net %": round(
+                    stats["Total net %"],
+                    4,
+                ),
+                "TIME_EXIT %": round(
+                    stats["TIME_EXIT %"],
+                    2,
+                ),
+                "Ambiguous→SL %": round(
+                    stats["Ambiguous→SL %"],
+                    2,
+                ),
+            })
+
+            metric_value = stats.get(
+                net_matrix_metric,
+                np.nan,
+            )
+
+            if (
+                int(stats["N"]) < int(net_matrix_min_n)
+                or pd.isna(metric_value)
+                or (
+                    net_matrix_metric == "Profit factor"
+                    and not np.isfinite(metric_value)
+                )
+            ):
+                z_row.append(np.nan)
+            else:
+                z_row.append(float(metric_value))
+
+            custom_row.append([
+                float(stats["N"]),
+                float(stats["Win rate %"]),
+                float(stats["Avg net %"]),
+                float(stats["Profit factor"])
+                if np.isfinite(stats["Profit factor"])
+                else np.nan,
+                float(stats["TIME_EXIT %"]),
+                float(stats["Ambiguous→SL %"]),
+            ])
+
+        z.append(z_row)
+        custom.append(custom_row)
+
+    fig_net = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=coarse_range_labels,
+            y=coarse_pen_labels,
+            customdata=np.array(
+                custom,
+                dtype=float,
+            ),
+            colorbar={
+                "title": net_matrix_metric,
+            },
+            hovertemplate=(
+                "<b>Penetration %{y}</b><br>"
+                "Range %{x}<br>"
+                "N: %{customdata[0]:.0f}<br>"
+                "Win rate: %{customdata[1]:.2f}%<br>"
+                "Avg net: %{customdata[2]:.4f}%<br>"
+                "PF: %{customdata[3]:.3f}<br>"
+                "TIME_EXIT: %{customdata[4]:.2f}%<br>"
+                "Ambiguous→SL: %{customdata[5]:.2f}%"
+                "<extra></extra>"
+            ),
+        )
+    )
+    fig_net.update_layout(
+        title=(
+            f"Coarse penetration × range · {net_matrix_metric} · "
+            f"TP {net_tp:.2f}% / SL {net_sl:.2f}% / "
+            f"exit {net_horizon}m / min N={net_matrix_min_n}"
+        ),
+        xaxis_title="Reaction range",
+        yaxis_title="Penetration",
+        height=470,
+        margin={
+            "l": 10,
+            "r": 10,
+            "t": 55,
+            "b": 10,
+        },
+    )
+    st.plotly_chart(
+        fig_net,
+        use_container_width=True,
+        key="confirmed_swing_net_geometry_heatmap",
+        config={"displaylogo": False},
+    )
+
+    if coarse_rows:
+        coarse_table = pd.DataFrame(coarse_rows)
+        coarse_table = coarse_table.loc[
+            coarse_table["N"].ge(int(net_matrix_min_n))
+        ].copy()
+
+        if not coarse_table.empty:
+            coarse_table["_pf_sort"] = (
+                coarse_table["Profit factor"]
+                .replace([np.inf, -np.inf], np.nan)
+            )
+            coarse_table = (
+                coarse_table
+                .sort_values(
+                    ["_pf_sort", "N"],
+                    ascending=[False, False],
+                    na_position="last",
+                )
+                .drop(columns=["_pf_sort"])
+            )
+
+            st.markdown(
+                "##### Coarse 3×3 net geometry cells"
+            )
+            st.caption(
+                "This is the less-overfit view: broader geometry buckets, "
+                "net of the configured fees, with all complete trades resolved "
+                "to TP, SL, or TIME_EXIT."
+            )
+            st.dataframe(
+                coarse_table,
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def render_confirmed_swing_volume_mfe_analysis(view):
