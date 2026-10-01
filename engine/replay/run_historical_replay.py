@@ -1030,29 +1030,32 @@ def main():
             # before starting the replay clock.
 
 
-            last_stream_id = None
+            publish_started = (
+                time.perf_counter()
+            )
 
-
-            for (
-                symbol,
-                timeframe,
-                candle,
-            ) in events:
-
-                result = (
-                    publisher
-                    .publish_historical_candle(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        candle=candle,
-                    )
+            result = (
+                publisher
+                .publish_historical_boundary(
+                    events=events,
+                    boundary_ts=boundary_ts,
                 )
+            )
 
+            publish_elapsed = (
+                time.perf_counter()
+                - publish_started
+            )
 
-                last_stream_id = result[
-                    "stream_id"
-                ]
+            last_stream_id = result[
+                "stream_id"
+            ]
 
+            if last_stream_id is None:
+                raise RuntimeError(
+                    "Boundary without "
+                    "published events"
+                )
 
             if last_stream_id is None:
                 raise RuntimeError(
@@ -1163,6 +1166,7 @@ def main():
                     f"{format_ts(boundary_ts)} UTC | "
                     f"events={len(events)} | "
                     f"stream={last_stream_id} | "
+                    f"publish_ms={publish_elapsed * 1000:.1f} | "
                     f"elapsed="
                     f"{format_duration(elapsed)} | "
                     f"speed="

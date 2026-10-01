@@ -681,6 +681,304 @@ class RedisMarketDataPublisher:
         }
 
 
+    def publish_historical_boundary(
+        self,
+        events,
+        boundary_ts: int,
+    ):
+        """
+        Replay-only fast path.
+
+        Publishes every candle belonging to ONE replay
+        market boundary using two Redis round trips:
+
+        1. one pipeline to inspect current history tails
+        2. one transactional pipeline to apply histories
+           + last_closed + stream events
+
+        Event order is preserved exactly as received.
+        """
+
+        if not events:
+            raise ValueError(
+                "historical boundary requires events"
+            )
+
+        boundary_ts = int(
+            boundary_ts
+        )
+
+        prepared = []
+
+        seen_pairs = set()
+
+        # =================================================
+        # NORMALIZE + VALIDATE EVERYTHING FIRST
+        # =================================================
+
+        for (
+            symbol,
+            timeframe,
+            candle,
+        ) in events:
+
+            symbol = normalize_symbol(
+                symbol
+            )
+
+            timeframe = normalize_timeframe(
+                timeframe
+            )
+
+            if not isinstance(candle, dict):
+                raise TypeError(
+                    "candle must be a dict"
+                )
+
+            pair = (
+                symbol,
+                timeframe,
+            )
+
+            if pair in seen_pairs:
+                raise RuntimeError(
+                    "duplicate historical replay "
+                    "event in boundary | "
+                    f"symbol={symbol} "
+                    f"timeframe={timeframe} "
+                    f"boundary={boundary_ts}"
+                )
+
+            seen_pairs.add(pair)
+
+            normalized = (
+                self._normalize_history_candle(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    candle=candle,
+                )
+            )
+
+            close_timestamp = (
+                candle.get("close_timestamp")
+                or candle.get("closeTimestamp")
+            )
+
+            if close_timestamp is None:
+                raise ValueError(
+                    "historical candle requires "
+                    "close_timestamp"
+                )
+
+            close_timestamp = int(
+                close_timestamp
+            )
+
+            if close_timestamp != boundary_ts:
+                raise RuntimeError(
+                    "historical candle boundary "
+                    "mismatch | "
+                    f"symbol={symbol} "
+                    f"timeframe={timeframe} "
+                    f"candle_close={close_timestamp} "
+                    f"boundary={boundary_ts}"
+                )
+
+            normalized[
+                "close_timestamp"
+            ] = close_timestamp
+
+            normalized[
+                "source"
+            ] = "historical_replay"
+
+            serialized = self._serialize(
+                normalized
+            )
+
+            candle_history_key = history_key(
+                symbol,
+                timeframe,
+            )
+
+            history_limit = (
+                self._history_limit(
+                    timeframe
+                )
+            )
+
+            prepared.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "candle": normalized,
+                "serialized": serialized,
+                "history_key": (
+                    candle_history_key
+                ),
+                "history_limit": (
+                    history_limit
+                ),
+            })
+
+        # =================================================
+        # ROUND TRIP 1
+        #
+        # Read every current history tail in one pipeline.
+        #
+        # Previously:
+        #     one LINDEX per candle
+        #
+        # Now:
+        #     one Redis pipeline for the whole boundary
+        # =================================================
+
+        read_pipeline = self.redis.pipeline(
+            transaction=False,
+        )
+
+        for item in prepared:
+            read_pipeline.lindex(
+                item["history_key"],
+                -1,
+            )
+
+        last_history_items = (
+            read_pipeline.execute()
+        )
+
+        # =================================================
+        # ROUND TRIP 2
+        #
+        # Apply entire boundary transactionally.
+        #
+        # Each event still performs EXACTLY:
+        #
+        #     LSET/RPUSH
+        #     LTRIM
+        #     SET last_closed
+        #     XADD closed-candles
+        #
+        # but all are sent together.
+        # =================================================
+
+        write_pipeline = self.redis.pipeline(
+            transaction=True,
+        )
+
+        for (
+            item,
+            last_history_item,
+        ) in zip(
+            prepared,
+            last_history_items,
+        ):
+
+            replace_last = False
+
+            if last_history_item:
+                try:
+                    last_candle = json.loads(
+                        last_history_item
+                    )
+
+                    replace_last = (
+                        int(
+                            last_candle[
+                                "timestamp"
+                            ]
+                        )
+                        == int(
+                            item[
+                                "candle"
+                            ][
+                                "timestamp"
+                            ]
+                        )
+                    )
+
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ):
+                    replace_last = False
+
+            if replace_last:
+                write_pipeline.lset(
+                    item["history_key"],
+                    -1,
+                    item["serialized"],
+                )
+
+            else:
+                write_pipeline.rpush(
+                    item["history_key"],
+                    item["serialized"],
+                )
+
+            write_pipeline.ltrim(
+                item["history_key"],
+                -item["history_limit"],
+                -1,
+            )
+
+            write_pipeline.set(
+                last_closed_key(
+                    item["symbol"],
+                    item["timeframe"],
+                ),
+                item["serialized"],
+            )
+
+            write_pipeline.xadd(
+                CLOSED_CANDLES_STREAM,
+                {
+                    "payload": (
+                        item["serialized"]
+                    ),
+                },
+                maxlen=(
+                    CLOSED_STREAM_MAXLEN
+                ),
+                approximate=True,
+            )
+
+        results = (
+            write_pipeline.execute()
+        )
+
+        expected_results = (
+            len(prepared) * 4
+        )
+
+        if len(results) != expected_results:
+            raise RuntimeError(
+                "historical boundary Redis "
+                "result count mismatch | "
+                f"expected={expected_results} "
+                f"actual={len(results)} "
+                f"boundary={boundary_ts}"
+            )
+
+        # The very last Redis command in the transaction
+        # is the XADD of the final deterministic event.
+        last_stream_id = results[-1]
+
+        # Preserve existing coverage bookkeeping.
+        for item in prepared:
+            self._register_closed_candle_coverage(
+                item["candle"]
+            )
+
+        return {
+            "type": "historical_boundary",
+            "source": "historical_replay",
+            "boundary_ts": boundary_ts,
+            "published": len(prepared),
+            "stream_id": last_stream_id,
+        }
+
 
     def replace_history(
 
