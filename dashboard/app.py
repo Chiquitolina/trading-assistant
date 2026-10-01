@@ -8927,7 +8927,17 @@ def _prepare_confirmed_swing_retest_candles(one_minute):
         return pd.DataFrame()
 
     work = one_minute.copy()
-    for column in ["timestamp", "open", "high", "low", "close"]:
+    for column in [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]:
+        if column not in work.columns:
+            continue
+
         work[column] = pd.to_numeric(
             work[column],
             errors="coerce",
@@ -8983,6 +8993,8 @@ def _build_confirmed_swing_retest_forward_cache(one_minute):
 
     return {
         "timestamps": timestamps,
+        "highs": highs,
+        "lows": lows,
         "suffix_high": suffix_high,
         "suffix_low": suffix_low,
         "segment_end": segment_end,
@@ -8999,12 +9011,33 @@ def _attach_confirmed_swing_reaction_run(retest, forward_cache):
     """
     retest = dict(retest)
 
+    # Post-touch metrics exist for every first retest status. They start on
+    # the NEXT 1m candle, so the classification candle cannot contribute
+    # hindsight to its own favorable/adverse excursion.
+    retest["touch_mfe_pct"] = np.nan
+    retest["touch_mae_pct"] = np.nan
+    retest["touch_current_pct"] = np.nan
+    retest["touch_observed_min"] = 0.0
+
+    # Keep the existing reaction_* fields for REACTION-only analysis and
+    # selector ranking.
     retest["reaction_mfe_pct"] = np.nan
     retest["reaction_mae_pct"] = np.nan
     retest["reaction_current_pct"] = np.nan
     retest["reaction_observed_min"] = 0.0
 
-    if not bool(retest.get("reaction")) or not forward_cache:
+    for horizon_min in (15, 30, 60):
+        retest[f"touch_mfe_{horizon_min}m_pct"] = np.nan
+        retest[f"touch_mae_{horizon_min}m_pct"] = np.nan
+        retest[f"touch_return_{horizon_min}m_pct"] = np.nan
+        retest[f"touch_complete_{horizon_min}m"] = False
+
+        retest[f"reaction_mfe_{horizon_min}m_pct"] = np.nan
+        retest[f"reaction_mae_{horizon_min}m_pct"] = np.nan
+        retest[f"reaction_return_{horizon_min}m_pct"] = np.nan
+        retest[f"reaction_complete_{horizon_min}m"] = False
+
+    if not forward_cache:
         return retest
 
     try:
@@ -9041,15 +9074,334 @@ def _attach_confirmed_swing_reaction_run(retest, forward_cache):
         mae_pct = max(0.0, (max_high / baseline - 1.0) * 100.0)
         current_pct = (1.0 - last_close / baseline) * 100.0
 
-    retest["reaction_mfe_pct"] = max(0.0, float(mfe_pct))
-    retest["reaction_mae_pct"] = float(mae_pct)
-    retest["reaction_current_pct"] = float(current_pct)
-    retest["reaction_observed_min"] = max(
+    observed_min = max(
         0.0,
         (int(timestamps[end_idx]) - retest_ts) / 60_000.0,
     )
 
+    retest["touch_mfe_pct"] = max(0.0, float(mfe_pct))
+    retest["touch_mae_pct"] = float(mae_pct)
+    retest["touch_current_pct"] = float(current_pct)
+    retest["touch_observed_min"] = observed_min
+
+    if bool(retest.get("reaction")):
+        retest["reaction_mfe_pct"] = retest["touch_mfe_pct"]
+        retest["reaction_mae_pct"] = retest["touch_mae_pct"]
+        retest["reaction_current_pct"] = retest["touch_current_pct"]
+        retest["reaction_observed_min"] = observed_min
+
+    highs = forward_cache["highs"]
+    lows = forward_cache["lows"]
+    closes = forward_cache["closes"]
+
+    for horizon_min in (15, 30, 60):
+        horizon_end_idx = start_idx + int(horizon_min) - 1
+
+        if (
+            horizon_end_idx > end_idx
+            or horizon_end_idx >= len(timestamps)
+        ):
+            continue
+
+        horizon_high = float(
+            np.max(highs[start_idx : horizon_end_idx + 1])
+        )
+        horizon_low = float(
+            np.min(lows[start_idx : horizon_end_idx + 1])
+        )
+        horizon_close = float(closes[horizon_end_idx])
+
+        if side == "LONG":
+            horizon_mfe = (
+                horizon_high / baseline - 1.0
+            ) * 100.0
+            horizon_mae = max(
+                0.0,
+                (1.0 - horizon_low / baseline) * 100.0,
+            )
+            horizon_return = (
+                horizon_close / baseline - 1.0
+            ) * 100.0
+        else:
+            horizon_mfe = (
+                1.0 - horizon_low / baseline
+            ) * 100.0
+            horizon_mae = max(
+                0.0,
+                (horizon_high / baseline - 1.0) * 100.0,
+            )
+            horizon_return = (
+                1.0 - horizon_close / baseline
+            ) * 100.0
+
+        retest[f"touch_mfe_{horizon_min}m_pct"] = max(
+            0.0,
+            float(horizon_mfe),
+        )
+        retest[f"touch_mae_{horizon_min}m_pct"] = float(
+            horizon_mae
+        )
+        retest[f"touch_return_{horizon_min}m_pct"] = float(
+            horizon_return
+        )
+        retest[f"touch_complete_{horizon_min}m"] = True
+
+        if bool(retest.get("reaction")):
+            retest[f"reaction_mfe_{horizon_min}m_pct"] = (
+                retest[f"touch_mfe_{horizon_min}m_pct"]
+            )
+            retest[f"reaction_mae_{horizon_min}m_pct"] = (
+                retest[f"touch_mae_{horizon_min}m_pct"]
+            )
+            retest[f"reaction_return_{horizon_min}m_pct"] = (
+                retest[f"touch_return_{horizon_min}m_pct"]
+            )
+            retest[f"reaction_complete_{horizon_min}m"] = True
+
     return retest
+
+
+
+
+def _confirmed_swing_volume_features_at(
+    one_minute,
+    timestamp,
+    baseline_lookback=30,
+    high_volume_threshold=2.0,
+):
+    """Causal 1m volume features at one closed candle.
+
+    Baseline matches the Volume Exhaustion collector: median positive volume
+    from the previous 30 candles, excluding the current candle.
+    """
+    work = _prepare_confirmed_swing_retest_candles(one_minute)
+
+    empty = {
+        "volume": np.nan,
+        "baseline_volume_30": np.nan,
+        "relative_volume_30": np.nan,
+        "volume_3m_ratio": np.nan,
+        "volume_5m_ratio": np.nan,
+        "high_volume_candles_5m": np.nan,
+        "volume_vs_prev3": np.nan,
+        "pre_volume_3m_ratio": np.nan,
+    }
+
+    if work.empty or "volume" not in work.columns:
+        return empty
+
+    work = work.dropna(subset=["volume"]).copy()
+    if work.empty:
+        return empty
+
+    timestamps = work["timestamp"].astype("int64").to_numpy()
+    matches = np.flatnonzero(timestamps == int(timestamp))
+    if len(matches) == 0:
+        return empty
+
+    idx = int(matches[-1])
+    if idx < int(baseline_lookback):
+        return empty
+
+    previous = work.iloc[:idx]
+    baseline_rows = previous.tail(int(baseline_lookback))
+    baseline_volumes = pd.to_numeric(
+        baseline_rows["volume"],
+        errors="coerce",
+    )
+    baseline_volumes = baseline_volumes[
+        baseline_volumes.gt(0)
+    ].dropna()
+
+    if baseline_volumes.empty:
+        return empty
+
+    baseline_volume = float(baseline_volumes.median())
+    if baseline_volume <= 0:
+        return empty
+
+    current_volume = float(work.iloc[idx]["volume"])
+    sequence = work.iloc[: idx + 1].copy()
+
+    def window_ratio(size):
+        if len(sequence) < size:
+            return np.nan
+
+        values = pd.to_numeric(
+            sequence.tail(size)["volume"],
+            errors="coerce",
+        ).dropna()
+
+        if len(values) != size:
+            return np.nan
+
+        expected = baseline_volume * float(size)
+        return (
+            float(values.sum() / expected)
+            if expected > 0
+            else np.nan
+        )
+
+    last_5 = pd.to_numeric(
+        sequence.tail(5)["volume"],
+        errors="coerce",
+    ).dropna()
+
+    high_volume_candles_5m = (
+        int(
+            (
+                last_5 / baseline_volume
+                >= float(high_volume_threshold)
+            ).sum()
+        )
+        if len(last_5) == 5
+        else np.nan
+    )
+
+    prev_3 = pd.to_numeric(
+        previous.tail(3)["volume"],
+        errors="coerce",
+    ).dropna()
+    prev_3_mean = (
+        float(prev_3.mean())
+        if len(prev_3) == 3
+        else np.nan
+    )
+
+    return {
+        "volume": current_volume,
+        "baseline_volume_30": baseline_volume,
+        "relative_volume_30": current_volume / baseline_volume,
+        "volume_3m_ratio": window_ratio(3),
+        "volume_5m_ratio": window_ratio(5),
+        "high_volume_candles_5m": high_volume_candles_5m,
+        "volume_vs_prev3": (
+            current_volume / prev_3_mean
+            if pd.notna(prev_3_mean) and prev_3_mean > 0
+            else np.nan
+        ),
+        "pre_volume_3m_ratio": (
+            float(prev_3.sum() / (baseline_volume * 3.0))
+            if len(prev_3) == 3 and baseline_volume > 0
+            else np.nan
+        ),
+    }
+
+
+def _attach_confirmed_swing_volume_context(
+    retest,
+    one_minute,
+):
+    """Attach information already known when the retest 1m candle closed."""
+    retest = dict(retest)
+
+    reaction_map = {
+        "volume": "reaction_volume",
+        "baseline_volume_30": "reaction_baseline_volume_30",
+        "relative_volume_30": "reaction_relative_volume_30",
+        "volume_3m_ratio": "reaction_volume_3m_ratio",
+        "volume_5m_ratio": "reaction_volume_5m_ratio",
+        "high_volume_candles_5m": "reaction_high_volume_candles_5m",
+        "volume_vs_prev3": "reaction_volume_vs_prev3",
+        "pre_volume_3m_ratio": "pre_retest_volume_3m_ratio",
+    }
+    departure_map = {
+        "volume": "departure_volume",
+        "relative_volume_30": "departure_relative_volume_30",
+    }
+
+    for target in (
+        list(reaction_map.values())
+        + list(departure_map.values())
+        + [
+            "reaction_vs_departure_rel_volume",
+            "reaction_range_pct",
+            "reaction_body_pct",
+            "reaction_close_strength",
+            "reaction_rejection_wick_share",
+        ]
+    ):
+        retest[target] = np.nan
+
+    try:
+        retest_ts = int(retest["retest_timestamp"])
+        departure_ts = int(retest["departure_timestamp"])
+        side = str(retest["signal"]).upper()
+        open_price = float(retest["retest_open"])
+        high = float(retest["retest_high"])
+        low = float(retest["retest_low"])
+        close = float(retest["retest_close"])
+        close_location = float(retest["retest_close_location"])
+    except (KeyError, TypeError, ValueError):
+        return retest
+
+    reaction_features = _confirmed_swing_volume_features_at(
+        one_minute,
+        retest_ts,
+    )
+    departure_features = _confirmed_swing_volume_features_at(
+        one_minute,
+        departure_ts,
+    )
+
+    for source, target in reaction_map.items():
+        retest[target] = reaction_features.get(source, np.nan)
+
+    for source, target in departure_map.items():
+        retest[target] = departure_features.get(source, np.nan)
+
+    reaction_rel = pd.to_numeric(
+        retest.get("reaction_relative_volume_30"),
+        errors="coerce",
+    )
+    departure_rel = pd.to_numeric(
+        retest.get("departure_relative_volume_30"),
+        errors="coerce",
+    )
+
+    if (
+        pd.notna(reaction_rel)
+        and pd.notna(departure_rel)
+        and float(departure_rel) > 0
+    ):
+        retest["reaction_vs_departure_rel_volume"] = (
+            float(reaction_rel) / float(departure_rel)
+        )
+
+    if open_price > 0:
+        candle_range = max(high - low, 0.0)
+        retest["reaction_range_pct"] = (
+            candle_range / open_price * 100.0
+        )
+        retest["reaction_body_pct"] = (
+            abs(close - open_price) / open_price * 100.0
+        )
+
+        if candle_range > 0:
+            if side == "LONG":
+                rejection_wick = max(
+                    min(open_price, close) - low,
+                    0.0,
+                )
+                retest["reaction_close_strength"] = close_location
+            elif side == "SHORT":
+                rejection_wick = max(
+                    high - max(open_price, close),
+                    0.0,
+                )
+                retest["reaction_close_strength"] = (
+                    1.0 - close_location
+                )
+            else:
+                rejection_wick = np.nan
+
+            if pd.notna(rejection_wick):
+                retest["reaction_rejection_wick_share"] = (
+                    float(rejection_wick) / candle_range
+                )
+
+    return retest
+
 
 
 def _find_confirmed_swing_retest(
@@ -9182,6 +9534,25 @@ def _find_confirmed_swing_retest(
                 (1.0 - low / swing_price) * 100.0
             )
 
+        if reaction:
+            touch_status = "REACTION"
+        elif (
+            signal_side == "SHORT"
+            and close > upper_zone
+        ) or (
+            signal_side == "LONG"
+            and close < lower_zone
+        ):
+            # The first retest did not merely hesitate: the 1m candle
+            # closed completely through the opposite edge of the accepted
+            # retest zone.
+            touch_status = "TOUCH_FAILED"
+        else:
+            # The level was touched but the same 1m candle neither produced
+            # the existing REACTION condition nor clearly closed through the
+            # opposite side of the tolerance zone.
+            touch_status = "TOUCH_INDECISIVE"
+
         return {
             "signal": signal_side,
             "timeframe": str(swing_row.get("timeframe", "—")),
@@ -9222,7 +9593,9 @@ def _find_confirmed_swing_retest(
                 (candle_ts - pivot_ts) / 60_000.0
             ),
             "reaction": bool(reaction),
-            "status": "REACTION" if reaction else "TOUCH",
+            "status": touch_status,
+            "touch_failed": touch_status == "TOUCH_FAILED",
+            "touch_indecisive": touch_status == "TOUCH_INDECISIVE",
         }
 
     return None
@@ -9281,6 +9654,10 @@ def build_confirmed_swing_retests_from_confirmation_study(
             retest["retest_age_min"] = max(
                 0.0,
                 (latest_ts - int(retest["retest_timestamp"])) / 60_000.0,
+            )
+            retest = _attach_confirmed_swing_volume_context(
+                retest,
+                prepared,
             )
             retest = _attach_confirmed_swing_reaction_run(
                 retest,
@@ -9467,6 +9844,10 @@ def scan_confirmed_swing_retests_all_symbols(
                 retest["retest_age_min"] = max(
                     0.0,
                     (latest_ts - retest_ts) / 60_000.0,
+                )
+                retest = _attach_confirmed_swing_volume_context(
+                    retest,
+                    prepared,
                 )
                 retest = _attach_confirmed_swing_reaction_run(
                     retest,
@@ -9691,6 +10072,1164 @@ def build_confirmed_swing_retest_detail_chart(
     )
     return fig
 
+
+
+def render_confirmed_swing_window_summary(view):
+    """General summary of every first retest inside the current window."""
+    if view is None or view.empty:
+        return
+
+    work = view.copy()
+
+    for column in [
+        "touch_mfe_pct",
+        "touch_mae_pct",
+        "touch_current_pct",
+        "touch_observed_min",
+    ]:
+        if column in work.columns:
+            work[column] = pd.to_numeric(
+                work[column],
+                errors="coerce",
+            )
+
+    statuses = (
+        work.get(
+            "status",
+            pd.Series("", index=work.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+
+    total_touches = len(work)
+    reactions = int(statuses.eq("REACTION").sum())
+    failed = int(statuses.eq("TOUCH_FAILED").sum())
+    indecisive = int(statuses.eq("TOUCH_INDECISIVE").sum())
+
+    # Legacy rows from an older cache/file can still say plain TOUCH.
+    legacy_touch = int(statuses.eq("TOUCH").sum())
+
+    favorable = work.get(
+        "touch_mfe_pct",
+        pd.Series(dtype=float),
+    ).dropna()
+    adverse = work.get(
+        "touch_mae_pct",
+        pd.Series(dtype=float),
+    ).dropna()
+    observed = work.get(
+        "touch_observed_min",
+        pd.Series(dtype=float),
+    ).dropna()
+
+    avg_favorable = (
+        float(favorable.mean())
+        if not favorable.empty
+        else np.nan
+    )
+    avg_adverse = (
+        float(adverse.mean())
+        if not adverse.empty
+        else np.nan
+    )
+    fa_ratio = (
+        avg_favorable / avg_adverse
+        if (
+            pd.notna(avg_favorable)
+            and pd.notna(avg_adverse)
+            and avg_adverse > 0
+        )
+        else np.nan
+    )
+
+    def rate(count):
+        return (
+            count / total_touches * 100.0
+            if total_touches
+            else 0.0
+        )
+
+    st.markdown("#### Window summary")
+    st.caption(
+        "General snapshot of the first confirmed-swing retests currently "
+        "inside the scanner window/filters. Favorable and adverse excursion "
+        "start on the NEXT 1m candle after the first-touch candle, so the "
+        "classification candle itself does not inflate the result."
+    )
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("N touches", total_touches)
+    s2.metric(
+        "Avg favorable (MFE)",
+        (
+            f"{avg_favorable:.3f}%"
+            if pd.notna(avg_favorable)
+            else "—"
+        ),
+    )
+    s3.metric(
+        "Avg adverse (MAE)",
+        (
+            f"{avg_adverse:.3f}%"
+            if pd.notna(avg_adverse)
+            else "—"
+        ),
+    )
+    s4.metric(
+        "Favorable / adverse",
+        (
+            f"{fa_ratio:.2f}x"
+            if pd.notna(fa_ratio)
+            else "—"
+        ),
+    )
+
+    s5, s6, s7, s8 = st.columns(4)
+    s5.metric(
+        "REACTION",
+        f"{reactions} · {rate(reactions):.1f}%",
+    )
+    s6.metric(
+        "FAILED",
+        f"{failed} · {rate(failed):.1f}%",
+    )
+    s7.metric(
+        "INDECISIVE",
+        f"{indecisive} · {rate(indecisive):.1f}%",
+    )
+    s8.metric(
+        "Avg observed",
+        (
+            f"{float(observed.mean()):.1f}m"
+            if not observed.empty
+            else "—"
+        ),
+    )
+
+    if legacy_touch:
+        st.caption(
+            f"{legacy_touch} legacy TOUCH rows are still present in the "
+            "current cached dataset. Refresh/recompute the scanner to classify "
+            "them as FAILED or INDECISIVE."
+        )
+
+    status_rows = []
+    for status_name in [
+        "REACTION",
+        "TOUCH_INDECISIVE",
+        "TOUCH_FAILED",
+    ]:
+        subset = work.loc[
+            statuses.eq(status_name)
+        ].copy()
+
+        if subset.empty:
+            continue
+
+        subset_fav = pd.to_numeric(
+            subset.get(
+                "touch_mfe_pct",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        ).dropna()
+        subset_adv = pd.to_numeric(
+            subset.get(
+                "touch_mae_pct",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        ).dropna()
+
+        fav_mean = (
+            float(subset_fav.mean())
+            if not subset_fav.empty
+            else np.nan
+        )
+        adv_mean = (
+            float(subset_adv.mean())
+            if not subset_adv.empty
+            else np.nan
+        )
+
+        status_rows.append({
+            "Status": status_name,
+            "N": len(subset),
+            "% window": round(
+                len(subset) / total_touches * 100.0,
+                2,
+            ),
+            "Avg MFE %": (
+                round(fav_mean, 4)
+                if pd.notna(fav_mean)
+                else np.nan
+            ),
+            "Median MFE %": (
+                round(float(subset_fav.median()), 4)
+                if not subset_fav.empty
+                else np.nan
+            ),
+            "Avg MAE %": (
+                round(adv_mean, 4)
+                if pd.notna(adv_mean)
+                else np.nan
+            ),
+            "Median MAE %": (
+                round(float(subset_adv.median()), 4)
+                if not subset_adv.empty
+                else np.nan
+            ),
+            "MFE/MAE": (
+                round(fav_mean / adv_mean, 3)
+                if (
+                    pd.notna(fav_mean)
+                    and pd.notna(adv_mean)
+                    and adv_mean > 0
+                )
+                else np.nan
+            ),
+        })
+
+    if status_rows:
+        st.markdown("##### Window status breakdown")
+        st.dataframe(
+            pd.DataFrame(status_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+
+def render_confirmed_swing_reaction_overview(view):
+    """Dashboard over every REACTION surviving the current scanner filters."""
+    if view is None or view.empty or "reaction" not in view.columns:
+        return
+
+    reactions = view.loc[
+        view["reaction"].fillna(False).astype(bool)
+    ].copy()
+
+    if reactions.empty:
+        st.info(
+            "No REACTION events are inside the current scanner window/filters."
+        )
+        return
+
+    numeric_columns = [
+        "reaction_mfe_pct",
+        "reaction_mae_pct",
+        "reaction_current_pct",
+        "reaction_observed_min",
+        "reaction_mfe_15m_pct",
+        "reaction_mae_15m_pct",
+        "reaction_return_15m_pct",
+        "reaction_mfe_30m_pct",
+        "reaction_mae_30m_pct",
+        "reaction_return_30m_pct",
+        "reaction_mfe_60m_pct",
+        "reaction_mae_60m_pct",
+        "reaction_return_60m_pct",
+        "reaction_relative_volume_30",
+        "reaction_volume_3m_ratio",
+        "reaction_volume_5m_ratio",
+        "reaction_high_volume_candles_5m",
+        "reaction_volume_vs_prev3",
+        "pre_retest_volume_3m_ratio",
+        "departure_relative_volume_30",
+        "reaction_vs_departure_rel_volume",
+        "reaction_range_pct",
+        "reaction_body_pct",
+        "reaction_close_strength",
+        "reaction_rejection_wick_share",
+        "max_departure_pct",
+        "confirmed_to_retest_min",
+        "retest_distance_pct",
+        "penetration_pct",
+    ]
+
+    for horizon_min in (15, 30, 60):
+        numeric_columns.extend([
+            f"reaction_mfe_{horizon_min}m_pct",
+            f"reaction_mae_{horizon_min}m_pct",
+            f"reaction_return_{horizon_min}m_pct",
+        ])
+
+    for column in numeric_columns:
+        if column in reactions.columns:
+            reactions[column] = pd.to_numeric(
+                reactions[column],
+                errors="coerce",
+            )
+
+    st.markdown("#### Reaction excursion overview")
+    st.caption(
+        "Uses every REACTION currently inside the scanner filters/window — "
+        "the same population available in the inspector select. All-path MFE/"
+        "MAE uses each event's available contiguous future path. The equal-"
+        "horizon table uses complete 15m/30m/60m windows so older reactions "
+        "do not receive extra opportunity simply because they happened first."
+    )
+
+    mfe = reactions.get(
+        "reaction_mfe_pct",
+        pd.Series(dtype=float),
+    ).dropna()
+    mae = reactions.get(
+        "reaction_mae_pct",
+        pd.Series(dtype=float),
+    ).dropna()
+    current_move = reactions.get(
+        "reaction_current_pct",
+        pd.Series(dtype=float),
+    ).dropna()
+    observed = reactions.get(
+        "reaction_observed_min",
+        pd.Series(dtype=float),
+    ).dropna()
+
+    avg_mfe = float(mfe.mean()) if not mfe.empty else np.nan
+    median_mfe = float(mfe.median()) if not mfe.empty else np.nan
+    avg_mae = float(mae.mean()) if not mae.empty else np.nan
+    median_mae = float(mae.median()) if not mae.empty else np.nan
+
+    excursion_ratio = (
+        avg_mfe / avg_mae
+        if (
+            pd.notna(avg_mfe)
+            and pd.notna(avg_mae)
+            and avg_mae > 0
+        )
+        else np.nan
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Reactions", len(reactions))
+    c2.metric(
+        "Avg MFE",
+        f"{avg_mfe:.3f}%" if pd.notna(avg_mfe) else "—",
+    )
+    c3.metric(
+        "Median MFE",
+        f"{median_mfe:.3f}%" if pd.notna(median_mfe) else "—",
+    )
+    c4.metric(
+        "Avg MAE",
+        f"{avg_mae:.3f}%" if pd.notna(avg_mae) else "—",
+    )
+    c5.metric(
+        "MFE / MAE",
+        f"{excursion_ratio:.2f}x" if pd.notna(excursion_ratio) else "—",
+    )
+
+    c6, c7, c8, c9, c10 = st.columns(5)
+    c6.metric(
+        "Median MAE",
+        f"{median_mae:.3f}%" if pd.notna(median_mae) else "—",
+    )
+    c7.metric(
+        "Avg current move",
+        (
+            f"{float(current_move.mean()):.3f}%"
+            if not current_move.empty
+            else "—"
+        ),
+    )
+    c8.metric(
+        "Avg observed",
+        (
+            f"{float(observed.mean()):.1f}m"
+            if not observed.empty
+            else "—"
+        ),
+    )
+    c9.metric(
+        "MFE P75",
+        (
+            f"{float(mfe.quantile(0.75)):.3f}%"
+            if not mfe.empty
+            else "—"
+        ),
+    )
+    c10.metric(
+        "MFE P90",
+        (
+            f"{float(mfe.quantile(0.90)):.3f}%"
+            if not mfe.empty
+            else "—"
+        ),
+    )
+
+    horizon_rows = []
+
+    for horizon_min in (15, 30, 60):
+        mfe_col = f"reaction_mfe_{horizon_min}m_pct"
+        mae_col = f"reaction_mae_{horizon_min}m_pct"
+        ret_col = f"reaction_return_{horizon_min}m_pct"
+
+        if not all(
+            column in reactions.columns
+            for column in (mfe_col, mae_col, ret_col)
+        ):
+            continue
+
+        horizon = reactions.dropna(
+            subset=[mfe_col, mae_col, ret_col]
+        ).copy()
+
+        if horizon.empty:
+            continue
+
+        horizon_avg_mfe = float(horizon[mfe_col].mean())
+        horizon_avg_mae = float(horizon[mae_col].mean())
+
+        horizon_rows.append({
+            "Horizon": f"{horizon_min}m",
+            "N complete": len(horizon),
+            "Coverage %": round(
+                len(horizon) / len(reactions) * 100.0,
+                2,
+            ),
+            "Avg MFE %": round(horizon_avg_mfe, 4),
+            "Median MFE %": round(
+                float(horizon[mfe_col].median()),
+                4,
+            ),
+            "Avg MAE %": round(horizon_avg_mae, 4),
+            "Median MAE %": round(
+                float(horizon[mae_col].median()),
+                4,
+            ),
+            "Avg return %": round(
+                float(horizon[ret_col].mean()),
+                4,
+            ),
+            "Positive close %": round(
+                float((horizon[ret_col] > 0).mean() * 100.0),
+                2,
+            ),
+            "MFE/MAE": round(
+                (
+                    horizon_avg_mfe / horizon_avg_mae
+                    if horizon_avg_mae > 0
+                    else np.nan
+                ),
+                3,
+            ),
+        })
+
+    if horizon_rows:
+        st.markdown("##### Equal-horizon excursion")
+        st.dataframe(
+            pd.DataFrame(horizon_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not mfe.empty:
+        threshold_rows = []
+
+        for threshold in (
+            0.25,
+            0.50,
+            0.75,
+            1.00,
+            1.50,
+            2.00,
+            3.00,
+        ):
+            reached = int((mfe >= threshold).sum())
+
+            threshold_rows.append({
+                "MFE target": f"{threshold:.2f}%",
+                "Reached": reached,
+                "Total measured": len(mfe),
+                "Hit rate %": round(
+                    reached / len(mfe) * 100.0,
+                    2,
+                ),
+            })
+
+        st.markdown("##### Favorable excursion hit rates")
+        st.dataframe(
+            pd.DataFrame(threshold_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if "signal" in reactions.columns:
+        side_rows = []
+
+        for side, subset in reactions.groupby(
+            "signal",
+            sort=False,
+        ):
+            subset_mfe = subset["reaction_mfe_pct"].dropna()
+            subset_mae = subset["reaction_mae_pct"].dropna()
+
+            if subset_mfe.empty and subset_mae.empty:
+                continue
+
+            side_avg_mfe = (
+                float(subset_mfe.mean())
+                if not subset_mfe.empty
+                else np.nan
+            )
+            side_avg_mae = (
+                float(subset_mae.mean())
+                if not subset_mae.empty
+                else np.nan
+            )
+
+            side_rows.append({
+                "Side": str(side),
+                "Reactions": len(subset),
+                "Avg MFE %": (
+                    round(side_avg_mfe, 4)
+                    if pd.notna(side_avg_mfe)
+                    else np.nan
+                ),
+                "Median MFE %": (
+                    round(float(subset_mfe.median()), 4)
+                    if not subset_mfe.empty
+                    else np.nan
+                ),
+                "Avg MAE %": (
+                    round(side_avg_mae, 4)
+                    if pd.notna(side_avg_mae)
+                    else np.nan
+                ),
+                "Median MAE %": (
+                    round(float(subset_mae.median()), 4)
+                    if not subset_mae.empty
+                    else np.nan
+                ),
+                "MFE/MAE": (
+                    round(side_avg_mfe / side_avg_mae, 3)
+                    if (
+                        pd.notna(side_avg_mfe)
+                        and pd.notna(side_avg_mae)
+                        and side_avg_mae > 0
+                    )
+                    else np.nan
+                ),
+            })
+
+        if side_rows:
+            st.markdown("##### LONG vs SHORT")
+            st.dataframe(
+                pd.DataFrame(side_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    chart_left, chart_right = st.columns(2)
+
+    with chart_left:
+        if not mfe.empty:
+            fig_mfe = go.Figure()
+            fig_mfe.add_trace(
+                go.Histogram(
+                    x=mfe,
+                    nbinsx=min(
+                        30,
+                        max(
+                            8,
+                            int(np.sqrt(len(mfe)) * 2),
+                        ),
+                    ),
+                    name="Reaction MFE",
+                )
+            )
+            fig_mfe.update_layout(
+                title="Post-reaction MFE distribution",
+                xaxis_title="MFE %",
+                yaxis_title="Reactions",
+                height=360,
+                margin={
+                    "l": 10,
+                    "r": 10,
+                    "t": 45,
+                    "b": 10,
+                },
+                showlegend=False,
+            )
+            st.plotly_chart(
+                fig_mfe,
+                use_container_width=True,
+                key="confirmed_swing_reaction_mfe_histogram",
+                config={"displaylogo": False},
+            )
+
+    with chart_right:
+        scatter = reactions.dropna(
+            subset=[
+                "reaction_mfe_pct",
+                "reaction_mae_pct",
+            ]
+        ).copy()
+
+        if not scatter.empty:
+            fig_scatter = go.Figure()
+
+            for side, subset in scatter.groupby(
+                "signal",
+                sort=False,
+            ):
+                fig_scatter.add_trace(
+                    go.Scatter(
+                        x=subset["reaction_mae_pct"],
+                        y=subset["reaction_mfe_pct"],
+                        mode="markers",
+                        name=str(side),
+                        text=subset.get(
+                            "symbol",
+                            pd.Series(
+                                [""] * len(subset),
+                                index=subset.index,
+                            ),
+                        ),
+                        customdata=np.column_stack([
+                            subset.get(
+                                "reaction_observed_min",
+                                pd.Series(
+                                    [np.nan] * len(subset),
+                                    index=subset.index,
+                                ),
+                            ),
+                            subset.get(
+                                "confirmed_to_retest_min",
+                                pd.Series(
+                                    [np.nan] * len(subset),
+                                    index=subset.index,
+                                ),
+                            ),
+                        ]),
+                        hovertemplate=(
+                            "<b>%{text}</b><br>"
+                            "MAE: %{x:.4f}%<br>"
+                            "MFE: %{y:.4f}%<br>"
+                            "Observed: %{customdata[0]:.1f}m<br>"
+                            "Confirmed → retest: "
+                            "%{customdata[1]:.1f}m"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+            fig_scatter.update_layout(
+                title="MFE vs MAE",
+                xaxis_title="MAE %",
+                yaxis_title="MFE %",
+                height=360,
+                margin={
+                    "l": 10,
+                    "r": 10,
+                    "t": 45,
+                    "b": 10,
+                },
+            )
+            st.plotly_chart(
+                fig_scatter,
+                use_container_width=True,
+                key="confirmed_swing_reaction_mfe_mae_scatter",
+                config={"displaylogo": False},
+            )
+
+
+
+
+
+def render_confirmed_swing_volume_mfe_analysis(view):
+    """Compare reaction-time volume fingerprints with later fixed-horizon MFE."""
+    if view is None or view.empty:
+        return
+
+    statuses = (
+        view.get(
+            "status",
+            pd.Series("", index=view.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    reactions = view.loc[statuses.eq("REACTION")].copy()
+
+    if reactions.empty:
+        return
+
+    numeric_columns = [
+        "reaction_mfe_15m_pct",
+        "reaction_mfe_30m_pct",
+        "reaction_mfe_60m_pct",
+        "reaction_mae_60m_pct",
+        "reaction_return_60m_pct",
+        "reaction_relative_volume_30",
+        "reaction_volume_3m_ratio",
+        "reaction_volume_5m_ratio",
+        "reaction_high_volume_candles_5m",
+        "reaction_volume_vs_prev3",
+        "pre_retest_volume_3m_ratio",
+        "departure_relative_volume_30",
+        "reaction_vs_departure_rel_volume",
+        "penetration_pct",
+        "reaction_close_strength",
+        "reaction_range_pct",
+        "reaction_body_pct",
+        "reaction_rejection_wick_share",
+    ]
+    for column in numeric_columns:
+        if column in reactions.columns:
+            reactions[column] = pd.to_numeric(
+                reactions[column],
+                errors="coerce",
+            )
+
+    required = [
+        "reaction_mfe_60m_pct",
+        "reaction_mae_60m_pct",
+    ]
+    if not all(column in reactions.columns for column in required):
+        return
+
+    complete = reactions.dropna(subset=required).copy()
+
+    st.markdown("#### Volume × reaction MFE")
+    st.caption(
+        "Uses only REACTION events with a complete 60m forward window. "
+        "Every volume feature is known by the close of the reaction 1m candle. "
+        "Relative volume uses the median of the previous 30 positive-volume "
+        "1m candles, matching the Volume Exhaustion collector. This is total "
+        "candle volume, not taker buy/sell imbalance."
+    )
+
+    if complete.empty:
+        st.info(
+            "No REACTION has a complete 60m forward window yet for the "
+            "volume-vs-MFE study."
+        )
+        return
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Complete 60m reactions", len(complete))
+    m2.metric(
+        "Avg rel volume",
+        (
+            f"{complete['reaction_relative_volume_30'].mean():.2f}x"
+            if (
+                "reaction_relative_volume_30" in complete.columns
+                and complete["reaction_relative_volume_30"].notna().any()
+            )
+            else "—"
+        ),
+    )
+    m3.metric(
+        "Avg MFE 60m",
+        f"{complete['reaction_mfe_60m_pct'].mean():.3f}%",
+    )
+    m4.metric(
+        "Avg MAE 60m",
+        f"{complete['reaction_mae_60m_pct'].mean():.3f}%",
+    )
+
+    # High-MFE cohorts.
+    mfe = complete["reaction_mfe_60m_pct"]
+    q25 = float(mfe.quantile(0.25))
+    q75 = float(mfe.quantile(0.75))
+    q90 = float(mfe.quantile(0.90))
+
+    def mfe_group(value):
+        if value >= q90:
+            return "P90+ EXTREME"
+        if value >= q75:
+            return "P75–90 HIGH"
+        if value < q25:
+            return "P0–25 LOW"
+        return "P25–75 MID"
+
+    complete["_mfe_group"] = mfe.map(mfe_group)
+
+    group_metrics = [
+        ("reaction_relative_volume_30", "Rel vol 1m"),
+        ("reaction_volume_3m_ratio", "Vol 3m"),
+        ("reaction_volume_5m_ratio", "Vol 5m"),
+        ("reaction_high_volume_candles_5m", "HV candles 5m"),
+        ("reaction_volume_vs_prev3", "Reaction / prev3 vol"),
+        ("pre_retest_volume_3m_ratio", "Pre-retest vol 3m"),
+        (
+            "reaction_vs_departure_rel_volume",
+            "Reaction / departure rel vol",
+        ),
+        ("penetration_pct", "Penetration %"),
+        ("reaction_close_strength", "Close strength"),
+    ]
+
+    group_rows = []
+    for group_name in [
+        "P0–25 LOW",
+        "P25–75 MID",
+        "P75–90 HIGH",
+        "P90+ EXTREME",
+    ]:
+        subset = complete.loc[
+            complete["_mfe_group"].eq(group_name)
+        ]
+        if subset.empty:
+            continue
+
+        row = {
+            "MFE group": group_name,
+            "N": len(subset),
+            "Avg MFE60 %": round(
+                float(subset["reaction_mfe_60m_pct"].mean()),
+                4,
+            ),
+            "Median MFE60 %": round(
+                float(subset["reaction_mfe_60m_pct"].median()),
+                4,
+            ),
+            "Avg MAE60 %": round(
+                float(subset["reaction_mae_60m_pct"].mean()),
+                4,
+            ),
+        }
+
+        for column, label in group_metrics:
+            if column not in subset.columns:
+                continue
+            values = subset[column].dropna()
+            row[label] = (
+                round(float(values.mean()), 4)
+                if not values.empty
+                else np.nan
+            )
+
+        group_rows.append(row)
+
+    if group_rows:
+        st.markdown("##### High-MFE reactions vs the rest")
+        st.dataframe(
+            pd.DataFrame(group_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # Relative-volume buckets.
+    if (
+        "reaction_relative_volume_30" in complete.columns
+        and complete["reaction_relative_volume_30"].notna().any()
+    ):
+        bucketed = complete.assign(
+            _volume_bucket=pd.cut(
+                complete["reaction_relative_volume_30"],
+                bins=[
+                    -np.inf,
+                    1.0,
+                    1.5,
+                    2.0,
+                    3.0,
+                    5.0,
+                    np.inf,
+                ],
+                labels=[
+                    "<1x",
+                    "1–1.5x",
+                    "1.5–2x",
+                    "2–3x",
+                    "3–5x",
+                    ">=5x",
+                ],
+                right=False,
+            )
+        )
+
+        bucket_rows = []
+        for bucket_name, subset in bucketed.groupby(
+            "_volume_bucket",
+            observed=True,
+            sort=False,
+        ):
+            if subset.empty:
+                continue
+
+            avg_mfe = float(
+                subset["reaction_mfe_60m_pct"].mean()
+            )
+            avg_mae = float(
+                subset["reaction_mae_60m_pct"].mean()
+            )
+
+            row = {
+                "Relative volume": str(bucket_name),
+                "N": len(subset),
+                "Avg MFE60 %": round(avg_mfe, 4),
+                "Avg MAE60 %": round(avg_mae, 4),
+                "MFE/MAE60": (
+                    round(avg_mfe / avg_mae, 3)
+                    if avg_mae > 0
+                    else np.nan
+                ),
+                ">=0.50% MFE": round(
+                    float(
+                        (
+                            subset["reaction_mfe_60m_pct"] >= 0.50
+                        ).mean()
+                        * 100.0
+                    ),
+                    2,
+                ),
+                ">=1.00% MFE": round(
+                    float(
+                        (
+                            subset["reaction_mfe_60m_pct"] >= 1.00
+                        ).mean()
+                        * 100.0
+                    ),
+                    2,
+                ),
+                ">=2.00% MFE": round(
+                    float(
+                        (
+                            subset["reaction_mfe_60m_pct"] >= 2.00
+                        ).mean()
+                        * 100.0
+                    ),
+                    2,
+                ),
+            }
+
+            for horizon in (15, 30):
+                column = f"reaction_mfe_{horizon}m_pct"
+                if (
+                    column in subset.columns
+                    and subset[column].notna().any()
+                ):
+                    row[f"Avg MFE{horizon} %"] = round(
+                        float(subset[column].dropna().mean()),
+                        4,
+                    )
+
+            bucket_rows.append(row)
+
+        if bucket_rows:
+            st.markdown("##### MFE by relative-volume bucket")
+            st.dataframe(
+                pd.DataFrame(bucket_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # Rank-correlation screen.
+    candidates = [
+        ("reaction_relative_volume_30", "Rel volume 1m"),
+        ("reaction_volume_3m_ratio", "Volume 3m"),
+        ("reaction_volume_5m_ratio", "Volume 5m"),
+        (
+            "reaction_high_volume_candles_5m",
+            "High-volume candles 5m",
+        ),
+        ("reaction_volume_vs_prev3", "Reaction / prev3 volume"),
+        ("pre_retest_volume_3m_ratio", "Pre-retest volume 3m"),
+        (
+            "departure_relative_volume_30",
+            "Departure relative volume",
+        ),
+        (
+            "reaction_vs_departure_rel_volume",
+            "Reaction / departure relative volume",
+        ),
+        ("penetration_pct", "Penetration"),
+        ("reaction_close_strength", "Close strength"),
+        ("reaction_range_pct", "Reaction range"),
+        (
+            "reaction_rejection_wick_share",
+            "Rejection wick share",
+        ),
+    ]
+
+    correlation_rows = []
+    for column, label in candidates:
+        if column not in complete.columns:
+            continue
+
+        pair = complete[
+            [column, "reaction_mfe_60m_pct"]
+        ].dropna()
+
+        if len(pair) < 3:
+            continue
+
+        spearman = pair[column].rank().corr(
+            pair["reaction_mfe_60m_pct"].rank()
+        )
+        pearson = pair[column].corr(
+            pair["reaction_mfe_60m_pct"]
+        )
+
+        correlation_rows.append({
+            "Feature": label,
+            "N": len(pair),
+            "Spearman vs MFE60": (
+                round(float(spearman), 4)
+                if pd.notna(spearman)
+                else np.nan
+            ),
+            "Pearson vs MFE60": (
+                round(float(pearson), 4)
+                if pd.notna(pearson)
+                else np.nan
+            ),
+        })
+
+    if correlation_rows:
+        correlations = pd.DataFrame(correlation_rows)
+        correlations["_rank"] = (
+            correlations["Spearman vs MFE60"].abs()
+        )
+        correlations = (
+            correlations
+            .sort_values(
+                "_rank",
+                ascending=False,
+                na_position="last",
+            )
+            .drop(columns=["_rank"])
+        )
+
+        st.markdown("##### Association screen vs MFE 60m")
+        st.caption(
+            "Descriptive association only — not causality. Stronger absolute "
+            "Spearman values are candidates for later bucket/replay testing."
+        )
+        st.dataframe(
+            correlations,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # Scatter.
+    if "reaction_relative_volume_30" in complete.columns:
+        scatter = complete.dropna(
+            subset=[
+                "reaction_relative_volume_30",
+                "reaction_mfe_60m_pct",
+            ]
+        )
+
+        if not scatter.empty:
+            fig = go.Figure()
+
+            for side, subset in scatter.groupby(
+                "signal",
+                sort=False,
+            ):
+                fig.add_trace(
+                    go.Scatter(
+                        x=subset["reaction_relative_volume_30"],
+                        y=subset["reaction_mfe_60m_pct"],
+                        mode="markers",
+                        name=str(side),
+                        text=subset["symbol"],
+                        customdata=np.column_stack([
+                            subset["reaction_mae_60m_pct"],
+                            subset.get(
+                                "reaction_volume_3m_ratio",
+                                pd.Series(
+                                    np.nan,
+                                    index=subset.index,
+                                ),
+                            ),
+                            subset.get(
+                                "penetration_pct",
+                                pd.Series(
+                                    np.nan,
+                                    index=subset.index,
+                                ),
+                            ),
+                        ]),
+                        hovertemplate=(
+                            "<b>%{text}</b><br>"
+                            "Rel volume: %{x:.2f}x<br>"
+                            "MFE60: %{y:.3f}%<br>"
+                            "MAE60: %{customdata[0]:.3f}%<br>"
+                            "Vol3m: %{customdata[1]:.2f}x<br>"
+                            "Penetration: %{customdata[2]:.3f}%"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+            fig.update_layout(
+                title="Reaction relative volume vs MFE 60m",
+                xaxis_title="Relative volume (previous-30 median baseline)",
+                yaxis_title="MFE 60m %",
+                height=420,
+                margin={
+                    "l": 10,
+                    "r": 10,
+                    "t": 45,
+                    "b": 10,
+                },
+            )
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                key="confirmed_swing_reaction_volume_mfe_scatter",
+                config={"displaylogo": False},
+            )
+
+    # Top MFE volume fingerprint.
+    top_columns = [
+        "symbol",
+        "signal",
+        "retest_time",
+        "reaction_mfe_60m_pct",
+        "reaction_mae_60m_pct",
+        "reaction_relative_volume_30",
+        "reaction_volume_3m_ratio",
+        "reaction_volume_5m_ratio",
+        "reaction_high_volume_candles_5m",
+        "reaction_volume_vs_prev3",
+        "pre_retest_volume_3m_ratio",
+        "departure_relative_volume_30",
+        "reaction_vs_departure_rel_volume",
+        "penetration_pct",
+        "reaction_close_strength",
+    ]
+    top_columns = [
+        column
+        for column in top_columns
+        if column in complete.columns
+    ]
+
+    top = (
+        complete
+        .sort_values(
+            "reaction_mfe_60m_pct",
+            ascending=False,
+        )
+        .head(25)
+        [top_columns]
+        .copy()
+    )
+
+    for column in top.columns:
+        if column in {"symbol", "signal", "retest_time"}:
+            continue
+        top[column] = pd.to_numeric(
+            top[column],
+            errors="coerce",
+        ).round(4)
+
+    st.markdown("##### Top MFE reactions — volume fingerprint")
+    st.dataframe(
+        top,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+
 def render_confirmed_swing_retest_scanner(
     retests_df,
     reaction_filter,
@@ -9706,7 +11245,8 @@ def render_confirmed_swing_retest_scanner(
         "close. Reactions are ranked by post-reaction MFE: the maximum "
         "favorable move observed AFTER the reaction became known. The "
         "reaction candle itself is excluded, and data gaps terminate the "
-        "path instead of being bridged."
+        "path instead of being bridged. Non-reaction first touches are split "
+        "into TOUCH_INDECISIVE and TOUCH_FAILED."
     )
 
     if retests_df is None or retests_df.empty:
@@ -9715,9 +11255,21 @@ def render_confirmed_swing_retest_scanner(
 
     view = retests_df.copy()
     if reaction_filter == "Reaction only":
-        view = view[view["reaction"].eq(True)].copy()
-    elif reaction_filter == "Touch only":
-        view = view[view["reaction"].eq(False)].copy()
+        view = view[view["status"].astype(str).eq("REACTION")].copy()
+    elif reaction_filter == "Non-reaction touches":
+        view = view[
+            view["status"].astype(str).isin(
+                ["TOUCH_INDECISIVE", "TOUCH_FAILED", "TOUCH"]
+            )
+        ].copy()
+    elif reaction_filter == "Failed only":
+        view = view[
+            view["status"].astype(str).eq("TOUCH_FAILED")
+        ].copy()
+    elif reaction_filter == "Indecisive only":
+        view = view[
+            view["status"].astype(str).eq("TOUCH_INDECISIVE")
+        ].copy()
 
     if side_filter != "ALL":
         view = view[view["signal"].astype(str).eq(side_filter)].copy()
@@ -9759,6 +11311,10 @@ def render_confirmed_swing_retest_scanner(
     m3.metric("LONG", int(view["signal"].eq("LONG").sum()))
     m4.metric("SHORT", int(view["signal"].eq("SHORT").sum()))
 
+    render_confirmed_swing_window_summary(view)
+    render_confirmed_swing_reaction_overview(view)
+    render_confirmed_swing_volume_mfe_analysis(view)
+
     display_columns = [
         "symbol",
         "timeframe",
@@ -9768,10 +11324,23 @@ def render_confirmed_swing_retest_scanner(
         "swing_price",
         "retest_price",
         "retest_distance_pct",
+        "touch_mfe_pct",
+        "touch_mae_pct",
+        "touch_current_pct",
+        "touch_observed_min",
         "reaction_mfe_pct",
         "reaction_mae_pct",
         "reaction_current_pct",
         "reaction_observed_min",
+        "reaction_mfe_15m_pct",
+        "reaction_mae_15m_pct",
+        "reaction_return_15m_pct",
+        "reaction_mfe_30m_pct",
+        "reaction_mae_30m_pct",
+        "reaction_return_30m_pct",
+        "reaction_mfe_60m_pct",
+        "reaction_mae_60m_pct",
+        "reaction_return_60m_pct",
         "max_departure_pct",
         "confirmed_to_retest_min",
         "retest_age_min",
@@ -9783,10 +11352,26 @@ def render_confirmed_swing_retest_scanner(
         "swing_price",
         "retest_price",
         "retest_distance_pct",
+        "touch_mfe_pct",
+        "touch_mae_pct",
+        "touch_current_pct",
+        "touch_observed_min",
         "reaction_mfe_pct",
         "reaction_mae_pct",
         "reaction_current_pct",
         "reaction_observed_min",
+        "reaction_relative_volume_30",
+        "reaction_volume_3m_ratio",
+        "reaction_volume_5m_ratio",
+        "reaction_high_volume_candles_5m",
+        "reaction_volume_vs_prev3",
+        "pre_retest_volume_3m_ratio",
+        "departure_relative_volume_30",
+        "reaction_vs_departure_rel_volume",
+        "reaction_range_pct",
+        "reaction_body_pct",
+        "reaction_close_strength",
+        "reaction_rejection_wick_share",
         "max_departure_pct",
         "confirmed_to_retest_min",
         "retest_age_min",
@@ -11166,6 +12751,10 @@ def build_volume_exhaustion_chart(
 
         for status, marker_symbol in [
             ("REACTION", "diamond"),
+            ("TOUCH_INDECISIVE", "x"),
+            ("TOUCH_FAILED", "cross"),
+            # Backward compatibility for cached rows generated before the
+            # status split.
             ("TOUCH", "x"),
         ]:
             subset = retests[retests["status"].astype(str).eq(status)]
@@ -11710,7 +13299,13 @@ if selected_section == "volume_exhaustion":
         with retest_control_5:
             retest_reaction_filter = st.selectbox(
                 "Retest type",
-                ["All retests", "Reaction only", "Touch only"],
+                [
+                    "All retests",
+                    "Reaction only",
+                    "Non-reaction touches",
+                    "Failed only",
+                    "Indecisive only",
+                ],
                 key="confirmed_swing_retest_type_filter",
             )
         with retest_control_6:
