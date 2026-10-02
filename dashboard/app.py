@@ -87,6 +87,24 @@ VOLUME_EXHAUSTION_OUTCOMES_FILE = (
 # The cutoff is intentionally static so events that existed during discovery
 # never migrate into the forward cohort on later dashboard refreshes.
 CANDIDATE_V1_FREEZE_TS_UTC = "2026-10-02T18:30:00Z"
+
+# Exact original Discovery cohort from the 10/10 SHORT sample used to freeze V1.
+# Cohort membership is now ID-based, never timestamp-based. Any candidate not
+# in this immutable set is FORWARD, even if a later backfill discovers an old
+# REACTION whose timestamp predates the freeze time.
+CANDIDATE_V1_FROZEN_DISCOVERY_EVENT_KEYS = frozenset({
+    "BULLAUSDT|SHORT|1790949900000",
+    "1000BONKUSDT|SHORT|1790948940000",
+    "TOWNSUSDT|SHORT|1790948400000",
+    "ETCUSDT|SHORT|1790948220000",
+    "ADAUSDT|SHORT|1790948220000",
+    "NEIROUSDT|SHORT|1790948220000",
+    "WIFUSDT|SHORT|1790948220000",
+    "YFIUSDT|SHORT|1790948220000",
+    "MELANIAUSDT|SHORT|1790948100000",
+    "SOLUSDT|SHORT|1790948100000",
+})
+
 CANDIDATE_V1_CONFIG_FILE = (
     BASE_DIR / "candidate_v1_frozen_config.json"
 )
@@ -14583,20 +14601,27 @@ def _candidate_v1_build_current_monitor(
         + 60_000
     )
 
-    freeze_ts_ms = int(
-        pd.Timestamp(
-            config.get(
-                "created_at_utc",
-                CANDIDATE_V1_FREEZE_TS_UTC,
-            )
-        ).timestamp()
-        * 1000
-    )
-    result["candidate_v1_cohort"] = np.where(
-        pd.to_numeric(
-            result["candidate_v1_reaction_known_ts"],
+    # Stable identity must exist BEFORE cohort assignment.
+    result["candidate_v1_event_key"] = (
+        result["symbol"].astype(str)
+        + "|"
+        + result["signal"].astype(str)
+        + "|"
+        + pd.to_numeric(
+            result["retest_timestamp"],
             errors="coerce",
-        ).le(freeze_ts_ms),
+        )
+        .fillna(-1)
+        .astype("int64")
+        .astype(str)
+    )
+
+    # Discovery is immutable. Timestamp is retained only as metadata showing
+    # when V1 was frozen; it no longer decides cohort membership.
+    result["candidate_v1_cohort"] = np.where(
+        result["candidate_v1_event_key"].isin(
+            CANDIDATE_V1_FROZEN_DISCOVERY_EVENT_KEYS
+        ),
         "DISCOVERY",
         "FORWARD",
     )
@@ -14629,18 +14654,13 @@ def _candidate_v1_build_current_monitor(
                 column,
             ]
 
-    result["candidate_v1_event_key"] = (
-        result["symbol"].astype(str)
-        + "|"
-        + result["signal"].astype(str)
-        + "|"
-        + pd.to_numeric(
-            result["retest_timestamp"],
-            errors="coerce",
-        )
-        .fillna(-1)
-        .astype("int64")
-        .astype(str)
+    # Keep cohort assignment tied to the immutable Discovery ID set.
+    result["candidate_v1_cohort"] = np.where(
+        result["candidate_v1_event_key"].isin(
+            CANDIDATE_V1_FROZEN_DISCOVERY_EVENT_KEYS
+        ),
+        "DISCOVERY",
+        "FORWARD",
     )
 
     return result
@@ -15301,6 +15321,17 @@ def _candidate_v1_persist_history(current):
             keep="last",
         )
 
+        # Migration/fix for history produced by the old timestamp rule.
+        # This immediately restores Discovery to the exact original 10 IDs
+        # and reclassifies every other persisted/backfilled row as FORWARD.
+        merged["candidate_v1_cohort"] = np.where(
+            merged["candidate_v1_event_key"].astype(str).isin(
+                CANDIDATE_V1_FROZEN_DISCOVERY_EVENT_KEYS
+            ),
+            "DISCOVERY",
+            "FORWARD",
+        )
+
     try:
         CANDIDATE_V1_HISTORY_FILE.parent.mkdir(
             parents=True,
@@ -15404,11 +15435,16 @@ def render_candidate_v1_frozen_monitor(
         .fillna("PENDING")
         .astype(str)
     )
-    history["candidate_v1_cohort"] = (
-        history["candidate_v1_cohort"]
-        .fillna("DISCOVERY")
-        .astype(str)
-    )
+    if "candidate_v1_event_key" in history.columns:
+        history["candidate_v1_cohort"] = np.where(
+            history["candidate_v1_event_key"].astype(str).isin(
+                CANDIDATE_V1_FROZEN_DISCOVERY_EVENT_KEYS
+            ),
+            "DISCOVERY",
+            "FORWARD",
+        )
+    else:
+        history["candidate_v1_cohort"] = "FORWARD"
 
     def _cohort_stats(cohort_name):
         subset = history.loc[
