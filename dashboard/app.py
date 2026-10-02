@@ -16523,6 +16523,7 @@ def _attach_confirmed_swing_sweep_entry_analysis(
             **fill_info,
             "path_results_360m": {},
             "time_exit_returns": {},
+            "management_time_exit_returns": {},
             "complete_horizons": [],
             "mfe_60m_pct": np.nan,
             "mae_60m_pct": np.nan,
@@ -16736,6 +16737,68 @@ def _attach_confirmed_swing_sweep_entry_analysis(
         payload[
             "time_exit_returns"
         ] = time_exit_returns
+
+        # ----------------------------------------------------
+        # Short causal closes for NO-RECLAIM management.
+        #
+        # A 180m-complete cohort is contiguous, therefore 3/5/10/15m
+        # closes are known for every row in the fixed research cohort.
+        # These returns are measured from the actual Sweep Entry limit.
+        # ----------------------------------------------------
+        management_time_exit_returns = {}
+
+        for management_minute in (
+            3,
+            5,
+            10,
+            15,
+        ):
+            management_idx = (
+                sweep_idx
+                + int(management_minute)
+            )
+
+            if (
+                management_idx > segment_end
+                or management_idx
+                >= len(timestamps)
+            ):
+                continue
+
+            management_close = float(
+                closes[
+                    management_idx
+                ]
+            )
+
+            if side == "LONG":
+                management_return = (
+                    management_close
+                    / entry_price
+                    - 1.0
+                ) * 100.0
+            else:
+                management_return = (
+                    1.0
+                    - management_close
+                    / entry_price
+                ) * 100.0
+
+            management_time_exit_returns[
+                str(
+                    int(
+                        management_minute
+                    )
+                )
+            ] = float(
+                management_return
+            )
+
+        payload[
+            "management_time_exit_returns"
+        ] = (
+            management_time_exit_returns
+        )
 
         # ----------------------------------------------------
         # First TP/SL after fill.
@@ -17104,6 +17167,508 @@ def _confirmed_swing_sweep_entry_result_for_row(
             ]
         ),
     }
+
+
+
+def _confirmed_swing_no_reclaim_management_result_for_row(
+    row,
+    offset_pct,
+    tp_pct,
+    sl_pct,
+    timeout_min,
+    base_horizon_min,
+    fee_per_side_pct,
+):
+    """Causal post-entry management: exit if the swing has not reclaimed.
+
+    Workflow:
+      1) enter on the resting FIRST-SWEEP limit;
+      2) TP/SL always has priority if hit before/equal to the timeout;
+      3) at the close of timeout_min, check whether reclaim has occurred;
+      4) if NOT reclaimed, exit at that close;
+      5) if reclaimed, keep the original TP/SL/TIME_EXIT strategy.
+
+    Reclaim is therefore used only AFTER entry, never as hindsight for entry.
+    """
+    try:
+        offset_pct = float(offset_pct)
+        tp_pct = float(tp_pct)
+        sl_pct = float(sl_pct)
+        timeout_min = int(timeout_min)
+        base_horizon_min = int(
+            base_horizon_min
+        )
+        fee_per_side_pct = float(
+            fee_per_side_pct
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+    baseline = (
+        _confirmed_swing_sweep_entry_result_for_row(
+            row,
+            offset_pct=offset_pct,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon_min=base_horizon_min,
+            fee_per_side_pct=(
+                fee_per_side_pct
+            ),
+        )
+    )
+
+    if (
+        baseline is None
+        or not bool(
+            baseline.get(
+                "filled",
+                False,
+            )
+        )
+    ):
+        return None
+
+    analysis = row.get(
+        "sweep_entry_analysis",
+        {},
+    )
+    if not isinstance(
+        analysis,
+        dict,
+    ):
+        return None
+
+    payload = analysis.get(
+        _confirmed_swing_sweep_entry_offset_key(
+            offset_pct
+        ),
+        {},
+    )
+    if not isinstance(
+        payload,
+        dict,
+    ):
+        return None
+
+    path_results = payload.get(
+        "path_results_360m",
+        {},
+    )
+    if not isinstance(
+        path_results,
+        dict,
+    ):
+        return None
+
+    path_result = path_results.get(
+        _confirmed_swing_first_touch_key(
+            tp_pct,
+            sl_pct,
+        ),
+        {},
+    )
+    if not isinstance(
+        path_result,
+        dict,
+    ):
+        return None
+
+    first_outcome = str(
+        path_result.get(
+            "outcome",
+            "NO_HIT",
+        )
+    )
+    first_hit_bar = pd.to_numeric(
+        path_result.get(
+            "hit_bar",
+        ),
+        errors="coerce",
+    )
+
+    baseline_reason = str(
+        baseline.get(
+            "exit_reason",
+            "",
+        )
+    )
+
+    # Natural TP/SL happens before management gets a chance to act.
+    if (
+        first_outcome
+        in {
+            "TP",
+            "SL",
+            "SL_AMBIGUOUS",
+        }
+        and pd.notna(
+            first_hit_bar
+        )
+        and int(
+            first_hit_bar
+        ) <= timeout_min
+    ):
+        gross_pct = (
+            tp_pct
+            if first_outcome == "TP"
+            else -sl_pct
+        )
+        fees_pct = max(
+            0.0,
+            fee_per_side_pct
+            * 2.0,
+        )
+
+        return {
+            "filled": True,
+            "exit_reason": (
+                first_outcome
+            ),
+            "management_action": (
+                "NATURAL_EXIT_BEFORE_TIMEOUT"
+            ),
+            "early_exit": False,
+            "reclaimed_by_timeout": (
+                pd.notna(
+                    pd.to_numeric(
+                        row.get(
+                            "sweep_to_reclaim_min",
+                        ),
+                        errors="coerce",
+                    )
+                )
+                and float(
+                    pd.to_numeric(
+                        row.get(
+                            "sweep_to_reclaim_min",
+                        ),
+                        errors="coerce",
+                    )
+                )
+                <= timeout_min
+            ),
+            "gross_pct": float(
+                gross_pct
+            ),
+            "fees_pct": float(
+                fees_pct
+            ),
+            "net_pct": float(
+                gross_pct
+                - fees_pct
+            ),
+            "baseline_exit_reason": (
+                baseline_reason
+            ),
+            "baseline_net_pct": (
+                baseline.get(
+                    "net_pct"
+                )
+            ),
+        }
+
+    reclaim_minutes = pd.to_numeric(
+        row.get(
+            "sweep_to_reclaim_min",
+        ),
+        errors="coerce",
+    )
+
+    reclaimed_by_timeout = bool(
+        pd.notna(
+            reclaim_minutes
+        )
+        and float(
+            reclaim_minutes
+        ) <= timeout_min
+    )
+
+    # Reclaim already happened: management does nothing and the trade follows
+    # the original 180m TP/SL/TIME_EXIT path.
+    if reclaimed_by_timeout:
+        return {
+            **baseline,
+            "management_action": (
+                "HOLD_AFTER_RECLAIM"
+            ),
+            "early_exit": False,
+            "reclaimed_by_timeout": True,
+            "baseline_exit_reason": (
+                baseline_reason
+            ),
+            "baseline_net_pct": (
+                baseline.get(
+                    "net_pct"
+                )
+            ),
+        }
+
+    management_returns = payload.get(
+        "management_time_exit_returns",
+        {},
+    )
+    if not isinstance(
+        management_returns,
+        dict,
+    ):
+        return None
+
+    timeout_return = pd.to_numeric(
+        management_returns.get(
+            str(
+                timeout_min
+            )
+        ),
+        errors="coerce",
+    )
+
+    if pd.isna(
+        timeout_return
+    ):
+        return None
+
+    fees_pct = max(
+        0.0,
+        fee_per_side_pct
+        * 2.0,
+    )
+
+    gross_pct = float(
+        timeout_return
+    )
+    net_pct = (
+        gross_pct
+        - fees_pct
+    )
+
+    return {
+        "filled": True,
+        "exit_reason": (
+            f"NO_RECLAIM_EXIT_{timeout_min}m"
+        ),
+        "management_action": (
+            "NO_RECLAIM_EARLY_EXIT"
+        ),
+        "early_exit": True,
+        "reclaimed_by_timeout": False,
+        "gross_pct": float(
+            gross_pct
+        ),
+        "fees_pct": float(
+            fees_pct
+        ),
+        "net_pct": float(
+            net_pct
+        ),
+        "baseline_exit_reason": (
+            baseline_reason
+        ),
+        "baseline_net_pct": (
+            baseline.get(
+                "net_pct"
+            )
+        ),
+    }
+
+
+def _confirmed_swing_no_reclaim_management_stats(
+    rows,
+    offset_pct,
+    tp_pct,
+    sl_pct,
+    timeout_min,
+    base_horizon_min,
+    fee_per_side_pct,
+):
+    """Aggregate the no-reclaim management rule on one fixed cohort."""
+    if (
+        rows is None
+        or rows.empty
+    ):
+        return None
+
+    results = []
+
+    for _, row in rows.iterrows():
+        result = (
+            _confirmed_swing_no_reclaim_management_result_for_row(
+                row,
+                offset_pct=offset_pct,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                timeout_min=timeout_min,
+                base_horizon_min=(
+                    base_horizon_min
+                ),
+                fee_per_side_pct=(
+                    fee_per_side_pct
+                ),
+            )
+        )
+
+        if result is None:
+            continue
+
+        net_pct = pd.to_numeric(
+            result.get(
+                "net_pct",
+            ),
+            errors="coerce",
+        )
+
+        if pd.isna(
+            net_pct
+        ):
+            continue
+
+        results.append(
+            result
+        )
+
+    if not results:
+        return None
+
+    result_df = pd.DataFrame(
+        results
+    )
+    net = pd.to_numeric(
+        result_df[
+            "net_pct"
+        ],
+        errors="coerce",
+    ).dropna()
+
+    positive_sum = float(
+        net.loc[
+            net > 0
+        ].sum()
+    )
+    negative_sum = float(
+        net.loc[
+            net < 0
+        ].sum()
+    )
+
+    profit_factor = (
+        positive_sum
+        / abs(
+            negative_sum
+        )
+        if negative_sum < 0
+        else (
+            np.inf
+            if positive_sum > 0
+            else np.nan
+        )
+    )
+
+    early_exit_mask = (
+        result_df[
+            "early_exit"
+        ]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    baseline_reason = (
+        result_df[
+            "baseline_exit_reason"
+        ]
+        .astype(str)
+    )
+
+    saved_eventual_sl = (
+        early_exit_mask
+        & baseline_reason.isin(
+            [
+                "SL",
+                "SL_AMBIGUOUS",
+            ]
+        )
+    )
+
+    cut_eventual_tp = (
+        early_exit_mask
+        & baseline_reason.eq(
+            "TP"
+        )
+    )
+
+    natural_tp = (
+        result_df[
+            "exit_reason"
+        ]
+        .astype(str)
+        .eq("TP")
+    )
+    natural_sl = (
+        result_df[
+            "exit_reason"
+        ]
+        .astype(str)
+        .isin(
+            [
+                "SL",
+                "SL_AMBIGUOUS",
+            ]
+        )
+    )
+
+    n = len(
+        result_df
+    )
+
+    return {
+        "N": int(n),
+        "Win rate %": float(
+            (
+                net > 0
+            ).mean()
+            * 100.0
+        ),
+        "Avg net %": float(
+            net.mean()
+        ),
+        "Median net %": float(
+            net.median()
+        ),
+        "Total net %": float(
+            net.sum()
+        ),
+        "Profit factor": float(
+            profit_factor
+        ),
+        "Natural TP %": float(
+            natural_tp.mean()
+            * 100.0
+        ),
+        "Natural SL %": float(
+            natural_sl.mean()
+            * 100.0
+        ),
+        "Early exit %": float(
+            early_exit_mask.mean()
+            * 100.0
+        ),
+        "Saved eventual SL": int(
+            saved_eventual_sl.sum()
+        ),
+        "Saved eventual SL %": float(
+            saved_eventual_sl.mean()
+            * 100.0
+        ),
+        "Cut eventual TP": int(
+            cut_eventual_tp.sum()
+        ),
+        "Cut eventual TP %": float(
+            cut_eventual_tp.mean()
+            * 100.0
+        ),
+    }
+
 
 
 def _confirmed_swing_sweep_entry_stats(
@@ -20755,6 +21320,302 @@ def render_confirmed_swing_sweep_reclaim_scanner(
                 use_container_width=True,
                 hide_index=True,
             )
+
+        # ----------------------------------------------------
+        # B2) Causal NO-RECLAIM management.
+        #
+        # The entry never changes. At 3/5/10/15m we ask a causal question:
+        # "has the swing reclaimed yet?" If not, close at that minute's
+        # candle close. If yes, leave the original 180m trade untouched.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### B2. No-reclaim early exit · causal management"
+        )
+        st.caption(
+            "Same fixed 180m cohort and same Sweep Entry. TP/SL still has "
+            "priority if touched first. Otherwise, at 3/5/10/15 minutes after "
+            "the sweep entry: if the swing has NOT reclaimed by that candle "
+            "close, exit immediately. If it has reclaimed, keep the original "
+            "180m strategy. 'Saved eventual SL' and 'Cut eventual TP' compare "
+            "the managed trade against its own unmanaged 180m counterfactual."
+        )
+
+        baseline_management_stats = (
+            _confirmed_swing_sweep_entry_stats(
+                research_cohort,
+                offset_pct=research_offset,
+                tp_pct=sweep_tp,
+                sl_pct=sweep_sl,
+                horizon_min=research_horizon,
+                fee_per_side_pct=sweep_fee,
+            )
+        )
+
+        management_timeouts = [
+            3,
+            5,
+            10,
+            15,
+        ]
+
+        management_groups = [
+            (
+                "ALL",
+                research_cohort,
+            ),
+            (
+                "LONG",
+                research_cohort.loc[
+                    research_cohort[
+                        "signal"
+                    ].eq("LONG")
+                ].copy(),
+            ),
+            (
+                "SHORT",
+                research_cohort.loc[
+                    research_cohort[
+                        "signal"
+                    ].eq("SHORT")
+                ].copy(),
+            ),
+        ]
+
+        management_tabs = st.tabs(
+            [
+                "ALL",
+                "LONG",
+                "SHORT",
+            ]
+        )
+
+        for (
+            management_tab,
+            (
+                management_group_label,
+                management_subset,
+            ),
+        ) in zip(
+            management_tabs,
+            management_groups,
+        ):
+            with management_tab:
+                if management_subset.empty:
+                    st.info(
+                        f"No {management_group_label} trades in the fixed "
+                        "research cohort."
+                    )
+                    continue
+
+                group_baseline = (
+                    _confirmed_swing_sweep_entry_stats(
+                        management_subset,
+                        offset_pct=research_offset,
+                        tp_pct=sweep_tp,
+                        sl_pct=sweep_sl,
+                        horizon_min=research_horizon,
+                        fee_per_side_pct=sweep_fee,
+                    )
+                )
+
+                if group_baseline is None:
+                    st.info(
+                        "Baseline 180m results are unavailable."
+                    )
+                    continue
+
+                management_rows = [{
+                    "Rule": "BASELINE 180m",
+                    "N": int(
+                        group_baseline[
+                            "Complete"
+                        ]
+                    ),
+                    "WR %": round(
+                        group_baseline[
+                            "Win rate %"
+                        ],
+                        2,
+                    ),
+                    "Avg net %": round(
+                        group_baseline[
+                            "Avg net %"
+                        ],
+                        4,
+                    ),
+                    "Median net %": round(
+                        group_baseline[
+                            "Median net %"
+                        ],
+                        4,
+                    ),
+                    "PF": (
+                        round(
+                            group_baseline[
+                                "Profit factor"
+                            ],
+                            3,
+                        )
+                        if np.isfinite(
+                            group_baseline[
+                                "Profit factor"
+                            ]
+                        )
+                        else np.inf
+                    ),
+                    "Total net %": round(
+                        group_baseline[
+                            "Total net %"
+                        ],
+                        4,
+                    ),
+                    "Δ Total vs base %": 0.0,
+                    "Early exit %": 0.0,
+                    "Saved eventual SL": 0,
+                    "Cut eventual TP": 0,
+                }]
+
+                baseline_total = float(
+                    group_baseline[
+                        "Total net %"
+                    ]
+                )
+
+                for timeout_min in (
+                    management_timeouts
+                ):
+                    managed = (
+                        _confirmed_swing_no_reclaim_management_stats(
+                            management_subset,
+                            offset_pct=research_offset,
+                            tp_pct=sweep_tp,
+                            sl_pct=sweep_sl,
+                            timeout_min=timeout_min,
+                            base_horizon_min=(
+                                research_horizon
+                            ),
+                            fee_per_side_pct=sweep_fee,
+                        )
+                    )
+
+                    if managed is None:
+                        continue
+
+                    management_rows.append({
+                        "Rule": (
+                            f"EXIT if no reclaim @ {timeout_min}m"
+                        ),
+                        "N": int(
+                            managed[
+                                "N"
+                            ]
+                        ),
+                        "WR %": round(
+                            managed[
+                                "Win rate %"
+                            ],
+                            2,
+                        ),
+                        "Avg net %": round(
+                            managed[
+                                "Avg net %"
+                            ],
+                            4,
+                        ),
+                        "Median net %": round(
+                            managed[
+                                "Median net %"
+                            ],
+                            4,
+                        ),
+                        "PF": (
+                            round(
+                                managed[
+                                    "Profit factor"
+                                ],
+                                3,
+                            )
+                            if np.isfinite(
+                                managed[
+                                    "Profit factor"
+                                ]
+                            )
+                            else np.inf
+                        ),
+                        "Total net %": round(
+                            managed[
+                                "Total net %"
+                            ],
+                            4,
+                        ),
+                        "Δ Total vs base %": round(
+                            float(
+                                managed[
+                                    "Total net %"
+                                ]
+                            )
+                            - baseline_total,
+                            4,
+                        ),
+                        "Early exit %": round(
+                            managed[
+                                "Early exit %"
+                            ],
+                            1,
+                        ),
+                        "Saved eventual SL": int(
+                            managed[
+                                "Saved eventual SL"
+                            ]
+                        ),
+                        "Cut eventual TP": int(
+                            managed[
+                                "Cut eventual TP"
+                            ]
+                        ),
+                    })
+
+                management_df = pd.DataFrame(
+                    management_rows
+                )
+
+                st.dataframe(
+                    management_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                n_values = (
+                    management_df[
+                        "N"
+                    ]
+                    .dropna()
+                    .astype(int)
+                    .unique()
+                    .tolist()
+                )
+
+                if (
+                    len(
+                        n_values
+                    ) != 1
+                    or int(
+                        n_values[0]
+                    )
+                    != len(
+                        management_subset
+                    )
+                ):
+                    st.warning(
+                        "No-reclaim management invariant failed: rules are "
+                        "not using the exact same fixed cohort. Do not "
+                        "interpret this table until corrected."
+                    )
+                else:
+                    st.caption(
+                        f"Management invariant OK: N={len(management_subset)} "
+                        "for baseline and every timeout rule."
+                    )
 
         # ----------------------------------------------------
         # C) Causal setup freshness at the time of sweep entry.
