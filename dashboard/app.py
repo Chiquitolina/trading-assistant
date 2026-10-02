@@ -10339,6 +10339,7 @@ def build_confirmed_swing_retest_detail_chart(
     candles,
     retest_row,
     chart_candle_limit=CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES,
+    room_context=None,
 ):
     """Render the selected confirmed-swing retest in structural 15m candles.
 
@@ -10513,6 +10514,103 @@ def build_confirmed_swing_retest_detail_chart(
                 ),
             )
         )
+
+    # ---------------------------------------------------------
+    # CAUSAL HTF ROOM OVERLAY
+    # ---------------------------------------------------------
+    # Frozen at the REACTION close. Only already-confirmed 30m/1h/4h
+    # swings that were actionable at that time can define the room.
+    if (
+        isinstance(room_context, dict)
+        and str(retest_row.get("status", "")).upper() == "REACTION"
+    ):
+        room_pct = pd.to_numeric(
+            room_context.get("nearest_opposing_room_pct"),
+            errors="coerce",
+        )
+        room_target = pd.to_numeric(
+            room_context.get("nearest_opposing_swing_price"),
+            errors="coerce",
+        )
+        reaction_price = pd.to_numeric(
+            room_context.get(
+                "reaction_price",
+                retest_row.get("retest_close", retest_row.get("retest_price")),
+            ),
+            errors="coerce",
+        )
+        room_tf = room_context.get("nearest_opposing_swing_tf")
+        room_side = str(retest_row.get("signal", "")).upper()
+
+        if (
+            pd.notna(room_pct)
+            and pd.notna(room_target)
+            and pd.notna(reaction_price)
+            and float(room_target) > 0
+            and float(reaction_price) > 0
+            and room_side in {"LONG", "SHORT"}
+        ):
+            reaction_time = pd.to_datetime(
+                retest_ts, unit="ms", utc=True
+            ).tz_convert(TZ)
+            room_end_time = pd.to_datetime(
+                visible_end_ts, unit="ms", utc=True
+            ).tz_convert(TZ)
+            y0 = min(float(reaction_price), float(room_target))
+            y1 = max(float(reaction_price), float(room_target))
+
+            if room_side == "LONG":
+                room_fill = "rgba(34, 197, 94, 0.16)"
+                room_line = "rgba(34, 197, 94, 0.90)"
+                room_label = "LONG HTF room"
+            else:
+                room_fill = "rgba(239, 68, 68, 0.16)"
+                room_line = "rgba(239, 68, 68, 0.90)"
+                room_label = "SHORT HTF room"
+
+            fig.add_shape(
+                type="rect",
+                x0=reaction_time, x1=room_end_time,
+                y0=y0, y1=y1,
+                fillcolor=room_fill,
+                line={"width": 0},
+                layer="below",
+            )
+            fig.add_shape(
+                type="line",
+                x0=reaction_time, x1=room_end_time,
+                y0=float(reaction_price), y1=float(reaction_price),
+                line={
+                    "color": "rgba(250, 204, 21, 0.95)",
+                    "width": 1.5,
+                    "dash": "dot",
+                },
+            )
+            fig.add_shape(
+                type="line",
+                x0=reaction_time, x1=room_end_time,
+                y0=float(room_target), y1=float(room_target),
+                line={
+                    "color": room_line,
+                    "width": 2,
+                    "dash": "dash",
+                },
+            )
+            fig.add_annotation(
+                x=room_end_time,
+                y=float(room_target),
+                text=(
+                    f"{room_label} · {room_tf or 'HTF'} · "
+                    f"{float(room_pct):.2f}% · target {float(room_target):.8g}"
+                ),
+                showarrow=False,
+                xanchor="right",
+                yanchor="bottom" if room_side == "LONG" else "top",
+                bgcolor="rgba(15, 23, 42, 0.82)",
+                bordercolor=room_line,
+                borderwidth=1,
+                font={"size": 11, "color": "#f8fafc"},
+            )
 
     fig.update_layout(
         height=620,
@@ -14250,6 +14348,10 @@ def _reaction_driver_swing_distances(
     result = {
         "same_side_distance_pct": np.nan,
         "opposing_room_pct": np.nan,
+        "opposing_swing_price": np.nan,
+        "opposing_swing_pivot_timestamp": np.nan,
+        "opposing_swing_confirmed_timestamp": np.nan,
+        "opposing_swing_actionable_timestamp": np.nan,
     }
     if not points or reaction_price is None or float(reaction_price) <= 0:
         return result
@@ -14282,12 +14384,41 @@ def _reaction_driver_swing_distances(
     favorable_rooms = []
     for point in opposite:
         p = float(point.price)
+        room_pct = np.nan
         if signal == "LONG" and p > price:
-            favorable_rooms.append((p / price - 1.0) * 100.0)
+            room_pct = (p / price - 1.0) * 100.0
         elif signal == "SHORT" and p < price:
-            favorable_rooms.append((price / p - 1.0) * 100.0)
+            room_pct = (price / p - 1.0) * 100.0
+
+        if pd.notna(room_pct):
+            confirmed = getattr(point, "confirmed_timestamp", None)
+            pivot_timestamp = getattr(point, "pivot_timestamp", None)
+            actionable = (
+                int(confirmed) + int(timeframe_ms)
+                if confirmed is not None
+                else None
+            )
+            favorable_rooms.append((
+                float(room_pct),
+                float(p),
+                pivot_timestamp,
+                confirmed,
+                actionable,
+            ))
+
     if favorable_rooms:
-        result["opposing_room_pct"] = min(favorable_rooms)
+        (
+            nearest_room,
+            nearest_price,
+            nearest_pivot_ts,
+            nearest_confirmed_ts,
+            nearest_actionable_ts,
+        ) = min(favorable_rooms, key=lambda item: item[0])
+        result["opposing_room_pct"] = nearest_room
+        result["opposing_swing_price"] = nearest_price
+        result["opposing_swing_pivot_timestamp"] = nearest_pivot_ts
+        result["opposing_swing_confirmed_timestamp"] = nearest_confirmed_ts
+        result["opposing_swing_actionable_timestamp"] = nearest_actionable_ts
 
     return result
 
@@ -14447,6 +14578,7 @@ def _build_reaction_run_driver_context(reactions):
             confluence_count = 0
             same_distances = []
             opposing_rooms = []
+            opposing_candidates = []
             nearest_tf = None
             nearest_value = np.nan
 
@@ -14462,6 +14594,18 @@ def _build_reaction_run_driver_context(reactions):
                 opposing_room = distances["opposing_room_pct"]
                 context[f"same_swing_dist_{tf}_pct"] = same_distance
                 context[f"opposing_room_{tf}_pct"] = opposing_room
+                context[f"opposing_swing_price_{tf}"] = distances.get(
+                    "opposing_swing_price", np.nan
+                )
+                context[f"opposing_swing_pivot_timestamp_{tf}"] = distances.get(
+                    "opposing_swing_pivot_timestamp", np.nan
+                )
+                context[f"opposing_swing_confirmed_timestamp_{tf}"] = distances.get(
+                    "opposing_swing_confirmed_timestamp", np.nan
+                )
+                context[f"opposing_swing_actionable_timestamp_{tf}"] = distances.get(
+                    "opposing_swing_actionable_timestamp", np.nan
+                )
 
                 if pd.notna(same_distance):
                     same_distances.append(float(same_distance))
@@ -14472,6 +14616,20 @@ def _build_reaction_run_driver_context(reactions):
                         nearest_tf = tf
                 if pd.notna(opposing_room):
                     opposing_rooms.append(float(opposing_room))
+                    opposing_candidates.append({
+                        "room_pct": float(opposing_room),
+                        "timeframe": tf,
+                        "price": distances.get("opposing_swing_price", np.nan),
+                        "pivot_timestamp": distances.get(
+                            "opposing_swing_pivot_timestamp", np.nan
+                        ),
+                        "confirmed_timestamp": distances.get(
+                            "opposing_swing_confirmed_timestamp", np.nan
+                        ),
+                        "actionable_timestamp": distances.get(
+                            "opposing_swing_actionable_timestamp", np.nan
+                        ),
+                    })
 
             context["htf_confluence_count_0_50"] = confluence_count
             context["nearest_htf_same_swing_pct"] = (
@@ -14480,6 +14638,36 @@ def _build_reaction_run_driver_context(reactions):
             context["nearest_htf_same_swing_tf"] = nearest_tf
             context["nearest_opposing_room_pct"] = (
                 min(opposing_rooms) if opposing_rooms else np.nan
+            )
+            nearest_opposing = (
+                min(opposing_candidates, key=lambda item: item["room_pct"])
+                if opposing_candidates
+                else None
+            )
+            context["nearest_opposing_swing_tf"] = (
+                nearest_opposing["timeframe"]
+                if nearest_opposing is not None
+                else None
+            )
+            context["nearest_opposing_swing_price"] = (
+                nearest_opposing["price"]
+                if nearest_opposing is not None
+                else np.nan
+            )
+            context["nearest_opposing_swing_pivot_timestamp"] = (
+                nearest_opposing["pivot_timestamp"]
+                if nearest_opposing is not None
+                else np.nan
+            )
+            context["nearest_opposing_swing_confirmed_timestamp"] = (
+                nearest_opposing["confirmed_timestamp"]
+                if nearest_opposing is not None
+                else np.nan
+            )
+            context["nearest_opposing_swing_actionable_timestamp"] = (
+                nearest_opposing["actionable_timestamp"]
+                if nearest_opposing is not None
+                else np.nan
             )
             context_rows.append(context)
 
@@ -15619,6 +15807,255 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
             hide_index=True,
         )
 
+    # --------------------------------------------------------
+    # SIMPLE VALIDATION TABLE
+    #
+    # Keep the candidate rules coarse and pre-declared. Each row is measured
+    # against the SAME censor-aware resolved cohort used above. Baseline is
+    # recomputed inside ALL / LONG / SHORT so lift is direction-specific.
+    # Coverage answers: of all >=threshold hits in this scope, how many does
+    # this candidate keep? This complements hit rate, which answers precision.
+    # --------------------------------------------------------
+    st.markdown(
+        "##### Simple validation table · candidate filters"
+    )
+    st.caption(
+        "Same censor-aware resolved cohort and same future label as the driver "
+        "lab. Baseline uses every resolved REACTION in each scope. Coverage = "
+        "candidate hits / all hits in that scope. Lift = candidate hit rate / "
+        "scope baseline hit rate. Room conditions require a known already-"
+        "confirmed opposing 30m/1h/4h swing. RSI is aligned RSI14 extreme on "
+        "at least one of 1m/5m/15m/1h."
+    )
+
+    validation = contextual.copy()
+
+    validation_room = pd.to_numeric(
+        validation.get("nearest_opposing_room_pct"),
+        errors="coerce",
+    )
+    validation_rsi = (
+        pd.to_numeric(
+            validation.get("aligned_rsi_extreme_count"),
+            errors="coerce",
+        )
+        .fillna(0)
+        .ge(1)
+    )
+    validation_body = (
+        pd.to_numeric(
+            validation.get("reaction_body_pct"),
+            errors="coerce",
+        )
+        .ge(0.20)
+    )
+
+    room_1 = validation_room.notna() & validation_room.ge(1.00)
+    room_2 = validation_room.notna() & validation_room.ge(2.00)
+
+    candidate_masks = [
+        (
+            "Baseline · all resolved",
+            pd.Series(True, index=validation.index),
+        ),
+        (
+            "Room >=1%",
+            room_1,
+        ),
+        (
+            "Room >=2%",
+            room_2,
+        ),
+        (
+            "Aligned RSI >=1 TF",
+            validation_rsi,
+        ),
+        (
+            "Reaction body >=0.20%",
+            validation_body,
+        ),
+        (
+            "RSI >=1 TF + Room >=1%",
+            validation_rsi & room_1,
+        ),
+        (
+            "RSI >=1 TF + Room >=2%",
+            validation_rsi & room_2,
+        ),
+        (
+            "RSI >=1 TF + Room >=1% + Body >=0.20%",
+            validation_rsi & room_1 & validation_body,
+        ),
+    ]
+
+    def _candidate_validation_rows(scope_name, scope_frame):
+        rows = []
+        if scope_frame.empty:
+            return rows
+
+        scope_hits = int(
+            scope_frame["_big_run"]
+            .fillna(False)
+            .astype(bool)
+            .sum()
+        )
+        scope_n = int(len(scope_frame))
+        baseline_rate = (
+            scope_hits / scope_n * 100.0
+            if scope_n > 0
+            else np.nan
+        )
+
+        for candidate_name, global_mask in candidate_masks:
+            local_mask = (
+                global_mask
+                .reindex(scope_frame.index)
+                .fillna(False)
+                .astype(bool)
+            )
+            subset = scope_frame.loc[local_mask].copy()
+            n = int(len(subset))
+            hits = int(
+                subset["_big_run"]
+                .fillna(False)
+                .astype(bool)
+                .sum()
+            ) if n else 0
+            hit_rate = (
+                hits / n * 100.0
+                if n > 0
+                else np.nan
+            )
+            coverage = (
+                hits / scope_hits * 100.0
+                if scope_hits > 0
+                else np.nan
+            )
+            lift = (
+                hit_rate / baseline_rate
+                if (
+                    pd.notna(hit_rate)
+                    and pd.notna(baseline_rate)
+                    and baseline_rate > 0
+                )
+                else np.nan
+            )
+
+            rows.append({
+                "Scope": scope_name,
+                "Candidate": candidate_name,
+                "N": n,
+                "Hits": hits,
+                "Hit rate %": (
+                    round(float(hit_rate), 2)
+                    if pd.notna(hit_rate)
+                    else np.nan
+                ),
+                "Coverage of hits %": (
+                    round(float(coverage), 2)
+                    if pd.notna(coverage)
+                    else np.nan
+                ),
+                "Lift vs baseline": (
+                    round(float(lift), 3)
+                    if pd.notna(lift)
+                    else np.nan
+                ),
+            })
+
+        return rows
+
+    validation_rows = []
+    validation_rows.extend(
+        _candidate_validation_rows(
+            "ALL",
+            validation,
+        )
+    )
+
+    for validation_side in ("LONG", "SHORT"):
+        side_frame = validation.loc[
+            validation["signal"]
+            .astype(str)
+            .str.upper()
+            .eq(validation_side)
+        ].copy()
+        validation_rows.extend(
+            _candidate_validation_rows(
+                validation_side,
+                side_frame,
+            )
+        )
+
+    validation_table = pd.DataFrame(validation_rows)
+
+    if not validation_table.empty:
+        all_tab, long_tab, short_tab = st.tabs(
+            [
+                "ALL",
+                "LONG",
+                "SHORT",
+            ]
+        )
+
+        for tab, scope_name in [
+            (all_tab, "ALL"),
+            (long_tab, "LONG"),
+            (short_tab, "SHORT"),
+        ]:
+            with tab:
+                scope_table = validation_table.loc[
+                    validation_table["Scope"].eq(scope_name)
+                ].drop(columns=["Scope"])
+                st.dataframe(
+                    scope_table,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # Direct consistency check for the hypotheses we care most about.
+        st.markdown(
+            "##### RSI + room · LONG vs SHORT consistency check"
+        )
+        st.caption(
+            "Side-by-side view of the combined RSI + HTF-room candidates. "
+            "This makes it obvious whether a high aggregate rate is carried "
+            "by only one direction. Tiny N remains exploratory."
+        )
+
+        combo_names = [
+            "RSI >=1 TF + Room >=1%",
+            "RSI >=1 TF + Room >=2%",
+            "RSI >=1 TF + Room >=1% + Body >=0.20%",
+        ]
+        consistency_rows = []
+        for candidate_name in combo_names:
+            row = {"Candidate": candidate_name}
+            for scope_name in ("LONG", "SHORT"):
+                match = validation_table.loc[
+                    validation_table["Scope"].eq(scope_name)
+                    & validation_table["Candidate"].eq(candidate_name)
+                ]
+                if match.empty:
+                    row[f"{scope_name} N"] = 0
+                    row[f"{scope_name} Hits"] = 0
+                    row[f"{scope_name} Hit rate %"] = np.nan
+                    row[f"{scope_name} Coverage %"] = np.nan
+                    row[f"{scope_name} Lift"] = np.nan
+                    continue
+                item = match.iloc[0]
+                row[f"{scope_name} N"] = int(item["N"])
+                row[f"{scope_name} Hits"] = int(item["Hits"])
+                row[f"{scope_name} Hit rate %"] = item["Hit rate %"]
+                row[f"{scope_name} Coverage %"] = item["Coverage of hits %"]
+                row[f"{scope_name} Lift"] = item["Lift vs baseline"]
+            consistency_rows.append(row)
+
+        st.dataframe(
+            pd.DataFrame(consistency_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def render_confirmed_swing_retest_scanner(
@@ -15819,6 +16256,110 @@ def render_confirmed_swing_retest_scanner(
     )
     selected_retest = view.loc[lookup[selected_label]]
 
+    # Same causal context used by the research tables, computed only for the
+    # selected inspector event. This does not alter setup detection.
+    selected_room_context = None
+    if str(selected_retest.get("status", "")).upper() == "REACTION":
+        selected_context_frame = _build_reaction_run_driver_context(
+            pd.DataFrame([selected_retest.to_dict()])
+        )
+        if selected_context_frame is not None and not selected_context_frame.empty:
+            selected_context_row = selected_context_frame.iloc[0]
+            selected_room_context = {
+                "reaction_price": pd.to_numeric(
+                    selected_retest.get(
+                        "retest_close", selected_retest.get("retest_price")
+                    ),
+                    errors="coerce",
+                ),
+                "nearest_opposing_room_pct": selected_context_row.get(
+                    "nearest_opposing_room_pct"
+                ),
+                "nearest_opposing_swing_tf": selected_context_row.get(
+                    "nearest_opposing_swing_tf"
+                ),
+                "nearest_opposing_swing_price": selected_context_row.get(
+                    "nearest_opposing_swing_price"
+                ),
+                "nearest_opposing_swing_pivot_timestamp": selected_context_row.get(
+                    "nearest_opposing_swing_pivot_timestamp"
+                ),
+                "nearest_opposing_swing_confirmed_timestamp": selected_context_row.get(
+                    "nearest_opposing_swing_confirmed_timestamp"
+                ),
+                "nearest_opposing_swing_actionable_timestamp": selected_context_row.get(
+                    "nearest_opposing_swing_actionable_timestamp"
+                ),
+                "aligned_rsi_extreme_count": selected_context_row.get(
+                    "aligned_rsi_extreme_count"
+                ),
+            }
+
+    show_detected_htf_room = st.checkbox(
+        "Show causal HTF room on chart",
+        value=True,
+        key="confirmed_swing_retest_show_detected_htf_room",
+        help=(
+            "Shows the room known at REACTION close: from the reaction price "
+            "to the nearest already-confirmed opposing 30m/1h/4h 5x5 swing. "
+            "Future swings never move this band."
+        ),
+    )
+
+    if selected_room_context is not None:
+        room_pct = pd.to_numeric(
+            selected_room_context.get("nearest_opposing_room_pct"),
+            errors="coerce",
+        )
+        room_price = pd.to_numeric(
+            selected_room_context.get("nearest_opposing_swing_price"),
+            errors="coerce",
+        )
+        reaction_price = pd.to_numeric(
+            selected_room_context.get("reaction_price"),
+            errors="coerce",
+        )
+        room_tf = selected_room_context.get("nearest_opposing_swing_tf")
+        aligned_rsi_count = pd.to_numeric(
+            selected_room_context.get("aligned_rsi_extreme_count"),
+            errors="coerce",
+        )
+
+        room_m1, room_m2, room_m3, room_m4 = st.columns(4)
+        room_m1.metric(
+            "Detected HTF room",
+            f"{float(room_pct):.2f}%" if pd.notna(room_pct) else "—",
+        )
+        room_m2.metric("Opposing swing TF", str(room_tf) if room_tf else "—")
+        room_m3.metric(
+            "Opposing swing price",
+            f"{float(room_price):.8g}" if pd.notna(room_price) else "—",
+        )
+        room_m4.metric(
+            "Aligned RSI TFs",
+            str(int(aligned_rsi_count)) if pd.notna(aligned_rsi_count) else "—",
+        )
+
+        if pd.notna(reaction_price) and pd.notna(room_price) and pd.notna(room_pct):
+            direction_text = (
+                "above"
+                if str(selected_retest.get("signal", "")).upper() == "LONG"
+                else "below"
+            )
+            st.caption(
+                "Causal room snapshot: REACTION "
+                f"{float(reaction_price):.8g} → {room_tf or 'HTF'} opposing "
+                f"swing {float(room_price):.8g} "
+                f"({float(room_pct):.2f}% {direction_text}). "
+                "The target is frozen from structures already confirmed when "
+                "the REACTION became known."
+            )
+    elif str(selected_retest.get("status", "")).upper() == "REACTION":
+        st.caption(
+            "No already-confirmed opposing 30m/1h/4h swing was available for "
+            "this REACTION, so no causal HTF room band is drawn."
+        )
+
     detail_chart_candle_limit = st.slider(
         "15m candles in inspector",
         min_value=CONFIRMED_SWING_RETEST_DETAIL_MIN_CANDLES,
@@ -15876,6 +16417,9 @@ def render_confirmed_swing_retest_scanner(
             candles=detail_candles,
             retest_row=selected_retest,
             chart_candle_limit=detail_chart_candle_limit,
+            room_context=(
+                selected_room_context if show_detected_htf_room else None
+            ),
         )
         st.caption(
             f"Historical inspector: {detail_chart_candle_limit} × 15m "
@@ -15907,6 +16451,30 @@ def render_confirmed_swing_retest_scanner(
         "confirmed_to_retest_min": selected_retest.get("confirmed_to_retest_min"),
         "pivot_to_confirmation_pct": selected_retest.get("pivot_to_confirmation_pct"),
         "retest_close_location": selected_retest.get("retest_close_location"),
+        "causal_htf_room_pct": (
+            selected_room_context.get("nearest_opposing_room_pct")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_tf": (
+            selected_room_context.get("nearest_opposing_swing_tf")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_price": (
+            selected_room_context.get("nearest_opposing_swing_price")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_pivot_timestamp": (
+            selected_room_context.get("nearest_opposing_swing_pivot_timestamp")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_confirmed_timestamp": (
+            selected_room_context.get("nearest_opposing_swing_confirmed_timestamp")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_actionable_timestamp": (
+            selected_room_context.get("nearest_opposing_swing_actionable_timestamp")
+            if selected_room_context else None
+        ),
     }
     st.json(details)
 
