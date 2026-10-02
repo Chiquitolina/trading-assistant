@@ -10,6 +10,10 @@ from engine.live.journal.compression_fidelity_journal import (
     CompressionFidelityJournal,
 )
 
+from engine.live.research.confirmed_swing_sweep_replay_strategy import (
+    ConfirmedSwingSweepReplayStrategy,
+)
+
 from engine.live.research.volume_exhaustion_collector import (
     VolumeExhaustionCollector,
 )
@@ -563,6 +567,80 @@ if VE_REPLAY_ENABLED:
         )
     )
 
+SWEEP_REPLAY_ENABLED = (
+    os.getenv(
+        "SWEEP_REPLAY_ENABLED",
+        "0",
+    ).strip()
+    == "1"
+)
+
+confirmed_swing_sweep_replay_strategy = None
+
+if SWEEP_REPLAY_ENABLED:
+
+    if not IS_REPLAY:
+        raise RuntimeError(
+            "SWEEP_REPLAY_ENABLED can only be used "
+            "with MARKET_CLOCK_MODE=replay"
+        )
+
+    required_sweep_timeframes = {
+        "1m",
+        "15m",
+    }
+
+    if not required_sweep_timeframes.issubset(
+        set(TIMEFRAMES)
+    ):
+        raise RuntimeError(
+            "Sweep Replay V1 requires 1m and 15m "
+            f"in TIMEFRAMES, got={TIMEFRAMES}"
+        )
+
+    confirmed_swing_sweep_replay_strategy = (
+        ConfirmedSwingSweepReplayStrategy(
+            buffer=buffer,
+
+            events_path=os.getenv(
+                "SWEEP_REPLAY_EVENTS_PATH",
+                (
+                    "replay-artifacts/"
+                    "confirmed_swing_sweep_v1_events.csv"
+                ),
+            ),
+
+            trades_path=os.getenv(
+                "SWEEP_REPLAY_TRADES_PATH",
+                (
+                    "replay-artifacts/"
+                    "confirmed_swing_sweep_v1_trades.csv"
+                ),
+            ),
+
+            # CANDIDATE V1 CONGELADA
+            swing_timeframe="15m",
+            left_bars=5,
+            right_bars=5,
+            min_prominence_pct=0.0,
+            min_departure_pct=0.20,
+            max_sweep_age_minutes=360,
+            entry_offset_pct=0.05,
+            tp_pct=0.75,
+            sl_pct=1.00,
+            max_hold_bars=180,
+            fee_per_side_pct=0.05,
+
+            reset_output=(
+                os.getenv(
+                    "SWEEP_REPLAY_RESET_OUTPUT",
+                    "1",
+                ).strip()
+                == "1"
+            ),
+        )
+    )
+
 if (
     MARKET_CLOCK_MODE == "replay"
     and MARKET_DATA_PROVIDER != "redis"
@@ -1097,7 +1175,22 @@ try:
                             candle=context_candle,
                         )
                     )
+                    
+                if (
+                    context_candle is not None
+                    and confirmed_swing_sweep_replay_strategy
+                    is not None
+                ):
+                    (
+                        confirmed_swing_sweep_replay_strategy
+                        .on_candle(
+                            symbol=context_symbol,
+                            close_time=context_close_time,
+                            candle=context_candle,
+                        )
+                    )
 
+                    
             # ==========================================
             # DETECT NEW EVENT
             # ==========================================
@@ -2053,6 +2146,15 @@ try:
 # =========================================================
 
 except KeyboardInterrupt:
+    if (
+        confirmed_swing_sweep_replay_strategy
+        is not None
+    ):
+        (
+            confirmed_swing_sweep_replay_strategy
+            .print_summary()
+        )
+        
     market_data.stop()
 
     status_writer.write({
