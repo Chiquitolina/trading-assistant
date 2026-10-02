@@ -16351,6 +16351,115 @@ def _confirmed_swing_sweep_entry_offset_key(offset_pct):
     return f"{float(offset_pct):.2f}"
 
 
+
+def _confirmed_swing_sweep_entry_fill_info(
+    setup,
+    offset_pct,
+):
+    """Return causal FIRST-sweep limit fill directly from sweep depth.
+
+    This is deliberately independent from future-path completeness.
+
+    By definition:
+      offset 0.00% MUST fill every detected sweep;
+      deeper offsets fill iff sweep_penetration_pct >= offset.
+
+    LONG:
+      limit = swing LOW * (1 - offset)
+
+    SHORT:
+      limit = swing HIGH * (1 + offset)
+    """
+    try:
+        offset_pct = max(
+            0.0,
+            float(offset_pct),
+        )
+        swing_price = float(
+            setup["swing_price"]
+        )
+        side = str(
+            setup["signal"]
+        ).upper()
+        penetration_pct = float(
+            setup[
+                "sweep_penetration_pct"
+            ]
+        )
+        sweep_ts = int(
+            setup[
+                "sweep_timestamp"
+            ]
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+    if (
+        swing_price <= 0
+        or side not in {
+            "LONG",
+            "SHORT",
+        }
+        or not np.isfinite(
+            penetration_pct
+        )
+    ):
+        return None
+
+    # Small numerical tolerance only protects floating-point boundaries.
+    eps = 1e-12
+    filled = (
+        penetration_pct
+        + eps
+        >= offset_pct
+    )
+
+    if side == "LONG":
+        limit_price = (
+            swing_price
+            * (
+                1.0
+                - offset_pct / 100.0
+            )
+        )
+    else:
+        limit_price = (
+            swing_price
+            * (
+                1.0
+                + offset_pct / 100.0
+            )
+        )
+
+    return {
+        "filled": bool(
+            filled
+        ),
+        "entry_price": (
+            float(
+                limit_price
+            )
+            if filled
+            else np.nan
+        ),
+        "entry_timestamp": (
+            sweep_ts
+            if filled
+            else np.nan
+        ),
+        "offset_pct": float(
+            offset_pct
+        ),
+        "penetration_pct": float(
+            penetration_pct
+        ),
+    }
+
+
 def _attach_confirmed_swing_sweep_entry_analysis(
     setup,
     forward_cache,
@@ -16377,27 +16486,54 @@ def _attach_confirmed_swing_sweep_entry_analysis(
     setup = dict(setup)
     setup["sweep_entry_analysis"] = {}
 
-    if not forward_cache:
-        return setup
-
     try:
         sweep_ts = int(setup["sweep_timestamp"])
-        swing_price = float(setup["swing_price"])
         side = str(setup["signal"]).upper()
-        sweep_open = float(setup["sweep_open"])
         sweep_high = float(setup["sweep_high"])
         sweep_low = float(setup["sweep_low"])
     except (KeyError, TypeError, ValueError):
         return setup
 
-    if (
-        swing_price <= 0
-        or side not in {"LONG", "SHORT"}
+    if side not in {"LONG", "SHORT"}:
+        return setup
+
+    # Fill status must NOT depend on whether we have 60/120/180m of future
+    # candles. Pre-create every offset payload directly from the known first
+    # sweep penetration.
+    for offset_pct in (
+        CONFIRMED_SWING_SWEEP_ENTRY_OFFSETS_PCT
     ):
+        fill_info = (
+            _confirmed_swing_sweep_entry_fill_info(
+                setup,
+                offset_pct,
+            )
+        )
+
+        if fill_info is None:
+            continue
+
+        setup[
+            "sweep_entry_analysis"
+        ][
+            _confirmed_swing_sweep_entry_offset_key(
+                offset_pct
+            )
+        ] = {
+            **fill_info,
+            "path_results_360m": {},
+            "time_exit_returns": {},
+            "complete_horizons": [],
+            "mfe_60m_pct": np.nan,
+            "mae_60m_pct": np.nan,
+        }
+
+    # Future-path data is optional. Missing/incomplete future history may
+    # reduce Complete, but can never change Filled.
+    if not forward_cache:
         return setup
 
     timestamps = forward_cache["timestamps"]
-    opens = forward_cache["opens"]
     highs = forward_cache["highs"]
     lows = forward_cache["lows"]
     closes = forward_cache["closes"]
@@ -16426,62 +16562,35 @@ def _attach_confirmed_swing_sweep_entry_analysis(
         CONFIRMED_SWING_SWEEP_ENTRY_OFFSETS_PCT
     ):
         offset_pct = float(offset_pct)
+        offset_key = (
+            _confirmed_swing_sweep_entry_offset_key(
+                offset_pct
+            )
+        )
+        payload = setup[
+            "sweep_entry_analysis"
+        ].get(
+            offset_key
+        )
 
-        if side == "LONG":
-            limit_price = (
-                swing_price
-                * (
-                    1.0
-                    - offset_pct / 100.0
-                )
-            )
-            filled = (
-                sweep_low <= limit_price
-            )
-        else:
-            limit_price = (
-                swing_price
-                * (
-                    1.0
-                    + offset_pct / 100.0
-                )
-            )
-            filled = (
-                sweep_high >= limit_price
-            )
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            continue
 
-        payload = {
-            "offset_pct": offset_pct,
-            "filled": bool(filled),
-            "entry_price": (
-                float(limit_price)
-                if filled
-                else np.nan
-            ),
-            "entry_timestamp": (
-                sweep_ts
-                if filled
-                else np.nan
-            ),
-            "path_results_360m": {},
-            "time_exit_returns": {},
-            "complete_horizons": [],
-            "mfe_60m_pct": np.nan,
-            "mae_60m_pct": np.nan,
-        }
-
-        if not filled:
-            setup[
-                "sweep_entry_analysis"
-            ][
-                _confirmed_swing_sweep_entry_offset_key(
-                    offset_pct
-                )
-            ] = payload
+        if not bool(
+            payload.get(
+                "filled",
+                False,
+            )
+        ):
             continue
 
         entry_price = float(
-            limit_price
+            payload[
+                "entry_price"
+            ]
         )
 
         # ----------------------------------------------------
@@ -17005,7 +17114,15 @@ def _confirmed_swing_sweep_entry_stats(
     horizon_min,
     fee_per_side_pct,
 ):
-    """Aggregate causal sweep-limit expectancy including fill rate."""
+    """Aggregate sweep-limit expectancy without conflating fill and completeness.
+
+    Setups   = detected FIRST sweeps in the selected universe.
+    Filled   = sweep penetration reached the selected resting LIMIT.
+    Complete = filled trades with enough contiguous future data to resolve the
+               selected TP/SL/TIME_EXIT horizon.
+
+    Therefore a recent fill can increase Filled without increasing Complete.
+    """
     if (
         rows is None
         or rows.empty
@@ -17017,6 +17134,28 @@ def _confirmed_swing_sweep_entry_stats(
     complete_results = []
 
     for _, row in rows.iterrows():
+        # Source of truth for fill: FIRST-sweep penetration only.
+        fill_info = (
+            _confirmed_swing_sweep_entry_fill_info(
+                row,
+                offset_pct,
+            )
+        )
+
+        if (
+            fill_info is None
+            or not bool(
+                fill_info.get(
+                    "filled",
+                    False,
+                )
+            )
+        ):
+            continue
+
+        filled_count += 1
+
+        # Performance needs enough future data for the selected horizon.
         result = (
             _confirmed_swing_sweep_entry_result_for_row(
                 row,
@@ -17030,18 +17169,16 @@ def _confirmed_swing_sweep_entry_stats(
             )
         )
 
-        if result is None:
-            continue
-
-        if not bool(
-            result.get(
-                "filled",
-                False,
+        if (
+            result is None
+            or not bool(
+                result.get(
+                    "filled",
+                    False,
+                )
             )
         ):
             continue
-
-        filled_count += 1
 
         net_value = pd.to_numeric(
             result.get(
@@ -17057,6 +17194,25 @@ def _confirmed_swing_sweep_entry_stats(
                 result
             )
 
+    fill_rate = (
+        filled_count
+        / total_setups
+        * 100.0
+        if total_setups
+        else np.nan
+    )
+
+    complete_count = len(
+        complete_results
+    )
+    complete_of_fills = (
+        complete_count
+        / filled_count
+        * 100.0
+        if filled_count
+        else np.nan
+    )
+
     if not complete_results:
         return {
             "Setups": int(
@@ -17066,13 +17222,16 @@ def _confirmed_swing_sweep_entry_stats(
                 filled_count
             ),
             "Complete": 0,
-            "Fill rate %": (
-                filled_count
-                / total_setups
-                * 100.0
-                if total_setups
-                else np.nan
+            "Fill rate %": float(
+                fill_rate
             ),
+            "Complete / filled %": float(
+                complete_of_fills
+            )
+            if pd.notna(
+                complete_of_fills
+            )
+            else np.nan,
             "Win rate %": np.nan,
             "Avg net %": np.nan,
             "Median net %": np.nan,
@@ -17118,10 +17277,6 @@ def _confirmed_swing_sweep_entry_stats(
         )
     )
 
-    n = len(
-        result_df
-    )
-
     return {
         "Setups": int(
             total_setups
@@ -17129,13 +17284,14 @@ def _confirmed_swing_sweep_entry_stats(
         "Filled": int(
             filled_count
         ),
-        "Complete": int(n),
-        "Fill rate %": (
-            filled_count
-            / total_setups
-            * 100.0
-            if total_setups
-            else np.nan
+        "Complete": int(
+            complete_count
+        ),
+        "Fill rate %": float(
+            fill_rate
+        ),
+        "Complete / filled %": float(
+            complete_of_fills
         ),
         "Win rate %": float(
             (
@@ -19042,6 +19198,18 @@ def render_confirmed_swing_sweep_reclaim_scanner(
                     "Complete"
                 ]
             ),
+            "Complete / filled %": round(
+                stats[
+                    "Complete / filled %"
+                ],
+                2,
+            )
+            if pd.notna(
+                stats[
+                    "Complete / filled %"
+                ]
+            )
+            else np.nan,
             "Win rate %": round(
                 stats[
                     "Win rate %"
@@ -19151,8 +19319,10 @@ def render_confirmed_swing_sweep_reclaim_scanner(
             "##### Sweep entry offset comparison"
         )
         st.caption(
-            "Same detected FIRST-sweep universe. Deeper offsets naturally "
-            "have lower fill rates; NO_FILL is not counted as a trade."
+            "Same detected FIRST-sweep universe. Filled depends ONLY on the "
+            "first-sweep penetration; Complete additionally requires enough "
+            "contiguous future data for the selected TIME_EXIT. Invariant: "
+            "offset 0.00% must fill 100% of detected sweeps."
         )
         st.dataframe(
             pd.DataFrame(
