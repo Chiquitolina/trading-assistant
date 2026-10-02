@@ -18869,7 +18869,9 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
         "lab. Baseline uses every resolved REACTION in each scope. Coverage = "
         "candidate hits / all hits in that scope. Lift = candidate hit rate / "
         "scope baseline hit rate. Room conditions require a known already-"
-        "confirmed opposing 30m/1h/4h swing. RSI is aligned RSI14 extreme on "
+        "confirmed opposing 30m/1h/4h swing. 'No opposing HTF structure' means "
+        "the causal context builder found no favorable already-confirmed opposing "
+        "swing on 30m/1h/4h at REACTION time. RSI is aligned RSI14 extreme on "
         "at least one of 1m/5m/15m/1h."
     )
 
@@ -18898,6 +18900,13 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
     room_1 = validation_room.notna() & validation_room.ge(1.00)
     room_2 = validation_room.notna() & validation_room.ge(2.00)
 
+    # Separate hypothesis: no already-confirmed opposing 30m/1h/4h swing
+    # existed in the favorable direction when the REACTION became known.
+    # This is intentionally research-only and does NOT modify either frozen
+    # Candidate V1 rule. NaN room is the representation produced by the causal
+    # HTF context builder when no usable opposing structure is found.
+    no_opposing_htf_structure = validation_room.isna()
+
     candidate_masks = [
         (
             "Baseline · all resolved",
@@ -18914,6 +18923,14 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
         (
             "Aligned RSI >=1 TF",
             validation_rsi,
+        ),
+        (
+            "No opposing HTF structure",
+            no_opposing_htf_structure,
+        ),
+        (
+            "RSI >=1 TF + No opposing HTF structure",
+            validation_rsi & no_opposing_htf_structure,
         ),
         (
             "Reaction body >=0.20%",
@@ -19063,14 +19080,17 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
             "##### RSI + room · LONG vs SHORT consistency check"
         )
         st.caption(
-            "Side-by-side view of the combined RSI + HTF-room candidates. "
-            "This makes it obvious whether a high aggregate rate is carried "
-            "by only one direction. Tiny N remains exploratory."
+            "Side-by-side view of the combined RSI + HTF-structure candidates. "
+            "Besides known room thresholds, the table now isolates REACTIONs "
+            "where no causal opposing 30m/1h/4h swing was available. This makes "
+            "it obvious whether a high aggregate rate is carried by only one "
+            "direction. Tiny N remains exploratory."
         )
 
         combo_names = [
             "RSI >=1 TF + Room >=1%",
             "RSI >=1 TF + Room >=2%",
+            "RSI >=1 TF + No opposing HTF structure",
             "RSI >=1 TF + Room >=1% + Body >=0.20%",
         ]
         consistency_rows = []
