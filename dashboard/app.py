@@ -8252,6 +8252,17 @@ CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES = 360
 CONFIRMED_SWING_SWEEP_DEFAULT_MIN_PENETRATION_PCT = 0.00
 CONFIRMED_SWING_SWEEP_DEFAULT_MAX_RECLAIM_MINUTES = 15
 
+# Pre-placed limit offsets for the actual Sweep Entry strategy.
+# LONG  -> limit below the confirmed swing LOW.
+# SHORT -> limit above the confirmed swing HIGH.
+CONFIRMED_SWING_SWEEP_ENTRY_OFFSETS_PCT = (
+    0.00,
+    0.05,
+    0.10,
+    0.15,
+    0.25,
+)
+
 # The retest inspector is structural, so render it directly in 15m instead
 # of loading thousands of 1m candles. Eighty 15m candles cover 20 hours,
 # enough to show the pivot -> confirmation -> departure -> retest path plus
@@ -16335,6 +16346,965 @@ def _find_confirmed_swing_sweep_reclaim(
     }
 
 
+
+def _confirmed_swing_sweep_entry_offset_key(offset_pct):
+    return f"{float(offset_pct):.2f}"
+
+
+def _attach_confirmed_swing_sweep_entry_analysis(
+    setup,
+    forward_cache,
+):
+    """Precompute causal LIMIT entry outcomes on the FIRST sweep candle.
+
+    The order is assumed to have been resting since AFTER the departure
+    candle closed.
+
+    LONG:
+        limit = swing_price * (1 - offset)
+    SHORT:
+        limit = swing_price * (1 + offset)
+
+    The limit is considered filled only if the FIRST detected sweep candle
+    reaches that level. We intentionally do not wait for a later second sweep.
+
+    Intrabar safety:
+    - if the entry candle also reaches the SL, count SL conservatively;
+    - never credit a TP on the entry candle because OHLC cannot prove that
+      the TP happened after the limit fill;
+    - from the next 1m candle onward, same-candle TP+SL is SL_AMBIGUOUS.
+    """
+    setup = dict(setup)
+    setup["sweep_entry_analysis"] = {}
+
+    if not forward_cache:
+        return setup
+
+    try:
+        sweep_ts = int(setup["sweep_timestamp"])
+        swing_price = float(setup["swing_price"])
+        side = str(setup["signal"]).upper()
+        sweep_open = float(setup["sweep_open"])
+        sweep_high = float(setup["sweep_high"])
+        sweep_low = float(setup["sweep_low"])
+    except (KeyError, TypeError, ValueError):
+        return setup
+
+    if (
+        swing_price <= 0
+        or side not in {"LONG", "SHORT"}
+    ):
+        return setup
+
+    timestamps = forward_cache["timestamps"]
+    opens = forward_cache["opens"]
+    highs = forward_cache["highs"]
+    lows = forward_cache["lows"]
+    closes = forward_cache["closes"]
+
+    sweep_idx = int(
+        np.searchsorted(
+            timestamps,
+            sweep_ts,
+            side="left",
+        )
+    )
+
+    if (
+        sweep_idx >= len(timestamps)
+        or int(timestamps[sweep_idx]) != sweep_ts
+    ):
+        return setup
+
+    segment_end = int(
+        forward_cache["segment_end"][
+            sweep_idx
+        ]
+    )
+
+    for offset_pct in (
+        CONFIRMED_SWING_SWEEP_ENTRY_OFFSETS_PCT
+    ):
+        offset_pct = float(offset_pct)
+
+        if side == "LONG":
+            limit_price = (
+                swing_price
+                * (
+                    1.0
+                    - offset_pct / 100.0
+                )
+            )
+            filled = (
+                sweep_low <= limit_price
+            )
+        else:
+            limit_price = (
+                swing_price
+                * (
+                    1.0
+                    + offset_pct / 100.0
+                )
+            )
+            filled = (
+                sweep_high >= limit_price
+            )
+
+        payload = {
+            "offset_pct": offset_pct,
+            "filled": bool(filled),
+            "entry_price": (
+                float(limit_price)
+                if filled
+                else np.nan
+            ),
+            "entry_timestamp": (
+                sweep_ts
+                if filled
+                else np.nan
+            ),
+            "path_results_360m": {},
+            "time_exit_returns": {},
+            "complete_horizons": [],
+            "mfe_60m_pct": np.nan,
+            "mae_60m_pct": np.nan,
+        }
+
+        if not filled:
+            setup[
+                "sweep_entry_analysis"
+            ][
+                _confirmed_swing_sweep_entry_offset_key(
+                    offset_pct
+                )
+            ] = payload
+            continue
+
+        entry_price = float(
+            limit_price
+        )
+
+        # ----------------------------------------------------
+        # Equal 60m MFE/MAE measured from the limit entry.
+        # The entry candle is included for adverse excursion;
+        # favorable excursion begins on the next candle because
+        # same-candle favorable ordering is not knowable.
+        # ----------------------------------------------------
+        next_idx = sweep_idx + 1
+
+        if (
+            next_idx <= segment_end
+            and next_idx < len(timestamps)
+        ):
+            future_60_end = (
+                next_idx + 60 - 1
+            )
+
+            if (
+                future_60_end <= segment_end
+                and future_60_end
+                < len(timestamps)
+            ):
+                future_high = float(
+                    np.max(
+                        highs[
+                            next_idx:
+                            future_60_end + 1
+                        ]
+                    )
+                )
+                future_low = float(
+                    np.min(
+                        lows[
+                            next_idx:
+                            future_60_end + 1
+                        ]
+                    )
+                )
+
+                if side == "LONG":
+                    favorable = max(
+                        0.0,
+                        (
+                            future_high
+                            / entry_price
+                            - 1.0
+                        ) * 100.0,
+                    )
+                    adverse = max(
+                        0.0,
+                        (
+                            1.0
+                            - min(
+                                sweep_low,
+                                future_low,
+                            )
+                            / entry_price
+                        ) * 100.0,
+                    )
+                else:
+                    favorable = max(
+                        0.0,
+                        (
+                            1.0
+                            - future_low
+                            / entry_price
+                        ) * 100.0,
+                    )
+                    adverse = max(
+                        0.0,
+                        (
+                            max(
+                                sweep_high,
+                                future_high,
+                            )
+                            / entry_price
+                            - 1.0
+                        ) * 100.0,
+                    )
+
+                payload[
+                    "mfe_60m_pct"
+                ] = float(favorable)
+                payload[
+                    "mae_60m_pct"
+                ] = float(adverse)
+
+        # ----------------------------------------------------
+        # TIME_EXIT returns.
+        #
+        # The fill occurs somewhere inside the sweep candle.
+        # For a clean causal clock, N-minute TIME_EXIT is taken
+        # at the close N full 1m candles AFTER the sweep candle.
+        # ----------------------------------------------------
+        complete_horizons = []
+        time_exit_returns = {}
+
+        for horizon in (
+            CONFIRMED_SWING_TIME_EXIT_HORIZONS
+        ):
+            horizon = int(horizon)
+            horizon_idx = (
+                sweep_idx + horizon
+            )
+
+            if (
+                horizon_idx > segment_end
+                or horizon_idx
+                >= len(timestamps)
+            ):
+                continue
+
+            horizon_close = float(
+                closes[horizon_idx]
+            )
+
+            if side == "LONG":
+                directional_return = (
+                    horizon_close
+                    / entry_price
+                    - 1.0
+                ) * 100.0
+            else:
+                directional_return = (
+                    1.0
+                    - horizon_close
+                    / entry_price
+                ) * 100.0
+
+            complete_horizons.append(
+                horizon
+            )
+            time_exit_returns[
+                str(horizon)
+            ] = float(
+                directional_return
+            )
+
+        payload[
+            "complete_horizons"
+        ] = complete_horizons
+        payload[
+            "time_exit_returns"
+        ] = time_exit_returns
+
+        # ----------------------------------------------------
+        # First TP/SL after fill.
+        # ----------------------------------------------------
+        path_results = {}
+
+        max_scan_end = min(
+            segment_end,
+            sweep_idx
+            + max(
+                CONFIRMED_SWING_TIME_EXIT_HORIZONS
+            ),
+            len(timestamps) - 1,
+        )
+
+        for tp_pct in (
+            CONFIRMED_SWING_FIRST_TOUCH_TP_GRID
+        ):
+            for sl_pct in (
+                CONFIRMED_SWING_FIRST_TOUCH_SL_GRID
+            ):
+                tp_pct = float(tp_pct)
+                sl_pct = float(sl_pct)
+
+                if side == "LONG":
+                    tp_price = (
+                        entry_price
+                        * (
+                            1.0
+                            + tp_pct / 100.0
+                        )
+                    )
+                    sl_price = (
+                        entry_price
+                        * (
+                            1.0
+                            - sl_pct / 100.0
+                        )
+                    )
+
+                    # Adverse hit on the fill candle is causal:
+                    # to trade below the stop after touching the
+                    # resting buy limit, the limit was crossed first.
+                    immediate_sl = (
+                        sweep_low <= sl_price
+                    )
+                else:
+                    tp_price = (
+                        entry_price
+                        * (
+                            1.0
+                            - tp_pct / 100.0
+                        )
+                    )
+                    sl_price = (
+                        entry_price
+                        * (
+                            1.0
+                            + sl_pct / 100.0
+                        )
+                    )
+                    immediate_sl = (
+                        sweep_high >= sl_price
+                    )
+
+                if immediate_sl:
+                    first_outcome = "SL"
+                    first_hit_bar = 0
+                    first_hit_minutes = 0.0
+                else:
+                    first_outcome = "NO_HIT"
+                    first_hit_bar = np.nan
+                    first_hit_minutes = np.nan
+
+                    # Do NOT credit same-candle TP. We cannot prove
+                    # whether that favorable extreme happened before
+                    # or after the limit fill.
+                    for idx in range(
+                        sweep_idx + 1,
+                        max_scan_end + 1,
+                    ):
+                        high = float(
+                            highs[idx]
+                        )
+                        low = float(
+                            lows[idx]
+                        )
+
+                        if side == "LONG":
+                            tp_hit = (
+                                high >= tp_price
+                            )
+                            sl_hit = (
+                                low <= sl_price
+                            )
+                        else:
+                            tp_hit = (
+                                low <= tp_price
+                            )
+                            sl_hit = (
+                                high >= sl_price
+                            )
+
+                        offset_bar = (
+                            idx - sweep_idx
+                        )
+
+                        if tp_hit and sl_hit:
+                            first_outcome = (
+                                "SL_AMBIGUOUS"
+                            )
+                            first_hit_bar = int(
+                                offset_bar
+                            )
+                            first_hit_minutes = float(
+                                offset_bar
+                            )
+                            break
+
+                        if sl_hit:
+                            first_outcome = "SL"
+                            first_hit_bar = int(
+                                offset_bar
+                            )
+                            first_hit_minutes = float(
+                                offset_bar
+                            )
+                            break
+
+                        if tp_hit:
+                            first_outcome = "TP"
+                            first_hit_bar = int(
+                                offset_bar
+                            )
+                            first_hit_minutes = float(
+                                offset_bar
+                            )
+                            break
+
+                path_results[
+                    _confirmed_swing_first_touch_key(
+                        tp_pct,
+                        sl_pct,
+                    )
+                ] = {
+                    "outcome": first_outcome,
+                    "hit_bar": (
+                        first_hit_bar
+                    ),
+                    "hit_minutes": (
+                        first_hit_minutes
+                    ),
+                }
+
+        payload[
+            "path_results_360m"
+        ] = path_results
+
+        setup[
+            "sweep_entry_analysis"
+        ][
+            _confirmed_swing_sweep_entry_offset_key(
+                offset_pct
+            )
+        ] = payload
+
+    return setup
+
+
+def _confirmed_swing_sweep_entry_result_for_row(
+    row,
+    offset_pct,
+    tp_pct,
+    sl_pct,
+    horizon_min,
+    fee_per_side_pct,
+):
+    """Resolve one pre-placed sweep LIMIT entry to TP/SL/TIME_EXIT."""
+    try:
+        offset_pct = float(offset_pct)
+        tp_pct = float(tp_pct)
+        sl_pct = float(sl_pct)
+        horizon_min = int(horizon_min)
+        fee_per_side_pct = float(
+            fee_per_side_pct
+        )
+    except (TypeError, ValueError):
+        return None
+
+    analysis = row.get(
+        "sweep_entry_analysis",
+        {},
+    )
+    if not isinstance(
+        analysis,
+        dict,
+    ):
+        return None
+
+    payload = analysis.get(
+        _confirmed_swing_sweep_entry_offset_key(
+            offset_pct
+        )
+    )
+
+    if not isinstance(
+        payload,
+        dict,
+    ):
+        return None
+
+    if not bool(
+        payload.get(
+            "filled",
+            False,
+        )
+    ):
+        return {
+            "filled": False,
+            "exit_reason": "NO_FILL",
+            "gross_pct": np.nan,
+            "fees_pct": 0.0,
+            "net_pct": np.nan,
+            "entry_price": np.nan,
+        }
+
+    complete_horizons = payload.get(
+        "complete_horizons",
+        [],
+    )
+    if not isinstance(
+        complete_horizons,
+        (
+            list,
+            tuple,
+            set,
+            np.ndarray,
+        ),
+    ):
+        return None
+
+    try:
+        complete_horizons = {
+            int(value)
+            for value
+            in complete_horizons
+        }
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+    if horizon_min not in complete_horizons:
+        return None
+
+    path_results = payload.get(
+        "path_results_360m",
+        {},
+    )
+    time_exit_returns = payload.get(
+        "time_exit_returns",
+        {},
+    )
+
+    if (
+        not isinstance(
+            path_results,
+            dict,
+        )
+        or not isinstance(
+            time_exit_returns,
+            dict,
+        )
+    ):
+        return None
+
+    path_result = path_results.get(
+        _confirmed_swing_first_touch_key(
+            tp_pct,
+            sl_pct,
+        )
+    )
+    if not isinstance(
+        path_result,
+        dict,
+    ):
+        return None
+
+    outcome = str(
+        path_result.get(
+            "outcome",
+            "NO_HIT",
+        )
+    )
+    hit_bar = pd.to_numeric(
+        path_result.get(
+            "hit_bar",
+        ),
+        errors="coerce",
+    )
+
+    if (
+        outcome
+        in {
+            "TP",
+            "SL",
+            "SL_AMBIGUOUS",
+        }
+        and pd.notna(
+            hit_bar
+        )
+        and int(
+            hit_bar
+        ) <= horizon_min
+    ):
+        gross_pct = (
+            tp_pct
+            if outcome == "TP"
+            else -sl_pct
+        )
+        exit_reason = outcome
+    else:
+        exit_return = pd.to_numeric(
+            time_exit_returns.get(
+                str(horizon_min),
+            ),
+            errors="coerce",
+        )
+        if pd.isna(
+            exit_return
+        ):
+            return None
+
+        gross_pct = float(
+            exit_return
+        )
+        exit_reason = "TIME_EXIT"
+
+    roundtrip_fee_pct = max(
+        0.0,
+        fee_per_side_pct * 2.0,
+    )
+    net_pct = (
+        float(gross_pct)
+        - roundtrip_fee_pct
+    )
+
+    return {
+        "filled": True,
+        "exit_reason": (
+            exit_reason
+        ),
+        "gross_pct": float(
+            gross_pct
+        ),
+        "fees_pct": float(
+            roundtrip_fee_pct
+        ),
+        "net_pct": float(
+            net_pct
+        ),
+        "entry_price": float(
+            payload[
+                "entry_price"
+            ]
+        ),
+    }
+
+
+def _confirmed_swing_sweep_entry_stats(
+    rows,
+    offset_pct,
+    tp_pct,
+    sl_pct,
+    horizon_min,
+    fee_per_side_pct,
+):
+    """Aggregate causal sweep-limit expectancy including fill rate."""
+    if (
+        rows is None
+        or rows.empty
+    ):
+        return None
+
+    total_setups = len(rows)
+    filled_count = 0
+    complete_results = []
+
+    for _, row in rows.iterrows():
+        result = (
+            _confirmed_swing_sweep_entry_result_for_row(
+                row,
+                offset_pct=offset_pct,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                horizon_min=horizon_min,
+                fee_per_side_pct=(
+                    fee_per_side_pct
+                ),
+            )
+        )
+
+        if result is None:
+            continue
+
+        if not bool(
+            result.get(
+                "filled",
+                False,
+            )
+        ):
+            continue
+
+        filled_count += 1
+
+        net_value = pd.to_numeric(
+            result.get(
+                "net_pct",
+            ),
+            errors="coerce",
+        )
+
+        if pd.notna(
+            net_value
+        ):
+            complete_results.append(
+                result
+            )
+
+    if not complete_results:
+        return {
+            "Setups": int(
+                total_setups
+            ),
+            "Filled": int(
+                filled_count
+            ),
+            "Complete": 0,
+            "Fill rate %": (
+                filled_count
+                / total_setups
+                * 100.0
+                if total_setups
+                else np.nan
+            ),
+            "Win rate %": np.nan,
+            "Avg net %": np.nan,
+            "Median net %": np.nan,
+            "Total net %": np.nan,
+            "Profit factor": np.nan,
+            "TP %": np.nan,
+            "SL %": np.nan,
+            "Ambiguous→SL %": np.nan,
+            "TIME_EXIT %": np.nan,
+        }
+
+    result_df = pd.DataFrame(
+        complete_results
+    )
+    net = pd.to_numeric(
+        result_df[
+            "net_pct"
+        ],
+        errors="coerce",
+    ).dropna()
+
+    positive_sum = float(
+        net.loc[
+            net > 0
+        ].sum()
+    )
+    negative_sum = float(
+        net.loc[
+            net < 0
+        ].sum()
+    )
+
+    profit_factor = (
+        positive_sum
+        / abs(
+            negative_sum
+        )
+        if negative_sum < 0
+        else (
+            np.inf
+            if positive_sum > 0
+            else np.nan
+        )
+    )
+
+    n = len(
+        result_df
+    )
+
+    return {
+        "Setups": int(
+            total_setups
+        ),
+        "Filled": int(
+            filled_count
+        ),
+        "Complete": int(n),
+        "Fill rate %": (
+            filled_count
+            / total_setups
+            * 100.0
+            if total_setups
+            else np.nan
+        ),
+        "Win rate %": float(
+            (
+                net > 0
+            ).mean()
+            * 100.0
+        ),
+        "Avg net %": float(
+            net.mean()
+        ),
+        "Median net %": float(
+            net.median()
+        ),
+        "Total net %": float(
+            net.sum()
+        ),
+        "Profit factor": float(
+            profit_factor
+        ),
+        "TP %": float(
+            result_df[
+                "exit_reason"
+            ]
+            .eq("TP")
+            .mean()
+            * 100.0
+        ),
+        "SL %": float(
+            result_df[
+                "exit_reason"
+            ]
+            .eq("SL")
+            .mean()
+            * 100.0
+        ),
+        "Ambiguous→SL %": float(
+            result_df[
+                "exit_reason"
+            ]
+            .eq(
+                "SL_AMBIGUOUS"
+            )
+            .mean()
+            * 100.0
+        ),
+        "TIME_EXIT %": float(
+            result_df[
+                "exit_reason"
+            ]
+            .eq(
+                "TIME_EXIT"
+            )
+            .mean()
+            * 100.0
+        ),
+    }
+
+
+def _confirmed_swing_sweep_entry_mfe_mae_stats(
+    rows,
+    offset_pct,
+):
+    """60m MFE/MAE summary for filled sweep entries."""
+    if (
+        rows is None
+        or rows.empty
+    ):
+        return None
+
+    mfe_values = []
+    mae_values = []
+
+    for _, row in rows.iterrows():
+        analysis = row.get(
+            "sweep_entry_analysis",
+            {},
+        )
+        if not isinstance(
+            analysis,
+            dict,
+        ):
+            continue
+
+        payload = analysis.get(
+            _confirmed_swing_sweep_entry_offset_key(
+                offset_pct
+            )
+        )
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            continue
+
+        if not bool(
+            payload.get(
+                "filled",
+                False,
+            )
+        ):
+            continue
+
+        mfe = pd.to_numeric(
+            payload.get(
+                "mfe_60m_pct",
+            ),
+            errors="coerce",
+        )
+        mae = pd.to_numeric(
+            payload.get(
+                "mae_60m_pct",
+            ),
+            errors="coerce",
+        )
+
+        if (
+            pd.notna(mfe)
+            and pd.notna(mae)
+        ):
+            mfe_values.append(
+                float(mfe)
+            )
+            mae_values.append(
+                float(mae)
+            )
+
+    if not mfe_values:
+        return None
+
+    mfe_series = pd.Series(
+        mfe_values,
+        dtype=float,
+    )
+    mae_series = pd.Series(
+        mae_values,
+        dtype=float,
+    )
+
+    avg_mfe = float(
+        mfe_series.mean()
+    )
+    avg_mae = float(
+        mae_series.mean()
+    )
+
+    return {
+        "N": len(
+            mfe_series
+        ),
+        "Avg MFE60 %": (
+            avg_mfe
+        ),
+        "Median MFE60 %": float(
+            mfe_series.median()
+        ),
+        "Avg MAE60 %": (
+            avg_mae
+        ),
+        "Median MAE60 %": float(
+            mae_series.median()
+        ),
+        "MFE/MAE": (
+            avg_mfe / avg_mae
+            if avg_mae > 0
+            else np.inf
+        ),
+    }
+
+
 @st.cache_data(
     ttl=120,
     show_spinner=False,
@@ -16592,7 +17562,18 @@ def scan_confirmed_swing_sweep_reclaims_all_symbols(
                 )
             )
 
-            # MFE/MAE begins AFTER reclaim for RECLAIMED rows.
+            # Primary strategy research: pre-placed LIMIT entry on the
+            # first sweep. This is evaluated for EVERY sweep, whether it
+            # eventually reclaims or not.
+            setup = (
+                _attach_confirmed_swing_sweep_entry_analysis(
+                    setup,
+                    forward_cache,
+                )
+            )
+
+            # Secondary benchmark: old/reclaim entry research. MFE/MAE
+            # begins AFTER reclaim for RECLAIMED rows.
             setup = (
                 _attach_confirmed_swing_reaction_run(
                     setup,
@@ -16600,7 +17581,7 @@ def scan_confirmed_swing_sweep_reclaims_all_symbols(
                 )
             )
 
-            # TP/SL/Time Exit only exists after a causal reclaim.
+            # Reclaim-entry TP/SL/Time Exit only exists after a causal reclaim.
             if bool(
                 setup.get(
                     "reaction",
@@ -16991,16 +17972,17 @@ def render_confirmed_swing_sweep_reclaim_scanner(
     side_filter,
     max_event_age_minutes,
 ):
-    """Render the separate Sweep -> Reclaim strategy research."""
+    """Render Sweep Entry as primary strategy and Reclaim Entry as benchmark."""
     st.markdown(
-        "### Confirmed Swing Sweep → Reclaim"
+        "### Confirmed Swing Sweep Entry"
     )
     st.caption(
-        "This is a separate strategy from the existing first-touch retest. "
-        "The level must first be swept: LONG trades below a confirmed 15m "
-        "swing LOW; SHORT trades above a confirmed 15m swing HIGH. A signal "
-        "exists only after a closed 1m candle reclaims the swing. Hypothetical "
-        "execution then starts at the next consecutive 1m open."
+        "Primary strategy: after the confirmed 15m swing moves away, a LIMIT "
+        "order is assumed to be resting at the selected offset inside the "
+        "first sweep. LONG buys below a confirmed swing LOW; SHORT sells above "
+        "a confirmed swing HIGH. Reclaim is measured AFTER entry as an outcome, "
+        "not required for the Sweep Entry. The old Reclaim Entry is preserved "
+        "below as a separate benchmark."
     )
 
     if (
@@ -17008,7 +17990,7 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         or setups_df.empty
     ):
         st.info(
-            "No Sweep → Reclaim setups match the current research window."
+            "No confirmed-swing sweeps match the current research window."
         )
         return
 
@@ -17070,23 +18052,23 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         st.columns(5)
     )
     m1.metric(
-        "Sweeps",
+        "First sweeps",
         len(view),
     )
     m2.metric(
-        "Reclaimed",
+        "Eventually reclaimed",
         int(
             reclaimed_mask.sum()
         ),
     )
     m3.metric(
-        "Pending",
+        "Reclaim pending",
         int(
             pending_mask.sum()
         ),
     )
     m4.metric(
-        "Expired",
+        "Reclaim expired",
         int(
             expired_mask.sum()
         ),
@@ -17098,9 +18080,6 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         ),
     )
 
-    # --------------------------------------------------------
-    # Sweep -> reclaim latency / depth research.
-    # --------------------------------------------------------
     reclaimed = view.loc[
         reclaimed_mask
     ].copy()
@@ -17147,40 +18126,881 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         q4.metric(
             "LONG / SHORT",
             (
-                f"{int(reclaimed['signal'].eq('LONG').sum())} / "
-                f"{int(reclaimed['signal'].eq('SHORT').sum())}"
+                f"{int(view['signal'].eq('LONG').sum())} / "
+                f"{int(view['signal'].eq('SHORT').sum())}"
             ),
         )
 
-        # Reuse the complete existing analytics suite, but ONLY on
-        # setups that actually reclaimed. The compatibility status is
-        # REACTION and penetration_pct is the true sweep depth.
-        st.markdown("---")
-        st.markdown(
-            "#### Reclaimed setup performance"
-        )
-        st.caption(
-            "Everything below reuses the same MFE/MAE, TP/SL path-order, "
-            "volume, geometry, fees, TIME_EXIT and chronological validation "
-            "already used by the touch strategy. Here, however, the signal "
-            "candle is the RECLAIM candle and penetration is actual sweep depth."
+    # ========================================================
+    # PRIMARY STRATEGY: SWEEP LIMIT ENTRY
+    # ========================================================
+    st.markdown("---")
+    st.markdown(
+        "#### 🎯 Sweep Entry · pre-placed LIMIT"
+    )
+    st.caption(
+        "The LIMIT is already resting after the departure candle closes. "
+        "Offset 0.00% = at the swing; LONG offsets are below the LOW swing and "
+        "SHORT offsets are above the HIGH swing. A limit only counts as filled "
+        "if the FIRST sweep candle reaches it. Same-entry-candle TP is never "
+        "credited because OHLC cannot prove it happened after the fill; "
+        "same-entry-candle SL is counted conservatively."
+    )
+
+    sweep_c1, sweep_c2, sweep_c3, sweep_c4, sweep_c5 = (
+        st.columns(5)
+    )
+
+    offset_options = list(
+        CONFIRMED_SWING_SWEEP_ENTRY_OFFSETS_PCT
+    )
+    tp_options = list(
+        CONFIRMED_SWING_FIRST_TOUCH_TP_GRID
+    )
+    sl_options = list(
+        CONFIRMED_SWING_FIRST_TOUCH_SL_GRID
+    )
+    horizon_options = list(
+        CONFIRMED_SWING_TIME_EXIT_HORIZONS
+    )
+
+    with sweep_c1:
+        selected_sweep_offset = st.selectbox(
+            "Sweep entry offset %",
+            options=offset_options,
+            index=(
+                offset_options.index(0.05)
+                if 0.05 in offset_options
+                else 0
+            ),
+            format_func=lambda value: (
+                f"{float(value):.2f}%"
+            ),
+            key=(
+                "sweep_entry_selected_offset"
+            ),
         )
 
-        render_confirmed_swing_window_summary(
-            reclaimed
+    with sweep_c2:
+        sweep_tp = st.selectbox(
+            "Sweep TP %",
+            options=tp_options,
+            index=tp_options.index(1.00),
+            key="sweep_entry_tp",
         )
-        render_confirmed_swing_reaction_overview(
-            reclaimed
+
+    with sweep_c3:
+        sweep_sl = st.selectbox(
+            "Sweep SL %",
+            options=sl_options,
+            index=sl_options.index(1.00),
+            key="sweep_entry_sl",
         )
-        render_confirmed_swing_path_order_analysis(
-            reclaimed
+
+    with sweep_c4:
+        sweep_horizon = st.selectbox(
+            "Sweep TIME_EXIT",
+            options=horizon_options,
+            index=(
+                horizon_options.index(120)
+                if 120 in horizon_options
+                else 0
+            ),
+            format_func=lambda value: (
+                f"{int(value)}m"
+            ),
+            key="sweep_entry_horizon",
         )
-        render_confirmed_swing_reaction_geometry_mfe(
-            reclaimed
+
+    with sweep_c5:
+        sweep_fee = st.number_input(
+            "Sweep fee / side %",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.05,
+            step=0.01,
+            format="%.3f",
+            key="sweep_entry_fee",
         )
-        render_confirmed_swing_volume_mfe_analysis(
-            reclaimed
+
+    sweep_stats = (
+        _confirmed_swing_sweep_entry_stats(
+            view,
+            offset_pct=(
+                selected_sweep_offset
+            ),
+            tp_pct=sweep_tp,
+            sl_pct=sweep_sl,
+            horizon_min=sweep_horizon,
+            fee_per_side_pct=sweep_fee,
         )
+    )
+
+    if sweep_stats is not None:
+        s1, s2, s3, s4, s5, s6 = (
+            st.columns(6)
+        )
+        s1.metric(
+            "Setups",
+            int(
+                sweep_stats[
+                    "Setups"
+                ]
+            ),
+        )
+        s2.metric(
+            "Filled",
+            int(
+                sweep_stats[
+                    "Filled"
+                ]
+            ),
+        )
+        s3.metric(
+            "Fill rate",
+            (
+                f"{sweep_stats['Fill rate %']:.1f}%"
+                if pd.notna(
+                    sweep_stats[
+                        "Fill rate %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+        s4.metric(
+            "Net WR",
+            (
+                f"{sweep_stats['Win rate %']:.2f}%"
+                if pd.notna(
+                    sweep_stats[
+                        "Win rate %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+        s5.metric(
+            "Avg net / trade",
+            (
+                f"{sweep_stats['Avg net %']:.4f}%"
+                if pd.notna(
+                    sweep_stats[
+                        "Avg net %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+        s6.metric(
+            "Profit factor",
+            (
+                f"{sweep_stats['Profit factor']:.3f}"
+                if pd.notna(
+                    sweep_stats[
+                        "Profit factor"
+                    ]
+                )
+                and np.isfinite(
+                    sweep_stats[
+                        "Profit factor"
+                    ]
+                )
+                else (
+                    "∞"
+                    if pd.notna(
+                        sweep_stats[
+                            "Profit factor"
+                        ]
+                    )
+                    else "—"
+                )
+            ),
+        )
+
+        r1, r2, r3, r4, r5 = (
+            st.columns(5)
+        )
+        r1.metric(
+            "Total net %",
+            (
+                f"{sweep_stats['Total net %']:.4f}%"
+                if pd.notna(
+                    sweep_stats[
+                        "Total net %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+        r2.metric(
+            "TP exits",
+            (
+                f"{sweep_stats['TP %']:.1f}%"
+                if pd.notna(
+                    sweep_stats[
+                        "TP %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+        r3.metric(
+            "SL exits",
+            (
+                f"{sweep_stats['SL %']:.1f}%"
+                if pd.notna(
+                    sweep_stats[
+                        "SL %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+        r4.metric(
+            "Ambiguous→SL",
+            (
+                f"{sweep_stats['Ambiguous→SL %']:.1f}%"
+                if pd.notna(
+                    sweep_stats[
+                        "Ambiguous→SL %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+        r5.metric(
+            "TIME_EXIT",
+            (
+                f"{sweep_stats['TIME_EXIT %']:.1f}%"
+                if pd.notna(
+                    sweep_stats[
+                        "TIME_EXIT %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Offset comparison — same structural sweep universe.
+    # --------------------------------------------------------
+    offset_rows = []
+
+    for offset in offset_options:
+        stats = (
+            _confirmed_swing_sweep_entry_stats(
+                view,
+                offset_pct=offset,
+                tp_pct=sweep_tp,
+                sl_pct=sweep_sl,
+                horizon_min=sweep_horizon,
+                fee_per_side_pct=sweep_fee,
+            )
+        )
+        mfe_mae = (
+            _confirmed_swing_sweep_entry_mfe_mae_stats(
+                view,
+                offset_pct=offset,
+            )
+        )
+
+        if stats is None:
+            continue
+
+        offset_rows.append({
+            "Entry offset %": float(
+                offset
+            ),
+            "Setups": int(
+                stats[
+                    "Setups"
+                ]
+            ),
+            "Filled": int(
+                stats[
+                    "Filled"
+                ]
+            ),
+            "Fill rate %": round(
+                stats[
+                    "Fill rate %"
+                ],
+                2,
+            )
+            if pd.notna(
+                stats[
+                    "Fill rate %"
+                ]
+            )
+            else np.nan,
+            "Complete": int(
+                stats[
+                    "Complete"
+                ]
+            ),
+            "Win rate %": round(
+                stats[
+                    "Win rate %"
+                ],
+                2,
+            )
+            if pd.notna(
+                stats[
+                    "Win rate %"
+                ]
+            )
+            else np.nan,
+            "Avg net %": round(
+                stats[
+                    "Avg net %"
+                ],
+                4,
+            )
+            if pd.notna(
+                stats[
+                    "Avg net %"
+                ]
+            )
+            else np.nan,
+            "Profit factor": (
+                round(
+                    stats[
+                        "Profit factor"
+                    ],
+                    3,
+                )
+                if pd.notna(
+                    stats[
+                        "Profit factor"
+                    ]
+                )
+                and np.isfinite(
+                    stats[
+                        "Profit factor"
+                    ]
+                )
+                else stats[
+                    "Profit factor"
+                ]
+            ),
+            "Total net %": round(
+                stats[
+                    "Total net %"
+                ],
+                4,
+            )
+            if pd.notna(
+                stats[
+                    "Total net %"
+                ]
+            )
+            else np.nan,
+            "Avg MFE60 %": (
+                round(
+                    mfe_mae[
+                        "Avg MFE60 %"
+                    ],
+                    4,
+                )
+                if mfe_mae
+                is not None
+                else np.nan
+            ),
+            "Avg MAE60 %": (
+                round(
+                    mfe_mae[
+                        "Avg MAE60 %"
+                    ],
+                    4,
+                )
+                if mfe_mae
+                is not None
+                else np.nan
+            ),
+            "MFE/MAE": (
+                round(
+                    mfe_mae[
+                        "MFE/MAE"
+                    ],
+                    3,
+                )
+                if mfe_mae
+                is not None
+                and np.isfinite(
+                    mfe_mae[
+                        "MFE/MAE"
+                    ]
+                )
+                else (
+                    mfe_mae[
+                        "MFE/MAE"
+                    ]
+                    if mfe_mae
+                    is not None
+                    else np.nan
+                )
+            ),
+        })
+
+    if offset_rows:
+        st.markdown(
+            "##### Sweep entry offset comparison"
+        )
+        st.caption(
+            "Same detected FIRST-sweep universe. Deeper offsets naturally "
+            "have lower fill rates; NO_FILL is not counted as a trade."
+        )
+        st.dataframe(
+            pd.DataFrame(
+                offset_rows
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # --------------------------------------------------------
+    # LONG / SHORT and reclaim-outcome diagnostics.
+    # --------------------------------------------------------
+    split_rows = []
+
+    split_groups = [
+        ("ALL", view),
+        (
+            "LONG",
+            view.loc[
+                view[
+                    "signal"
+                ].eq("LONG")
+            ],
+        ),
+        (
+            "SHORT",
+            view.loc[
+                view[
+                    "signal"
+                ].eq("SHORT")
+            ],
+        ),
+        (
+            "Eventually RECLAIMED",
+            view.loc[
+                reclaimed_mask
+            ],
+        ),
+        (
+            "Not reclaimed yet/expired",
+            view.loc[
+                ~reclaimed_mask
+            ],
+        ),
+    ]
+
+    for label, subset in split_groups:
+        if subset.empty:
+            continue
+
+        stats = (
+            _confirmed_swing_sweep_entry_stats(
+                subset,
+                offset_pct=(
+                    selected_sweep_offset
+                ),
+                tp_pct=sweep_tp,
+                sl_pct=sweep_sl,
+                horizon_min=sweep_horizon,
+                fee_per_side_pct=sweep_fee,
+            )
+        )
+
+        if stats is None:
+            continue
+
+        split_rows.append({
+            "Group": label,
+            "Setups": int(
+                stats[
+                    "Setups"
+                ]
+            ),
+            "Filled": int(
+                stats[
+                    "Filled"
+                ]
+            ),
+            "Fill rate %": round(
+                stats[
+                    "Fill rate %"
+                ],
+                2,
+            )
+            if pd.notna(
+                stats[
+                    "Fill rate %"
+                ]
+            )
+            else np.nan,
+            "Complete": int(
+                stats[
+                    "Complete"
+                ]
+            ),
+            "WR %": round(
+                stats[
+                    "Win rate %"
+                ],
+                2,
+            )
+            if pd.notna(
+                stats[
+                    "Win rate %"
+                ]
+            )
+            else np.nan,
+            "Avg net %": round(
+                stats[
+                    "Avg net %"
+                ],
+                4,
+            )
+            if pd.notna(
+                stats[
+                    "Avg net %"
+                ]
+            )
+            else np.nan,
+            "PF": (
+                round(
+                    stats[
+                        "Profit factor"
+                    ],
+                    3,
+                )
+                if pd.notna(
+                    stats[
+                        "Profit factor"
+                    ]
+                )
+                and np.isfinite(
+                    stats[
+                        "Profit factor"
+                    ]
+                )
+                else stats[
+                    "Profit factor"
+                ]
+            ),
+            "Total net %": round(
+                stats[
+                    "Total net %"
+                ],
+                4,
+            )
+            if pd.notna(
+                stats[
+                    "Total net %"
+                ]
+            )
+            else np.nan,
+        })
+
+    if split_rows:
+        st.markdown(
+            "##### Sweep entry diagnostics"
+        )
+        st.caption(
+            "'Eventually RECLAIMED' is a diagnostic outcome group, NOT a "
+            "causal entry filter: at sweep-entry time we do not know yet "
+            "whether reclaim will happen."
+        )
+        st.dataframe(
+            pd.DataFrame(
+                split_rows
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # --------------------------------------------------------
+    # Chronological stability of the selected Sweep Entry.
+    # --------------------------------------------------------
+    chronological = view.copy()
+
+    if (
+        "sweep_timestamp"
+        in chronological.columns
+    ):
+        chronological[
+            "sweep_timestamp"
+        ] = pd.to_numeric(
+            chronological[
+                "sweep_timestamp"
+            ],
+            errors="coerce",
+        )
+        chronological = (
+            chronological
+            .dropna(
+                subset=[
+                    "sweep_timestamp"
+                ]
+            )
+            .sort_values(
+                [
+                    "sweep_timestamp",
+                    "symbol",
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+        if len(
+            chronological
+        ) >= 2:
+            split_idx = (
+                len(
+                    chronological
+                )
+                // 2
+            )
+
+            chrono_rows = []
+
+            for (
+                label,
+                subset,
+            ) in [
+                (
+                    "FULL",
+                    chronological,
+                ),
+                (
+                    "EARLY 50%",
+                    chronological.iloc[
+                        :split_idx
+                    ],
+                ),
+                (
+                    "LATE 50%",
+                    chronological.iloc[
+                        split_idx:
+                    ],
+                ),
+            ]:
+                stats = (
+                    _confirmed_swing_sweep_entry_stats(
+                        subset,
+                        offset_pct=(
+                            selected_sweep_offset
+                        ),
+                        tp_pct=sweep_tp,
+                        sl_pct=sweep_sl,
+                        horizon_min=(
+                            sweep_horizon
+                        ),
+                        fee_per_side_pct=(
+                            sweep_fee
+                        ),
+                    )
+                )
+
+                if stats is None:
+                    continue
+
+                chrono_rows.append({
+                    "Split": label,
+                    "Setups": int(
+                        stats[
+                            "Setups"
+                        ]
+                    ),
+                    "Filled": int(
+                        stats[
+                            "Filled"
+                        ]
+                    ),
+                    "Complete": int(
+                        stats[
+                            "Complete"
+                        ]
+                    ),
+                    "Fill %": round(
+                        stats[
+                            "Fill rate %"
+                        ],
+                        2,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Fill rate %"
+                        ]
+                    )
+                    else np.nan,
+                    "WR %": round(
+                        stats[
+                            "Win rate %"
+                        ],
+                        2,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Win rate %"
+                        ]
+                    )
+                    else np.nan,
+                    "Avg net %": round(
+                        stats[
+                            "Avg net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Avg net %"
+                        ]
+                    )
+                    else np.nan,
+                    "PF": (
+                        round(
+                            stats[
+                                "Profit factor"
+                            ],
+                            3,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Profit factor"
+                            ]
+                        )
+                        and np.isfinite(
+                            stats[
+                                "Profit factor"
+                            ]
+                        )
+                        else stats[
+                            "Profit factor"
+                        ]
+                    ),
+                    "Total net %": round(
+                        stats[
+                            "Total net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Total net %"
+                        ]
+                    )
+                    else np.nan,
+                })
+
+            if chrono_rows:
+                st.markdown(
+                    "##### Sweep Entry chronological split"
+                )
+                st.dataframe(
+                    pd.DataFrame(
+                        chrono_rows
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    # ========================================================
+    # SECONDARY BENCHMARK: WAIT FOR RECLAIM
+    # ========================================================
+    if not reclaimed.empty:
+        st.markdown("---")
+        st.markdown(
+            "#### ↩️ Reclaim Entry benchmark"
+        )
+        st.caption(
+            "Separate benchmark preserved from the previous implementation: "
+            "wait until a 1m candle closes back through the swing, then enter "
+            "at the next consecutive 1m open. This is NOT the primary Sweep "
+            "Entry strategy."
+        )
+
+        reclaim_stats = (
+            _confirmed_swing_net_stats(
+                reclaimed,
+                tp_pct=sweep_tp,
+                sl_pct=sweep_sl,
+                horizon_min=(
+                    sweep_horizon
+                ),
+                fee_per_side_pct=(
+                    sweep_fee
+                ),
+            )
+        )
+
+        if reclaim_stats is not None:
+            b1, b2, b3, b4, b5 = (
+                st.columns(5)
+            )
+            b1.metric(
+                "Complete",
+                int(
+                    reclaim_stats[
+                        "N"
+                    ]
+                ),
+            )
+            b2.metric(
+                "Net WR",
+                (
+                    f"{reclaim_stats['Win rate %']:.2f}%"
+                ),
+            )
+            b3.metric(
+                "Avg net / trade",
+                (
+                    f"{reclaim_stats['Avg net %']:.4f}%"
+                ),
+            )
+            b4.metric(
+                "PF",
+                (
+                    f"{reclaim_stats['Profit factor']:.3f}"
+                    if np.isfinite(
+                        reclaim_stats[
+                            "Profit factor"
+                        ]
+                    )
+                    else "∞"
+                ),
+            )
+            b5.metric(
+                "Total net %",
+                (
+                    f"{reclaim_stats['Total net %']:.4f}%"
+                ),
+            )
+
+        # Keep the existing deep research available for the benchmark.
+        with st.expander(
+            "Reclaim Entry deep analysis",
+            expanded=False,
+        ):
+            render_confirmed_swing_window_summary(
+                reclaimed
+            )
+            render_confirmed_swing_reaction_overview(
+                reclaimed
+            )
+            render_confirmed_swing_path_order_analysis(
+                reclaimed
+            )
+            render_confirmed_swing_reaction_geometry_mfe(
+                reclaimed
+            )
+            render_confirmed_swing_volume_mfe_analysis(
+                reclaimed
+            )
 
     # --------------------------------------------------------
     # Full event table.
@@ -17188,6 +19008,51 @@ def render_confirmed_swing_sweep_reclaim_scanner(
     st.markdown("---")
     st.markdown(
         "#### Sweep / reclaim events"
+    )
+
+    # Materialize the selected sweep LIMIT price/fill for the table.
+    selected_offset_key = (
+        _confirmed_swing_sweep_entry_offset_key(
+            selected_sweep_offset
+        )
+    )
+
+    view = view.copy()
+    view["selected_sweep_entry_price"] = view[
+        "sweep_entry_analysis"
+    ].apply(
+        lambda payload: (
+            payload.get(
+                selected_offset_key,
+                {},
+            ).get(
+                "entry_price",
+                np.nan,
+            )
+            if isinstance(
+                payload,
+                dict,
+            )
+            else np.nan
+        )
+    )
+    view["selected_sweep_filled"] = view[
+        "sweep_entry_analysis"
+    ].apply(
+        lambda payload: bool(
+            payload.get(
+                selected_offset_key,
+                {},
+            ).get(
+                "filled",
+                False,
+            )
+        )
+        if isinstance(
+            payload,
+            dict,
+        )
+        else False
     )
 
     display_columns = [
@@ -17198,6 +19063,8 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         "swing_price",
         "sweep_price",
         "sweep_penetration_pct",
+        "selected_sweep_filled",
+        "selected_sweep_entry_price",
         "reclaim_price",
         "sweep_to_reclaim_min",
         "reclaim_same_candle",
@@ -17225,6 +19092,7 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         "swing_price",
         "sweep_price",
         "sweep_penetration_pct",
+        "selected_sweep_entry_price",
         "reclaim_price",
         "sweep_to_reclaim_min",
         "max_departure_pct",
@@ -17319,7 +19187,13 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         lookup[
             selected_label
         ]
-    ]
+    ].copy()
+
+    selected_setup[
+        "selected_sweep_entry_offset_pct"
+    ] = float(
+        selected_sweep_offset
+    )
 
     detail_candle_limit = st.slider(
         "15m candles in Sweep → Reclaim inspector",
@@ -17444,6 +19318,8 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         "sweep_time",
         "sweep_price",
         "sweep_penetration_pct",
+        "selected_sweep_filled",
+        "selected_sweep_entry_price",
         "sweep_close",
         "sweep_close_location",
         "reclaim_time",
@@ -17486,9 +19362,10 @@ if selected_section == "swing_sweep_reclaim":
     )
     st.caption(
         "Separate research tab. The original confirmed-swing first-touch "
-        "strategy remains unchanged in Volume Exhaustion. Here a touch alone "
-        "does nothing: price must sweep through the confirmed 15m swing and "
-        "then reclaim it before a hypothetical entry is allowed."
+        "strategy remains unchanged in Volume Exhaustion. Here the primary "
+        "strategy places a LIMIT after departure and enters inside the FIRST "
+        "sweep. Reclaim is tracked afterward as an outcome. A separate "
+        "Reclaim Entry benchmark is kept for comparison."
     )
 
     events = (
