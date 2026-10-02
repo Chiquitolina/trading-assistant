@@ -19853,6 +19853,455 @@ def _render_sweep_vs_reaction_same_window_comparison(
             f"{float((delta > 0).mean() * 100.0):.1f}%",
         )
 
+    # --------------------------------------------------------
+    # PAIRED DIAGNOSTICS
+    # Same exact structural events: what is lost/gained by
+    # waiting for REACTION instead of taking the resting sweep LIMIT?
+    # --------------------------------------------------------
+    st.markdown(
+        "##### C. Paired diagnostics · what changes while waiting for REACTION"
+    )
+    st.caption(
+        "All diagnostics below use the exact same common-event cohort above. "
+        "Sweep→REACTION latency is measured from the FIRST-sweep candle to the "
+        "REACTION/reclaim candle. Entry-price delta is side-adjusted: positive "
+        "means the REACTION entry is WORSE than the Sweep LIMIT; negative means "
+        "REACTION obtained a better entry price. Paired WIN/LOSS uses net return "
+        "after configured fees: WIN > 0%, LOSS ≤ 0%."
+    )
+
+    # Sweep -> REACTION latency in minutes.
+    common_detail_df[
+        "sweep→reaction min"
+    ] = (
+        (
+            common_detail_df[
+                "reaction_time"
+            ]
+            - common_detail_df[
+                "sweep_time"
+            ]
+        ).dt.total_seconds()
+        / 60.0
+    )
+
+    # Side-adjusted entry deterioration. Positive = waiting for REACTION
+    # produced a worse execution price; negative = a better one.
+    def _reaction_entry_delta_pct(detail_row):
+        sweep_entry = pd.to_numeric(
+            detail_row.get(
+                "sweep_entry",
+            ),
+            errors="coerce",
+        )
+        reaction_entry = pd.to_numeric(
+            detail_row.get(
+                "reaction_entry",
+            ),
+            errors="coerce",
+        )
+        side = str(
+            detail_row.get(
+                "side",
+                "",
+            )
+        ).upper()
+
+        if (
+            pd.isna(sweep_entry)
+            or pd.isna(reaction_entry)
+            or float(sweep_entry) <= 0
+            or float(reaction_entry) <= 0
+        ):
+            return np.nan
+
+        if side == "LONG":
+            return (
+                float(reaction_entry)
+                / float(sweep_entry)
+                - 1.0
+            ) * 100.0
+
+        if side == "SHORT":
+            return (
+                float(sweep_entry)
+                / float(reaction_entry)
+                - 1.0
+            ) * 100.0
+
+        return np.nan
+
+    common_detail_df[
+        "reaction entry worse %"
+    ] = common_detail_df.apply(
+        _reaction_entry_delta_pct,
+        axis=1,
+    )
+
+    # 1) Latency buckets.
+    latency = pd.to_numeric(
+        common_detail_df[
+            "sweep→reaction min"
+        ],
+        errors="coerce",
+    )
+    latency_bucket = pd.cut(
+        latency,
+        bins=[
+            -np.inf,
+            2.0,
+            5.0,
+            10.0,
+            20.0,
+            np.inf,
+        ],
+        labels=[
+            "0–2m",
+            "3–5m",
+            "6–10m",
+            "11–20m",
+            ">20m",
+        ],
+        right=True,
+        include_lowest=True,
+    )
+    common_detail_df[
+        "latency bucket"
+    ] = latency_bucket.astype(
+        "object"
+    )
+
+    latency_rows = []
+    for label in [
+        "0–2m",
+        "3–5m",
+        "6–10m",
+        "11–20m",
+        ">20m",
+    ]:
+        subset = common_detail_df.loc[
+            common_detail_df[
+                "latency bucket"
+            ].eq(label)
+        ].copy()
+        if subset.empty:
+            continue
+
+        subset_sweep = pd.to_numeric(
+            subset[
+                "sweep_net %"
+            ],
+            errors="coerce",
+        )
+        subset_reaction = pd.to_numeric(
+            subset[
+                "reaction_net %"
+            ],
+            errors="coerce",
+        )
+
+        latency_rows.append({
+            "Sweep→REACTION": label,
+            "N": int(len(subset)),
+            "% cohort": (
+                len(subset)
+                / len(common_detail_df)
+                * 100.0
+            ),
+            "Median latency min": float(
+                pd.to_numeric(
+                    subset[
+                        "sweep→reaction min"
+                    ],
+                    errors="coerce",
+                ).median()
+            ),
+            "Sweep avg net %": float(
+                subset_sweep.mean()
+            ),
+            "REACTION avg net %": float(
+                subset_reaction.mean()
+            ),
+            "REACTION − Sweep pp": float(
+                (
+                    subset_reaction
+                    - subset_sweep
+                ).mean()
+            ),
+        })
+
+    st.markdown(
+        "###### Sweep→REACTION latency"
+    )
+    if latency_rows:
+        latency_df = pd.DataFrame(
+            latency_rows
+        )
+        for column in [
+            "% cohort",
+            "Median latency min",
+            "Sweep avg net %",
+            "REACTION avg net %",
+            "REACTION − Sweep pp",
+        ]:
+            latency_df[column] = pd.to_numeric(
+                latency_df[column],
+                errors="coerce",
+            ).round(4)
+        st.dataframe(
+            latency_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # 2) Entry-price deterioration buckets.
+    entry_delta = pd.to_numeric(
+        common_detail_df[
+            "reaction entry worse %"
+        ],
+        errors="coerce",
+    )
+
+    def _entry_delta_bucket(value):
+        if pd.isna(value):
+            return None
+        value = float(value)
+        if value <= 0.0:
+            return "REACTION better/equal"
+        if value <= 0.10:
+            return "0–0.10% worse"
+        if value <= 0.25:
+            return "0.10–0.25% worse"
+        if value <= 0.50:
+            return "0.25–0.50% worse"
+        return ">0.50% worse"
+
+    common_detail_df[
+        "entry delta bucket"
+    ] = entry_delta.map(
+        _entry_delta_bucket
+    )
+
+    entry_delta_rows = []
+    for label in [
+        "REACTION better/equal",
+        "0–0.10% worse",
+        "0.10–0.25% worse",
+        "0.25–0.50% worse",
+        ">0.50% worse",
+    ]:
+        subset = common_detail_df.loc[
+            common_detail_df[
+                "entry delta bucket"
+            ].eq(label)
+        ].copy()
+        if subset.empty:
+            continue
+
+        subset_sweep = pd.to_numeric(
+            subset[
+                "sweep_net %"
+            ],
+            errors="coerce",
+        )
+        subset_reaction = pd.to_numeric(
+            subset[
+                "reaction_net %"
+            ],
+            errors="coerce",
+        )
+
+        entry_delta_rows.append({
+            "REACTION entry vs Sweep": label,
+            "N": int(len(subset)),
+            "% cohort": (
+                len(subset)
+                / len(common_detail_df)
+                * 100.0
+            ),
+            "Median entry delta %": float(
+                pd.to_numeric(
+                    subset[
+                        "reaction entry worse %"
+                    ],
+                    errors="coerce",
+                ).median()
+            ),
+            "Sweep avg net %": float(
+                subset_sweep.mean()
+            ),
+            "REACTION avg net %": float(
+                subset_reaction.mean()
+            ),
+            "REACTION − Sweep pp": float(
+                (
+                    subset_reaction
+                    - subset_sweep
+                ).mean()
+            ),
+        })
+
+    st.markdown(
+        "###### Entry-price deterioration while waiting"
+    )
+    if entry_delta_rows:
+        entry_delta_df = pd.DataFrame(
+            entry_delta_rows
+        )
+        for column in [
+            "% cohort",
+            "Median entry delta %",
+            "Sweep avg net %",
+            "REACTION avg net %",
+            "REACTION − Sweep pp",
+        ]:
+            entry_delta_df[column] = pd.to_numeric(
+                entry_delta_df[column],
+                errors="coerce",
+            ).round(4)
+        st.dataframe(
+            entry_delta_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # 3) Paired outcome matrix. WIN means positive net result after fees.
+    sweep_net_series = pd.to_numeric(
+        common_detail_df[
+            "sweep_net %"
+        ],
+        errors="coerce",
+    )
+    reaction_net_series = pd.to_numeric(
+        common_detail_df[
+            "reaction_net %"
+        ],
+        errors="coerce",
+    )
+
+    sweep_win = sweep_net_series > 0.0
+    reaction_win = reaction_net_series > 0.0
+
+    common_detail_df[
+        "paired outcome"
+    ] = np.select(
+        [
+            sweep_win & reaction_win,
+            sweep_win & ~reaction_win,
+            ~sweep_win & reaction_win,
+            ~sweep_win & ~reaction_win,
+        ],
+        [
+            "Sweep WIN / Reaction WIN",
+            "Sweep WIN / Reaction LOSS",
+            "Sweep LOSS / Reaction WIN",
+            "Sweep LOSS / Reaction LOSS",
+        ],
+        default="UNKNOWN",
+    )
+
+    paired_rows = []
+    for label in [
+        "Sweep WIN / Reaction WIN",
+        "Sweep WIN / Reaction LOSS",
+        "Sweep LOSS / Reaction WIN",
+        "Sweep LOSS / Reaction LOSS",
+    ]:
+        subset = common_detail_df.loc[
+            common_detail_df[
+                "paired outcome"
+            ].eq(label)
+        ].copy()
+        if subset.empty:
+            continue
+
+        paired_rows.append({
+            "Paired outcome": label,
+            "N": int(len(subset)),
+            "% cohort": (
+                len(subset)
+                / len(common_detail_df)
+                * 100.0
+            ),
+            "Sweep avg net %": float(
+                pd.to_numeric(
+                    subset[
+                        "sweep_net %"
+                    ],
+                    errors="coerce",
+                ).mean()
+            ),
+            "REACTION avg net %": float(
+                pd.to_numeric(
+                    subset[
+                        "reaction_net %"
+                    ],
+                    errors="coerce",
+                ).mean()
+            ),
+            "Avg REACTION − Sweep pp": float(
+                pd.to_numeric(
+                    subset[
+                        "reaction - sweep net pp"
+                    ],
+                    errors="coerce",
+                ).mean()
+            ),
+        })
+
+    st.markdown(
+        "###### Paired outcome matrix"
+    )
+    if paired_rows:
+        paired_df = pd.DataFrame(
+            paired_rows
+        )
+        for column in [
+            "% cohort",
+            "Sweep avg net %",
+            "REACTION avg net %",
+            "Avg REACTION − Sweep pp",
+        ]:
+            paired_df[column] = pd.to_numeric(
+                paired_df[column],
+                errors="coerce",
+            ).round(4)
+        st.dataframe(
+            paired_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        p1, p2, p3 = st.columns(3)
+        sweep_only_wins = int(
+            (
+                common_detail_df[
+                    "paired outcome"
+                ]
+                == "Sweep WIN / Reaction LOSS"
+            ).sum()
+        )
+        reaction_only_wins = int(
+            (
+                common_detail_df[
+                    "paired outcome"
+                ]
+                == "Sweep LOSS / Reaction WIN"
+            ).sum()
+        )
+        p1.metric(
+            "Sweep saves vs REACTION",
+            sweep_only_wins,
+        )
+        p2.metric(
+            "REACTION saves vs Sweep",
+            reaction_only_wins,
+        )
+        p3.metric(
+            "Net paired advantage",
+            f"{sweep_only_wins - reaction_only_wins:+d} events",
+        )
+
     with st.expander(
         "Inspect common events · Sweep vs REACTION",
         expanded=False,
