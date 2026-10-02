@@ -83,6 +83,17 @@ VOLUME_EXHAUSTION_OUTCOMES_FILE = (
     BASE_DIR / "volume_exhaustion_outcomes.csv"
 )
 
+# Frozen research candidate discovered on 2026-10-02.
+# The cutoff is intentionally static so events that existed during discovery
+# never migrate into the forward cohort on later dashboard refreshes.
+CANDIDATE_V1_FREEZE_TS_UTC = "2026-10-02T18:30:00Z"
+CANDIDATE_V1_CONFIG_FILE = (
+    BASE_DIR / "candidate_v1_frozen_config.json"
+)
+CANDIDATE_V1_HISTORY_FILE = (
+    BASE_DIR / "candidate_v1_frozen_monitor.csv"
+)
+
 DASHBOARD_CACHE_DIR = (
     BASE_DIR
     / "reports"
@@ -14243,6 +14254,770 @@ def render_confirmed_swing_volume_mfe_analysis(view):
 
 
 
+
+def _candidate_v1_load_or_freeze_config(
+    detector,
+    min_swing_prominence_pct,
+    retest_tolerance_pct,
+    min_departure_pct,
+    max_retest_age_minutes,
+):
+    """Persist the setup identity once; later UI changes cannot rewrite V1."""
+    defaults = {
+        "name": "Candidate V1",
+        "created_at_utc": CANDIDATE_V1_FREEZE_TS_UTC,
+        "side": "SHORT",
+        "swing_timeframe": "15m",
+        "swing_detector": str(detector),
+        "min_swing_prominence_pct": float(min_swing_prominence_pct),
+        "retest_tolerance_pct": float(retest_tolerance_pct),
+        "min_departure_pct": float(min_departure_pct),
+        "max_confirmation_to_retest_min": int(max_retest_age_minutes),
+        "aligned_rsi_min_tf": 1,
+        "opposing_htf_room_min_pct": 1.0,
+        "runner_threshold_pct": 2.0,
+        "runner_horizon_min": 180,
+        "notes": (
+            "Frozen after discovery. Driver filters are SHORT + aligned RSI "
+            "extreme on >=1 of 1m/5m/15m/1h + causal opposing 30m/1h/4h "
+            "room >=1%. No body, wick or volume filter."
+        ),
+    }
+
+    try:
+        if CANDIDATE_V1_CONFIG_FILE.exists():
+            loaded = json.loads(
+                CANDIDATE_V1_CONFIG_FILE.read_text(encoding="utf-8")
+            )
+            if isinstance(loaded, dict):
+                return loaded
+    except Exception:
+        pass
+
+    try:
+        CANDIDATE_V1_CONFIG_FILE.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        tmp_path = CANDIDATE_V1_CONFIG_FILE.with_suffix(".json.tmp")
+        tmp_path.write_text(
+            json.dumps(defaults, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        tmp_path.replace(CANDIDATE_V1_CONFIG_FILE)
+    except Exception:
+        # The monitor remains usable even if the filesystem is read-only.
+        pass
+
+    return defaults
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _candidate_v1_mae_before_target(
+    candidate_rows,
+    threshold_pct=2.0,
+    horizon_min=180,
+    candle_limit=5000,
+):
+    """Measure adverse excursion strictly before the target-hit candle.
+
+    For HIT rows the target candle itself is excluded because OHLC data cannot
+    prove whether its favorable or adverse extreme happened first.
+    For NO_HIT/PENDING rows MAE is measured over the available causal path,
+    capped at the fixed horizon.
+    """
+    if candidate_rows is None or candidate_rows.empty:
+        return pd.DataFrame()
+
+    required = {"symbol", "retest_timestamp", "retest_close", "signal"}
+    if not required.issubset(candidate_rows.columns):
+        return pd.DataFrame()
+
+    threshold_pct = float(threshold_pct)
+    horizon_min = int(horizon_min)
+    rows = []
+
+    for symbol, symbol_rows in candidate_rows.groupby("symbol", sort=False):
+        candles = load_volume_exhaustion_research_candles(
+            symbol=str(symbol),
+            timeframe="1m",
+            limit=int(candle_limit),
+        )
+        prepared = _prepare_confirmed_swing_retest_candles(candles)
+        if prepared.empty:
+            continue
+
+        timestamps = prepared["timestamp"].astype("int64").to_numpy()
+        highs = prepared["high"].astype(float).to_numpy()
+        lows = prepared["low"].astype(float).to_numpy()
+
+        segment_end = np.empty(len(timestamps), dtype=np.int64)
+        for idx in range(len(timestamps) - 1, -1, -1):
+            if (
+                idx == len(timestamps) - 1
+                or int(timestamps[idx + 1])
+                != int(timestamps[idx]) + 60_000
+            ):
+                segment_end[idx] = idx
+            else:
+                segment_end[idx] = segment_end[idx + 1]
+
+        for row_index, row in symbol_rows.iterrows():
+            try:
+                reaction_ts = int(row["retest_timestamp"])
+                baseline = float(row["retest_close"])
+                side = str(row["signal"]).upper()
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if baseline <= 0 or side not in {"LONG", "SHORT"}:
+                continue
+
+            next_ts = reaction_ts + 60_000
+            start_idx = int(
+                np.searchsorted(timestamps, next_ts, side="left")
+            )
+            if (
+                start_idx >= len(timestamps)
+                or int(timestamps[start_idx]) != next_ts
+            ):
+                continue
+
+            max_horizon_idx = start_idx + horizon_min - 1
+            end_idx = min(
+                int(segment_end[start_idx]),
+                int(max_horizon_idx),
+            )
+
+            if side == "SHORT":
+                target_price = baseline * (
+                    1.0 - threshold_pct / 100.0
+                )
+                hit_positions = np.flatnonzero(
+                    lows[start_idx : end_idx + 1] <= target_price
+                )
+            else:
+                target_price = baseline * (
+                    1.0 + threshold_pct / 100.0
+                )
+                hit_positions = np.flatnonzero(
+                    highs[start_idx : end_idx + 1] >= target_price
+                )
+
+            first_hit_idx = None
+            first_hit_min = np.nan
+            if len(hit_positions):
+                first_hit_idx = start_idx + int(hit_positions[0])
+                first_hit_min = (
+                    int(timestamps[first_hit_idx]) - reaction_ts
+                ) / 60_000.0
+
+            if first_hit_idx is not None:
+                adverse_end_idx = first_hit_idx - 1
+                mae_scope = "STRICT_BEFORE_HIT_CANDLE"
+            else:
+                adverse_end_idx = end_idx
+                mae_scope = "OBSERVED_TO_HORIZON_OR_GAP"
+
+            if adverse_end_idx < start_idx:
+                mae_pct = 0.0
+                observed_adverse_bars = 0
+            else:
+                if side == "SHORT":
+                    adverse_price = float(
+                        np.nanmax(
+                            highs[start_idx : adverse_end_idx + 1]
+                        )
+                    )
+                    mae_pct = max(
+                        0.0,
+                        (adverse_price / baseline - 1.0) * 100.0,
+                    )
+                else:
+                    adverse_price = float(
+                        np.nanmin(
+                            lows[start_idx : adverse_end_idx + 1]
+                        )
+                    )
+                    mae_pct = max(
+                        0.0,
+                        (1.0 - adverse_price / baseline) * 100.0,
+                    )
+                observed_adverse_bars = (
+                    adverse_end_idx - start_idx + 1
+                )
+
+            observed_total_bars = end_idx - start_idx + 1
+            rows.append({
+                "_row_index": row_index,
+                "candidate_v1_mae_before_target_pct": float(mae_pct),
+                "candidate_v1_mae_scope": mae_scope,
+                "candidate_v1_first_hit_min_path": first_hit_min,
+                "candidate_v1_observed_path_min": int(observed_total_bars),
+                "candidate_v1_adverse_bars": int(observed_adverse_bars),
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows).set_index("_row_index")
+
+
+def _candidate_v1_build_current_monitor(
+    retests_df,
+    config,
+):
+    """Build unique SHORT V1 reactions and their censor-aware 180m outcome."""
+    if retests_df is None or retests_df.empty:
+        return pd.DataFrame()
+
+    work = retests_df.copy()
+    status = (
+        work.get("status", pd.Series("", index=work.index))
+        .fillna("")
+        .astype(str)
+    )
+    signal = (
+        work.get("signal", pd.Series("", index=work.index))
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    work = work.loc[
+        status.eq("REACTION")
+        & signal.eq(str(config.get("side", "SHORT")).upper())
+    ].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    # One market reaction is one observation even if more than one structural
+    # swing maps to the same 1m REACTION candle.
+    duplicate_keys = ["symbol", "signal", "retest_timestamp"]
+    for key in duplicate_keys:
+        if key not in work.columns:
+            return pd.DataFrame()
+
+    trigger_counts = (
+        work.groupby(duplicate_keys, dropna=False)
+        .size()
+        .rename("triggering_swing_count")
+        .reset_index()
+    )
+    work = (
+        work.sort_values(
+            ["retest_timestamp", "symbol"],
+            ascending=[False, True],
+        )
+        .drop_duplicates(
+            subset=duplicate_keys,
+            keep="first",
+        )
+        .merge(
+            trigger_counts,
+            on=duplicate_keys,
+            how="left",
+        )
+    )
+
+    contextual = _build_reaction_run_driver_context(work)
+    if contextual.empty:
+        return pd.DataFrame()
+
+    room = pd.to_numeric(
+        contextual.get("nearest_opposing_room_pct"),
+        errors="coerce",
+    )
+    rsi_count = pd.to_numeric(
+        contextual.get("aligned_rsi_extreme_count"),
+        errors="coerce",
+    )
+    contextual = contextual.loc[
+        room.ge(float(config.get("opposing_htf_room_min_pct", 1.0)))
+        & rsi_count.ge(int(config.get("aligned_rsi_min_tf", 1)))
+    ].copy()
+    if contextual.empty:
+        return pd.DataFrame()
+
+    resolved, censored = _reaction_driver_fixed_horizon_cohort(
+        contextual,
+        threshold_pct=float(
+            config.get("runner_threshold_pct", 2.0)
+        ),
+        horizon_min=int(
+            config.get("runner_horizon_min", 180)
+        ),
+    )
+
+    parts = []
+    if not resolved.empty:
+        resolved = resolved.copy()
+        resolved["candidate_v1_outcome"] = np.where(
+            resolved["_big_run"].fillna(False).astype(bool),
+            "HIT",
+            "NO_HIT",
+        )
+        parts.append(resolved)
+
+    if not censored.empty:
+        censored = censored.copy()
+        censored["candidate_v1_outcome"] = "PENDING"
+        parts.append(censored)
+
+    if not parts:
+        return pd.DataFrame()
+
+    result = pd.concat(parts, axis=0, ignore_index=False)
+    result["candidate_v1_reaction_known_ts"] = (
+        pd.to_numeric(
+            result["retest_timestamp"],
+            errors="coerce",
+        )
+        + 60_000
+    )
+
+    freeze_ts_ms = int(
+        pd.Timestamp(
+            config.get(
+                "created_at_utc",
+                CANDIDATE_V1_FREEZE_TS_UTC,
+            )
+        ).timestamp()
+        * 1000
+    )
+    result["candidate_v1_cohort"] = np.where(
+        pd.to_numeric(
+            result["candidate_v1_reaction_known_ts"],
+            errors="coerce",
+        ).le(freeze_ts_ms),
+        "DISCOVERY",
+        "FORWARD",
+    )
+
+    aligned_tfs = []
+    for _, row in result.iterrows():
+        active = [
+            tf
+            for tf in ("1m", "5m", "15m", "1h")
+            if bool(row.get(f"aligned_rsi_extreme_{tf}", False))
+        ]
+        aligned_tfs.append(",".join(active) if active else "—")
+    result["candidate_v1_aligned_rsi_tfs"] = aligned_tfs
+
+    path_metrics = _candidate_v1_mae_before_target(
+        result,
+        threshold_pct=float(
+            config.get("runner_threshold_pct", 2.0)
+        ),
+        horizon_min=int(
+            config.get("runner_horizon_min", 180)
+        ),
+        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+    )
+    if path_metrics is not None and not path_metrics.empty:
+        common = result.index.intersection(path_metrics.index)
+        for column in path_metrics.columns:
+            result.loc[common, column] = path_metrics.loc[
+                common,
+                column,
+            ]
+
+    result["candidate_v1_event_key"] = (
+        result["symbol"].astype(str)
+        + "|"
+        + result["signal"].astype(str)
+        + "|"
+        + pd.to_numeric(
+            result["retest_timestamp"],
+            errors="coerce",
+        )
+        .fillna(-1)
+        .astype("int64")
+        .astype(str)
+    )
+
+    return result
+
+
+def _candidate_v1_persist_history(current):
+    """Append/update monitor rows so Discovery evidence does not roll away."""
+    if current is None or current.empty:
+        try:
+            if CANDIDATE_V1_HISTORY_FILE.exists():
+                return pd.read_csv(CANDIDATE_V1_HISTORY_FILE)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    persist_columns = [
+        "candidate_v1_event_key",
+        "candidate_v1_cohort",
+        "candidate_v1_outcome",
+        "symbol",
+        "signal",
+        "retest_timestamp",
+        "candidate_v1_reaction_known_ts",
+        "retest_close",
+        "nearest_opposing_room_pct",
+        "nearest_opposing_swing_tf",
+        "nearest_opposing_swing_price",
+        "aligned_rsi_extreme_count",
+        "candidate_v1_aligned_rsi_tfs",
+        "rsi14_1m",
+        "rsi14_5m",
+        "rsi14_15m",
+        "rsi14_1h",
+        "triggering_swing_count",
+        "_first_hit_min",
+        "reaction_mfe_180m_pct",
+        "candidate_v1_mae_before_target_pct",
+        "candidate_v1_mae_scope",
+        "candidate_v1_observed_path_min",
+    ]
+    persist_columns = [
+        c for c in persist_columns if c in current.columns
+    ]
+    latest = current[persist_columns].copy()
+
+    existing = pd.DataFrame()
+    try:
+        if CANDIDATE_V1_HISTORY_FILE.exists():
+            existing = pd.read_csv(CANDIDATE_V1_HISTORY_FILE)
+    except Exception:
+        existing = pd.DataFrame()
+
+    merged = pd.concat(
+        [existing, latest],
+        ignore_index=True,
+        sort=False,
+    )
+    if "candidate_v1_event_key" in merged.columns:
+        merged = merged.drop_duplicates(
+            subset=["candidate_v1_event_key"],
+            keep="last",
+        )
+
+    try:
+        CANDIDATE_V1_HISTORY_FILE.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        tmp_path = CANDIDATE_V1_HISTORY_FILE.with_suffix(".csv.tmp")
+        merged.to_csv(tmp_path, index=False)
+        tmp_path.replace(CANDIDATE_V1_HISTORY_FILE)
+    except Exception:
+        pass
+
+    return merged
+
+
+def render_candidate_v1_frozen_monitor(
+    retests_df,
+    config,
+):
+    """Top-of-tab frozen forward monitor for the discovered SHORT candidate."""
+    st.markdown("### 🧊 Candidate V1 · Frozen Monitor")
+    st.caption(
+        "Frozen research rule: SHORT 15m confirmed-swing REACTION + aligned "
+        "RSI14 extreme on >=1 TF + causal opposing HTF room >=1.00%. "
+        "Outcome = reaches +2.00% in <=180m. No body/wick/volume filter. "
+        "Discovery/Forward is split by the fixed freeze timestamp; rules are "
+        "not re-optimized as new events arrive."
+    )
+
+    config_cols = st.columns(5)
+    config_cols[0].metric(
+        "Frozen detector",
+        (
+            f"{config.get('swing_timeframe', '15m')} "
+            f"{config.get('swing_detector', '—')}"
+        ),
+    )
+    config_cols[1].metric(
+        "RSI condition",
+        f">={int(config.get('aligned_rsi_min_tf', 1))} TF",
+    )
+    config_cols[2].metric(
+        "HTF room",
+        f">={float(config.get('opposing_htf_room_min_pct', 1.0)):.2f}%",
+    )
+    config_cols[3].metric(
+        "Runner",
+        (
+            f"+{float(config.get('runner_threshold_pct', 2.0)):.2f}% "
+            f"/ {int(config.get('runner_horizon_min', 180))}m"
+        ),
+    )
+    freeze_local = pd.Timestamp(
+        config.get(
+            "created_at_utc",
+            CANDIDATE_V1_FREEZE_TS_UTC,
+        )
+    )
+    try:
+        freeze_local = freeze_local.tz_convert(TZ)
+        freeze_text = freeze_local.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        freeze_text = str(config.get("created_at_utc"))
+    config_cols[4].metric("Frozen at", freeze_text)
+
+    current = _candidate_v1_build_current_monitor(
+        retests_df=retests_df,
+        config=config,
+    )
+    history = _candidate_v1_persist_history(current)
+
+    if history is None or history.empty:
+        st.info(
+            "No Candidate V1 events are available yet under the frozen rule."
+        )
+        return
+
+    for column in [
+        "_first_hit_min",
+        "candidate_v1_mae_before_target_pct",
+        "reaction_mfe_180m_pct",
+        "nearest_opposing_room_pct",
+        "nearest_opposing_swing_price",
+        "aligned_rsi_extreme_count",
+        "triggering_swing_count",
+        "retest_timestamp",
+        "candidate_v1_reaction_known_ts",
+    ]:
+        if column in history.columns:
+            history[column] = pd.to_numeric(
+                history[column],
+                errors="coerce",
+            )
+
+    history["candidate_v1_outcome"] = (
+        history["candidate_v1_outcome"]
+        .fillna("PENDING")
+        .astype(str)
+    )
+    history["candidate_v1_cohort"] = (
+        history["candidate_v1_cohort"]
+        .fillna("DISCOVERY")
+        .astype(str)
+    )
+
+    def _cohort_stats(cohort_name):
+        subset = history.loc[
+            history["candidate_v1_cohort"].eq(cohort_name)
+        ].copy()
+        resolved = subset.loc[
+            subset["candidate_v1_outcome"].isin(["HIT", "NO_HIT"])
+        ]
+        hits = int(
+            resolved["candidate_v1_outcome"].eq("HIT").sum()
+        )
+        pending = int(
+            subset["candidate_v1_outcome"].eq("PENDING").sum()
+        )
+        rate = (
+            hits / len(resolved) * 100.0
+            if len(resolved)
+            else np.nan
+        )
+        return subset, resolved, hits, pending, rate
+
+    discovery, discovery_resolved, discovery_hits, discovery_pending, discovery_rate = (
+        _cohort_stats("DISCOVERY")
+    )
+    forward, forward_resolved, forward_hits, forward_pending, forward_rate = (
+        _cohort_stats("FORWARD")
+    )
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Discovery N", len(discovery))
+    m2.metric(
+        "Discovery resolved",
+        f"{discovery_hits}/{len(discovery_resolved)}",
+    )
+    m3.metric(
+        "Discovery hit rate",
+        f"{discovery_rate:.1f}%" if pd.notna(discovery_rate) else "—",
+    )
+    m4.metric("Forward N", len(forward))
+    m5.metric(
+        "Forward resolved",
+        f"{forward_hits}/{len(forward_resolved)}",
+    )
+    m6.metric(
+        "Forward hit rate",
+        f"{forward_rate:.1f}%" if pd.notna(forward_rate) else "—",
+        delta=(
+            f"{forward_pending} pending"
+            if forward_pending
+            else None
+        ),
+    )
+
+    st.caption(
+        "MAE-before-2% is strict: for HITs it stops BEFORE the 1m candle that "
+        "first touches +2%, avoiding unknown intrabar ordering. For NO_HITs it "
+        "uses the complete 180m path; PENDING rows use only the observed "
+        "contiguous path."
+    )
+
+    mae_rows = []
+    for cohort_name, subset in (
+        ("DISCOVERY", discovery),
+        ("FORWARD", forward),
+    ):
+        hits = subset.loc[
+            subset["candidate_v1_outcome"].eq("HIT")
+        ].copy()
+        mae = pd.to_numeric(
+            hits.get(
+                "candidate_v1_mae_before_target_pct",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        ).dropna()
+        first_hit = pd.to_numeric(
+            hits.get("_first_hit_min", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        mae_rows.append({
+            "Cohort": cohort_name,
+            "N candidates": int(len(subset)),
+            "Resolved": int(
+                subset["candidate_v1_outcome"]
+                .isin(["HIT", "NO_HIT"])
+                .sum()
+            ),
+            "Hits": int(
+                subset["candidate_v1_outcome"].eq("HIT").sum()
+            ),
+            "Pending": int(
+                subset["candidate_v1_outcome"].eq("PENDING").sum()
+            ),
+            "Hit rate %": (
+                round(
+                    subset["candidate_v1_outcome"].eq("HIT").sum()
+                    / max(
+                        int(
+                            subset["candidate_v1_outcome"]
+                            .isin(["HIT", "NO_HIT"])
+                            .sum()
+                        ),
+                        1,
+                    )
+                    * 100.0,
+                    2,
+                )
+                if int(
+                    subset["candidate_v1_outcome"]
+                    .isin(["HIT", "NO_HIT"])
+                    .sum()
+                )
+                else np.nan
+            ),
+            "Median MAE before +2% %": (
+                round(float(mae.median()), 4)
+                if not mae.empty
+                else np.nan
+            ),
+            "P90 MAE before +2% %": (
+                round(float(mae.quantile(0.90)), 4)
+                if not mae.empty
+                else np.nan
+            ),
+            "Median first-hit min": (
+                round(float(first_hit.median()), 1)
+                if not first_hit.empty
+                else np.nan
+            ),
+        })
+
+    st.dataframe(
+        pd.DataFrame(mae_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    display = history.copy()
+    if "candidate_v1_reaction_known_ts" in display.columns:
+        display["Reaction"] = (
+            pd.to_datetime(
+                display["candidate_v1_reaction_known_ts"],
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+            .dt.strftime("%Y-%m-%d %H:%M")
+        )
+    else:
+        display["Reaction"] = "—"
+
+    display_columns = [
+        "candidate_v1_cohort",
+        "candidate_v1_outcome",
+        "symbol",
+        "Reaction",
+        "nearest_opposing_room_pct",
+        "nearest_opposing_swing_tf",
+        "nearest_opposing_swing_price",
+        "aligned_rsi_extreme_count",
+        "candidate_v1_aligned_rsi_tfs",
+        "triggering_swing_count",
+        "_first_hit_min",
+        "candidate_v1_mae_before_target_pct",
+        "reaction_mfe_180m_pct",
+    ]
+    display_columns = [
+        c for c in display_columns if c in display.columns
+    ]
+    display = display[display_columns].copy()
+    display = display.rename(columns={
+        "candidate_v1_cohort": "Cohort",
+        "candidate_v1_outcome": "Outcome",
+        "symbol": "Symbol",
+        "nearest_opposing_room_pct": "HTF room %",
+        "nearest_opposing_swing_tf": "Opposing TF",
+        "nearest_opposing_swing_price": "Opposing price",
+        "aligned_rsi_extreme_count": "Aligned RSI TFs N",
+        "candidate_v1_aligned_rsi_tfs": "Aligned RSI TFs",
+        "triggering_swing_count": "Trigger swings",
+        "_first_hit_min": "First +2% min",
+        "candidate_v1_mae_before_target_pct": "MAE before +2% %",
+        "reaction_mfe_180m_pct": "MFE180 %",
+    })
+
+    if "Reaction" in display.columns:
+        display = display.sort_values(
+            "Reaction",
+            ascending=False,
+        )
+
+    tab_all, tab_discovery, tab_forward = st.tabs(
+        ["ALL", "DISCOVERY", "FORWARD"]
+    )
+    with tab_all:
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_discovery:
+        st.dataframe(
+            display.loc[
+                display["Cohort"].eq("DISCOVERY")
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    with tab_forward:
+        st.dataframe(
+            display.loc[
+                display["Cohort"].eq("FORWARD")
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def _reaction_driver_rsi_from_candles(
     candles,
     known_timestamp_ms,
@@ -26934,6 +27709,11 @@ if selected_section == "volume_exhaustion":
             )
             return
 
+        # Filled later, after the fixed Candidate V1 scan has enough inputs.
+        # The container itself is created here so the monitor stays at the
+        # very top of the Volume Exhaustion tab.
+        candidate_v1_top_slot = st.container()
+
         long_events = valid_events[
             valid_events["potential_side"].eq("LONG")
         ]
@@ -27354,6 +28134,102 @@ if selected_section == "volume_exhaustion":
             step=20,
             key="volume_exhaustion_candle_limit",
         )
+
+        # -----------------------------------------------------
+        # CANDIDATE V1 · FROZEN MONITOR
+        # Freeze the base 15m retest identity on first run, then ignore later
+        # UI edits for this monitor. The candidate filters themselves are
+        # permanently SHORT + RSI>=1 TF + opposing room>=1%.
+        # -----------------------------------------------------
+        candidate_v1_detector = swing_detector_windows.get(
+            "15m",
+            default_swing_detectors.get("15m", "3x3"),
+        )
+        candidate_v1_config = _candidate_v1_load_or_freeze_config(
+            detector=candidate_v1_detector,
+            min_swing_prominence_pct=float(min_swing_prominence_pct),
+            retest_tolerance_pct=float(retest_tolerance_pct),
+            min_departure_pct=float(min_retest_departure_pct),
+            max_retest_age_minutes=int(retest_max_age_minutes),
+        )
+
+        candidate_v1_symbols = tuple(
+            sorted(
+                events["symbol"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+        )
+
+        with candidate_v1_top_slot:
+            with st.spinner(
+                "Updating frozen Candidate V1 monitor..."
+            ):
+                candidate_v1_retests_df = (
+                    scan_confirmed_swing_retests_all_symbols(
+                        symbols=candidate_v1_symbols,
+                        swing_timeframes=(
+                            str(
+                                candidate_v1_config.get(
+                                    "swing_timeframe",
+                                    "15m",
+                                )
+                            ),
+                        ),
+                        swing_detector_items=(
+                            (
+                                str(
+                                    candidate_v1_config.get(
+                                        "swing_timeframe",
+                                        "15m",
+                                    )
+                                ),
+                                str(
+                                    candidate_v1_config.get(
+                                        "swing_detector",
+                                        candidate_v1_detector,
+                                    )
+                                ),
+                            ),
+                        ),
+                        min_swing_prominence_pct=float(
+                            candidate_v1_config.get(
+                                "min_swing_prominence_pct",
+                                min_swing_prominence_pct,
+                            )
+                        ),
+                        retest_tolerance_pct=float(
+                            candidate_v1_config.get(
+                                "retest_tolerance_pct",
+                                retest_tolerance_pct,
+                            )
+                        ),
+                        min_departure_pct=float(
+                            candidate_v1_config.get(
+                                "min_departure_pct",
+                                min_retest_departure_pct,
+                            )
+                        ),
+                        max_age_minutes=int(
+                            candidate_v1_config.get(
+                                "max_confirmation_to_retest_min",
+                                retest_max_age_minutes,
+                            )
+                        ),
+                        # Keep enough recent derived events to update pending
+                        # outcomes; persisted monitor history keeps older rows.
+                        max_retest_age_minutes=4320,
+                    )
+                )
+
+                render_candidate_v1_frozen_monitor(
+                    retests_df=candidate_v1_retests_df,
+                    config=candidate_v1_config,
+                )
+
+            st.markdown("---")
 
         candles = (
             geometry_scanner_data_service
