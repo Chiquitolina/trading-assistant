@@ -14314,6 +14314,23 @@ def _reaction_driver_tag_row(row):
     if pd.notna(nearest) and float(nearest) <= 0.25:
         tags.append("HTF_SWING<=0.25%")
 
+    opposing_room = pd.to_numeric(
+        row.get("nearest_opposing_room_pct"),
+        errors="coerce",
+    )
+    if pd.notna(opposing_room):
+        if float(opposing_room) >= 2.0:
+            tags.append("OPPOSING_ROOM>=2%")
+        elif float(opposing_room) >= 1.0:
+            tags.append("OPPOSING_ROOM>=1%")
+
+    reaction_range = pd.to_numeric(
+        row.get("reaction_range_pct"),
+        errors="coerce",
+    )
+    if pd.notna(reaction_range) and float(reaction_range) >= 0.35:
+        tags.append("REACTION_RANGE>=0.35%")
+
     rejection = pd.to_numeric(row.get("reaction_rejection_wick_share"), errors="coerce")
     if pd.notna(rejection) and float(rejection) >= 0.50:
         tags.append("REJECTION_WICK>=50%")
@@ -14578,11 +14595,241 @@ def _reaction_driver_first_hit_times(
     return pd.DataFrame(rows).set_index("_row_index")
 
 
+def _reaction_driver_fixed_horizon_cohort(
+    reactions,
+    threshold_pct,
+    horizon_min,
+):
+    """Resolve a fixed-horizon label without discarding early known winners.
+
+    Censor-aware rule:
+    - HIT: the threshold was reached on/before horizon_min. Once this happens
+      the positive label is known, even if the later 1m path becomes incomplete.
+    - NO_HIT: the full horizon is complete and the threshold was never reached.
+    - CENSORED: no hit is known yet and the full horizon is not available.
+
+    The REACTION candle itself is excluded because first-hit scanning starts on
+    the next consecutive 1m candle, matching reaction_mfe semantics.
+    """
+    if reactions is None or reactions.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    horizon_min = int(horizon_min)
+    threshold_pct = float(threshold_pct)
+    classified = reactions.copy()
+
+    first_hit = _reaction_driver_first_hit_times(
+        classified,
+        threshold_pct=threshold_pct,
+        candle_limit=max(2500, horizon_min + 600),
+    )
+    classified["_first_hit_min"] = np.nan
+    if first_hit is not None and not first_hit.empty:
+        common_index = classified.index.intersection(first_hit.index)
+        classified.loc[
+            common_index,
+            "_first_hit_min",
+        ] = pd.to_numeric(
+            first_hit.loc[common_index, "first_hit_min"],
+            errors="coerce",
+        )
+
+    complete_col = f"reaction_complete_{horizon_min}m"
+    mfe_col = f"reaction_mfe_{horizon_min}m_pct"
+
+    if complete_col in classified.columns:
+        complete = classified[complete_col].fillna(False).astype(bool)
+    elif mfe_col in classified.columns:
+        complete = pd.to_numeric(
+            classified[mfe_col],
+            errors="coerce",
+        ).notna()
+    else:
+        complete = pd.Series(False, index=classified.index)
+
+    first_hit_min = pd.to_numeric(
+        classified["_first_hit_min"],
+        errors="coerce",
+    )
+    hit = first_hit_min.le(float(horizon_min))
+    no_hit = complete & ~hit
+    resolved = hit | no_hit
+
+    classified["_fixed_horizon_status"] = np.select(
+        [hit, no_hit],
+        [
+            f"HIT<={horizon_min}m",
+            f"NO_HIT_{horizon_min}m",
+        ],
+        default="CENSORED",
+    )
+    classified["_big_run"] = hit.astype(bool)
+    classified["_fixed_horizon_complete"] = complete.astype(bool)
+    classified["_fixed_horizon_resolved"] = resolved.astype(bool)
+
+    # Descriptive magnitude only. For an early hit whose later path is
+    # incomplete, available-path MFE is used solely as a display value; it is
+    # NEVER used to decide the fixed-horizon label.
+    fixed_mfe = pd.to_numeric(
+        classified.get(
+            mfe_col,
+            pd.Series(np.nan, index=classified.index),
+        ),
+        errors="coerce",
+    )
+    available_mfe = pd.to_numeric(
+        classified.get(
+            "reaction_mfe_pct",
+            pd.Series(np.nan, index=classified.index),
+        ),
+        errors="coerce",
+    )
+    classified["_resolved_run_pct"] = fixed_mfe
+    fallback_mask = hit & classified["_resolved_run_pct"].isna()
+    classified.loc[
+        fallback_mask,
+        "_resolved_run_pct",
+    ] = available_mfe.loc[fallback_mask]
+
+    return (
+        classified.loc[resolved].copy(),
+        classified.loc[~resolved].copy(),
+    )
+
+
+def _reaction_driver_bucket_table(
+    frame,
+    bucket_series,
+    bucket_order,
+    bucket_label,
+):
+    """Summarize fixed labels by a pre-entry causal bucket."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    work = frame.copy()
+    work["_driver_bucket"] = bucket_series.reindex(work.index)
+    work = work.loc[work["_driver_bucket"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    baseline = float(work["_big_run"].fillna(False).astype(bool).mean())
+    rows = []
+    for bucket in bucket_order:
+        subset = work.loc[
+            work["_driver_bucket"].astype(str).eq(str(bucket))
+        ].copy()
+        if subset.empty:
+            continue
+        n = len(subset)
+        hits = int(subset["_big_run"].fillna(False).astype(bool).sum())
+        hit_rate = hits / n if n else np.nan
+        rows.append({
+            bucket_label: str(bucket),
+            "N": int(n),
+            "Hits": int(hits),
+            "Hit rate %": round(float(hit_rate * 100.0), 2),
+            "Lift vs cohort": (
+                round(float(hit_rate / baseline), 3)
+                if baseline > 0
+                else np.nan
+            ),
+            "% of all hits": (
+                round(
+                    hits
+                    / max(
+                        int(
+                            work["_big_run"]
+                            .fillna(False)
+                            .astype(bool)
+                            .sum()
+                        ),
+                        1,
+                    )
+                    * 100.0,
+                    2,
+                )
+            ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _reaction_driver_geometry_tables(eligible):
+    """Render coarse, causal REACTION-candle geometry buckets."""
+    if eligible is None or eligible.empty:
+        return
+
+    st.markdown("##### Reaction candle geometry · resolved outcome buckets")
+    st.caption(
+        "All geometry is known when the REACTION 1m candle closes. Hit rate "
+        "uses the currently selected run label. Buckets are intentionally "
+        "coarse and descriptive; they are not optimized entry rules."
+    )
+
+    specs = [
+        (
+            "reaction_range_pct",
+            [-np.inf, 0.20, 0.35, 0.50, 0.75, np.inf],
+            ["<0.20%", "0.20–0.35%", "0.35–0.50%", "0.50–0.75%", ">=0.75%"],
+            "Reaction range",
+        ),
+        (
+            "reaction_body_pct",
+            [-np.inf, 0.10, 0.20, 0.35, 0.50, np.inf],
+            ["<0.10%", "0.10–0.20%", "0.20–0.35%", "0.35–0.50%", ">=0.50%"],
+            "Reaction body",
+        ),
+        (
+            "reaction_rejection_wick_share",
+            [-np.inf, 0.25, 0.50, 0.75, np.inf],
+            ["<25%", "25–50%", "50–75%", ">=75%"],
+            "Rejection wick share",
+        ),
+        (
+            "reaction_close_strength",
+            [-np.inf, 0.50, 0.70, 0.85, np.inf],
+            ["<0.50", "0.50–0.70", "0.70–0.85", ">=0.85"],
+            "Directional close strength",
+        ),
+    ]
+
+    all_rows = []
+    for column, bins, labels, feature_label in specs:
+        if column not in eligible.columns:
+            continue
+        values = pd.to_numeric(eligible[column], errors="coerce")
+        buckets = pd.cut(
+            values,
+            bins=bins,
+            labels=labels,
+            right=False,
+            include_lowest=True,
+        )
+        table = _reaction_driver_bucket_table(
+            eligible,
+            buckets,
+            labels,
+            "Bucket",
+        )
+        if table.empty:
+            continue
+        table.insert(0, "Geometry feature", feature_label)
+        all_rows.append(table)
+
+    if all_rows:
+        st.dataframe(
+            pd.concat(all_rows, ignore_index=True),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def _render_reaction_horizon_ladder(
     reactions,
     run_threshold,
 ):
-    """Compare fixed horizons and first-hit timing for the selected threshold."""
+    """Compare fixed horizons, same-180 cohort, and censor-aware 180 labels."""
     if reactions is None or reactions.empty:
         return
 
@@ -14591,10 +14838,11 @@ def _render_reaction_horizon_ladder(
 
     st.markdown("##### ⏱️ Horizon ladder · when does the run actually appear?")
     st.caption(
-        "Fixed-horizon rows use only REACTIONs with a complete contiguous 1m "
-        "path for that horizon. The same-360m cohort freezes the exact same "
-        "events across 60/120/180/360m, so changes there are pure time effects. "
-        "First-hit timing starts on the next 1m candle after REACTION is known."
+        "A uses traditional complete-path cohorts. B freezes the 180m-complete "
+        "cohort across 60/120/180m so changes are pure time effects. C measures "
+        "the exact first causal threshold hit. D is the censor-aware 180m label: "
+        "an early HIT is resolved immediately; a NO-HIT requires the full 180m; "
+        "unfinished no-hit events remain CENSORED."
     )
 
     ladder_rows = []
@@ -14630,26 +14878,28 @@ def _render_reaction_horizon_ladder(
             hide_index=True,
         )
 
-    # Freeze a 360m-complete cohort so every horizon uses identical events.
-    cohort_360 = pd.DataFrame()
-    if "reaction_complete_360m" in reactions.columns:
-        cohort_360 = reactions.loc[
-            reactions["reaction_complete_360m"].fillna(False).astype(bool)
+    # Same 180m-complete cohort: unlike the old 360m cohort this has enough N
+    # to be useful, and it matches the research TIME_EXIT we care about.
+    cohort_180 = pd.DataFrame()
+    if "reaction_complete_180m" in reactions.columns:
+        cohort_180 = reactions.loc[
+            reactions["reaction_complete_180m"].fillna(False).astype(bool)
         ].copy()
-    elif "reaction_mfe_360m_pct" in reactions.columns:
-        cohort_360 = reactions.dropna(
-            subset=["reaction_mfe_360m_pct"]
+    elif "reaction_mfe_180m_pct" in reactions.columns:
+        cohort_180 = reactions.dropna(
+            subset=["reaction_mfe_180m_pct"]
         ).copy()
 
-    if not cohort_360.empty:
+    if not cohort_180.empty:
         same_rows = []
-        cohort_n = len(cohort_360)
-        for horizon in horizons:
+        cohort_n = len(cohort_180)
+        for horizon in (60, 120, 180):
             mfe_col = f"reaction_mfe_{horizon}m_pct"
-            if mfe_col not in cohort_360.columns:
+            if mfe_col not in cohort_180.columns:
                 continue
             values = pd.to_numeric(
-                cohort_360[mfe_col], errors="coerce"
+                cohort_180[mfe_col],
+                errors="coerce",
             )
             if values.isna().any():
                 continue
@@ -14659,13 +14909,14 @@ def _render_reaction_horizon_ladder(
                 "N same cohort": cohort_n,
                 f">={threshold:.2f}% hits": hits,
                 "Cumulative hit rate %": round(
-                    hits / cohort_n * 100.0, 2
+                    hits / cohort_n * 100.0,
+                    2,
                 ),
                 "Median MFE %": round(float(values.median()), 4),
             })
 
         if same_rows:
-            st.markdown("###### B. Same 360m-complete cohort · pure time effect")
+            st.markdown("###### B. Same 180m-complete cohort · pure time effect")
             st.dataframe(
                 pd.DataFrame(same_rows),
                 use_container_width=True,
@@ -14675,7 +14926,6 @@ def _render_reaction_horizon_ladder(
                 f"Same-cohort invariant: N={cohort_n} on every row."
             )
 
-    # Exact first-hit timing among events that eventually reached the threshold.
     eventual = reactions.loc[
         pd.to_numeric(
             reactions.get("reaction_mfe_pct"),
@@ -14716,7 +14966,8 @@ def _render_reaction_horizon_ladder(
                         "First hit of threshold": label,
                         "N": n,
                         "% eventual hits": round(
-                            n / len(times) * 100.0, 2
+                            n / len(times) * 100.0,
+                            2,
                         ),
                     })
 
@@ -14734,8 +14985,33 @@ def _render_reaction_horizon_ladder(
                     hide_index=True,
                 )
 
+    resolved_180, censored_180 = _reaction_driver_fixed_horizon_cohort(
+        reactions,
+        threshold_pct=threshold,
+        horizon_min=180,
+    )
+    if not resolved_180.empty:
+        hits_180 = int(resolved_180["_big_run"].sum())
+        no_hits_180 = int(len(resolved_180) - hits_180)
+        st.markdown("###### D. Censor-aware 180m label")
+        d1, d2, d3, d4, d5 = st.columns(5)
+        d1.metric("Resolved", len(resolved_180))
+        d2.metric(f"HIT >={threshold:.2f}%", hits_180)
+        d3.metric("NO HIT by 180m", no_hits_180)
+        d4.metric("CENSORED", len(censored_180))
+        d5.metric(
+            "Resolved hit rate",
+            f"{hits_180 / len(resolved_180) * 100.0:.1f}%",
+        )
+        st.caption(
+            "Positive labels do NOT need 180 future candles once the threshold "
+            "has already been hit. Negative labels DO require a complete 180m "
+            "contiguous path. Censored rows are excluded from driver statistics."
+        )
+
+
 def render_confirmed_swing_reaction_run_driver_lab(view):
-    """Classify >X% REACTION runs using only information known at REACTION close."""
+    """Classify big REACTION runs using only information known at REACTION close."""
     if view is None or view.empty:
         return
 
@@ -14750,12 +15026,10 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
 
     st.markdown("#### 🔬 Big REACTION run driver lab")
     st.caption(
-        "Goal: explain what was already visible when REACTION became known, "
-        "then compare >threshold runs against the other REACTION events. "
-        "Driver features never use candles after the REACTION close. The run "
-        "itself is the future label. Use fixed 60m mode for the cleanest "
-        "predictive comparison; Available-path mode matches the +run labels in "
-        "the inspector but has a variable future horizon."
+        "Goal: explain what was already visible when REACTION became known. "
+        "For Fixed horizons the label is censor-aware: an early threshold HIT "
+        "is resolved immediately, while a NO-HIT requires the full selected "
+        "horizon. Driver features never use candles after the REACTION close."
     )
 
     c1, c2, c3 = st.columns(3)
@@ -14778,7 +15052,7 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
                 "Fixed 180m",
                 "Fixed 360m",
             ],
-            index=0,
+            index=3,
             key="reaction_run_driver_mode",
         )
     with c3:
@@ -14821,24 +15095,23 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
                 errors="coerce",
             )
 
+    censored = pd.DataFrame()
+    fixed_horizon = None
+
     if run_mode.startswith("Fixed "):
         fixed_horizon = int(
             run_mode.replace("Fixed ", "").replace("m", "")
         )
-        target_column = f"reaction_mfe_{fixed_horizon}m_pct"
-        complete_column = f"reaction_complete_{fixed_horizon}m"
-        if target_column not in reactions.columns:
-            st.info(
-                f"No {fixed_horizon}m reaction MFE field is available yet."
-            )
-            return
-        if complete_column in reactions.columns:
-            eligible = reactions.loc[
-                reactions[complete_column].fillna(False).astype(bool)
-            ].dropna(subset=[target_column]).copy()
-        else:
-            eligible = reactions.dropna(subset=[target_column]).copy()
-        horizon_label = f"MFE{fixed_horizon}"
+        eligible, censored = _reaction_driver_fixed_horizon_cohort(
+            reactions,
+            threshold_pct=float(run_threshold),
+            horizon_min=fixed_horizon,
+        )
+        target_column = "_resolved_run_pct"
+        horizon_label = (
+            f"censor-aware HIT >= {float(run_threshold):.2f}% "
+            f"within {fixed_horizon}m"
+        )
     else:
         target_column = "reaction_mfe_pct"
         if "reaction_observed_min" not in reactions.columns:
@@ -14846,34 +15119,60 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
         eligible = reactions.loc[
             reactions["reaction_observed_min"].ge(float(min_observed))
         ].dropna(subset=[target_column]).copy()
-        horizon_label = f"available-path MFE (>= {int(min_observed)}m observed)"
+        eligible["_big_run"] = eligible[target_column].ge(
+            float(run_threshold)
+        )
+        eligible["_first_hit_min"] = np.nan
+        horizon_label = (
+            f"available-path MFE (>= {int(min_observed)}m observed)"
+        )
 
     if eligible.empty:
-        st.info("No REACTION events have enough future path for this study.")
+        st.info("No REACTION events have a resolved label for this study.")
         return
 
-    eligible["_big_run"] = eligible[target_column].ge(float(run_threshold))
+    eligible["_big_run"] = eligible["_big_run"].fillna(False).astype(bool)
     big = eligible.loc[eligible["_big_run"]].copy()
     other = eligible.loc[~eligible["_big_run"]].copy()
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Eligible REACTIONs", len(eligible))
-    k2.metric(f">={float(run_threshold):.2f}% runs", len(big))
-    k3.metric(
-        "Big-run rate",
-        f"{(len(big) / len(eligible) * 100.0):.1f}%",
-    )
-    k4.metric(
-        "Median big run",
-        (
-            f"{float(big[target_column].median()):.2f}%"
-            if not big.empty
-            else "—"
-        ),
-    )
+    if fixed_horizon is not None:
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("Resolved REACTIONs", len(eligible))
+        k2.metric(f">={float(run_threshold):.2f}% hits", len(big))
+        k3.metric("NO HIT", len(other))
+        k4.metric("CENSORED", len(censored))
+        k5.metric(
+            "Resolved hit rate",
+            f"{len(big) / len(eligible) * 100.0:.1f}%",
+        )
+        hit_times = pd.to_numeric(
+            big.get("_first_hit_min"),
+            errors="coerce",
+        ).dropna()
+        k6.metric(
+            "Median first hit",
+            f"{float(hit_times.median()):.0f}m" if not hit_times.empty else "—",
+        )
+    else:
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Eligible REACTIONs", len(eligible))
+        k2.metric(f">={float(run_threshold):.2f}% runs", len(big))
+        k3.metric(
+            "Big-run rate",
+            f"{len(big) / len(eligible) * 100.0:.1f}%",
+        )
+        k4.metric(
+            "Median big run",
+            (
+                f"{float(big[target_column].median()):.2f}%"
+                if not big.empty
+                else "—"
+            ),
+        )
+
     st.caption(
-        f"Current label: {horizon_label}. Big-run threshold: "
-        f">= {float(run_threshold):.2f}%."
+        f"Current label: {horizon_label}. Censored rows never enter the "
+        "big-vs-control driver comparison."
     )
 
     _render_reaction_horizon_ladder(
@@ -14882,7 +15181,7 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
     )
 
     if big.empty:
-        st.info("No runs reach the selected threshold in the current window.")
+        st.info("No runs reach the selected threshold in the resolved cohort.")
         return
 
     # Immediate causal features already attached to the REACTION rows.
@@ -14932,13 +15231,15 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
             hide_index=True,
         )
 
+    _reaction_driver_geometry_tables(eligible)
+
     st.markdown("##### Multi-timeframe context")
     st.caption(
-        "Optional heavier scan. RSI(14), relative volume and 30m/1h/4h swings "
-        "are reconstructed as-of the REACTION close. A higher-TF swing only "
-        "counts if its 5x5 confirmation candle had already closed; future "
-        "pivots are excluded. 15m is not counted as higher-TF confluence because "
-        "the setup itself is built from a 15m swing."
+        "RSI(14), relative volume and 30m/1h/4h swings are reconstructed as-of "
+        "the REACTION close. A higher-TF swing only counts if its 5x5 "
+        "confirmation candle had already closed. Opposing HTF room means the "
+        "distance, in the trade direction, to the nearest already-confirmed "
+        "opposite-side 30m/1h/4h swing."
     )
     compute_context = st.checkbox(
         "Compute causal RSI + higher-TF swing/volume context",
@@ -14946,260 +15247,378 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
         key="reaction_run_driver_compute_context",
     )
 
-    if compute_context:
-        with st.spinner("Building causal context for REACTION events..."):
-            contextual = _build_reaction_run_driver_context(eligible)
+    if not compute_context:
+        return
 
-        if contextual.empty:
-            st.info("Could not build multi-timeframe context for this cohort.")
-            return
+    with st.spinner("Building causal context for resolved REACTION events..."):
+        contextual = _build_reaction_run_driver_context(eligible)
 
-        contextual["_big_run"] = pd.to_numeric(
-            contextual[target_column],
-            errors="coerce",
-        ).ge(float(run_threshold))
-        big_ctx = contextual.loc[contextual["_big_run"]].copy()
-        other_ctx = contextual.loc[~contextual["_big_run"]].copy()
+    if contextual.empty:
+        st.info("Could not build multi-timeframe context for this cohort.")
+        return
 
-        def _flag_pct(frame, mask):
-            if frame.empty:
-                return np.nan
-            values = mask.loc[frame.index].fillna(False).astype(bool)
-            return float(values.mean() * 100.0)
+    # Preserve the censor-aware label from eligible. Do not rebuild it from MFE.
+    contextual["_big_run"] = contextual["_big_run"].fillna(False).astype(bool)
+    big_ctx = contextual.loc[contextual["_big_run"]].copy()
+    other_ctx = contextual.loc[~contextual["_big_run"]].copy()
 
-        flag_specs = [
-            (
-                "Aligned RSI extreme on >=1 TF",
-                contextual["aligned_rsi_extreme_count"].ge(1),
-            ),
-            (
-                "Aligned RSI extreme on >=2 TF",
-                contextual["aligned_rsi_extreme_count"].ge(2),
-            ),
-            (
-                "30m/1h/4h same-side swing <=0.25%",
-                contextual["nearest_htf_same_swing_pct"].le(0.25),
-            ),
-            (
-                "30m/1h/4h same-side swing <=0.50%",
-                contextual["nearest_htf_same_swing_pct"].le(0.50),
-            ),
-            (
-                "HTF confluence on >=2 TF (<=0.50%)",
-                contextual["htf_confluence_count_0_50"].ge(2),
-            ),
-            (
-                "Reaction 1m rel volume >=2x",
-                pd.to_numeric(
-                    contextual.get("reaction_relative_volume_30"),
-                    errors="coerce",
-                ).ge(2.0),
-            ),
-            (
-                "Last closed 5m rel volume >=1.5x",
-                pd.to_numeric(
-                    contextual.get("rel_volume_5m"),
-                    errors="coerce",
-                ).ge(1.5),
-            ),
-            (
-                "Last closed 15m rel volume >=1.5x",
-                pd.to_numeric(
-                    contextual.get("rel_volume_15m"),
-                    errors="coerce",
-                ).ge(1.5),
-            ),
-        ]
+    def _flag_pct(frame, mask):
+        if frame.empty:
+            return np.nan
+        values = mask.loc[frame.index].fillna(False).astype(bool)
+        return float(values.mean() * 100.0)
 
-        enrichment_rows = []
-        for label, mask in flag_specs:
-            big_pct = _flag_pct(big_ctx, mask)
-            other_pct = _flag_pct(other_ctx, mask)
-            lift = (
-                big_pct / other_pct
-                if pd.notna(big_pct)
-                and pd.notna(other_pct)
-                and other_pct > 0
-                else np.nan
-            )
-            enrichment_rows.append({
-                "Causal condition": label,
-                f"% >= {float(run_threshold):.2f}% run": (
-                    round(big_pct, 2) if pd.notna(big_pct) else np.nan
-                ),
-                "% other REACTION": (
-                    round(other_pct, 2) if pd.notna(other_pct) else np.nan
-                ),
-                "Enrichment lift": (
-                    round(float(lift), 3) if pd.notna(lift) else np.nan
-                ),
-            })
+    opposing_room = pd.to_numeric(
+        contextual.get("nearest_opposing_room_pct"),
+        errors="coerce",
+    )
 
-        st.markdown("##### Enrichment screen · what appears more often in big runs?")
-        st.caption(
-            "Lift >1 means the condition is more common in >=threshold runs; "
-            "this is descriptive discovery, not yet an entry filter."
+    flag_specs = [
+        (
+            "Aligned RSI extreme on >=1 TF",
+            contextual["aligned_rsi_extreme_count"].ge(1),
+        ),
+        (
+            "Aligned RSI extreme on >=2 TF",
+            contextual["aligned_rsi_extreme_count"].ge(2),
+        ),
+        (
+            "Aligned RSI extreme on 1m",
+            contextual["aligned_rsi_extreme_1m"].fillna(False).astype(bool),
+        ),
+        (
+            "Aligned RSI extreme on 5m",
+            contextual["aligned_rsi_extreme_5m"].fillna(False).astype(bool),
+        ),
+        (
+            "Aligned RSI extreme on 15m",
+            contextual["aligned_rsi_extreme_15m"].fillna(False).astype(bool),
+        ),
+        (
+            "Aligned RSI extreme on 1h",
+            contextual["aligned_rsi_extreme_1h"].fillna(False).astype(bool),
+        ),
+        (
+            "Opposing HTF room >=0.50%",
+            opposing_room.ge(0.50) & opposing_room.notna(),
+        ),
+        (
+            "Opposing HTF room >=1.00%",
+            opposing_room.ge(1.00) & opposing_room.notna(),
+        ),
+        (
+            "Opposing HTF room >=2.00%",
+            opposing_room.ge(2.00) & opposing_room.notna(),
+        ),
+        (
+            "Reaction range >=0.35%",
+            pd.to_numeric(
+                contextual.get("reaction_range_pct"),
+                errors="coerce",
+            ).ge(0.35),
+        ),
+        (
+            "Reaction range >=0.50%",
+            pd.to_numeric(
+                contextual.get("reaction_range_pct"),
+                errors="coerce",
+            ).ge(0.50),
+        ),
+        (
+            "Rejection wick >=50%",
+            pd.to_numeric(
+                contextual.get("reaction_rejection_wick_share"),
+                errors="coerce",
+            ).ge(0.50),
+        ),
+        (
+            "Directional close strength >=0.70",
+            pd.to_numeric(
+                contextual.get("reaction_close_strength"),
+                errors="coerce",
+            ).ge(0.70),
+        ),
+        (
+            "Reaction 1m rel volume >=2x",
+            pd.to_numeric(
+                contextual.get("reaction_relative_volume_30"),
+                errors="coerce",
+            ).ge(2.0),
+        ),
+    ]
+
+    enrichment_rows = []
+    for label, mask in flag_specs:
+        big_pct = _flag_pct(big_ctx, mask)
+        other_pct = _flag_pct(other_ctx, mask)
+        lift = (
+            big_pct / other_pct
+            if pd.notna(big_pct)
+            and pd.notna(other_pct)
+            and other_pct > 0
+            else np.nan
         )
+        enrichment_rows.append({
+            "Causal condition": label,
+            f"% >= {float(run_threshold):.2f}% run": (
+                round(big_pct, 2) if pd.notna(big_pct) else np.nan
+            ),
+            "% control": (
+                round(other_pct, 2) if pd.notna(other_pct) else np.nan
+            ),
+            "Enrichment lift": (
+                round(float(lift), 3) if pd.notna(lift) else np.nan
+            ),
+        })
+
+    st.markdown("##### Enrichment screen · candidate drivers")
+    st.caption(
+        "Lift >1 means the condition is more common in resolved >=threshold "
+        "runs than in resolved controls. This is discovery only, not a filter."
+    )
+    st.dataframe(
+        pd.DataFrame(enrichment_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    contextual_feature_specs = [
+        ("rsi14_1m", "RSI14 1m"),
+        ("rsi14_5m", "RSI14 5m"),
+        ("rsi14_15m", "RSI14 15m"),
+        ("rsi14_1h", "RSI14 1h"),
+        ("nearest_opposing_room_pct", "Nearest opposing HTF room %"),
+        ("aligned_rsi_extreme_count", "Aligned RSI extreme TF count"),
+        ("reaction_range_pct", "Reaction range %"),
+        ("reaction_body_pct", "Reaction body %"),
+        ("reaction_rejection_wick_share", "Rejection wick share"),
+        ("reaction_close_strength", "Directional close strength"),
+        ("nearest_htf_same_swing_pct", "Nearest same-side HTF swing %"),
+        ("rel_volume_5m", "Rel volume 5m"),
+        ("rel_volume_15m", "Rel volume 15m"),
+        ("rel_volume_1h", "Rel volume 1h"),
+    ]
+
+    context_compare_rows = []
+    for column, label in contextual_feature_specs:
+        if column not in contextual.columns:
+            continue
+        b = pd.to_numeric(big_ctx[column], errors="coerce").dropna()
+        o = pd.to_numeric(other_ctx[column], errors="coerce").dropna()
+        if b.empty or o.empty:
+            continue
+        context_compare_rows.append({
+            "Context feature": label,
+            "N big": len(b),
+            "Median >=run": round(float(b.median()), 4),
+            "N control": len(o),
+            "Median control": round(float(o.median()), 4),
+            "Median delta": round(float(b.median() - o.median()), 4),
+        })
+
+    if context_compare_rows:
+        st.markdown("##### Multi-TF medians · big run vs control")
         st.dataframe(
-            pd.DataFrame(enrichment_rows),
+            pd.DataFrame(context_compare_rows),
             use_container_width=True,
             hide_index=True,
         )
 
-        contextual_feature_specs = [
-            ("rsi14_1m", "RSI14 1m"),
-            ("rsi14_5m", "RSI14 5m"),
-            ("rsi14_15m", "RSI14 15m"),
-            ("rsi14_1h", "RSI14 1h"),
-            ("rel_volume_5m", "Rel volume 5m"),
-            ("rel_volume_15m", "Rel volume 15m"),
-            ("rel_volume_1h", "Rel volume 1h"),
-            ("nearest_htf_same_swing_pct", "Nearest same-side HTF swing %"),
-            ("nearest_opposing_room_pct", "Nearest opposing HTF room %"),
-            ("aligned_rsi_extreme_count", "Aligned RSI extreme TF count"),
-            ("htf_confluence_count_0_50", "HTF swing confluence count"),
-        ]
+    # Opposing-room buckets. Missing room is kept separate: no already-known
+    # opposing swing can itself be informative and must not be silently treated
+    # as infinite room.
+    room_labels = [
+        "<0.25%",
+        "0.25–0.50%",
+        "0.50–1.00%",
+        "1.00–2.00%",
+        ">=2.00%",
+        "NO KNOWN OPPOSING SWING",
+    ]
+    room_bucket = pd.Series(
+        "NO KNOWN OPPOSING SWING",
+        index=contextual.index,
+        dtype="object",
+    )
+    known_room = opposing_room.notna()
+    room_bucket.loc[known_room] = pd.cut(
+        opposing_room.loc[known_room],
+        bins=[-np.inf, 0.25, 0.50, 1.00, 2.00, np.inf],
+        labels=room_labels[:-1],
+        right=False,
+        include_lowest=True,
+    ).astype(str)
+    room_table = _reaction_driver_bucket_table(
+        contextual,
+        room_bucket,
+        room_labels,
+        "Opposing HTF room",
+    )
+    if not room_table.empty:
+        st.markdown("##### Opposing HTF room · resolved hit rate")
+        st.caption(
+            "Room is measured in the trade direction to the nearest already-"
+            "confirmed opposing 30m/1h/4h swing. Missing is shown separately."
+        )
+        st.dataframe(
+            room_table,
+            use_container_width=True,
+            hide_index=True,
+        )
 
-        context_compare_rows = []
-        for column, label in contextual_feature_specs:
-            if column not in contextual.columns:
-                continue
-            b = pd.to_numeric(big_ctx[column], errors="coerce").dropna()
-            o = pd.to_numeric(other_ctx[column], errors="coerce").dropna()
-            if b.empty or o.empty:
-                continue
-            context_compare_rows.append({
-                "Context feature": label,
-                "N big": len(b),
-                "Median >=run": round(float(b.median()), 4),
-                "N other": len(o),
-                "Median other": round(float(o.median()), 4),
-                "Median delta": round(float(b.median() - o.median()), 4),
-            })
+    rsi_labels = ["0 TF", "1 TF", "2 TF", "3 TF", "4 TF"]
+    rsi_bucket = (
+        pd.to_numeric(
+            contextual["aligned_rsi_extreme_count"],
+            errors="coerce",
+        )
+        .fillna(0)
+        .clip(0, 4)
+        .astype(int)
+        .map({i: f"{i} TF" for i in range(5)})
+    )
+    rsi_table = _reaction_driver_bucket_table(
+        contextual,
+        rsi_bucket,
+        rsi_labels,
+        "Aligned RSI extremes",
+    )
+    if not rsi_table.empty:
+        st.markdown("##### Aligned RSI score · resolved hit rate")
+        st.caption(
+            "Aligned extreme = RSI14 <=30 for LONG or >=70 for SHORT, known at "
+            "REACTION close, across 1m/5m/15m/1h."
+        )
+        st.dataframe(
+            rsi_table,
+            use_container_width=True,
+            hide_index=True,
+        )
 
-        if context_compare_rows:
-            st.markdown("##### Multi-TF medians · big run vs control")
-            st.dataframe(
-                pd.DataFrame(context_compare_rows),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        top_columns = [
+    top_columns = [
+        "symbol",
+        "signal",
+        "retest_time",
+        "_first_hit_min",
+        "reaction_mfe_pct",
+        "run_driver_tags",
+        "rsi14_1m",
+        "rsi14_5m",
+        "rsi14_15m",
+        "rsi14_1h",
+        "aligned_rsi_extreme_count",
+        "nearest_opposing_room_pct",
+        "opposing_room_30m_pct",
+        "opposing_room_1h_pct",
+        "opposing_room_4h_pct",
+        "reaction_range_pct",
+        "reaction_body_pct",
+        "reaction_rejection_wick_share",
+        "reaction_close_strength",
+        "reaction_relative_volume_30",
+    ]
+    top_columns = [c for c in top_columns if c in big_ctx.columns]
+    top_runs = (
+        big_ctx.sort_values(
+            "_first_hit_min",
+            ascending=True,
+            na_position="last",
+        )
+        [top_columns]
+        .copy()
+    )
+    for column in top_runs.columns:
+        if column in {
             "symbol",
             "signal",
             "retest_time",
-            target_column,
             "run_driver_tags",
-            "reaction_relative_volume_30",
-            "rsi14_1m",
-            "rsi14_5m",
-            "rsi14_15m",
-            "rsi14_1h",
-            "rel_volume_5m",
-            "rel_volume_15m",
-            "rel_volume_1h",
-            "same_swing_dist_30m_pct",
-            "same_swing_dist_1h_pct",
-            "same_swing_dist_4h_pct",
-            "nearest_htf_same_swing_pct",
-            "nearest_htf_same_swing_tf",
-            "nearest_opposing_room_pct",
-            "aligned_rsi_extreme_count",
-            "htf_confluence_count_0_50",
-            "reaction_rejection_wick_share",
-            "reaction_close_strength",
-        ]
-        top_columns = [c for c in top_columns if c in big_ctx.columns]
-        top_runs = (
-            big_ctx.sort_values(target_column, ascending=False)
-            [top_columns]
-            .copy()
-        )
-        for column in top_runs.columns:
-            if column in {
-                "symbol",
-                "signal",
-                "retest_time",
-                "run_driver_tags",
-                "nearest_htf_same_swing_tf",
-            }:
-                continue
-            top_runs[column] = pd.to_numeric(
-                top_runs[column],
-                errors="coerce",
-            ).round(4)
+        }:
+            continue
+        top_runs[column] = pd.to_numeric(
+            top_runs[column],
+            errors="coerce",
+        ).round(4)
 
-        st.markdown("##### >=threshold runs · causal fingerprint")
+    st.markdown("##### >=threshold hits · causal fingerprint")
+    st.dataframe(
+        top_runs,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Combination screen focused on the three hypotheses requested:
+    # aligned RSI, space to opposing HTF structure, and REACTION geometry.
+    combo = contextual.copy()
+    combo["Aligned RSI"] = np.where(
+        combo["aligned_rsi_extreme_count"].ge(1),
+        "YES",
+        "NO",
+    )
+    room = pd.to_numeric(
+        combo.get("nearest_opposing_room_pct"),
+        errors="coerce",
+    )
+    combo["Opposing room >=1%"] = np.where(
+        room.isna(),
+        "UNKNOWN",
+        np.where(room.ge(1.0), "YES", "NO"),
+    )
+    combo["Reaction range >=0.35%"] = np.where(
+        pd.to_numeric(
+            combo.get("reaction_range_pct"),
+            errors="coerce",
+        ).ge(0.35),
+        "YES",
+        "NO",
+    )
+
+    combo_rows = []
+    for keys, subset in combo.groupby(
+        [
+            "Aligned RSI",
+            "Opposing room >=1%",
+            "Reaction range >=0.35%",
+        ],
+        dropna=False,
+        sort=False,
+    ):
+        n = len(subset)
+        if n < 3:
+            continue
+        hits = int(subset["_big_run"].sum())
+        hit_rate = hits / n * 100.0
+        baseline = float(combo["_big_run"].mean() * 100.0)
+        combo_rows.append({
+            "Aligned RSI": keys[0],
+            "Opposing room >=1%": keys[1],
+            "Reaction range >=0.35%": keys[2],
+            "N": n,
+            "Hits": hits,
+            f">={float(run_threshold):.2f}% hit rate": round(hit_rate, 2),
+            "Lift vs cohort": (
+                round(hit_rate / baseline, 3)
+                if baseline > 0
+                else np.nan
+            ),
+        })
+
+    if combo_rows:
+        combos = pd.DataFrame(combo_rows).sort_values(
+            [f">={float(run_threshold):.2f}% hit rate", "N"],
+            ascending=[False, False],
+        )
+        st.markdown("##### Combination fingerprints · RSI × HTF room × geometry")
+        st.caption(
+            "Coarse discovery grid on the resolved cohort. Rows with tiny N "
+            "should not be promoted to live filters."
+        )
         st.dataframe(
-            top_runs,
+            combos,
             use_container_width=True,
             hide_index=True,
         )
 
-        # Compact combination screen to surface repeated causal fingerprints.
-        combo = contextual.copy()
-        combo["RSI extreme"] = np.where(
-            combo["aligned_rsi_extreme_count"].ge(1),
-            "YES",
-            "NO",
-        )
-        combo["HTF swing <=0.50%"] = np.where(
-            combo["nearest_htf_same_swing_pct"].le(0.50),
-            "YES",
-            "NO",
-        )
-        combo["1m vol >=2x"] = np.where(
-            pd.to_numeric(
-                combo.get("reaction_relative_volume_30"),
-                errors="coerce",
-            ).ge(2.0),
-            "YES",
-            "NO",
-        )
-
-        combo_rows = []
-        for keys, subset in combo.groupby(
-            ["RSI extreme", "HTF swing <=0.50%", "1m vol >=2x"],
-            dropna=False,
-            sort=False,
-        ):
-            n = len(subset)
-            if n < 3:
-                continue
-            hit_rate = float(subset["_big_run"].mean() * 100.0)
-            combo_rows.append({
-                "RSI extreme": keys[0],
-                "HTF swing <=0.50%": keys[1],
-                "1m vol >=2x": keys[2],
-                "N": n,
-                f">={float(run_threshold):.2f}% run rate": round(hit_rate, 2),
-                "Median run %": round(
-                    float(
-                        pd.to_numeric(
-                            subset[target_column],
-                            errors="coerce",
-                        ).median()
-                    ),
-                    4,
-                ),
-            })
-
-        if combo_rows:
-            combos = pd.DataFrame(combo_rows).sort_values(
-                [f">={float(run_threshold):.2f}% run rate", "N"],
-                ascending=[False, False],
-            )
-            st.markdown("##### Combination fingerprints")
-            st.caption(
-                "Coarse 3-factor screen only. Keep combinations with support; "
-                "do not turn small-N rows into filters."
-            )
-            st.dataframe(
-                combos,
-                use_container_width=True,
-                hide_index=True,
-            )
 
 
 def render_confirmed_swing_retest_scanner(
