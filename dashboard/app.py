@@ -19738,6 +19738,480 @@ def render_confirmed_swing_sweep_reclaim_scanner(
                     )
 
     # --------------------------------------------------------
+    # CROSS-OFFSET SAME-COHORT
+    #
+    # Freeze the EVENT cohort using a required penetration threshold and a
+    # complete 180m path. Then replay shallower/equal resting LIMIT offsets
+    # on those exact same sweeps. This isolates ENTRY PRICE from EVENT QUALITY.
+    #
+    # Example:
+    #   cohort threshold = 0.10%
+    #   eligible offsets = 0.00 / 0.05 / 0.10
+    #
+    # Every row is therefore the same structural sweep set; only the resting
+    # LIMIT price changes.
+    # --------------------------------------------------------
+    st.markdown(
+        "##### Cross-offset same cohort · entry price only"
+    )
+    st.caption(
+        "Freeze the sweep cohort first, then change only the LIMIT depth. "
+        "This removes the selection effect where deeper offsets naturally "
+        "trade a different subset of events. The cohort requires the chosen "
+        "minimum penetration and a complete 180m contiguous path."
+    )
+
+    cross_threshold_options = [
+        float(value)
+        for value in (
+            CONFIRMED_SWING_SWEEP_ENTRY_OFFSETS_PCT
+        )
+        if float(value) > 0.0
+    ]
+
+    cross_c1, cross_c2 = st.columns(
+        [1.0, 2.0]
+    )
+
+    with cross_c1:
+        default_threshold = (
+            0.10
+            if 0.10
+            in cross_threshold_options
+            else cross_threshold_options[0]
+        )
+
+        cross_cohort_threshold = st.selectbox(
+            "Cross-offset cohort min penetration %",
+            options=cross_threshold_options,
+            index=(
+                cross_threshold_options.index(
+                    default_threshold
+                )
+            ),
+            format_func=lambda value: (
+                f"{float(value):.2f}%"
+            ),
+            key=(
+                "sweep_cross_offset_threshold"
+            ),
+            help=(
+                "Example 0.10%: keep only sweeps that penetrated at least "
+                "0.10%, then compare entries at 0.00%, 0.05% and 0.10% "
+                "on those exact same events."
+            ),
+        )
+
+    with cross_c2:
+        st.markdown(
+            f"**Evaluation:** TP {float(sweep_tp):.2f}% · "
+            f"SL {float(sweep_sl):.2f}% · TIME_EXIT 180m · "
+            f"fee {float(sweep_fee):.3f}%/side"
+        )
+
+    cross_horizon = 180
+
+    eligible_cross_offsets = [
+        float(value)
+        for value in (
+            CONFIRMED_SWING_SWEEP_ENTRY_OFFSETS_PCT
+        )
+        if float(value)
+        <= float(
+            cross_cohort_threshold
+        )
+        + 1e-12
+    ]
+
+    threshold_key = (
+        _confirmed_swing_sweep_entry_offset_key(
+            cross_cohort_threshold
+        )
+    )
+
+    cross_mask = []
+
+    for _, row in view.iterrows():
+        penetration = pd.to_numeric(
+            row.get(
+                "sweep_penetration_pct",
+            ),
+            errors="coerce",
+        )
+
+        if (
+            pd.isna(
+                penetration
+            )
+            or float(
+                penetration
+            )
+            + 1e-12
+            < float(
+                cross_cohort_threshold
+            )
+        ):
+            cross_mask.append(
+                False
+            )
+            continue
+
+        analysis = row.get(
+            "sweep_entry_analysis",
+            {},
+        )
+        threshold_payload = (
+            analysis.get(
+                threshold_key,
+                {},
+            )
+            if isinstance(
+                analysis,
+                dict,
+            )
+            else {}
+        )
+
+        complete_horizons = (
+            threshold_payload.get(
+                "complete_horizons",
+                [],
+            )
+            if isinstance(
+                threshold_payload,
+                dict,
+            )
+            else []
+        )
+
+        try:
+            complete_horizons = {
+                int(value)
+                for value
+                in complete_horizons
+            }
+        except (
+            TypeError,
+            ValueError,
+        ):
+            complete_horizons = set()
+
+        cross_mask.append(
+            cross_horizon
+            in complete_horizons
+        )
+
+    cross_cohort = view.loc[
+        pd.Series(
+            cross_mask,
+            index=view.index,
+            dtype=bool,
+        )
+    ].copy()
+
+    if cross_cohort.empty:
+        st.info(
+            f"No sweeps with penetration >= "
+            f"{float(cross_cohort_threshold):.2f}% currently have a "
+            f"complete {cross_horizon}m path."
+        )
+    else:
+        cross_n = len(
+            cross_cohort
+        )
+        cross_long = int(
+            cross_cohort[
+                "signal"
+            ].eq("LONG").sum()
+        )
+        cross_short = int(
+            cross_cohort[
+                "signal"
+            ].eq("SHORT").sum()
+        )
+
+        penetration_series = pd.to_numeric(
+            cross_cohort[
+                "sweep_penetration_pct"
+            ],
+            errors="coerce",
+        )
+
+        cx1, cx2, cx3, cx4 = (
+            st.columns(4)
+        )
+        cx1.metric(
+            "Frozen cohort N",
+            cross_n,
+        )
+        cx2.metric(
+            "LONG / SHORT",
+            f"{cross_long} / {cross_short}",
+        )
+        cx3.metric(
+            "Min penetration",
+            (
+                f"{float(cross_cohort_threshold):.2f}%"
+            ),
+        )
+        cx4.metric(
+            "Median penetration",
+            (
+                f"{penetration_series.median():.3f}%"
+                if penetration_series.notna().any()
+                else "—"
+            ),
+        )
+
+        cross_rows = []
+
+        for entry_offset in (
+            eligible_cross_offsets
+        ):
+            stats = (
+                _confirmed_swing_sweep_entry_stats(
+                    cross_cohort,
+                    offset_pct=entry_offset,
+                    tp_pct=sweep_tp,
+                    sl_pct=sweep_sl,
+                    horizon_min=(
+                        cross_horizon
+                    ),
+                    fee_per_side_pct=(
+                        sweep_fee
+                    ),
+                )
+            )
+
+            mfe_mae = (
+                _confirmed_swing_sweep_entry_mfe_mae_stats(
+                    cross_cohort,
+                    offset_pct=entry_offset,
+                )
+            )
+
+            if stats is None:
+                continue
+
+            cross_rows.append({
+                "Entry offset %": float(
+                    entry_offset
+                ),
+                "N": int(
+                    stats[
+                        "Complete"
+                    ]
+                ),
+                "WR %": (
+                    round(
+                        stats[
+                            "Win rate %"
+                        ],
+                        2,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Win rate %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "Avg net %": (
+                    round(
+                        stats[
+                            "Avg net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Avg net %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "Median net %": (
+                    round(
+                        stats[
+                            "Median net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Median net %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "PF": (
+                    round(
+                        stats[
+                            "Profit factor"
+                        ],
+                        3,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Profit factor"
+                        ]
+                    )
+                    and np.isfinite(
+                        stats[
+                            "Profit factor"
+                        ]
+                    )
+                    else stats[
+                        "Profit factor"
+                    ]
+                ),
+                "Total net %": (
+                    round(
+                        stats[
+                            "Total net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Total net %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "TP %": (
+                    round(
+                        stats[
+                            "TP %"
+                        ],
+                        1,
+                    )
+                    if pd.notna(
+                        stats[
+                            "TP %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "SL %": (
+                    round(
+                        stats[
+                            "SL %"
+                        ],
+                        1,
+                    )
+                    if pd.notna(
+                        stats[
+                            "SL %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "TIME_EXIT %": (
+                    round(
+                        stats[
+                            "TIME_EXIT %"
+                        ],
+                        1,
+                    )
+                    if pd.notna(
+                        stats[
+                            "TIME_EXIT %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "Avg MFE60 %": (
+                    round(
+                        mfe_mae[
+                            "Avg MFE60 %"
+                        ],
+                        4,
+                    )
+                    if mfe_mae
+                    is not None
+                    else np.nan
+                ),
+                "Avg MAE60 %": (
+                    round(
+                        mfe_mae[
+                            "Avg MAE60 %"
+                        ],
+                        4,
+                    )
+                    if mfe_mae
+                    is not None
+                    else np.nan
+                ),
+                "MFE/MAE": (
+                    round(
+                        mfe_mae[
+                            "MFE/MAE"
+                        ],
+                        3,
+                    )
+                    if (
+                        mfe_mae
+                        is not None
+                        and np.isfinite(
+                            mfe_mae[
+                                "MFE/MAE"
+                            ]
+                        )
+                    )
+                    else (
+                        mfe_mae[
+                            "MFE/MAE"
+                        ]
+                        if mfe_mae
+                        is not None
+                        else np.nan
+                    )
+                ),
+            })
+
+        cross_df = pd.DataFrame(
+            cross_rows
+        )
+
+        if not cross_df.empty:
+            st.dataframe(
+                cross_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            n_values = (
+                cross_df[
+                    "N"
+                ]
+                .dropna()
+                .astype(int)
+                .unique()
+                .tolist()
+            )
+
+            if (
+                len(
+                    n_values
+                ) != 1
+                or int(
+                    n_values[0]
+                ) != cross_n
+            ):
+                st.warning(
+                    "Cross-offset invariant failed: entry offsets are not "
+                    "being evaluated on the exact same complete trade count. "
+                    "Do not interpret this table until it is fixed."
+                )
+            else:
+                st.caption(
+                    f"Cross-offset invariant OK: N={cross_n} for every "
+                    f"entry offset. Event cohort is fixed; only entry price "
+                    "changes."
+                )
+
+    # --------------------------------------------------------
     # LONG / SHORT and reclaim-outcome diagnostics.
     # --------------------------------------------------------
     split_rows = []
