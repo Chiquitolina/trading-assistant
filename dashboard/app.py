@@ -9046,7 +9046,7 @@ def _attach_confirmed_swing_reaction_run(retest, forward_cache):
     retest["reaction_current_pct"] = np.nan
     retest["reaction_observed_min"] = 0.0
 
-    for horizon_min in (15, 30, 60):
+    for horizon_min in (15, 30, 60, 120, 180, 360):
         retest[f"touch_mfe_{horizon_min}m_pct"] = np.nan
         retest[f"touch_mae_{horizon_min}m_pct"] = np.nan
         retest[f"touch_return_{horizon_min}m_pct"] = np.nan
@@ -9114,7 +9114,7 @@ def _attach_confirmed_swing_reaction_run(retest, forward_cache):
     lows = forward_cache["lows"]
     closes = forward_cache["closes"]
 
-    for horizon_min in (15, 30, 60):
+    for horizon_min in (15, 30, 60, 120, 180, 360):
         horizon_end_idx = start_idx + int(horizon_min) - 1
 
         if (
@@ -14481,6 +14481,259 @@ def _build_reaction_run_driver_context(reactions):
     return result
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _reaction_driver_first_hit_times(
+    reaction_rows,
+    threshold_pct,
+    candle_limit=2500,
+):
+    """Return first causal minute that each REACTION reaches the threshold.
+
+    The REACTION candle is excluded. Measurement starts on the next consecutive
+    1m candle, matching reaction_mfe_pct semantics. Gaps terminate the path.
+    Only rows that actually reach the threshold get a finite first-hit time.
+    """
+    if reaction_rows is None or reaction_rows.empty:
+        return pd.DataFrame()
+
+    required = {"symbol", "retest_timestamp", "retest_close", "signal"}
+    if not required.issubset(reaction_rows.columns):
+        return pd.DataFrame()
+
+    threshold_pct = float(threshold_pct)
+    rows = []
+
+    for symbol, symbol_rows in reaction_rows.groupby("symbol", sort=False):
+        candles = load_volume_exhaustion_research_candles(
+            symbol=str(symbol),
+            timeframe="1m",
+            limit=int(candle_limit),
+        )
+        prepared = _prepare_confirmed_swing_retest_candles(candles)
+        if prepared.empty:
+            continue
+
+        timestamps = prepared["timestamp"].astype("int64").to_numpy()
+        highs = prepared["high"].astype(float).to_numpy()
+        lows = prepared["low"].astype(float).to_numpy()
+
+        # Build contiguous segment-end indices once per symbol.
+        segment_end = np.empty(len(timestamps), dtype=np.int64)
+        for idx in range(len(timestamps) - 1, -1, -1):
+            if (
+                idx == len(timestamps) - 1
+                or int(timestamps[idx + 1]) != int(timestamps[idx]) + 60_000
+            ):
+                segment_end[idx] = idx
+            else:
+                segment_end[idx] = segment_end[idx + 1]
+
+        for row_index, row in symbol_rows.iterrows():
+            try:
+                reaction_ts = int(row["retest_timestamp"])
+                baseline = float(row["retest_close"])
+                side = str(row["signal"]).upper()
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if baseline <= 0 or side not in {"LONG", "SHORT"}:
+                continue
+
+            next_ts = reaction_ts + 60_000
+            start_idx = int(np.searchsorted(timestamps, next_ts, side="left"))
+            if (
+                start_idx >= len(timestamps)
+                or int(timestamps[start_idx]) != next_ts
+            ):
+                continue
+
+            end_idx = int(segment_end[start_idx])
+            first_hit = np.nan
+
+            if side == "LONG":
+                target = baseline * (1.0 + threshold_pct / 100.0)
+                hit_positions = np.flatnonzero(
+                    highs[start_idx : end_idx + 1] >= target
+                )
+            else:
+                target = baseline * (1.0 - threshold_pct / 100.0)
+                hit_positions = np.flatnonzero(
+                    lows[start_idx : end_idx + 1] <= target
+                )
+
+            if len(hit_positions):
+                hit_idx = start_idx + int(hit_positions[0])
+                first_hit = (
+                    int(timestamps[hit_idx]) - reaction_ts
+                ) / 60_000.0
+
+            rows.append({
+                "_row_index": row_index,
+                "first_hit_min": first_hit,
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows).set_index("_row_index")
+
+
+def _render_reaction_horizon_ladder(
+    reactions,
+    run_threshold,
+):
+    """Compare fixed horizons and first-hit timing for the selected threshold."""
+    if reactions is None or reactions.empty:
+        return
+
+    threshold = float(run_threshold)
+    horizons = (60, 120, 180, 360)
+
+    st.markdown("##### ⏱️ Horizon ladder · when does the run actually appear?")
+    st.caption(
+        "Fixed-horizon rows use only REACTIONs with a complete contiguous 1m "
+        "path for that horizon. The same-360m cohort freezes the exact same "
+        "events across 60/120/180/360m, so changes there are pure time effects. "
+        "First-hit timing starts on the next 1m candle after REACTION is known."
+    )
+
+    ladder_rows = []
+    for horizon in horizons:
+        mfe_col = f"reaction_mfe_{horizon}m_pct"
+        complete_col = f"reaction_complete_{horizon}m"
+        if mfe_col not in reactions.columns:
+            continue
+
+        if complete_col in reactions.columns:
+            mask = reactions[complete_col].fillna(False).astype(bool)
+            subset = reactions.loc[mask].copy()
+        else:
+            subset = reactions.dropna(subset=[mfe_col]).copy()
+
+        values = pd.to_numeric(subset[mfe_col], errors="coerce").dropna()
+        n = len(values)
+        hits = int(values.ge(threshold).sum()) if n else 0
+        ladder_rows.append({
+            "Horizon": f"{horizon}m",
+            "N complete": n,
+            f">={threshold:.2f}% hits": hits,
+            "Hit rate %": round(hits / n * 100.0, 2) if n else np.nan,
+            "Median MFE %": round(float(values.median()), 4) if n else np.nan,
+            "P75 MFE %": round(float(values.quantile(0.75)), 4) if n else np.nan,
+        })
+
+    if ladder_rows:
+        st.markdown("###### A. All complete events at each horizon")
+        st.dataframe(
+            pd.DataFrame(ladder_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # Freeze a 360m-complete cohort so every horizon uses identical events.
+    cohort_360 = pd.DataFrame()
+    if "reaction_complete_360m" in reactions.columns:
+        cohort_360 = reactions.loc[
+            reactions["reaction_complete_360m"].fillna(False).astype(bool)
+        ].copy()
+    elif "reaction_mfe_360m_pct" in reactions.columns:
+        cohort_360 = reactions.dropna(
+            subset=["reaction_mfe_360m_pct"]
+        ).copy()
+
+    if not cohort_360.empty:
+        same_rows = []
+        cohort_n = len(cohort_360)
+        for horizon in horizons:
+            mfe_col = f"reaction_mfe_{horizon}m_pct"
+            if mfe_col not in cohort_360.columns:
+                continue
+            values = pd.to_numeric(
+                cohort_360[mfe_col], errors="coerce"
+            )
+            if values.isna().any():
+                continue
+            hits = int(values.ge(threshold).sum())
+            same_rows.append({
+                "Horizon": f"{horizon}m",
+                "N same cohort": cohort_n,
+                f">={threshold:.2f}% hits": hits,
+                "Cumulative hit rate %": round(
+                    hits / cohort_n * 100.0, 2
+                ),
+                "Median MFE %": round(float(values.median()), 4),
+            })
+
+        if same_rows:
+            st.markdown("###### B. Same 360m-complete cohort · pure time effect")
+            st.dataframe(
+                pd.DataFrame(same_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                f"Same-cohort invariant: N={cohort_n} on every row."
+            )
+
+    # Exact first-hit timing among events that eventually reached the threshold.
+    eventual = reactions.loc[
+        pd.to_numeric(
+            reactions.get("reaction_mfe_pct"),
+            errors="coerce",
+        ).ge(threshold)
+    ].copy()
+
+    if not eventual.empty:
+        with st.spinner(
+            f"Finding first causal hit of +{threshold:.2f}%..."
+        ):
+            first_hit = _reaction_driver_first_hit_times(
+                eventual,
+                threshold_pct=threshold,
+                candle_limit=2500,
+            )
+
+        if not first_hit.empty:
+            times = pd.to_numeric(
+                first_hit["first_hit_min"],
+                errors="coerce",
+            ).dropna()
+
+            if not times.empty:
+                bins = [-np.inf, 60, 120, 180, 360, np.inf]
+                labels = ["0–60m", "61–120m", "121–180m", "181–360m", ">360m"]
+                buckets = pd.cut(
+                    times,
+                    bins=bins,
+                    labels=labels,
+                    right=True,
+                )
+                counts = buckets.value_counts(sort=False)
+                timing_rows = []
+                for label in labels:
+                    n = int(counts.get(label, 0))
+                    timing_rows.append({
+                        "First hit of threshold": label,
+                        "N": n,
+                        "% eventual hits": round(
+                            n / len(times) * 100.0, 2
+                        ),
+                    })
+
+                st.markdown("###### C. Exact time-to-threshold among eventual hits")
+                t1, t2, t3 = st.columns(3)
+                t1.metric("Eventually reached", len(times))
+                t2.metric("Median first hit", f"{float(times.median()):.0f}m")
+                t3.metric(
+                    "Reached by 180m",
+                    f"{float(times.le(180).mean() * 100.0):.1f}%",
+                )
+                st.dataframe(
+                    pd.DataFrame(timing_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
 def render_confirmed_swing_reaction_run_driver_lab(view):
     """Classify >X% REACTION runs using only information known at REACTION close."""
     if view is None or view.empty:
@@ -14518,7 +14771,13 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
     with c2:
         run_mode = st.selectbox(
             "Run measurement",
-            ["Available path", "Fixed 60m"],
+            [
+                "Available path",
+                "Fixed 60m",
+                "Fixed 120m",
+                "Fixed 180m",
+                "Fixed 360m",
+            ],
             index=0,
             key="reaction_run_driver_mode",
         )
@@ -14529,7 +14788,7 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
             max_value=1440,
             value=60,
             step=15,
-            disabled=(run_mode == "Fixed 60m"),
+            disabled=(run_mode != "Available path"),
             key="reaction_run_driver_min_observed",
         )
 
@@ -14537,6 +14796,9 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
         "reaction_mfe_pct",
         "reaction_observed_min",
         "reaction_mfe_60m_pct",
+        "reaction_mfe_120m_pct",
+        "reaction_mfe_180m_pct",
+        "reaction_mfe_360m_pct",
         "reaction_relative_volume_30",
         "reaction_volume_3m_ratio",
         "reaction_volume_5m_ratio",
@@ -14559,10 +14821,24 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
                 errors="coerce",
             )
 
-    if run_mode == "Fixed 60m":
-        target_column = "reaction_mfe_60m_pct"
-        eligible = reactions.dropna(subset=[target_column]).copy()
-        horizon_label = "MFE60"
+    if run_mode.startswith("Fixed "):
+        fixed_horizon = int(
+            run_mode.replace("Fixed ", "").replace("m", "")
+        )
+        target_column = f"reaction_mfe_{fixed_horizon}m_pct"
+        complete_column = f"reaction_complete_{fixed_horizon}m"
+        if target_column not in reactions.columns:
+            st.info(
+                f"No {fixed_horizon}m reaction MFE field is available yet."
+            )
+            return
+        if complete_column in reactions.columns:
+            eligible = reactions.loc[
+                reactions[complete_column].fillna(False).astype(bool)
+            ].dropna(subset=[target_column]).copy()
+        else:
+            eligible = reactions.dropna(subset=[target_column]).copy()
+        horizon_label = f"MFE{fixed_horizon}"
     else:
         target_column = "reaction_mfe_pct"
         if "reaction_observed_min" not in reactions.columns:
@@ -14598,6 +14874,11 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
     st.caption(
         f"Current label: {horizon_label}. Big-run threshold: "
         f">= {float(run_threshold):.2f}%."
+    )
+
+    _render_reaction_horizon_ladder(
+        reactions=reactions,
+        run_threshold=run_threshold,
     )
 
     if big.empty:
