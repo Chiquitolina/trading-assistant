@@ -19333,6 +19333,411 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         )
 
     # --------------------------------------------------------
+    # SAME-COHORT TIME_EXIT comparison for the selected offset.
+    #
+    # Critical rule: choose the cohort ONCE using the longest comparison
+    # horizon (180m), then evaluate 60/120/180 on those exact same rows.
+    # This prevents shorter horizons from looking different merely because
+    # they include more recent / more complete trades.
+    # --------------------------------------------------------
+    same_cohort_horizons = [
+        horizon
+        for horizon in (60, 120, 180)
+        if horizon
+        in CONFIRMED_SWING_TIME_EXIT_HORIZONS
+    ]
+
+    if same_cohort_horizons:
+        same_cohort_max_horizon = max(
+            same_cohort_horizons
+        )
+        same_cohort_offset_key = (
+            _confirmed_swing_sweep_entry_offset_key(
+                selected_sweep_offset
+            )
+        )
+
+        same_cohort_mask = []
+
+        for _, row in view.iterrows():
+            # Fill is determined only by first-sweep penetration.
+            fill_info = (
+                _confirmed_swing_sweep_entry_fill_info(
+                    row,
+                    selected_sweep_offset,
+                )
+            )
+
+            if (
+                fill_info is None
+                or not bool(
+                    fill_info.get(
+                        "filled",
+                        False,
+                    )
+                )
+            ):
+                same_cohort_mask.append(
+                    False
+                )
+                continue
+
+            analysis = row.get(
+                "sweep_entry_analysis",
+                {},
+            )
+            payload = (
+                analysis.get(
+                    same_cohort_offset_key,
+                    {},
+                )
+                if isinstance(
+                    analysis,
+                    dict,
+                )
+                else {}
+            )
+
+            complete_horizons = (
+                payload.get(
+                    "complete_horizons",
+                    [],
+                )
+                if isinstance(
+                    payload,
+                    dict,
+                )
+                else []
+            )
+
+            try:
+                complete_horizons = {
+                    int(value)
+                    for value
+                    in complete_horizons
+                }
+            except (
+                TypeError,
+                ValueError,
+            ):
+                complete_horizons = set()
+
+            same_cohort_mask.append(
+                same_cohort_max_horizon
+                in complete_horizons
+            )
+
+        same_cohort = view.loc[
+            pd.Series(
+                same_cohort_mask,
+                index=view.index,
+                dtype=bool,
+            )
+        ].copy()
+
+        st.markdown(
+            "##### Same-cohort TIME_EXIT · selected offset"
+        )
+        st.caption(
+            f"Offset {float(selected_sweep_offset):.2f}% · "
+            f"TP {float(sweep_tp):.2f}% · "
+            f"SL {float(sweep_sl):.2f}% · "
+            f"fee {float(sweep_fee):.3f}%/side. "
+            f"The cohort is frozen using only fills with a complete "
+            f"{same_cohort_max_horizon}m contiguous path. "
+            "60m, 120m and 180m are then evaluated on these exact same trades."
+        )
+
+        if same_cohort.empty:
+            st.info(
+                f"No selected-offset fills currently have a complete "
+                f"{same_cohort_max_horizon}m path."
+            )
+        else:
+            cohort_n = len(
+                same_cohort
+            )
+            cohort_long = int(
+                same_cohort[
+                    "signal"
+                ].eq("LONG").sum()
+            )
+            cohort_short = int(
+                same_cohort[
+                    "signal"
+                ].eq("SHORT").sum()
+            )
+
+            cohort_ts = pd.to_numeric(
+                same_cohort.get(
+                    "sweep_timestamp",
+                    pd.Series(
+                        dtype=float
+                    ),
+                ),
+                errors="coerce",
+            ).dropna()
+
+            if not cohort_ts.empty:
+                cohort_start = (
+                    pd.to_datetime(
+                        int(
+                            cohort_ts.min()
+                        ),
+                        unit="ms",
+                        utc=True,
+                    )
+                    .tz_convert(TZ)
+                    .strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                )
+                cohort_end = (
+                    pd.to_datetime(
+                        int(
+                            cohort_ts.max()
+                        ),
+                        unit="ms",
+                        utc=True,
+                    )
+                    .tz_convert(TZ)
+                    .strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                )
+            else:
+                cohort_start = "—"
+                cohort_end = "—"
+
+            sc1, sc2, sc3, sc4 = (
+                st.columns(4)
+            )
+            sc1.metric(
+                "Same cohort N",
+                cohort_n,
+            )
+            sc2.metric(
+                "LONG / SHORT",
+                f"{cohort_long} / {cohort_short}",
+            )
+            sc3.metric(
+                "First sweep",
+                cohort_start,
+            )
+            sc4.metric(
+                "Last sweep",
+                cohort_end,
+            )
+
+            same_cohort_rows = []
+
+            for horizon in same_cohort_horizons:
+                stats = (
+                    _confirmed_swing_sweep_entry_stats(
+                        same_cohort,
+                        offset_pct=(
+                            selected_sweep_offset
+                        ),
+                        tp_pct=sweep_tp,
+                        sl_pct=sweep_sl,
+                        horizon_min=horizon,
+                        fee_per_side_pct=(
+                            sweep_fee
+                        ),
+                    )
+                )
+
+                if stats is None:
+                    continue
+
+                # Because the cohort was frozen on 180m completeness,
+                # Complete should equal cohort N at every shorter horizon.
+                same_cohort_rows.append({
+                    "TIME_EXIT": (
+                        f"{int(horizon)}m"
+                    ),
+                    "N": int(
+                        stats[
+                            "Complete"
+                        ]
+                    ),
+                    "WR %": (
+                        round(
+                            stats[
+                                "Win rate %"
+                            ],
+                            2,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Win rate %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "Avg net %": (
+                        round(
+                            stats[
+                                "Avg net %"
+                            ],
+                            4,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Avg net %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "Median net %": (
+                        round(
+                            stats[
+                                "Median net %"
+                            ],
+                            4,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Median net %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "PF": (
+                        round(
+                            stats[
+                                "Profit factor"
+                            ],
+                            3,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Profit factor"
+                            ]
+                        )
+                        and np.isfinite(
+                            stats[
+                                "Profit factor"
+                            ]
+                        )
+                        else stats[
+                            "Profit factor"
+                        ]
+                    ),
+                    "Total net %": (
+                        round(
+                            stats[
+                                "Total net %"
+                            ],
+                            4,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Total net %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "TP %": (
+                        round(
+                            stats[
+                                "TP %"
+                            ],
+                            1,
+                        )
+                        if pd.notna(
+                            stats[
+                                "TP %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "SL %": (
+                        round(
+                            stats[
+                                "SL %"
+                            ],
+                            1,
+                        )
+                        if pd.notna(
+                            stats[
+                                "SL %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "Ambig→SL %": (
+                        round(
+                            stats[
+                                "Ambiguous→SL %"
+                            ],
+                            1,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Ambiguous→SL %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "TIME_EXIT %": (
+                        round(
+                            stats[
+                                "TIME_EXIT %"
+                            ],
+                            1,
+                        )
+                        if pd.notna(
+                            stats[
+                                "TIME_EXIT %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                })
+
+            same_cohort_df = pd.DataFrame(
+                same_cohort_rows
+            )
+
+            if not same_cohort_df.empty:
+                st.dataframe(
+                    same_cohort_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Make the invariant visible rather than silently assuming it.
+                same_n_values = (
+                    same_cohort_df[
+                        "N"
+                    ]
+                    .dropna()
+                    .astype(int)
+                    .unique()
+                    .tolist()
+                )
+
+                if (
+                    len(
+                        same_n_values
+                    ) != 1
+                    or int(
+                        same_n_values[0]
+                    ) != cohort_n
+                ):
+                    st.warning(
+                        "Same-cohort invariant failed: 60/120/180m are not "
+                        "using the exact same complete trade count. Do not "
+                        "interpret the horizon comparison until this is fixed."
+                    )
+                else:
+                    st.caption(
+                        f"Same-cohort invariant OK: N={cohort_n} for every "
+                        "TIME_EXIT row."
+                    )
+
+    # --------------------------------------------------------
     # LONG / SHORT and reclaim-outcome diagnostics.
     # --------------------------------------------------------
     split_rows = []
