@@ -17966,6 +17966,609 @@ def build_confirmed_swing_sweep_reclaim_detail_chart(
     return fig
 
 
+
+def build_confirmed_swing_sweep_entry_path_chart(
+    candles,
+    setup_row,
+    offset_pct,
+    tp_pct,
+    sl_pct,
+    horizon_min,
+    pre_sweep_minutes=30,
+):
+    """1m execution path from the selected Sweep Entry.
+
+    This is separate from the 15m structural chart. It shows exactly what
+    happened around the first sweep and, when the selected resting LIMIT was
+    filled, follows the trade through the selected TP/SL/TIME_EXIT horizon.
+
+    The plotted execution respects the same conservative rules used by the
+    research engine:
+    - the resting limit can fill on the first sweep candle;
+    - an SL reached on the fill candle counts as SL;
+    - a same-fill-candle TP is not credited because OHLC cannot prove that
+      the favorable extreme happened after the limit fill;
+    - later same-1m TP+SL is SL_AMBIGUOUS.
+    """
+    work = _prepare_confirmed_swing_retest_candles(candles)
+    if work.empty:
+        return go.Figure(), None
+
+    try:
+        sweep_ts = int(setup_row["sweep_timestamp"])
+        swing_price = float(setup_row["swing_price"])
+        side = str(setup_row["signal"]).upper()
+    except (KeyError, TypeError, ValueError):
+        return go.Figure(), None
+
+    if (
+        swing_price <= 0
+        or side not in {"LONG", "SHORT"}
+    ):
+        return go.Figure(), None
+
+    offset_pct = float(offset_pct)
+    tp_pct = float(tp_pct)
+    sl_pct = float(sl_pct)
+    horizon_min = int(horizon_min)
+    pre_sweep_minutes = max(
+        5,
+        int(pre_sweep_minutes),
+    )
+
+    analysis = setup_row.get(
+        "sweep_entry_analysis",
+        {},
+    )
+
+    payload = {}
+    if isinstance(analysis, dict):
+        payload = analysis.get(
+            _confirmed_swing_sweep_entry_offset_key(
+                offset_pct
+            ),
+            {},
+        )
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    filled = bool(
+        payload.get(
+            "filled",
+            False,
+        )
+    )
+
+    if side == "LONG":
+        limit_price = (
+            swing_price
+            * (
+                1.0
+                - offset_pct / 100.0
+            )
+        )
+    else:
+        limit_price = (
+            swing_price
+            * (
+                1.0
+                + offset_pct / 100.0
+            )
+        )
+
+    entry_price = (
+        float(
+            payload.get(
+                "entry_price",
+                limit_price,
+            )
+        )
+        if filled
+        else float(limit_price)
+    )
+
+    start_ts = (
+        sweep_ts
+        - pre_sweep_minutes * 60_000
+    )
+    end_ts = (
+        sweep_ts
+        + horizon_min * 60_000
+    )
+
+    visible = work.loc[
+        (work["timestamp"] >= start_ts)
+        & (work["timestamp"] <= end_ts)
+    ].copy()
+
+    if visible.empty:
+        return go.Figure(), None
+
+    visible["chart_time"] = pd.to_datetime(
+        visible["timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Candlestick(
+            x=visible["chart_time"],
+            open=visible["open"],
+            high=visible["high"],
+            low=visible["low"],
+            close=visible["close"],
+            name="1m",
+        )
+    )
+
+    fig.add_hline(
+        y=swing_price,
+        line_dash="dash",
+        annotation_text="15m swing",
+    )
+
+    fig.add_hline(
+        y=limit_price,
+        line_dash="dot",
+        annotation_text=(
+            f"LIMIT {offset_pct:.2f}%"
+        ),
+    )
+
+    # Structural sweep marker.
+    fig.add_trace(
+        go.Scatter(
+            x=[
+                pd.to_datetime(
+                    sweep_ts,
+                    unit="ms",
+                    utc=True,
+                ).tz_convert(TZ)
+            ],
+            y=[
+                float(
+                    setup_row[
+                        "sweep_price"
+                    ]
+                )
+            ],
+            mode="markers+text",
+            text=["SWEEP"],
+            textposition="top center",
+            marker={
+                "size": 12,
+                "symbol": "diamond-open",
+            },
+            name="SWEEP",
+            hovertemplate=(
+                "<b>SWEEP</b><br>"
+                "Time: %{x}<br>"
+                "Price: %{y:.8f}"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    # Reclaim marker is an outcome after the Sweep Entry.
+    reclaim_ts = pd.to_numeric(
+        setup_row.get(
+            "reclaim_timestamp",
+        ),
+        errors="coerce",
+    )
+    reclaim_price = pd.to_numeric(
+        setup_row.get(
+            "reclaim_price",
+        ),
+        errors="coerce",
+    )
+
+    if (
+        pd.notna(reclaim_ts)
+        and pd.notna(reclaim_price)
+        and start_ts
+        <= int(reclaim_ts)
+        <= end_ts
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=[
+                    pd.to_datetime(
+                        int(reclaim_ts),
+                        unit="ms",
+                        utc=True,
+                    ).tz_convert(TZ)
+                ],
+                y=[float(reclaim_price)],
+                mode="markers+text",
+                text=["RECLAIM"],
+                textposition="bottom center",
+                marker={
+                    "size": 11,
+                    "symbol": "diamond",
+                },
+                name="RECLAIM",
+                hovertemplate=(
+                    "<b>RECLAIM</b><br>"
+                    "Time: %{x}<br>"
+                    "Price: %{y:.8f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    result = (
+        _confirmed_swing_sweep_entry_result_for_row(
+            setup_row,
+            offset_pct=offset_pct,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon_min=horizon_min,
+            fee_per_side_pct=0.0,
+        )
+    )
+
+    if filled:
+        # Entry occurs during the first sweep candle at the resting LIMIT.
+        fig.add_trace(
+            go.Scatter(
+                x=[
+                    pd.to_datetime(
+                        sweep_ts,
+                        unit="ms",
+                        utc=True,
+                    ).tz_convert(TZ)
+                ],
+                y=[entry_price],
+                mode="markers+text",
+                text=["ENTRY"],
+                textposition="bottom center",
+                marker={
+                    "size": 13,
+                    "symbol": (
+                        "triangle-up"
+                        if side == "LONG"
+                        else "triangle-down"
+                    ),
+                },
+                name="ENTRY",
+                hovertemplate=(
+                    "<b>SWEEP ENTRY</b><br>"
+                    "Time: %{x}<br>"
+                    "Price: %{y:.8f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        if side == "LONG":
+            tp_price = (
+                entry_price
+                * (
+                    1.0
+                    + tp_pct / 100.0
+                )
+            )
+            sl_price = (
+                entry_price
+                * (
+                    1.0
+                    - sl_pct / 100.0
+                )
+            )
+        else:
+            tp_price = (
+                entry_price
+                * (
+                    1.0
+                    - tp_pct / 100.0
+                )
+            )
+            sl_price = (
+                entry_price
+                * (
+                    1.0
+                    + sl_pct / 100.0
+                )
+            )
+
+        fig.add_hline(
+            y=tp_price,
+            line_dash="dot",
+            annotation_text=(
+                f"TP {tp_pct:.2f}%"
+            ),
+        )
+        fig.add_hline(
+            y=sl_price,
+            line_dash="dot",
+            annotation_text=(
+                f"SL {sl_pct:.2f}%"
+            ),
+        )
+
+        # Locate and mark the actual research exit.
+        exit_reason = None
+        exit_ts = None
+        exit_price = None
+
+        if isinstance(result, dict):
+            exit_reason = str(
+                result.get(
+                    "exit_reason",
+                    "",
+                )
+            )
+
+        path_results = payload.get(
+            "path_results_360m",
+            {},
+        )
+        path_key = (
+            _confirmed_swing_first_touch_key(
+                tp_pct,
+                sl_pct,
+            )
+        )
+        path_result = (
+            path_results.get(
+                path_key,
+                {},
+            )
+            if isinstance(
+                path_results,
+                dict,
+            )
+            else {}
+        )
+
+        hit_bar = pd.to_numeric(
+            (
+                path_result.get(
+                    "hit_bar",
+                )
+                if isinstance(
+                    path_result,
+                    dict,
+                )
+                else np.nan
+            ),
+            errors="coerce",
+        )
+
+        if (
+            exit_reason
+            in {
+                "TP",
+                "SL",
+                "SL_AMBIGUOUS",
+            }
+            and pd.notna(hit_bar)
+            and int(hit_bar)
+            <= horizon_min
+        ):
+            exit_ts = (
+                sweep_ts
+                + int(hit_bar) * 60_000
+            )
+            exit_price = (
+                tp_price
+                if exit_reason == "TP"
+                else sl_price
+            )
+
+        elif exit_reason == "TIME_EXIT":
+            exit_ts = (
+                sweep_ts
+                + horizon_min * 60_000
+            )
+
+            exit_row = visible.loc[
+                visible[
+                    "timestamp"
+                ].astype("int64")
+                .eq(int(exit_ts))
+            ]
+
+            if not exit_row.empty:
+                exit_price = float(
+                    exit_row.iloc[-1][
+                        "close"
+                    ]
+                )
+
+        if (
+            exit_ts is not None
+            and exit_price is not None
+            and start_ts
+            <= int(exit_ts)
+            <= end_ts
+        ):
+            fig.add_trace(
+                go.Scatter(
+                    x=[
+                        pd.to_datetime(
+                            int(exit_ts),
+                            unit="ms",
+                            utc=True,
+                        ).tz_convert(TZ)
+                    ],
+                    y=[
+                        float(
+                            exit_price
+                        )
+                    ],
+                    mode="markers+text",
+                    text=[
+                        str(
+                            exit_reason
+                        )
+                    ],
+                    textposition="top center",
+                    marker={
+                        "size": 12,
+                        "symbol": "x",
+                    },
+                    name=(
+                        str(
+                            exit_reason
+                        )
+                    ),
+                    hovertemplate=(
+                        "<b>EXIT "
+                        + str(
+                            exit_reason
+                        )
+                        + "</b><br>"
+                        "Time: %{x}<br>"
+                        "Price: %{y:.8f}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+        # Mark directional MFE and MAE over the visible selected horizon.
+        after_entry = visible.loc[
+            visible[
+                "timestamp"
+            ].astype("int64")
+            .ge(sweep_ts)
+        ].copy()
+
+        if not after_entry.empty:
+            if side == "LONG":
+                mfe_idx = (
+                    after_entry[
+                        "high"
+                    ]
+                    .astype(float)
+                    .idxmax()
+                )
+                mae_idx = (
+                    after_entry[
+                        "low"
+                    ]
+                    .astype(float)
+                    .idxmin()
+                )
+                mfe_price = float(
+                    after_entry.loc[
+                        mfe_idx,
+                        "high",
+                    ]
+                )
+                mae_price = float(
+                    after_entry.loc[
+                        mae_idx,
+                        "low",
+                    ]
+                )
+            else:
+                mfe_idx = (
+                    after_entry[
+                        "low"
+                    ]
+                    .astype(float)
+                    .idxmin()
+                )
+                mae_idx = (
+                    after_entry[
+                        "high"
+                    ]
+                    .astype(float)
+                    .idxmax()
+                )
+                mfe_price = float(
+                    after_entry.loc[
+                        mfe_idx,
+                        "low",
+                    ]
+                )
+                mae_price = float(
+                    after_entry.loc[
+                        mae_idx,
+                        "high",
+                    ]
+                )
+
+            mfe_ts = int(
+                after_entry.loc[
+                    mfe_idx,
+                    "timestamp",
+                ]
+            )
+            mae_ts = int(
+                after_entry.loc[
+                    mae_idx,
+                    "timestamp",
+                ]
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[
+                        pd.to_datetime(
+                            mfe_ts,
+                            unit="ms",
+                            utc=True,
+                        ).tz_convert(TZ)
+                    ],
+                    y=[mfe_price],
+                    mode="markers+text",
+                    text=["MFE"],
+                    textposition="top center",
+                    marker={
+                        "size": 10,
+                        "symbol": "circle-open",
+                    },
+                    name="MFE",
+                )
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[
+                        pd.to_datetime(
+                            mae_ts,
+                            unit="ms",
+                            utc=True,
+                        ).tz_convert(TZ)
+                    ],
+                    y=[mae_price],
+                    mode="markers+text",
+                    text=["MAE"],
+                    textposition="bottom center",
+                    marker={
+                        "size": 10,
+                        "symbol": "circle-open",
+                    },
+                    name="MAE",
+                )
+            )
+
+    fig.update_layout(
+        height=650,
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        title=(
+            f"{setup_row.get('symbol', '')} · "
+            f"{side} · 1m path from FIRST SWEEP"
+        ),
+        margin={
+            "l": 10,
+            "r": 10,
+            "t": 45,
+            "b": 10,
+        },
+    )
+
+    return fig, result
+
+
 def render_confirmed_swing_sweep_reclaim_scanner(
     setups_df,
     status_filter,
@@ -19297,6 +19900,249 @@ def render_confirmed_swing_sweep_reclaim_scanner(
             use_container_width=True,
             key=(
                 "sweep_reclaim_detail_chart"
+            ),
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+        )
+
+    # --------------------------------------------------------
+    # 1m execution path from the selected Sweep Entry.
+    # --------------------------------------------------------
+    st.markdown(
+        "#### 1m recorrido desde Sweep Entry"
+    )
+    st.caption(
+        "Este es el equivalente al recorrido que mirábamos desde REACTION "
+        "en la estrategia anterior, pero ahora el punto cero es la entrada "
+        "LIMIT dentro del FIRST SWEEP. Muestra SWEEP, ENTRY, RECLAIM como "
+        "outcome posterior, TP/SL, MFE/MAE y el exit usado por el escenario "
+        "seleccionado arriba."
+    )
+
+    selected_offset_key = (
+        _confirmed_swing_sweep_entry_offset_key(
+            selected_sweep_offset
+        )
+    )
+    selected_analysis = selected_setup.get(
+        "sweep_entry_analysis",
+        {},
+    )
+    selected_payload = (
+        selected_analysis.get(
+            selected_offset_key,
+            {},
+        )
+        if isinstance(
+            selected_analysis,
+            dict,
+        )
+        else {}
+    )
+    selected_filled = bool(
+        selected_payload.get(
+            "filled",
+            False,
+        )
+    )
+
+    # The scanner already works from a bounded 1m history. Fetch enough
+    # latest candles to cover this historical sweep plus the selected path.
+    sweep_age_min = np.nan
+    try:
+        latest_event_age = pd.to_numeric(
+            selected_setup.get(
+                "retest_age_min",
+            ),
+            errors="coerce",
+        )
+        sweep_to_event_min = (
+            pd.to_numeric(
+                selected_setup.get(
+                    "sweep_to_reclaim_min",
+                ),
+                errors="coerce",
+            )
+            if pd.notna(
+                selected_setup.get(
+                    "reclaim_timestamp",
+                    np.nan,
+                )
+            )
+            else 0.0
+        )
+
+        sweep_age_min = (
+            float(
+                latest_event_age
+            )
+            + (
+                float(
+                    sweep_to_event_min
+                )
+                if pd.notna(
+                    sweep_to_event_min
+                )
+                else 0.0
+            )
+            if pd.notna(
+                latest_event_age
+            )
+            else np.nan
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        sweep_age_min = np.nan
+
+    path_fetch_limit = min(
+        int(
+            VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+        ),
+        max(
+            300,
+            int(
+                (
+                    sweep_age_min
+                    if pd.notna(
+                        sweep_age_min
+                    )
+                    else 0.0
+                )
+                + int(
+                    sweep_horizon
+                )
+                + 90
+            ),
+        ),
+    )
+
+    path_candles = (
+        load_volume_exhaustion_research_candles(
+            symbol=str(
+                selected_setup[
+                    "symbol"
+                ]
+            ),
+            timeframe="1m",
+            limit=path_fetch_limit,
+        )
+    )
+
+    if (
+        path_candles is None
+        or path_candles.empty
+    ):
+        st.warning(
+            "No 1m candles are available for this Sweep Entry path."
+        )
+    else:
+        (
+            sweep_path_fig,
+            selected_sweep_result,
+        ) = (
+            build_confirmed_swing_sweep_entry_path_chart(
+                candles=path_candles,
+                setup_row=selected_setup,
+                offset_pct=(
+                    selected_sweep_offset
+                ),
+                tp_pct=sweep_tp,
+                sl_pct=sweep_sl,
+                horizon_min=(
+                    sweep_horizon
+                ),
+                pre_sweep_minutes=30,
+            )
+        )
+
+        if not selected_filled:
+            st.info(
+                f"El FIRST SWEEP existió, pero la LIMIT de "
+                f"{float(selected_sweep_offset):.2f}% no llegó a llenarse. "
+                "El gráfico igualmente muestra el swing, el nivel de LIMIT, "
+                "el SWEEP y el RECLAIM si ocurrió."
+            )
+        else:
+            path_m1, path_m2, path_m3, path_m4 = (
+                st.columns(4)
+            )
+
+            selected_entry_price = pd.to_numeric(
+                selected_payload.get(
+                    "entry_price",
+                ),
+                errors="coerce",
+            )
+            selected_mfe_60 = pd.to_numeric(
+                selected_payload.get(
+                    "mfe_60m_pct",
+                ),
+                errors="coerce",
+            )
+            selected_mae_60 = pd.to_numeric(
+                selected_payload.get(
+                    "mae_60m_pct",
+                ),
+                errors="coerce",
+            )
+
+            path_m1.metric(
+                "ENTRY",
+                (
+                    f"{float(selected_entry_price):.8g}"
+                    if pd.notna(
+                        selected_entry_price
+                    )
+                    else "—"
+                ),
+            )
+            path_m2.metric(
+                "MFE 60m",
+                (
+                    f"{float(selected_mfe_60):.3f}%"
+                    if pd.notna(
+                        selected_mfe_60
+                    )
+                    else "—"
+                ),
+            )
+            path_m3.metric(
+                "MAE 60m",
+                (
+                    f"{float(selected_mae_60):.3f}%"
+                    if pd.notna(
+                        selected_mae_60
+                    )
+                    else "—"
+                ),
+            )
+
+            result_text = "—"
+            if isinstance(
+                selected_sweep_result,
+                dict,
+            ):
+                result_text = str(
+                    selected_sweep_result.get(
+                        "exit_reason",
+                        "—",
+                    )
+                )
+
+            path_m4.metric(
+                "Scenario exit",
+                result_text,
+            )
+
+        st.plotly_chart(
+            sweep_path_fig,
+            use_container_width=True,
+            key=(
+                "sweep_entry_1m_path_chart"
             ),
             config={
                 "displaylogo": False,
