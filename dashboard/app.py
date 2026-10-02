@@ -19290,6 +19290,605 @@ def build_confirmed_swing_sweep_entry_path_chart(
     return fig, result
 
 
+
+def _render_sweep_vs_reaction_same_window_comparison(
+    comparison_view,
+    offset_pct,
+    tp_pct,
+    sl_pct,
+    horizon_min,
+    fee_per_side_pct,
+    max_event_age_minutes,
+):
+    """Compare Sweep LIMIT vs post-REACTION entry on the same structural window.
+
+    The base universe is the exact same set of detected FIRST sweeps after the
+    scanner's symbol/side/time-window filters.  The Sweep status filter is
+    intentionally ignored here because RECLAIMED is an outcome that is not
+    known at Sweep-entry time.
+
+    Sweep entry:
+      resting LIMIT inside the FIRST sweep at ``offset_pct``.
+
+    Reaction entry:
+      only events that later RECLAIM the swing; execution begins at the OPEN of
+      the next consecutive 1m candle after the reclaim/REACTION candle closes.
+
+    Both strategies use the same TP, SL, TIME_EXIT and fee parameters below.
+    """
+    if (
+        comparison_view is None
+        or comparison_view.empty
+    ):
+        return
+
+    base = comparison_view.copy()
+    base_n = int(len(base))
+
+    sweep_stats = (
+        _confirmed_swing_sweep_entry_stats(
+            base,
+            offset_pct=offset_pct,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon_min=horizon_min,
+            fee_per_side_pct=fee_per_side_pct,
+        )
+    )
+
+    reaction_rows = base.loc[
+        base["sweep_status"]
+        .astype(str)
+        .eq("RECLAIMED")
+    ].copy()
+
+    if (
+        not reaction_rows.empty
+        and "first_touch_entry_price"
+        in reaction_rows.columns
+    ):
+        reaction_entry_mask = pd.to_numeric(
+            reaction_rows[
+                "first_touch_entry_price"
+            ],
+            errors="coerce",
+        ).notna()
+        reaction_entries = int(
+            reaction_entry_mask.sum()
+        )
+    else:
+        reaction_entries = 0
+
+    reaction_stats = (
+        _confirmed_swing_net_stats(
+            reaction_rows,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon_min=horizon_min,
+            fee_per_side_pct=fee_per_side_pct,
+        )
+        if not reaction_rows.empty
+        else None
+    )
+
+    st.markdown("---")
+    st.markdown(
+        "#### ⚖️ Same-window strategy comparison · Sweep vs REACTION"
+    )
+    st.caption(
+        "Same structural FIRST-sweep universe with the time window anchored to "
+        "the FIRST SWEEP for both strategies. "
+        f"Window: last {int(max_event_age_minutes)} minutes by sweep time · "
+        f"TP {float(tp_pct):.2f}% · SL {float(sl_pct):.2f}% · "
+        f"TIME_EXIT {int(horizon_min)}m · fee {float(fee_per_side_pct):.3f}%/side. "
+        f"Sweep uses a resting LIMIT at {float(offset_pct):.2f}% inside the FIRST sweep; "
+        "REACTION waits for the swing reclaim/REACTION candle to close and enters "
+        "at the next consecutive 1m OPEN. The scanner's Sweep-status filter is "
+        "ignored only for this comparison so the Sweep strategy is not selected "
+        "using a future reclaim outcome."
+    )
+
+    def _safe_value(stats, key):
+        if stats is None:
+            return np.nan
+        return stats.get(key, np.nan)
+
+    sweep_entries = int(
+        _safe_value(
+            sweep_stats,
+            "Filled",
+        )
+    ) if sweep_stats is not None else 0
+    sweep_complete = int(
+        _safe_value(
+            sweep_stats,
+            "Complete",
+        )
+    ) if sweep_stats is not None else 0
+    reaction_complete = int(
+        _safe_value(
+            reaction_stats,
+            "N",
+        )
+    ) if reaction_stats is not None else 0
+
+    comparison_rows = [
+        {
+            "Strategy": "Sweep LIMIT",
+            "Base setups": base_n,
+            "Entries": sweep_entries,
+            "Participation %": (
+                sweep_entries / base_n * 100.0
+                if base_n
+                else np.nan
+            ),
+            "Complete": sweep_complete,
+            "Complete / entries %": (
+                sweep_complete / sweep_entries * 100.0
+                if sweep_entries
+                else np.nan
+            ),
+            "Net WR %": _safe_value(
+                sweep_stats,
+                "Win rate %",
+            ),
+            "Avg net / trade %": _safe_value(
+                sweep_stats,
+                "Avg net %",
+            ),
+            "PF": _safe_value(
+                sweep_stats,
+                "Profit factor",
+            ),
+            "Total net %": _safe_value(
+                sweep_stats,
+                "Total net %",
+            ),
+            "TP %": _safe_value(
+                sweep_stats,
+                "TP %",
+            ),
+            "SL %": _safe_value(
+                sweep_stats,
+                "SL %",
+            ),
+            "Ambig→SL %": _safe_value(
+                sweep_stats,
+                "Ambiguous→SL %",
+            ),
+            "TIME_EXIT %": _safe_value(
+                sweep_stats,
+                "TIME_EXIT %",
+            ),
+        },
+        {
+            "Strategy": "REACTION · next 1m open",
+            "Base setups": base_n,
+            "Entries": reaction_entries,
+            "Participation %": (
+                reaction_entries / base_n * 100.0
+                if base_n
+                else np.nan
+            ),
+            "Complete": reaction_complete,
+            "Complete / entries %": (
+                reaction_complete / reaction_entries * 100.0
+                if reaction_entries
+                else np.nan
+            ),
+            "Net WR %": _safe_value(
+                reaction_stats,
+                "Win rate %",
+            ),
+            "Avg net / trade %": _safe_value(
+                reaction_stats,
+                "Avg net %",
+            ),
+            "PF": _safe_value(
+                reaction_stats,
+                "Profit factor",
+            ),
+            "Total net %": _safe_value(
+                reaction_stats,
+                "Total net %",
+            ),
+            "TP %": _safe_value(
+                reaction_stats,
+                "TP %",
+            ),
+            "SL %": _safe_value(
+                reaction_stats,
+                "SL %",
+            ),
+            "Ambig→SL %": _safe_value(
+                reaction_stats,
+                "Ambiguous→SL %",
+            ),
+            "TIME_EXIT %": _safe_value(
+                reaction_stats,
+                "TIME_EXIT %",
+            ),
+        },
+    ]
+
+    comparison_df = pd.DataFrame(
+        comparison_rows
+    )
+
+    for column in [
+        "Participation %",
+        "Complete / entries %",
+        "Net WR %",
+        "Avg net / trade %",
+        "Total net %",
+        "TP %",
+        "SL %",
+        "Ambig→SL %",
+        "TIME_EXIT %",
+    ]:
+        comparison_df[column] = pd.to_numeric(
+            comparison_df[column],
+            errors="coerce",
+        ).round(4)
+
+    comparison_df["PF"] = pd.to_numeric(
+        comparison_df["PF"],
+        errors="coerce",
+    ).round(3)
+
+    st.markdown(
+        "##### A. Same base universe · participation + executed trades"
+    )
+    st.dataframe(
+        comparison_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "Entries are not the same thing as Complete. Recent entries can be real "
+        "but still lack enough contiguous future 1m candles to resolve the "
+        "selected TIME_EXIT. Performance columns use Complete trades only. "
+        "REACTION participation is also right-censored while a sweep remains "
+        "SWEEP_PENDING; the common-event cohort below is the clean entry-quality "
+        "comparison."
+    )
+
+    # --------------------------------------------------------
+    # COMMON-EVENT COHORT
+    # Same structural event, both strategies executable and complete.
+    # --------------------------------------------------------
+    common_indices = []
+    common_details = []
+
+    for idx, row in base.iterrows():
+        if str(
+            row.get(
+                "sweep_status",
+                "",
+            )
+        ) != "RECLAIMED":
+            continue
+
+        sweep_result = (
+            _confirmed_swing_sweep_entry_result_for_row(
+                row,
+                offset_pct=offset_pct,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                horizon_min=horizon_min,
+                fee_per_side_pct=fee_per_side_pct,
+            )
+        )
+        reaction_result = (
+            _confirmed_swing_net_result_for_row(
+                row,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                horizon_min=horizon_min,
+                fee_per_side_pct=fee_per_side_pct,
+            )
+        )
+
+        if (
+            sweep_result is None
+            or not bool(
+                sweep_result.get(
+                    "filled",
+                    False,
+                )
+            )
+            or reaction_result is None
+        ):
+            continue
+
+        sweep_net = pd.to_numeric(
+            sweep_result.get(
+                "net_pct",
+            ),
+            errors="coerce",
+        )
+        reaction_net = pd.to_numeric(
+            reaction_result.get(
+                "net_pct",
+            ),
+            errors="coerce",
+        )
+
+        if (
+            pd.isna(sweep_net)
+            or pd.isna(reaction_net)
+        ):
+            continue
+
+        common_indices.append(idx)
+
+        common_details.append({
+            "symbol": row.get(
+                "symbol",
+                "—",
+            ),
+            "side": row.get(
+                "signal",
+                "—",
+            ),
+            "swing_price": pd.to_numeric(
+                row.get(
+                    "swing_price",
+                ),
+                errors="coerce",
+            ),
+            "sweep_time": pd.to_datetime(
+                pd.to_numeric(
+                    row.get(
+                        "sweep_timestamp",
+                    ),
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            ),
+            "reaction_time": pd.to_datetime(
+                pd.to_numeric(
+                    row.get(
+                        "reclaim_timestamp",
+                    ),
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            ),
+            "sweep_entry": pd.to_numeric(
+                sweep_result.get(
+                    "entry_price",
+                ),
+                errors="coerce",
+            ),
+            "reaction_entry": pd.to_numeric(
+                row.get(
+                    "first_touch_entry_price",
+                ),
+                errors="coerce",
+            ),
+            "sweep_exit": str(
+                sweep_result.get(
+                    "exit_reason",
+                    "—",
+                )
+            ),
+            "reaction_exit": str(
+                reaction_result.get(
+                    "exit_reason",
+                    "—",
+                )
+            ),
+            "sweep_net %": float(
+                sweep_net
+            ),
+            "reaction_net %": float(
+                reaction_net
+            ),
+            "reaction - sweep net pp": float(
+                reaction_net
+                - sweep_net
+            ),
+        })
+
+    st.markdown(
+        "##### B. Common-event cohort · exact same structural events"
+    )
+    st.caption(
+        "This removes the biggest selection effect. A row enters this cohort "
+        "only when the SAME sweep both filled the selected Sweep LIMIT and later "
+        "produced a causal REACTION entry, with both strategies having a complete "
+        f"{int(horizon_min)}m path. The event set is therefore identical; only "
+        "entry timing/price differs."
+    )
+
+    if not common_indices:
+        st.info(
+            "No exact common events are complete for both strategies with the "
+            "current parameters/window yet."
+        )
+        return
+
+    common = base.loc[
+        common_indices
+    ].copy()
+
+    common_sweep_stats = (
+        _confirmed_swing_sweep_entry_stats(
+            common,
+            offset_pct=offset_pct,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon_min=horizon_min,
+            fee_per_side_pct=fee_per_side_pct,
+        )
+    )
+    common_reaction_stats = (
+        _confirmed_swing_net_stats(
+            common,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon_min=horizon_min,
+            fee_per_side_pct=fee_per_side_pct,
+        )
+    )
+
+    common_rows = []
+    for label, stats, n_key in [
+        (
+            "Sweep LIMIT",
+            common_sweep_stats,
+            "Complete",
+        ),
+        (
+            "REACTION · next 1m open",
+            common_reaction_stats,
+            "N",
+        ),
+    ]:
+        if stats is None:
+            continue
+
+        common_rows.append({
+            "Strategy": label,
+            "N same events": int(
+                stats.get(
+                    n_key,
+                    0,
+                )
+            ),
+            "Net WR %": stats.get(
+                "Win rate %",
+                np.nan,
+            ),
+            "Avg net / trade %": stats.get(
+                "Avg net %",
+                np.nan,
+            ),
+            "PF": stats.get(
+                "Profit factor",
+                np.nan,
+            ),
+            "Total net %": stats.get(
+                "Total net %",
+                np.nan,
+            ),
+            "TP %": stats.get(
+                "TP %",
+                np.nan,
+            ),
+            "SL %": stats.get(
+                "SL %",
+                np.nan,
+            ),
+            "Ambig→SL %": stats.get(
+                "Ambiguous→SL %",
+                np.nan,
+            ),
+            "TIME_EXIT %": stats.get(
+                "TIME_EXIT %",
+                np.nan,
+            ),
+        })
+
+    common_summary_df = pd.DataFrame(
+        common_rows
+    )
+
+    for column in [
+        "Net WR %",
+        "Avg net / trade %",
+        "Total net %",
+        "TP %",
+        "SL %",
+        "Ambig→SL %",
+        "TIME_EXIT %",
+    ]:
+        common_summary_df[column] = pd.to_numeric(
+            common_summary_df[column],
+            errors="coerce",
+        ).round(4)
+
+    common_summary_df["PF"] = pd.to_numeric(
+        common_summary_df["PF"],
+        errors="coerce",
+    ).round(3)
+
+    st.dataframe(
+        common_summary_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    common_detail_df = pd.DataFrame(
+        common_details
+    )
+    delta = pd.to_numeric(
+        common_detail_df[
+            "reaction - sweep net pp"
+        ],
+        errors="coerce",
+    ).dropna()
+
+    if not delta.empty:
+        d1, d2, d3 = st.columns(3)
+        d1.metric(
+            "Common events",
+            int(
+                len(
+                    common_detail_df
+                )
+            ),
+        )
+        d2.metric(
+            "Avg REACTION − Sweep net",
+            f"{float(delta.mean()):+.4f} pp",
+        )
+        d3.metric(
+            "REACTION higher net",
+            f"{float((delta > 0).mean() * 100.0):.1f}%",
+        )
+
+    with st.expander(
+        "Inspect common events · Sweep vs REACTION",
+        expanded=False,
+    ):
+        numeric_detail_columns = [
+            "swing_price",
+            "sweep_entry",
+            "reaction_entry",
+            "sweep_net %",
+            "reaction_net %",
+            "reaction - sweep net pp",
+        ]
+        for column in numeric_detail_columns:
+            common_detail_df[column] = pd.to_numeric(
+                common_detail_df[column],
+                errors="coerce",
+            ).round(6)
+
+        common_detail_df = common_detail_df.sort_values(
+            [
+                "sweep_time",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                True,
+            ],
+        )
+
+        st.dataframe(
+            common_detail_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def render_confirmed_swing_sweep_reclaim_scanner(
     setups_df,
     status_filter,
@@ -19318,6 +19917,69 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         )
         return
 
+    # Same-window comparison base universe.
+    # Anchor the window to FIRST SWEEP for every row.  The legacy retest_age_min
+    # is reclaim-anchored on RECLAIMED rows, which would make the comparison
+    # outcome-dependent.  For reclaimed rows:
+    #   sweep_age = reclaim_age + sweep_to_reclaim_min
+    # For pending/expired rows retest_age_min already means sweep age.
+    comparison_view = setups_df.copy()
+
+    if side_filter != "ALL":
+        comparison_view = comparison_view.loc[
+            comparison_view["signal"]
+            .astype(str)
+            .eq(side_filter)
+        ].copy()
+
+    comparison_event_age = pd.to_numeric(
+        comparison_view[
+            "retest_age_min"
+        ],
+        errors="coerce",
+    )
+    comparison_reclaim_delay = pd.to_numeric(
+        comparison_view.get(
+            "sweep_to_reclaim_min",
+            pd.Series(
+                np.nan,
+                index=comparison_view.index,
+            ),
+        ),
+        errors="coerce",
+    )
+    comparison_is_reclaimed = (
+        comparison_view[
+            "sweep_status"
+        ]
+        .astype(str)
+        .eq("RECLAIMED")
+    )
+    comparison_sweep_age = comparison_event_age.copy()
+    comparison_sweep_age.loc[
+        comparison_is_reclaimed
+        & comparison_reclaim_delay.notna()
+    ] = (
+        comparison_event_age.loc[
+            comparison_is_reclaimed
+            & comparison_reclaim_delay.notna()
+        ]
+        + comparison_reclaim_delay.loc[
+            comparison_is_reclaimed
+            & comparison_reclaim_delay.notna()
+        ]
+    )
+    comparison_view[
+        "_comparison_sweep_age_min"
+    ] = comparison_sweep_age
+    comparison_view = comparison_view.loc[
+        comparison_sweep_age
+        <= float(
+            max_event_age_minutes
+        )
+    ].copy()
+
+    # Preserve the existing scanner/table behavior below.
     view = setups_df.copy()
 
     if status_filter != "ALL":
@@ -19509,7 +20171,7 @@ def render_confirmed_swing_sweep_reclaim_scanner(
         sweep_tp = st.selectbox(
             "Sweep TP %",
             options=tp_options,
-            index=tp_options.index(1.00),
+            index=tp_options.index(0.75),
             key="sweep_entry_tp",
         )
 
@@ -19526,8 +20188,8 @@ def render_confirmed_swing_sweep_reclaim_scanner(
             "Sweep TIME_EXIT",
             options=horizon_options,
             index=(
-                horizon_options.index(120)
-                if 120 in horizon_options
+                horizon_options.index(180)
+                if 180 in horizon_options
                 else 0
             ),
             format_func=lambda value: (
@@ -19705,6 +20367,16 @@ def render_confirmed_swing_sweep_reclaim_scanner(
                 else "—"
             ),
         )
+
+    _render_sweep_vs_reaction_same_window_comparison(
+        comparison_view=comparison_view,
+        offset_pct=selected_sweep_offset,
+        tp_pct=sweep_tp,
+        sl_pct=sweep_sl,
+        horizon_min=sweep_horizon,
+        fee_per_side_pct=sweep_fee,
+        max_event_age_minutes=max_event_age_minutes,
+    )
 
     # --------------------------------------------------------
     # Offset comparison — same structural sweep universe.
