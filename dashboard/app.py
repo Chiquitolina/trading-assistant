@@ -20211,6 +20211,1233 @@ def render_confirmed_swing_sweep_reclaim_scanner(
                     "changes."
                 )
 
+    # ========================================================
+    # RESEARCH SUITE · FIXED 180m COHORT FOR THE SELECTED OFFSET
+    # ========================================================
+    st.markdown("---")
+    st.markdown(
+        "#### 🔬 Sweep Entry research suite · fixed 180m cohort"
+    )
+    st.caption(
+        "Everything in this block freezes one causal cohort first: the "
+        "currently selected entry offset must have FILLED on the first sweep "
+        "and must have a complete contiguous 180m path. The cohort is then "
+        "reused unchanged to study direction, reclaim behavior, setup age, "
+        "TP/SL robustness, fees and chronology. This avoids changing the "
+        "sample while changing a research dimension."
+    )
+
+    research_horizon = 180
+    research_offset = float(
+        selected_sweep_offset
+    )
+    research_offset_key = (
+        _confirmed_swing_sweep_entry_offset_key(
+            research_offset
+        )
+    )
+
+    research_mask = []
+
+    for _, row in view.iterrows():
+        fill_info = (
+            _confirmed_swing_sweep_entry_fill_info(
+                row,
+                research_offset,
+            )
+        )
+
+        if (
+            fill_info is None
+            or not bool(
+                fill_info.get(
+                    "filled",
+                    False,
+                )
+            )
+        ):
+            research_mask.append(
+                False
+            )
+            continue
+
+        analysis = row.get(
+            "sweep_entry_analysis",
+            {},
+        )
+        payload = (
+            analysis.get(
+                research_offset_key,
+                {},
+            )
+            if isinstance(
+                analysis,
+                dict,
+            )
+            else {}
+        )
+
+        complete_horizons = (
+            payload.get(
+                "complete_horizons",
+                [],
+            )
+            if isinstance(
+                payload,
+                dict,
+            )
+            else []
+        )
+
+        try:
+            complete_horizons = {
+                int(value)
+                for value
+                in complete_horizons
+            }
+        except (
+            TypeError,
+            ValueError,
+        ):
+            complete_horizons = set()
+
+        research_mask.append(
+            research_horizon
+            in complete_horizons
+        )
+
+    research_cohort = view.loc[
+        pd.Series(
+            research_mask,
+            index=view.index,
+            dtype=bool,
+        )
+    ].copy()
+
+    if research_cohort.empty:
+        st.info(
+            f"No {research_offset:.2f}% Sweep Entry fills currently have a "
+            f"complete {research_horizon}m path, so the fixed-cohort research "
+            "suite cannot run yet."
+        )
+    else:
+        research_n = len(
+            research_cohort
+        )
+
+        research_base_stats = (
+            _confirmed_swing_sweep_entry_stats(
+                research_cohort,
+                offset_pct=research_offset,
+                tp_pct=sweep_tp,
+                sl_pct=sweep_sl,
+                horizon_min=research_horizon,
+                fee_per_side_pct=sweep_fee,
+            )
+        )
+
+        rs1, rs2, rs3, rs4, rs5 = (
+            st.columns(5)
+        )
+        rs1.metric(
+            "Frozen N",
+            research_n,
+        )
+        rs2.metric(
+            "Offset",
+            f"{research_offset:.2f}%",
+        )
+        rs3.metric(
+            "LONG / SHORT",
+            (
+                f"{int(research_cohort['signal'].eq('LONG').sum())} / "
+                f"{int(research_cohort['signal'].eq('SHORT').sum())}"
+            ),
+        )
+        rs4.metric(
+            "Avg net @180m",
+            (
+                f"{research_base_stats['Avg net %']:.4f}%"
+                if research_base_stats
+                and pd.notna(
+                    research_base_stats[
+                        "Avg net %"
+                    ]
+                )
+                else "—"
+            ),
+        )
+        rs5.metric(
+            "PF @180m",
+            (
+                f"{research_base_stats['Profit factor']:.3f}"
+                if research_base_stats
+                and pd.notna(
+                    research_base_stats[
+                        "Profit factor"
+                    ]
+                )
+                and np.isfinite(
+                    research_base_stats[
+                        "Profit factor"
+                    ]
+                )
+                else (
+                    "∞"
+                    if research_base_stats
+                    and pd.notna(
+                        research_base_stats[
+                            "Profit factor"
+                        ]
+                    )
+                    else "—"
+                )
+            ),
+        )
+
+        def _sweep_research_group_row(
+            label,
+            subset,
+        ):
+            if (
+                subset is None
+                or subset.empty
+            ):
+                return None
+
+            stats = (
+                _confirmed_swing_sweep_entry_stats(
+                    subset,
+                    offset_pct=research_offset,
+                    tp_pct=sweep_tp,
+                    sl_pct=sweep_sl,
+                    horizon_min=research_horizon,
+                    fee_per_side_pct=sweep_fee,
+                )
+            )
+
+            if stats is None:
+                return None
+
+            mfe_mae = (
+                _confirmed_swing_sweep_entry_mfe_mae_stats(
+                    subset,
+                    offset_pct=research_offset,
+                )
+            )
+
+            return {
+                "Group": str(label),
+                "N": int(
+                    stats[
+                        "Complete"
+                    ]
+                ),
+                "WR %": (
+                    round(
+                        stats[
+                            "Win rate %"
+                        ],
+                        2,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Win rate %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "Avg net %": (
+                    round(
+                        stats[
+                            "Avg net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Avg net %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "Median net %": (
+                    round(
+                        stats[
+                            "Median net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Median net %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "PF": (
+                    round(
+                        stats[
+                            "Profit factor"
+                        ],
+                        3,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Profit factor"
+                        ]
+                    )
+                    and np.isfinite(
+                        stats[
+                            "Profit factor"
+                        ]
+                    )
+                    else stats[
+                        "Profit factor"
+                    ]
+                ),
+                "Total net %": (
+                    round(
+                        stats[
+                            "Total net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Total net %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "TP %": (
+                    round(
+                        stats[
+                            "TP %"
+                        ],
+                        1,
+                    )
+                    if pd.notna(
+                        stats[
+                            "TP %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "SL %": (
+                    round(
+                        stats[
+                            "SL %"
+                        ],
+                        1,
+                    )
+                    if pd.notna(
+                        stats[
+                            "SL %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "TIME_EXIT %": (
+                    round(
+                        stats[
+                            "TIME_EXIT %"
+                        ],
+                        1,
+                    )
+                    if pd.notna(
+                        stats[
+                            "TIME_EXIT %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "Avg MFE60 %": (
+                    round(
+                        mfe_mae[
+                            "Avg MFE60 %"
+                        ],
+                        4,
+                    )
+                    if mfe_mae
+                    is not None
+                    else np.nan
+                ),
+                "Avg MAE60 %": (
+                    round(
+                        mfe_mae[
+                            "Avg MAE60 %"
+                        ],
+                        4,
+                    )
+                    if mfe_mae
+                    is not None
+                    else np.nan
+                ),
+                "MFE/MAE": (
+                    round(
+                        mfe_mae[
+                            "MFE/MAE"
+                        ],
+                        3,
+                    )
+                    if (
+                        mfe_mae
+                        is not None
+                        and np.isfinite(
+                            mfe_mae[
+                                "MFE/MAE"
+                            ]
+                        )
+                    )
+                    else (
+                        mfe_mae[
+                            "MFE/MAE"
+                        ]
+                        if mfe_mae
+                        is not None
+                        else np.nan
+                    )
+                ),
+            }
+
+        # ----------------------------------------------------
+        # A) Direction robustness.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### A. Direction robustness · same cohort"
+        )
+        direction_rows = []
+
+        for direction_label in [
+            "ALL",
+            "LONG",
+            "SHORT",
+        ]:
+            subset = (
+                research_cohort
+                if direction_label == "ALL"
+                else research_cohort.loc[
+                    research_cohort[
+                        "signal"
+                    ].eq(
+                        direction_label
+                    )
+                ].copy()
+            )
+
+            row = (
+                _sweep_research_group_row(
+                    direction_label,
+                    subset,
+                )
+            )
+            if row is not None:
+                direction_rows.append(
+                    row
+                )
+
+        if direction_rows:
+            st.dataframe(
+                pd.DataFrame(
+                    direction_rows
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ----------------------------------------------------
+        # B) Reclaim timing after entry.
+        #
+        # This is NOT an entry filter because reclaim happens after the fill.
+        # It can later become a trade-management feature.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### B. What happened after entry? · reclaim timing"
+        )
+        st.caption(
+            "Post-entry diagnostic only. Same-candle / delayed / no-reclaim "
+            "cannot be known when the resting Sweep Entry fills, so these "
+            "groups must not be used as causal entry filters."
+        )
+
+        reclaim_work = (
+            research_cohort.copy()
+        )
+        reclaim_minutes = pd.to_numeric(
+            reclaim_work.get(
+                "sweep_to_reclaim_min",
+                pd.Series(
+                    np.nan,
+                    index=reclaim_work.index,
+                ),
+            ),
+            errors="coerce",
+        )
+        reclaim_status = (
+            reclaim_work.get(
+                "sweep_status",
+                pd.Series(
+                    "",
+                    index=reclaim_work.index,
+                ),
+            )
+            .astype(str)
+        )
+
+        reclaim_work[
+            "_reclaim_bucket"
+        ] = "NO_RECLAIM_IN_WINDOW"
+
+        reclaim_work.loc[
+            reclaim_status.eq(
+                "SWEEP_PENDING"
+            ),
+            "_reclaim_bucket",
+        ] = "PENDING"
+
+        reclaim_work.loc[
+            reclaim_minutes.eq(0),
+            "_reclaim_bucket",
+        ] = "SAME_CANDLE"
+
+        reclaim_work.loc[
+            reclaim_minutes.gt(0)
+            & reclaim_minutes.le(3),
+            "_reclaim_bucket",
+        ] = "1-3m"
+
+        reclaim_work.loc[
+            reclaim_minutes.gt(3)
+            & reclaim_minutes.le(5),
+            "_reclaim_bucket",
+        ] = "4-5m"
+
+        reclaim_work.loc[
+            reclaim_minutes.gt(5)
+            & reclaim_minutes.le(15),
+            "_reclaim_bucket",
+        ] = "6-15m"
+
+        reclaim_rows = []
+        reclaim_order = [
+            "SAME_CANDLE",
+            "1-3m",
+            "4-5m",
+            "6-15m",
+            "NO_RECLAIM_IN_WINDOW",
+            "PENDING",
+        ]
+
+        for bucket in reclaim_order:
+            subset = reclaim_work.loc[
+                reclaim_work[
+                    "_reclaim_bucket"
+                ].eq(bucket)
+            ].copy()
+
+            row = (
+                _sweep_research_group_row(
+                    bucket,
+                    subset,
+                )
+            )
+            if row is not None:
+                reclaim_rows.append(
+                    row
+                )
+
+        if reclaim_rows:
+            st.dataframe(
+                pd.DataFrame(
+                    reclaim_rows
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ----------------------------------------------------
+        # C) Causal setup freshness at the time of sweep entry.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### C. Setup age at sweep · causal entry feature"
+        )
+        st.caption(
+            "confirmed→sweep and departure→sweep are already known when the "
+            "first sweep arrives, so unlike reclaim timing they can be tested "
+            "later as real entry filters."
+        )
+
+        age_work = (
+            research_cohort.copy()
+        )
+
+        age_work[
+            "_confirmed_to_sweep_min"
+        ] = pd.to_numeric(
+            age_work.get(
+                "confirmed_to_sweep_min",
+                np.nan,
+            ),
+            errors="coerce",
+        )
+
+        departure_ts_num = pd.to_numeric(
+            age_work.get(
+                "departure_timestamp",
+                np.nan,
+            ),
+            errors="coerce",
+        )
+        sweep_ts_num = pd.to_numeric(
+            age_work.get(
+                "sweep_timestamp",
+                np.nan,
+            ),
+            errors="coerce",
+        )
+
+        age_work[
+            "_departure_to_sweep_min"
+        ] = (
+            (
+                sweep_ts_num
+                - departure_ts_num
+            )
+            / 60_000.0
+        )
+
+        def _age_bucket(
+            value,
+        ):
+            value = pd.to_numeric(
+                value,
+                errors="coerce",
+            )
+
+            if pd.isna(value):
+                return "UNKNOWN"
+            value = float(value)
+
+            if value <= 60:
+                return "0-60m"
+            if value <= 180:
+                return "61-180m"
+            if value <= 360:
+                return "181-360m"
+            return ">360m"
+
+        age_work[
+            "_confirmed_age_bucket"
+        ] = age_work[
+            "_confirmed_to_sweep_min"
+        ].apply(
+            _age_bucket
+        )
+        age_work[
+            "_departure_age_bucket"
+        ] = age_work[
+            "_departure_to_sweep_min"
+        ].apply(
+            _age_bucket
+        )
+
+        age_tabs = st.tabs(
+            [
+                "Confirmed → sweep",
+                "Departure → sweep",
+            ]
+        )
+
+        with age_tabs[0]:
+            rows = []
+            for bucket in [
+                "0-60m",
+                "61-180m",
+                "181-360m",
+                ">360m",
+                "UNKNOWN",
+            ]:
+                subset = age_work.loc[
+                    age_work[
+                        "_confirmed_age_bucket"
+                    ].eq(bucket)
+                ].copy()
+                row = (
+                    _sweep_research_group_row(
+                        bucket,
+                        subset,
+                    )
+                )
+                if row is not None:
+                    rows.append(
+                        row
+                    )
+            if rows:
+                st.dataframe(
+                    pd.DataFrame(
+                        rows
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        with age_tabs[1]:
+            rows = []
+            for bucket in [
+                "0-60m",
+                "61-180m",
+                "181-360m",
+                ">360m",
+                "UNKNOWN",
+            ]:
+                subset = age_work.loc[
+                    age_work[
+                        "_departure_age_bucket"
+                    ].eq(bucket)
+                ].copy()
+                row = (
+                    _sweep_research_group_row(
+                        bucket,
+                        subset,
+                    )
+                )
+                if row is not None:
+                    rows.append(
+                        row
+                    )
+            if rows:
+                st.dataframe(
+                    pd.DataFrame(
+                        rows
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # ----------------------------------------------------
+        # D) Realized sweep depth after fill.
+        #
+        # The final penetration of the 1m sweep candle is not known at the
+        # instant the limit fills, so this is diagnostic / management research.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### D. Realized sweep depth after fill"
+        )
+        st.caption(
+            "Diagnostic only: the final low/high of the sweep candle can occur "
+            "after the limit fill, so total penetration is not fully known at "
+            "entry time."
+        )
+
+        depth_work = (
+            research_cohort.copy()
+        )
+        depth = pd.to_numeric(
+            depth_work[
+                "sweep_penetration_pct"
+            ],
+            errors="coerce",
+        )
+
+        depth_work[
+            "_depth_bucket"
+        ] = pd.cut(
+            depth,
+            bins=[
+                -np.inf,
+                0.05,
+                0.10,
+                0.15,
+                0.25,
+                0.50,
+                np.inf,
+            ],
+            labels=[
+                "<=0.05%",
+                "0.05-0.10%",
+                "0.10-0.15%",
+                "0.15-0.25%",
+                "0.25-0.50%",
+                ">0.50%",
+            ],
+            right=True,
+            include_lowest=True,
+        )
+
+        depth_rows = []
+        for bucket in [
+            "<=0.05%",
+            "0.05-0.10%",
+            "0.10-0.15%",
+            "0.15-0.25%",
+            "0.25-0.50%",
+            ">0.50%",
+        ]:
+            subset = depth_work.loc[
+                depth_work[
+                    "_depth_bucket"
+                ].astype(str)
+                .eq(bucket)
+            ].copy()
+            row = (
+                _sweep_research_group_row(
+                    bucket,
+                    subset,
+                )
+            )
+            if row is not None:
+                depth_rows.append(
+                    row
+                )
+
+        if depth_rows:
+            st.dataframe(
+                pd.DataFrame(
+                    depth_rows
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ----------------------------------------------------
+        # E) TP × SL robustness surface on the SAME cohort.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### E. TP × SL robustness · same 180m cohort"
+        )
+        st.caption(
+            "This is a robustness surface, not a request to choose the single "
+            "best cell. A credible region should remain positive across nearby "
+            "TP/SL values instead of depending on one isolated optimum."
+        )
+
+        robustness_rows = []
+
+        for tp_value in (
+            CONFIRMED_SWING_FIRST_TOUCH_TP_GRID
+        ):
+            for sl_value in (
+                CONFIRMED_SWING_FIRST_TOUCH_SL_GRID
+            ):
+                stats = (
+                    _confirmed_swing_sweep_entry_stats(
+                        research_cohort,
+                        offset_pct=research_offset,
+                        tp_pct=float(
+                            tp_value
+                        ),
+                        sl_pct=float(
+                            sl_value
+                        ),
+                        horizon_min=research_horizon,
+                        fee_per_side_pct=sweep_fee,
+                    )
+                )
+
+                if stats is None:
+                    continue
+
+                robustness_rows.append({
+                    "TP %": float(
+                        tp_value
+                    ),
+                    "SL %": float(
+                        sl_value
+                    ),
+                    "N": int(
+                        stats[
+                            "Complete"
+                        ]
+                    ),
+                    "WR %": (
+                        round(
+                            stats[
+                                "Win rate %"
+                            ],
+                            2,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Win rate %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "Avg net %": (
+                        round(
+                            stats[
+                                "Avg net %"
+                            ],
+                            4,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Avg net %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "PF": (
+                        round(
+                            stats[
+                                "Profit factor"
+                            ],
+                            3,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Profit factor"
+                            ]
+                        )
+                        and np.isfinite(
+                            stats[
+                                "Profit factor"
+                            ]
+                        )
+                        else stats[
+                            "Profit factor"
+                        ]
+                    ),
+                    "Total net %": (
+                        round(
+                            stats[
+                                "Total net %"
+                            ],
+                            4,
+                        )
+                        if pd.notna(
+                            stats[
+                                "Total net %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                    "TIME_EXIT %": (
+                        round(
+                            stats[
+                                "TIME_EXIT %"
+                            ],
+                            1,
+                        )
+                        if pd.notna(
+                            stats[
+                                "TIME_EXIT %"
+                            ]
+                        )
+                        else np.nan
+                    ),
+                })
+
+        robustness_df = pd.DataFrame(
+            robustness_rows
+        )
+
+        if not robustness_df.empty:
+            robust_tabs = st.tabs(
+                [
+                    "Avg net %",
+                    "Profit factor",
+                    "Full table",
+                ]
+            )
+
+            with robust_tabs[0]:
+                avg_matrix = (
+                    robustness_df.pivot(
+                        index="SL %",
+                        columns="TP %",
+                        values="Avg net %",
+                    )
+                )
+                st.dataframe(
+                    avg_matrix,
+                    use_container_width=True,
+                )
+
+            with robust_tabs[1]:
+                pf_matrix = (
+                    robustness_df.pivot(
+                        index="SL %",
+                        columns="TP %",
+                        values="PF",
+                    )
+                )
+                st.dataframe(
+                    pf_matrix,
+                    use_container_width=True,
+                )
+
+            with robust_tabs[2]:
+                st.dataframe(
+                    robustness_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # ----------------------------------------------------
+        # F) Fee sensitivity.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### F. Fee sensitivity · same cohort"
+        )
+        st.caption(
+            "Slippage and funding are still excluded. This only stresses "
+            "round-trip trading fees while preserving exactly the same trades."
+        )
+
+        fee_candidates = sorted({
+            0.03,
+            0.04,
+            0.05,
+            0.06,
+            0.08,
+            0.10,
+            round(
+                float(
+                    sweep_fee
+                ),
+                3,
+            ),
+        })
+
+        fee_rows = []
+
+        for fee_value in (
+            fee_candidates
+        ):
+            stats = (
+                _confirmed_swing_sweep_entry_stats(
+                    research_cohort,
+                    offset_pct=research_offset,
+                    tp_pct=sweep_tp,
+                    sl_pct=sweep_sl,
+                    horizon_min=research_horizon,
+                    fee_per_side_pct=float(
+                        fee_value
+                    ),
+                )
+            )
+
+            if stats is None:
+                continue
+
+            fee_rows.append({
+                "Fee / side %": float(
+                    fee_value
+                ),
+                "Round-trip fee %": float(
+                    fee_value
+                    * 2.0
+                ),
+                "N": int(
+                    stats[
+                        "Complete"
+                    ]
+                ),
+                "WR %": (
+                    round(
+                        stats[
+                            "Win rate %"
+                        ],
+                        2,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Win rate %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "Avg net %": (
+                    round(
+                        stats[
+                            "Avg net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Avg net %"
+                        ]
+                    )
+                    else np.nan
+                ),
+                "PF": (
+                    round(
+                        stats[
+                            "Profit factor"
+                        ],
+                        3,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Profit factor"
+                        ]
+                    )
+                    and np.isfinite(
+                        stats[
+                            "Profit factor"
+                        ]
+                    )
+                    else stats[
+                        "Profit factor"
+                    ]
+                ),
+                "Total net %": (
+                    round(
+                        stats[
+                            "Total net %"
+                        ],
+                        4,
+                    )
+                    if pd.notna(
+                        stats[
+                            "Total net %"
+                        ]
+                    )
+                    else np.nan
+                ),
+            })
+
+        if fee_rows:
+            st.dataframe(
+                pd.DataFrame(
+                    fee_rows
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ----------------------------------------------------
+        # G) Chronological stability on the SAME fixed cohort.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### G. Chronological stability · fixed cohort"
+        )
+        chronological_fixed = (
+            research_cohort.copy()
+        )
+        chronological_fixed[
+            "_sweep_ts"
+        ] = pd.to_numeric(
+            chronological_fixed[
+                "sweep_timestamp"
+            ],
+            errors="coerce",
+        )
+        chronological_fixed = (
+            chronological_fixed
+            .dropna(
+                subset=[
+                    "_sweep_ts"
+                ]
+            )
+            .sort_values(
+                [
+                    "_sweep_ts",
+                    "symbol",
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+        if len(
+            chronological_fixed
+        ) >= 2:
+            split_idx = (
+                len(
+                    chronological_fixed
+                )
+                // 2
+            )
+
+            chrono_fixed_rows = []
+
+            for label, subset in [
+                (
+                    "FULL",
+                    chronological_fixed,
+                ),
+                (
+                    "EARLY 50%",
+                    chronological_fixed.iloc[
+                        :split_idx
+                    ],
+                ),
+                (
+                    "LATE 50%",
+                    chronological_fixed.iloc[
+                        split_idx:
+                    ],
+                ),
+            ]:
+                row = (
+                    _sweep_research_group_row(
+                        label,
+                        subset,
+                    )
+                )
+                if row is not None:
+                    chrono_fixed_rows.append(
+                        row
+                    )
+
+            if chrono_fixed_rows:
+                st.dataframe(
+                    pd.DataFrame(
+                        chrono_fixed_rows
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # ----------------------------------------------------
+        # H) Symbol concentration.
+        # ----------------------------------------------------
+        st.markdown(
+            "##### H. Symbol concentration"
+        )
+        st.caption(
+            "A result dominated by a few symbols is less convincing than one "
+            "distributed across many independent markets."
+        )
+
+        symbol_counts = (
+            research_cohort[
+                "symbol"
+            ]
+            .astype(str)
+            .value_counts()
+            .rename_axis(
+                "Symbol"
+            )
+            .reset_index(
+                name="N"
+            )
+        )
+
+        if not symbol_counts.empty:
+            symbol_counts[
+                "Share %"
+            ] = (
+                symbol_counts[
+                    "N"
+                ]
+                / research_n
+                * 100.0
+            ).round(2)
+
+            st.dataframe(
+                symbol_counts.head(
+                    20
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
     # --------------------------------------------------------
     # LONG / SHORT and reclaim-outcome diagnostics.
     # --------------------------------------------------------
