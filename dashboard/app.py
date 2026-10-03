@@ -172,6 +172,13 @@ CANDIDATE_V1_PATH_STORE_FILE = (
 )
 CANDIDATE_V1_PATH_REFRESH_SECONDS = 60
 
+# Separate persisted paths for non-Candidate REACTION controls. Keeping this
+# store isolated prevents exploratory matched-control rows from polluting the
+# frozen Candidate V1 path store.
+CANDIDATE_V1_MATCHED_REACTION_PATH_STORE_FILE = (
+    BASE_DIR / "reports" / "candidate_v1_analysis" / "matched_reaction_paths_1m.pkl"
+)
+
 # Persisted causal 4h cross-sectional snapshots used only for research
 # segmentation. Candidate V1 selection itself never reads these fields.
 CANDIDATE_V1_MARKET_REGIME_STORE_FILE = (
@@ -15270,6 +15277,38 @@ def _candidate_v1_add_regime_labels(frame):
         ["ALIGNED", "AGAINST"],
         default="UNKNOWN",
     )
+
+    # One side-aware number makes LONG/SHORT relative strength comparable:
+    # positive means the symbol is outperforming BTC in the direction of the
+    # REACTION (LONG: symbol-BTC, SHORT: BTC-symbol).
+    side_adjusted = np.where(
+        long_side,
+        residual,
+        np.where(short_side, -residual, np.nan),
+    )
+    result["side_adjusted_strength_vs_btc_4h"] = pd.to_numeric(
+        side_adjusted,
+        errors="coerce",
+    )
+    directional = pd.to_numeric(
+        result["side_adjusted_strength_vs_btc_4h"],
+        errors="coerce",
+    )
+    result["Directional strength bucket"] = np.select(
+        [
+            directional.le(-1.0),
+            directional.gt(-1.0) & directional.lt(0.0),
+            directional.ge(0.0) & directional.lt(1.0),
+            directional.ge(1.0),
+        ],
+        [
+            "<= -1% AGAINST",
+            "-1% to 0% AGAINST",
+            "0% to +1% ALIGNED",
+            ">= +1% ALIGNED",
+        ],
+        default="UNKNOWN",
+    )
     return result
 
 
@@ -15797,6 +15836,915 @@ def _candidate_v1_context_overlap_table(frame):
     )
     return overlap
 
+
+def _candidate_v1_matched_control_path_store(reaction_rows, force=False):
+    """Persist causal 1m paths for non-Candidate REACTION controls only."""
+    if reaction_rows is None or reaction_rows.empty:
+        return pd.DataFrame()
+
+    return candidate_v1_fast_refresh_path_store(
+        candidate_rows=reaction_rows,
+        store_path=CANDIDATE_V1_MATCHED_REACTION_PATH_STORE_FILE,
+        candle_loader=load_volume_exhaustion_research_candles,
+        prepare_candles=_prepare_confirmed_swing_retest_candles,
+        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+        max_horizon=360,
+        refresh_interval_seconds=CANDIDATE_V1_PATH_REFRESH_SECONDS,
+        force=bool(force),
+    )
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _candidate_v1_build_reaction_control_source(retests_df):
+    """Build one causal row per 15m confirmed-swing REACTION.
+
+    This uses the exact same structural REACTION universe that feeds Candidate
+    V1. Candidate membership is then classified only from the frozen driver
+    filters (aligned RSI >=1 TF and opposing HTF room >=1%). Everything else is
+    a non-Candidate REACTION control.
+    """
+    if retests_df is None or retests_df.empty:
+        return pd.DataFrame()
+
+    work = retests_df.copy()
+    status = work.get(
+        "status",
+        pd.Series("", index=work.index),
+    ).fillna("").astype(str)
+    side = work.get(
+        "signal",
+        pd.Series("", index=work.index),
+    ).fillna("").astype(str).str.upper()
+    work = work.loc[
+        status.eq("REACTION")
+        & side.isin(["LONG", "SHORT"])
+    ].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    duplicate_keys = ["symbol", "signal", "retest_timestamp"]
+    if not set(duplicate_keys).issubset(work.columns):
+        return pd.DataFrame()
+
+    trigger_counts = (
+        work.groupby(duplicate_keys, dropna=False)
+        .size()
+        .rename("triggering_swing_count")
+        .reset_index()
+    )
+    work = (
+        work.sort_values(
+            ["retest_timestamp", "symbol"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=duplicate_keys,
+            keep="first",
+        )
+        .merge(
+            trigger_counts,
+            on=duplicate_keys,
+            how="left",
+        )
+    )
+
+    contextual = _build_reaction_run_driver_context(work)
+    if contextual is None or contextual.empty:
+        return pd.DataFrame()
+
+    contextual["candidate_v1_event_key"] = (
+        contextual["symbol"].astype(str)
+        + "|"
+        + contextual["signal"].astype(str).str.upper()
+        + "|"
+        + pd.to_numeric(
+            contextual["retest_timestamp"],
+            errors="coerce",
+        )
+        .fillna(-1)
+        .astype("int64")
+        .astype(str)
+    )
+    contextual["candidate_v1_cohort"] = "CONTROL"
+
+    room = pd.to_numeric(
+        contextual.get("nearest_opposing_room_pct"),
+        errors="coerce",
+    )
+    rsi_count = pd.to_numeric(
+        contextual.get("aligned_rsi_extreme_count"),
+        errors="coerce",
+    )
+    contextual["is_candidate_v1_driver"] = (
+        room.ge(1.0)
+        & rsi_count.ge(1)
+    )
+
+    no_room = ~room.ge(1.0)
+    no_rsi = ~rsi_count.ge(1)
+    contextual["control_reason"] = np.select(
+        [
+            no_room & no_rsi,
+            no_room,
+            no_rsi,
+        ],
+        [
+            "FAIL_ROOM+RSI",
+            "FAIL_ROOM",
+            "FAIL_RSI",
+        ],
+        default="CANDIDATE_V1_DRIVER",
+    )
+    return contextual.reset_index(drop=True)
+
+
+def _candidate_v1_selected_execution_cost(selected_paths):
+    if selected_paths is None or selected_paths.empty:
+        return 0.10
+    values = pd.to_numeric(
+        selected_paths.get("execution_cost_pct"),
+        errors="coerce",
+    ).dropna()
+    return float(values.median()) if not values.empty else 0.10
+
+
+def _candidate_v1_selected_notional(selected_paths):
+    """Recover notional from the frozen execution snapshot when possible."""
+    if selected_paths is None or selected_paths.empty:
+        return 100.0
+    net_pct = pd.to_numeric(
+        selected_paths.get("net_pnl_pct"),
+        errors="coerce",
+    )
+    net_usdt = pd.to_numeric(
+        selected_paths.get("net_pnl_usdt"),
+        errors="coerce",
+    )
+    valid = net_pct.notna() & net_usdt.notna() & net_pct.abs().gt(1e-12)
+    implied = (net_usdt.loc[valid] / net_pct.loc[valid] * 100.0).replace(
+        [np.inf, -np.inf],
+        np.nan,
+    ).dropna()
+    return float(implied.median()) if not implied.empty else 100.0
+
+
+def _candidate_v1_build_control_execution(
+    controls,
+    selected_tp,
+    selected_sl,
+    horizon_min,
+    execution_cost_pct,
+    notional_usdt,
+    force=False,
+):
+    if controls is None or controls.empty:
+        return pd.DataFrame()
+
+    path_store = _candidate_v1_matched_control_path_store(
+        controls,
+        force=bool(force),
+    )
+    if path_store is None or path_store.empty:
+        return pd.DataFrame()
+
+    # The fast execution engine treats fee/slippage inputs as one additive cost
+    # percentage, so putting the frozen Candidate total cost in entry_fee_pct
+    # reproduces the exact same net-cost convention for controls.
+    return candidate_v1_fast_build_execution_grid(
+        candidate_rows=controls,
+        path_store=path_store,
+        tp_values=(float(selected_tp),),
+        sl_values=(float(selected_sl),),
+        horizon_min=int(horizon_min),
+        entry_fee_pct=float(execution_cost_pct),
+        exit_fee_pct=0.0,
+        entry_slippage_pct=0.0,
+        exit_slippage_pct=0.0,
+        notional_usdt=float(notional_usdt),
+    )
+
+
+def _candidate_v1_group_stats_extended(frame):
+    base = _candidate_v1_execution_slice_stats(frame)
+    if frame is None or frame.empty:
+        base.update({
+            "Avg MFE %": np.nan,
+            "Avg MAE %": np.nan,
+        })
+        return base
+
+    resolved = frame.loc[
+        frame.get(
+            "Outcome",
+            pd.Series("PENDING", index=frame.index),
+        ).astype(str).ne("PENDING")
+    ].copy()
+    mfe = pd.to_numeric(
+        resolved.get("mfe_until_exit_pct"),
+        errors="coerce",
+    ).dropna()
+    mae = pd.to_numeric(
+        resolved.get("mae_until_exit_pct"),
+        errors="coerce",
+    ).dropna()
+    base["Avg MFE %"] = (
+        round(float(mfe.mean()), 4)
+        if not mfe.empty
+        else np.nan
+    )
+    base["Avg MAE %"] = (
+        round(float(mae.mean()), 4)
+        if not mae.empty
+        else np.nan
+    )
+    return base
+
+
+def _candidate_v1_matched_strata_table(candidate_frame, control_frame):
+    required = {
+        "side",
+        "flow_candle_timestamp",
+        "Directional strength bucket",
+    }
+    if (
+        candidate_frame is None
+        or candidate_frame.empty
+        or control_frame is None
+        or control_frame.empty
+        or not required.issubset(candidate_frame.columns)
+        or not required.issubset(control_frame.columns)
+    ):
+        return pd.DataFrame()
+
+    candidate_frame = candidate_frame.copy()
+    control_frame = control_frame.copy()
+    candidate_frame["_match_key"] = list(zip(
+        candidate_frame["side"].astype(str),
+        pd.to_numeric(
+            candidate_frame["flow_candle_timestamp"],
+            errors="coerce",
+        ),
+        candidate_frame["Directional strength bucket"].astype(str),
+    ))
+    control_frame["_match_key"] = list(zip(
+        control_frame["side"].astype(str),
+        pd.to_numeric(
+            control_frame["flow_candle_timestamp"],
+            errors="coerce",
+        ),
+        control_frame["Directional strength bucket"].astype(str),
+    ))
+
+    common = sorted(
+        set(candidate_frame["_match_key"])
+        & set(control_frame["_match_key"]),
+        key=lambda item: (str(item[0]), float(item[1]), str(item[2])),
+    )
+    rows = []
+    for side_name, boundary, strength_bucket in common:
+        candidate_subset = candidate_frame.loc[
+            candidate_frame["side"].astype(str).eq(str(side_name))
+            & pd.to_numeric(
+                candidate_frame["flow_candle_timestamp"],
+                errors="coerce",
+            ).eq(float(boundary))
+            & candidate_frame["Directional strength bucket"].astype(str).eq(
+                str(strength_bucket)
+            )
+        ].copy()
+        control_subset = control_frame.loc[
+            control_frame["side"].astype(str).eq(str(side_name))
+            & pd.to_numeric(
+                control_frame["flow_candle_timestamp"],
+                errors="coerce",
+            ).eq(float(boundary))
+            & control_frame["Directional strength bucket"].astype(str).eq(
+                str(strength_bucket)
+            )
+        ].copy()
+        candidate_stats = _candidate_v1_group_stats_extended(
+            candidate_subset
+        )
+        control_stats = _candidate_v1_group_stats_extended(
+            control_subset
+        )
+        if (
+            candidate_stats["Resolved"] == 0
+            or control_stats["Resolved"] == 0
+        ):
+            continue
+
+        rows.append({
+            "Side": side_name,
+            "4h snapshot": pd.to_datetime(
+                int(boundary),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            ).tz_convert(TZ).strftime("%Y-%m-%d %H:%M"),
+            "Directional strength": strength_bucket,
+            "Candidate resolved": candidate_stats["Resolved"],
+            "Candidate Avg %": candidate_stats["Avg %"],
+            "Candidate PF": candidate_stats["PF"],
+            "Control resolved": control_stats["Resolved"],
+            "Control Avg %": control_stats["Avg %"],
+            "Control PF": control_stats["PF"],
+            "Delta Avg %": round(
+                float(candidate_stats["Avg %"])
+                - float(control_stats["Avg %"]),
+                4,
+            ),
+            "Candidate MFE %": candidate_stats["Avg MFE %"],
+            "Control MFE %": control_stats["Avg MFE %"],
+            "Candidate MAE %": candidate_stats["Avg MAE %"],
+            "Control MAE %": control_stats["Avg MAE %"],
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _candidate_v1_greedy_matched_pairs(candidate_frame, control_frame):
+    """One-to-one nearest-strength matching without replacement inside strata."""
+    if candidate_frame is None or candidate_frame.empty:
+        return pd.DataFrame()
+    if control_frame is None or control_frame.empty:
+        return pd.DataFrame()
+
+    required = {
+        "side",
+        "flow_candle_timestamp",
+        "Directional strength bucket",
+        "side_adjusted_strength_vs_btc_4h",
+        "net_pnl_pct",
+        "Outcome",
+        "symbol",
+        "reaction_timestamp",
+    }
+    if (
+        not required.issubset(candidate_frame.columns)
+        or not required.issubset(control_frame.columns)
+    ):
+        return pd.DataFrame()
+
+    cands = candidate_frame.loc[
+        candidate_frame["Outcome"].astype(str).ne("PENDING")
+        & pd.to_numeric(
+            candidate_frame["net_pnl_pct"],
+            errors="coerce",
+        ).notna()
+    ].copy()
+    ctrls = control_frame.loc[
+        control_frame["Outcome"].astype(str).ne("PENDING")
+        & pd.to_numeric(
+            control_frame["net_pnl_pct"],
+            errors="coerce",
+        ).notna()
+    ].copy()
+    if cands.empty or ctrls.empty:
+        return pd.DataFrame()
+
+    rows = []
+    group_cols = [
+        "side",
+        "flow_candle_timestamp",
+        "Directional strength bucket",
+    ]
+    for key, candidate_group in cands.groupby(group_cols, dropna=False):
+        side_name, boundary, strength_bucket = key
+        control_group = ctrls.loc[
+            ctrls["side"].astype(str).eq(str(side_name))
+            & pd.to_numeric(
+                ctrls["flow_candle_timestamp"],
+                errors="coerce",
+            ).eq(float(boundary))
+            & ctrls["Directional strength bucket"].astype(str).eq(
+                str(strength_bucket)
+            )
+        ].copy()
+        if control_group.empty:
+            continue
+
+        available = list(control_group.index)
+        candidate_group = candidate_group.sort_values(
+            ["reaction_timestamp", "symbol"],
+            kind="stable",
+        )
+        for candidate_index, candidate in candidate_group.iterrows():
+            if not available:
+                break
+            candidate_strength = float(
+                pd.to_numeric(
+                    candidate["side_adjusted_strength_vs_btc_4h"],
+                    errors="coerce",
+                )
+            )
+
+            # Prefer a different symbol when equally/near-equally suitable to
+            # reduce same-asset dependence, but allow same-symbol when needed.
+            scored = []
+            for control_index in available:
+                control = control_group.loc[control_index]
+                control_strength = pd.to_numeric(
+                    control["side_adjusted_strength_vs_btc_4h"],
+                    errors="coerce",
+                )
+                if pd.isna(control_strength):
+                    continue
+                distance = abs(candidate_strength - float(control_strength))
+                same_symbol_penalty = (
+                    1
+                    if str(candidate["symbol"]) == str(control["symbol"])
+                    else 0
+                )
+                scored.append(
+                    (distance, same_symbol_penalty, control_index)
+                )
+            if not scored:
+                continue
+            _, _, chosen_index = min(scored)
+            available.remove(chosen_index)
+            control = control_group.loc[chosen_index]
+
+            candidate_net = float(candidate["net_pnl_pct"])
+            control_net = float(control["net_pnl_pct"])
+            rows.append({
+                "Side": str(side_name),
+                "4h snapshot": pd.to_datetime(
+                    int(boundary),
+                    unit="ms",
+                    utc=True,
+                    errors="coerce",
+                ).tz_convert(TZ).strftime("%Y-%m-%d %H:%M"),
+                "Directional strength": str(strength_bucket),
+                "Candidate": str(candidate["symbol"]),
+                "Candidate reaction": pd.to_datetime(
+                    int(candidate["reaction_timestamp"]),
+                    unit="ms",
+                    utc=True,
+                    errors="coerce",
+                ).tz_convert(TZ).strftime("%Y-%m-%d %H:%M"),
+                "Candidate strength %": round(
+                    candidate_strength,
+                    4,
+                ),
+                "Candidate net %": round(candidate_net, 4),
+                "Control": str(control["symbol"]),
+                "Control reaction": pd.to_datetime(
+                    int(control["reaction_timestamp"]),
+                    unit="ms",
+                    utc=True,
+                    errors="coerce",
+                ).tz_convert(TZ).strftime("%Y-%m-%d %H:%M"),
+                "Control strength %": round(
+                    float(control["side_adjusted_strength_vs_btc_4h"]),
+                    4,
+                ),
+                "Control net %": round(control_net, 4),
+                "Strength distance %": round(
+                    abs(
+                        candidate_strength
+                        - float(control["side_adjusted_strength_vs_btc_4h"])
+                    ),
+                    4,
+                ),
+                "Delta Candidate-Control %": round(
+                    candidate_net - control_net,
+                    4,
+                ),
+            })
+
+    return pd.DataFrame(rows)
+
+
+def _candidate_v1_control_summary_table(candidate_frame, control_frame):
+    rows = []
+    for side_name in ("TOTAL", "LONG", "SHORT"):
+        for group_name, source in (
+            ("Candidate V1", candidate_frame),
+            ("Non-Candidate REACTION", control_frame),
+        ):
+            if source is None or source.empty:
+                continue
+            subset = source
+            if side_name != "TOTAL":
+                subset = subset.loc[
+                    subset["side"].astype(str).str.upper().eq(side_name)
+                ]
+            if subset.empty:
+                continue
+            stats = _candidate_v1_group_stats_extended(subset)
+            rows.append({
+                "Side": side_name,
+                "Group": group_name,
+                **stats,
+            })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v1_render_matched_reaction_control(
+    selected_context,
+    retests_df,
+    selected_tp,
+    selected_sl,
+    snap_horizon,
+    selected_paths,
+    key_prefix,
+):
+    st.markdown("##### Candidate V1 vs matched non-Candidate REACTION")
+    st.caption(
+        "Control reactions come from the same 15m confirmed-swing REACTION "
+        "scanner but fail at least one frozen V1 driver (RSI>=1 aligned TF or "
+        "opposing HTF room>=1%). Matching holds side, exact causal 4h snapshot "
+        "and side-adjusted symbol-vs-BTC bucket constant. This tests whether V1 "
+        "adds information beyond market drift and relative strength."
+    )
+
+    if retests_df is None or retests_df.empty:
+        st.info(
+            "The current REACTION scanner source is unavailable on this rerun."
+        )
+        return
+
+    try:
+        with st.spinner("Building matched REACTION control pool..."):
+            reaction_source = _candidate_v1_build_reaction_control_source(
+                retests_df
+            )
+    except Exception as exc:
+        st.warning(
+            "Could not build REACTION controls: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    if reaction_source is None or reaction_source.empty:
+        st.info("No causal REACTION controls are available yet.")
+        return
+
+    controls = reaction_source.loc[
+        ~reaction_source["is_candidate_v1_driver"].fillna(False).astype(bool)
+    ].copy()
+    if controls.empty:
+        st.info("No non-Candidate REACTIONs exist in the current scanner window.")
+        return
+
+    try:
+        control_context, _ = _candidate_v1_build_market_context(
+            controls,
+            force=False,
+        )
+    except Exception as exc:
+        st.warning(
+            "Control Market Flow context unavailable: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    controls = controls.merge(
+        control_context.drop_duplicates("candidate_v1_event_key"),
+        on="candidate_v1_event_key",
+        how="left",
+        suffixes=("", "_ctx"),
+    )
+    controls = _candidate_v1_add_regime_labels(controls)
+    candidates = _candidate_v1_add_regime_labels(
+        selected_context.copy()
+    )
+
+    controls = controls.loc[
+        controls.get(
+            "market_context_available",
+            pd.Series(False, index=controls.index),
+        ).fillna(False).astype(bool)
+        & controls["Directional strength bucket"].astype(str).ne("UNKNOWN")
+        & pd.to_numeric(
+            controls["flow_candle_timestamp"],
+            errors="coerce",
+        ).notna()
+    ].copy()
+    candidates = candidates.loc[
+        candidates.get(
+            "market_context_available",
+            pd.Series(False, index=candidates.index),
+        ).fillna(False).astype(bool)
+        & candidates["Directional strength bucket"].astype(str).ne("UNKNOWN")
+        & pd.to_numeric(
+            candidates["flow_candle_timestamp"],
+            errors="coerce",
+        ).notna()
+    ].copy()
+    if controls.empty or candidates.empty:
+        st.info(
+            "Not enough causal Market Flow context is available for matched controls."
+        )
+        return
+
+    total_control_pool_n = int(
+        controls["candidate_v1_event_key"].astype(str).nunique()
+    )
+
+    # Keep only control strata that are actually represented by the selected
+    # Candidate execution pair. This avoids scanning unrelated REACTION paths.
+    match_cols = [
+        "side",
+        "flow_candle_timestamp",
+        "Directional strength bucket",
+    ]
+    candidate_strata = candidates[
+        match_cols
+    ].dropna().drop_duplicates()
+    if candidate_strata.empty:
+        st.info("Candidate rows do not have enough causal context to match.")
+        return
+
+    controls = controls.merge(
+        candidate_strata.assign(_matchable=True),
+        on=match_cols,
+        how="inner",
+    )
+    if controls.empty:
+        st.info(
+            "No non-Candidate REACTION shares the selected Candidate strata yet."
+        )
+        return
+
+    force_control_paths = st.button(
+        "Refresh matched REACTION paths",
+        key=f"{key_prefix}_matched_control_refresh",
+        help=(
+            "Refreshes only non-Candidate REACTION paths in strata occupied by "
+            "the selected Candidate set."
+        ),
+    )
+
+    execution_cost_pct = _candidate_v1_selected_execution_cost(
+        selected_paths
+    )
+    notional_usdt = _candidate_v1_selected_notional(
+        selected_paths
+    )
+    with st.spinner("Materializing matched control execution paths..."):
+        control_execution = _candidate_v1_build_control_execution(
+            controls,
+            selected_tp=selected_tp,
+            selected_sl=selected_sl,
+            horizon_min=snap_horizon,
+            execution_cost_pct=execution_cost_pct,
+            notional_usdt=notional_usdt,
+            force=bool(force_control_paths),
+        )
+
+    if control_execution is None or control_execution.empty:
+        st.info(
+            "Matched control paths are not complete/available yet."
+        )
+        return
+
+    control_exec_context = control_execution.merge(
+        controls.drop_duplicates("candidate_v1_event_key"),
+        on="candidate_v1_event_key",
+        how="left",
+        suffixes=("", "_ctx"),
+    )
+    control_exec_context = _candidate_v1_add_regime_labels(
+        control_exec_context
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "Matched controls / pool",
+        (
+            f"{int(controls['candidate_v1_event_key'].nunique())}"
+            f"/{total_control_pool_n}"
+        ),
+    )
+    c2.metric(
+        "Control resolved",
+        int(control_exec_context["Outcome"].astype(str).ne("PENDING").sum()),
+    )
+    c3.metric(
+        "Matched 4h boundaries",
+        int(
+            pd.to_numeric(
+                controls["flow_candle_timestamp"],
+                errors="coerce",
+            ).dropna().nunique()
+        ),
+    )
+    c4.metric(
+        "Execution cost",
+        f"{float(execution_cost_pct):.3f}%",
+    )
+
+    matched_boundaries = int(
+        pd.to_numeric(
+            controls["flow_candle_timestamp"],
+            errors="coerce",
+        ).dropna().nunique()
+    )
+    if matched_boundaries < 5:
+        st.warning(
+            "Matched controls currently span only "
+            f"{matched_boundaries} causal 4h boundary/boundaries. "
+            "Treat Market/Breadth conclusions as regime observations, not as "
+            "independent statistical confirmation yet."
+        )
+
+    baseline = _candidate_v1_control_summary_table(
+        candidates,
+        control_exec_context,
+    )
+    if not baseline.empty:
+        st.markdown("###### Raw same-window baseline")
+        st.caption(
+            "Useful context only: this pooled table is not distribution-matched. "
+            "The strata and one-to-one sections below are the controlled tests."
+        )
+        st.dataframe(
+            baseline,
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_control_raw_baseline",
+        )
+
+    if "control_reason" in control_exec_context.columns:
+        reason_rows = []
+        for side_name in ("LONG", "SHORT"):
+            side_controls = control_exec_context.loc[
+                control_exec_context["side"].astype(str).str.upper().eq(side_name)
+            ].copy()
+            for reason in ("FAIL_ROOM", "FAIL_RSI", "FAIL_ROOM+RSI"):
+                subset = side_controls.loc[
+                    side_controls["control_reason"].astype(str).eq(reason)
+                ].copy()
+                if subset.empty:
+                    continue
+                stats = _candidate_v1_group_stats_extended(subset)
+                reason_rows.append({
+                    "Side": side_name,
+                    "Why not Candidate V1": reason,
+                    **stats,
+                })
+        if reason_rows:
+            st.markdown("###### Which frozen V1 condition excluded the controls?")
+            st.caption(
+                "This does not optimize a new rule; it shows whether failures of "
+                "RSI alignment, HTF room, or both are associated with different "
+                "execution behavior inside the matched control pool."
+            )
+            st.dataframe(
+                pd.DataFrame(reason_rows),
+                use_container_width=True,
+                hide_index=True,
+                key=f"{key_prefix}_control_fail_reason",
+            )
+
+    strata = _candidate_v1_matched_strata_table(
+        candidates,
+        control_exec_context,
+    )
+    if not strata.empty:
+        st.markdown("###### Exact snapshot × side × strength strata")
+        st.dataframe(
+            strata,
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_matched_strata",
+        )
+        st.download_button(
+            "Download matched strata CSV",
+            data=strata.to_csv(index=False).encode("utf-8"),
+            file_name=(
+                "candidate_v1_vs_reaction_matched_strata_"
+                f"tp{float(selected_tp):g}_sl{float(selected_sl):g}_"
+                f"{int(snap_horizon)}m.csv"
+            ),
+            mime="text/csv",
+            key=f"{key_prefix}_matched_strata_download",
+        )
+
+    pairs = _candidate_v1_greedy_matched_pairs(
+        candidates,
+        control_exec_context,
+    )
+    if pairs.empty:
+        st.info(
+            "No fully resolved one-to-one Candidate/control pairs are available yet."
+        )
+        return
+
+    pair_delta = pd.to_numeric(
+        pairs["Delta Candidate-Control %"],
+        errors="coerce",
+    ).dropna()
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Resolved matched pairs", len(pair_delta))
+    p2.metric(
+        "Mean pair delta",
+        f"{float(pair_delta.mean()):+.3f}%"
+        if not pair_delta.empty
+        else "—",
+    )
+    p3.metric(
+        "Median pair delta",
+        f"{float(pair_delta.median()):+.3f}%"
+        if not pair_delta.empty
+        else "—",
+    )
+    p4.metric(
+        "Candidate outperformed",
+        f"{float(pair_delta.gt(0).mean() * 100.0):.1f}%"
+        if not pair_delta.empty
+        else "—",
+    )
+
+    pair_side_rows = []
+    for side_name in ("LONG", "SHORT"):
+        subset = pairs.loc[pairs["Side"].astype(str).eq(side_name)].copy()
+        if subset.empty:
+            continue
+        candidate_net = pd.to_numeric(subset["Candidate net %"], errors="coerce")
+        control_net = pd.to_numeric(subset["Control net %"], errors="coerce")
+        delta = pd.to_numeric(
+            subset["Delta Candidate-Control %"],
+            errors="coerce",
+        )
+        pair_side_rows.append({
+            "Side": side_name,
+            "Pairs": int(delta.notna().sum()),
+            "Candidate Avg %": round(float(candidate_net.mean()), 4),
+            "Control Avg %": round(float(control_net.mean()), 4),
+            "Mean delta %": round(float(delta.mean()), 4),
+            "Median delta %": round(float(delta.median()), 4),
+            "Candidate outperformed %": round(
+                float(delta.gt(0).mean() * 100.0),
+                2,
+            ),
+        })
+    if pair_side_rows:
+        st.markdown("###### One-to-one result by side")
+        st.dataframe(
+            pd.DataFrame(pair_side_rows),
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_matched_pairs_by_side",
+        )
+
+    boundary_rows = []
+    for (snapshot_label, side_name), subset in pairs.groupby(
+        ["4h snapshot", "Side"],
+        sort=True,
+    ):
+        delta = pd.to_numeric(
+            subset["Delta Candidate-Control %"],
+            errors="coerce",
+        ).dropna()
+        if delta.empty:
+            continue
+        boundary_rows.append({
+            "4h snapshot": snapshot_label,
+            "Side": side_name,
+            "Pairs": len(delta),
+            "Mean delta %": round(float(delta.mean()), 4),
+            "Median delta %": round(float(delta.median()), 4),
+            "Candidate outperformed %": round(
+                float(delta.gt(0).mean() * 100.0),
+                2,
+            ),
+        })
+    if boundary_rows:
+        st.markdown("###### Stability by causal 4h snapshot")
+        st.caption(
+            "This prevents many reactions inside one 4h regime from looking like "
+            "many independent Market Flow observations."
+        )
+        st.dataframe(
+            pd.DataFrame(boundary_rows),
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_matched_pairs_by_boundary",
+        )
+
+    st.dataframe(
+        pairs,
+        use_container_width=True,
+        hide_index=True,
+        key=f"{key_prefix}_matched_pairs",
+    )
+    st.download_button(
+        "Download one-to-one matched pairs CSV",
+        data=pairs.to_csv(index=False).encode("utf-8"),
+        file_name=(
+            "candidate_v1_vs_reaction_pairs_"
+            f"tp{float(selected_tp):g}_sl{float(selected_sl):g}_"
+            f"{int(snap_horizon)}m.csv"
+        ),
+        mime="text/csv",
+        key=f"{key_prefix}_matched_pairs_download",
+    )
+
+
 def _candidate_v1_regime_filter_mask(frame, label):
     if label == "ALL causal contexts":
         return pd.Series(True, index=frame.index)
@@ -15869,6 +16817,7 @@ def _candidate_v1_render_market_regime_analysis(
     snap_horizon,
     metric,
     key_prefix,
+    retests_df=None,
 ):
     st.markdown("##### 🌊 Performance by causal Market Regime")
     st.caption(
@@ -15946,6 +16895,15 @@ def _candidate_v1_render_market_regime_analysis(
         "Market breadth 4h": ("Breadth bucket", ["<40%", "40–50%", "50–60%", "60–70%", ">=70%"]),
         "BTC 4h direction": ("BTC 4h", ["BTC < 0%", "BTC >= 0%"]),
         "Symbol residual vs BTC": ("Symbol vs BTC", ["<= -1%", "-1% to 0%", "0% to +1%", ">= +1%"]),
+        "Directional strength vs BTC": (
+            "Directional strength bucket",
+            [
+                "<= -1% AGAINST",
+                "-1% to 0% AGAINST",
+                "0% to +1% ALIGNED",
+                ">= +1% ALIGNED",
+            ],
+        ),
         "Market alignment with side": ("Market alignment", ["TAILWIND", "MIXED", "HEADWIND"]),
         "Symbol strength alignment": ("Symbol-side alignment", ["ALIGNED", "AGAINST"]),
         "Sector strength alignment": ("Sector-side alignment", ["ALIGNED", "AGAINST"]),
@@ -15969,6 +16927,30 @@ def _candidate_v1_render_market_regime_analysis(
         st.info("Not enough resolved executions with causal context for this dimension yet.")
     else:
         st.dataframe(performance, use_container_width=True, hide_index=True)
+
+    directional_gradient = _candidate_v1_regime_performance_table(
+        selected_context,
+        "Directional strength bucket",
+        bucket_order=[
+            "<= -1% AGAINST",
+            "-1% to 0% AGAINST",
+            "0% to +1% ALIGNED",
+            ">= +1% ALIGNED",
+        ],
+    )
+    if not directional_gradient.empty:
+        st.markdown("##### Directional strength vs BTC · gradient")
+        st.caption(
+            "Positive means relative strength agrees with the REACTION side: "
+            "LONG = symbol-BTC, SHORT = BTC-symbol. This keeps LONG and SHORT "
+            "on one comparable directional scale."
+        )
+        st.dataframe(
+            directional_gradient,
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_directional_strength_gradient",
+        )
 
     st.markdown("##### Market × symbol controlled analysis")
     st.caption(
@@ -16152,6 +17134,16 @@ def _candidate_v1_render_market_regime_analysis(
                 key=f"{key_prefix}_btc_breadth_overlap",
             )
 
+    _candidate_v1_render_matched_reaction_control(
+        selected_context=selected_context,
+        retests_df=retests_df,
+        selected_tp=selected_tp,
+        selected_sl=selected_sl,
+        snap_horizon=snap_horizon,
+        selected_paths=selected_paths,
+        key_prefix=key_prefix,
+    )
+
     regime_filter = st.selectbox(
         "Regime-conditioned matrix",
         options=[
@@ -16228,6 +17220,8 @@ def _candidate_v1_render_market_regime_analysis(
             "btc_return_pct_4h",
             "return_pct_4h",
             "symbol_strength_vs_btc_4h",
+            "side_adjusted_strength_vs_btc_4h",
+            "Directional strength bucket",
             "return_rank_pct_4h",
             "relative_volume_4h",
             "primary_sector",
@@ -16343,7 +17337,7 @@ def _candidate_v1_matrix_cell_text(row, metric):
     return f"{value_text} (WR {wr_text} · PF {pf_text})"
 
 
-def _candidate_v1_render_execution_matrix(history, key_prefix):
+def _candidate_v1_render_execution_matrix(history, key_prefix, retests_df=None):
     """Execution matrix with an explicit frozen UI snapshot.
 
     Expensive path/grid work only runs on the first render or when the user
@@ -16691,6 +17685,7 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
         snap_horizon=snap_horizon,
         metric=metric,
         key_prefix=key_prefix,
+        retests_df=retests_df,
     )
 
     show_detail = st.toggle(
@@ -16796,7 +17791,7 @@ def _candidate_v1_read_history_csv_cached(path_text, mtime_ns):
     return pd.read_csv(path_text)
 
 
-def render_candidate_v1_total_monitor():
+def render_candidate_v1_total_monitor(retests_df=None):
     """Combined persisted view of the frozen SHORT + LONG Candidate V1 sets."""
     frames = []
     for side, path in (
@@ -16867,6 +17862,7 @@ def render_candidate_v1_total_monitor():
     _candidate_v1_render_execution_matrix(
         history,
         key_prefix="candidate_v1_total_execution",
+        retests_df=retests_df,
     )
 
     st.markdown("#### Side comparison")
@@ -33088,7 +34084,9 @@ if selected_section == "reaction_swing_lab":
                     )
 
                 with total_monitor_tab:
-                    render_candidate_v1_total_monitor()
+                    render_candidate_v1_total_monitor(
+                        retests_df=candidate_v1_retests_df,
+                    )
 
             elif lab_mode == "🔁 REACTION / Retests":
                 control_1, control_2, control_3 = (
