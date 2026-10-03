@@ -14516,6 +14516,501 @@ def _candidate_v1_mae_before_target(
     return pd.DataFrame(rows).set_index("_row_index")
 
 
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _candidate_v1_extended_followup_metrics(
+    candidate_rows,
+    threshold_pct=2.0,
+    horizons=(180, 240, 360),
+    candle_limit=5000,
+):
+    """Track every frozen candidate beyond the official 180m outcome.
+
+    The Candidate V1 definition remains +2% within 180 minutes. 240m and 360m
+    are observational follow-up horizons only. A contiguous 1m path is
+    required; gaps censor the later horizon instead of being bridged.
+    """
+    if candidate_rows is None or candidate_rows.empty:
+        return pd.DataFrame()
+
+    required = {"symbol", "retest_timestamp", "retest_close", "signal"}
+    if not required.issubset(candidate_rows.columns):
+        return pd.DataFrame()
+
+    horizons = tuple(sorted({int(h) for h in horizons if int(h) > 0}))
+    if not horizons:
+        return pd.DataFrame()
+
+    max_horizon = max(horizons)
+    threshold_pct = float(threshold_pct)
+    rows = []
+
+    for symbol, symbol_rows in candidate_rows.groupby("symbol", sort=False):
+        candles = load_volume_exhaustion_research_candles(
+            symbol=str(symbol),
+            timeframe="1m",
+            limit=int(candle_limit),
+        )
+        prepared = _prepare_confirmed_swing_retest_candles(candles)
+        if prepared.empty:
+            continue
+
+        timestamps = prepared["timestamp"].astype("int64").to_numpy()
+        highs = prepared["high"].astype(float).to_numpy()
+        lows = prepared["low"].astype(float).to_numpy()
+
+        segment_end = np.empty(len(timestamps), dtype=np.int64)
+        for idx in range(len(timestamps) - 1, -1, -1):
+            if (
+                idx == len(timestamps) - 1
+                or int(timestamps[idx + 1])
+                != int(timestamps[idx]) + 60_000
+            ):
+                segment_end[idx] = idx
+            else:
+                segment_end[idx] = segment_end[idx + 1]
+
+        for row_index, row in symbol_rows.iterrows():
+            try:
+                reaction_ts = int(row["retest_timestamp"])
+                baseline = float(row["retest_close"])
+                side = str(row["signal"]).upper()
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if baseline <= 0 or side not in {"LONG", "SHORT"}:
+                continue
+
+            next_ts = reaction_ts + 60_000
+            start_idx = int(np.searchsorted(timestamps, next_ts, side="left"))
+            if (
+                start_idx >= len(timestamps)
+                or int(timestamps[start_idx]) != next_ts
+            ):
+                continue
+
+            max_end_idx = min(
+                int(segment_end[start_idx]),
+                int(start_idx + max_horizon - 1),
+            )
+            observed_bars = max_end_idx - start_idx + 1
+            if observed_bars <= 0:
+                continue
+
+            if side == "LONG":
+                target_price = baseline * (1.0 + threshold_pct / 100.0)
+                hit_positions = np.flatnonzero(
+                    highs[start_idx : max_end_idx + 1] >= target_price
+                )
+            else:
+                target_price = baseline * (1.0 - threshold_pct / 100.0)
+                hit_positions = np.flatnonzero(
+                    lows[start_idx : max_end_idx + 1] <= target_price
+                )
+
+            first_hit_min = np.nan
+            if len(hit_positions):
+                first_hit_idx = start_idx + int(hit_positions[0])
+                first_hit_min = (
+                    int(timestamps[first_hit_idx]) - reaction_ts
+                ) / 60_000.0
+
+            metrics = {
+                "_row_index": row_index,
+                "candidate_v1_first_hit_2pct_min_360": first_hit_min,
+                "candidate_v1_observed_followup_min": int(observed_bars),
+            }
+
+            if pd.notna(first_hit_min):
+                if float(first_hit_min) <= 180:
+                    bucket = "<=180m"
+                elif float(first_hit_min) <= 240:
+                    bucket = "181-240m"
+                elif float(first_hit_min) <= 360:
+                    bucket = "241-360m"
+                else:
+                    bucket = ">360m"
+            elif observed_bars >= 360:
+                bucket = "NO_HIT_360"
+            else:
+                bucket = "PENDING_360"
+            metrics["candidate_v1_hit_timing_bucket"] = bucket
+
+            for horizon in horizons:
+                horizon_end_idx = min(
+                    int(max_end_idx),
+                    int(start_idx + horizon - 1),
+                )
+                horizon_observed = horizon_end_idx - start_idx + 1
+
+                h_highs = highs[start_idx : horizon_end_idx + 1]
+                h_lows = lows[start_idx : horizon_end_idx + 1]
+                if len(h_highs) == 0 or len(h_lows) == 0:
+                    continue
+
+                if side == "LONG":
+                    mfe_pct = max(
+                        0.0,
+                        (float(np.nanmax(h_highs)) / baseline - 1.0) * 100.0,
+                    )
+                    mae_pct = max(
+                        0.0,
+                        (1.0 - float(np.nanmin(h_lows)) / baseline) * 100.0,
+                    )
+                else:
+                    mfe_pct = max(
+                        0.0,
+                        (1.0 - float(np.nanmin(h_lows)) / baseline) * 100.0,
+                    )
+                    mae_pct = max(
+                        0.0,
+                        (float(np.nanmax(h_highs)) / baseline - 1.0) * 100.0,
+                    )
+
+                hit_by_horizon = (
+                    pd.notna(first_hit_min)
+                    and float(first_hit_min) <= float(horizon)
+                )
+                if hit_by_horizon:
+                    outcome = "HIT"
+                elif horizon_observed >= horizon:
+                    outcome = "NO_HIT"
+                else:
+                    outcome = "PENDING"
+
+                metrics[f"candidate_v1_outcome_{horizon}m"] = outcome
+                metrics[f"candidate_v1_mfe_{horizon}m_pct"] = float(mfe_pct)
+                metrics[f"candidate_v1_mae_{horizon}m_pct"] = float(mae_pct)
+                metrics[f"candidate_v1_observed_{horizon}m_min"] = int(
+                    horizon_observed
+                )
+
+            rows.append(metrics)
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows).set_index("_row_index")
+
+
+def _candidate_v1_merge_extended_followup(result, threshold_pct=2.0):
+    """Attach 180/240/360m observational follow-up without changing V1."""
+    extended = _candidate_v1_extended_followup_metrics(
+        result,
+        threshold_pct=float(threshold_pct),
+        horizons=(180, 240, 360),
+        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+    )
+    if extended is None or extended.empty:
+        return result
+
+    common = result.index.intersection(extended.index)
+    for column in extended.columns:
+        result.loc[common, column] = extended.loc[common, column]
+
+    # The frozen outcome stays authoritative at 180m. Keep the observational
+    # 180m field aligned with it when legacy rows lack the new column.
+    if "candidate_v1_outcome_180m" not in result.columns:
+        result["candidate_v1_outcome_180m"] = result.get(
+            "candidate_v1_outcome",
+            "PENDING",
+        )
+    else:
+        result["candidate_v1_outcome_180m"] = (
+            result["candidate_v1_outcome_180m"]
+            .fillna(result.get("candidate_v1_outcome"))
+        )
+
+    return result
+
+
+def _candidate_v1_render_extended_followup(history, key_prefix):
+    """Display TOTAL / DISCOVERY / FORWARD follow-up at 180, 240 and 360m."""
+    if history is None or history.empty:
+        return
+
+    st.markdown("#### ⏱ Extended follow-up · +2% target")
+    st.caption(
+        "Candidate V1 stays frozen at +2% <=180m. The 240m and 360m columns "
+        "are observational only: they show whether an official 180m NO_HIT "
+        "became a late runner. Every candidate is followed, not only NO_HITs. "
+        "Data gaps censor later horizons instead of being bridged."
+    )
+
+    follow_tabs = st.tabs(["TOTAL", "DISCOVERY", "FORWARD"])
+    for tab, cohort_name in zip(
+        follow_tabs,
+        ("TOTAL", "DISCOVERY", "FORWARD"),
+    ):
+        with tab:
+            subset = history.copy()
+            if cohort_name != "TOTAL":
+                subset = subset.loc[
+                    subset.get("candidate_v1_cohort", "") == cohort_name
+                ].copy()
+
+            rows = []
+            for horizon in (180, 240, 360):
+                outcome_col = f"candidate_v1_outcome_{horizon}m"
+                if outcome_col not in subset.columns and horizon == 180:
+                    outcome = subset.get(
+                        "candidate_v1_outcome",
+                        pd.Series("PENDING", index=subset.index),
+                    )
+                else:
+                    outcome = subset.get(
+                        outcome_col,
+                        pd.Series("PENDING", index=subset.index),
+                    )
+                outcome = outcome.fillna("PENDING").astype(str)
+                resolved = outcome.isin(["HIT", "NO_HIT"])
+                hits = int(outcome.eq("HIT").sum())
+                resolved_n = int(resolved.sum())
+                pending_n = int(outcome.eq("PENDING").sum())
+
+                mfe_col = f"candidate_v1_mfe_{horizon}m_pct"
+                if horizon == 180 and mfe_col not in subset.columns:
+                    mfe_col = "reaction_mfe_180m_pct"
+                mae_col = f"candidate_v1_mae_{horizon}m_pct"
+
+                mfe = pd.to_numeric(
+                    subset.get(mfe_col, pd.Series(dtype=float)),
+                    errors="coerce",
+                ).dropna()
+                mae = pd.to_numeric(
+                    subset.get(mae_col, pd.Series(dtype=float)),
+                    errors="coerce",
+                ).dropna()
+
+                rows.append({
+                    "Horizon": f"{horizon}m",
+                    "N": int(len(subset)),
+                    "Resolved": resolved_n,
+                    "Hits +2%": hits,
+                    "Pending": pending_n,
+                    "Hit rate %": (
+                        round(hits / resolved_n * 100.0, 2)
+                        if resolved_n
+                        else np.nan
+                    ),
+                    "Median MFE %": (
+                        round(float(mfe.median()), 3)
+                        if not mfe.empty
+                        else np.nan
+                    ),
+                    "Median MAE %": (
+                        round(float(mae.median()), 3)
+                        if not mae.empty
+                        else np.nan
+                    ),
+                })
+
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True,
+                hide_index=True,
+                key=f"{key_prefix}_{cohort_name.lower()}_horizons",
+            )
+
+            timing = subset.get(
+                "candidate_v1_hit_timing_bucket",
+                pd.Series(dtype=str),
+            ).fillna("UNKNOWN").astype(str)
+            if not timing.empty:
+                order = [
+                    "<=180m",
+                    "181-240m",
+                    "241-360m",
+                    "NO_HIT_360",
+                    "PENDING_360",
+                    "UNKNOWN",
+                ]
+                counts = timing.value_counts()
+                bucket_rows = [
+                    {"First +2% timing": bucket, "N": int(counts.get(bucket, 0))}
+                    for bucket in order
+                    if int(counts.get(bucket, 0)) > 0
+                ]
+                if bucket_rows:
+                    st.caption(
+                        "Late-run buckets make the old 180m NO_HITs visible "
+                        "without rewriting their official outcome."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(bucket_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                        key=f"{key_prefix}_{cohort_name.lower()}_timing",
+                    )
+
+
+def render_candidate_v1_total_monitor():
+    """Combined persisted view of the frozen SHORT + LONG Candidate V1 sets."""
+    frames = []
+    for side, path in (
+        ("SHORT", CANDIDATE_V1_HISTORY_FILE),
+        ("LONG", CANDIDATE_V1_LONG_HISTORY_FILE),
+    ):
+        try:
+            if path.exists():
+                frame = pd.read_csv(path)
+                if not frame.empty:
+                    frame = frame.copy()
+                    frame["Candidate side"] = side
+                    frames.append(frame)
+        except Exception:
+            continue
+
+    st.markdown("### 🧊 Candidate V1 TOTAL · SHORT + LONG")
+    st.caption(
+        "Combined research view only. SHORT and LONG keep their own frozen "
+        "Discovery IDs, histories and snapshots; this tab never changes cohort "
+        "membership or the official +2% <=180m definition."
+    )
+
+    if not frames:
+        st.info("No persisted Candidate V1 SHORT/LONG history is available yet.")
+        return
+
+    history = pd.concat(frames, ignore_index=True, sort=False)
+    history = history.drop_duplicates(
+        subset=["Candidate side", "candidate_v1_event_key"],
+        keep="last",
+    )
+
+    official = history.get(
+        "candidate_v1_outcome",
+        pd.Series("PENDING", index=history.index),
+    ).fillna("PENDING").astype(str)
+    resolved = official.isin(["HIT", "NO_HIT"])
+    hits = int(official.eq("HIT").sum())
+    resolved_n = int(resolved.sum())
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total candidates", len(history))
+    c2.metric("SHORT", int(history["Candidate side"].eq("SHORT").sum()))
+    c3.metric("LONG", int(history["Candidate side"].eq("LONG").sum()))
+    c4.metric("180m resolved", f"{hits}/{resolved_n}")
+    c5.metric(
+        "180m hit rate",
+        f"{hits / resolved_n * 100.0:.1f}%" if resolved_n else "—",
+    )
+
+    _candidate_v1_render_extended_followup(
+        history,
+        key_prefix="candidate_v1_total_followup",
+    )
+
+    st.markdown("#### Side comparison")
+    side_rows = []
+    for side_name in ("LONG", "SHORT", "TOTAL"):
+        subset = history if side_name == "TOTAL" else history.loc[
+            history["Candidate side"].eq(side_name)
+        ]
+        for horizon in (180, 240, 360):
+            col = f"candidate_v1_outcome_{horizon}m"
+            outcome = subset.get(
+                col,
+                subset.get(
+                    "candidate_v1_outcome",
+                    pd.Series("PENDING", index=subset.index),
+                ) if horizon == 180 else pd.Series("PENDING", index=subset.index),
+            ).fillna("PENDING").astype(str)
+            resolved_mask = outcome.isin(["HIT", "NO_HIT"])
+            resolved_count = int(resolved_mask.sum())
+            hit_count = int(outcome.eq("HIT").sum())
+            side_rows.append({
+                "Side": side_name,
+                "Horizon": f"{horizon}m",
+                "N": int(len(subset)),
+                "Resolved": resolved_count,
+                "Hits": hit_count,
+                "Pending": int(outcome.eq("PENDING").sum()),
+                "Hit rate %": (
+                    round(hit_count / resolved_count * 100.0, 2)
+                    if resolved_count
+                    else np.nan
+                ),
+            })
+    st.dataframe(
+        pd.DataFrame(side_rows),
+        use_container_width=True,
+        hide_index=True,
+        key="candidate_v1_total_side_comparison",
+    )
+
+    st.markdown("#### Combined journal")
+    journal = history.copy()
+    if "candidate_v1_reaction_known_ts" in journal.columns:
+        journal["Reaction"] = (
+            pd.to_datetime(
+                pd.to_numeric(
+                    journal["candidate_v1_reaction_known_ts"],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+            .dt.strftime("%Y-%m-%d %H:%M")
+        )
+    else:
+        journal["Reaction"] = "—"
+
+    display_cols = [
+        "Candidate side",
+        "candidate_v1_cohort",
+        "symbol",
+        "Reaction",
+        "candidate_v1_outcome",
+        "candidate_v1_outcome_240m",
+        "candidate_v1_outcome_360m",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
+        "nearest_opposing_room_pct",
+    ]
+    display_cols = [c for c in display_cols if c in journal.columns]
+    display = journal[display_cols].copy().rename(columns={
+        "candidate_v1_cohort": "Cohort",
+        "symbol": "Symbol",
+        "candidate_v1_outcome": "Outcome 180m",
+        "candidate_v1_outcome_240m": "Outcome 240m",
+        "candidate_v1_outcome_360m": "Outcome 360m",
+        "candidate_v1_first_hit_2pct_min_360": "First +2% min",
+        "candidate_v1_hit_timing_bucket": "Hit timing",
+        "candidate_v1_mfe_240m_pct": "MFE240 %",
+        "candidate_v1_mfe_360m_pct": "MFE360 %",
+        "nearest_opposing_room_pct": "HTF room %",
+    })
+
+    sort_col = "candidate_v1_reaction_known_ts"
+    if sort_col in journal.columns:
+        order = pd.to_numeric(journal[sort_col], errors="coerce").sort_values(
+            ascending=False,
+            na_position="last",
+        ).index
+        journal = journal.loc[order].reset_index(drop=True)
+        display = display.loc[order].reset_index(drop=True)
+
+    selected = st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        key="candidate_v1_total_journal",
+        on_select="rerun",
+        selection_mode="single-row",
+    ).selection.rows
+
+    if selected:
+        row = journal.iloc[int(selected[0])].copy()
+        if str(row.get("Candidate side", row.get("signal", ""))).upper() == "LONG":
+            _candidate_v1_long_render_saved_inspector(row)
+        else:
+            _candidate_v1_render_saved_inspector(row)
+
 def _candidate_v1_build_current_monitor(
     retests_df,
     config,
@@ -14681,6 +15176,11 @@ def _candidate_v1_build_current_monitor(
                 column,
             ]
 
+    result = _candidate_v1_merge_extended_followup(
+        result,
+        threshold_pct=float(config.get("runner_threshold_pct", 2.0)),
+    )
+
     # Keep cohort assignment tied to the immutable Discovery ID set.
     result["candidate_v1_cohort"] = np.where(
         result["candidate_v1_event_key"].isin(
@@ -14778,6 +15278,21 @@ def _candidate_v1_snapshot_metadata(row):
         "candidate_v1_mae_before_target_pct",
         "candidate_v1_mae_scope",
         "candidate_v1_observed_path_min",
+        "candidate_v1_outcome_180m",
+        "candidate_v1_outcome_240m",
+        "candidate_v1_outcome_360m",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket",
+        "candidate_v1_observed_followup_min",
+        "candidate_v1_mfe_180m_pct",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
+        "candidate_v1_mae_180m_pct",
+        "candidate_v1_mae_240m_pct",
+        "candidate_v1_mae_360m_pct",
+        "candidate_v1_observed_180m_min",
+        "candidate_v1_observed_240m_min",
+        "candidate_v1_observed_360m_min",
     ]
     return {
         field: _candidate_v1_json_value(row.get(field))
@@ -15040,8 +15555,14 @@ def _candidate_v1_render_saved_inspector(history_row):
         "nearest_opposing_room_pct",
         "nearest_opposing_swing_price",
         "_first_hit_min",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket",
+        "candidate_v1_outcome_240m",
+        "candidate_v1_outcome_360m",
         "candidate_v1_mae_before_target_pct",
         "reaction_mfe_180m_pct",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
     ]
     for field in numeric_fields:
         if field in metadata:
@@ -15090,7 +15611,10 @@ def _candidate_v1_render_saved_inspector(history_row):
         errors="coerce",
     )
     first_hit = pd.to_numeric(
-        metadata.get("_first_hit_min"),
+        metadata.get(
+            "candidate_v1_first_hit_2pct_min_360",
+            metadata.get("_first_hit_min"),
+        ),
         errors="coerce",
     )
     mae = pd.to_numeric(
@@ -15107,7 +15631,7 @@ def _candidate_v1_render_saved_inspector(history_row):
         f"{float(room_pct):.2f}%" if pd.notna(room_pct) else "—",
     )
     i5.metric(
-        "First +2%",
+        "First +2% <=360m",
         f"{float(first_hit):.0f}m" if pd.notna(first_hit) else "—",
     )
     i6.metric(
@@ -15115,7 +15639,7 @@ def _candidate_v1_render_saved_inspector(history_row):
         f"{float(mae):.3f}%" if pd.notna(mae) else "—",
     )
 
-    i7, i8, i9, i10 = st.columns(4)
+    i7, i8, i9, i10, i11, i12 = st.columns(6)
     i7.metric(
         "Opposing TF",
         str(metadata.get("nearest_opposing_swing_tf") or "—"),
@@ -15129,6 +15653,14 @@ def _candidate_v1_render_saved_inspector(history_row):
         str(metadata.get("candidate_v1_aligned_rsi_tfs", "—")),
     )
     i10.metric(
+        "Outcome 240m",
+        str(metadata.get("candidate_v1_outcome_240m", "—")),
+    )
+    i11.metric(
+        "Outcome 360m",
+        str(metadata.get("candidate_v1_outcome_360m", "—")),
+    )
+    i12.metric(
         "Snapshot",
         (
             "✅ complete"
@@ -15324,6 +15856,21 @@ def _candidate_v1_persist_history(current):
         "candidate_v1_mae_before_target_pct",
         "candidate_v1_mae_scope",
         "candidate_v1_observed_path_min",
+        "candidate_v1_outcome_180m",
+        "candidate_v1_outcome_240m",
+        "candidate_v1_outcome_360m",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket",
+        "candidate_v1_observed_followup_min",
+        "candidate_v1_mfe_180m_pct",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
+        "candidate_v1_mae_180m_pct",
+        "candidate_v1_mae_240m_pct",
+        "candidate_v1_mae_360m_pct",
+        "candidate_v1_observed_180m_min",
+        "candidate_v1_observed_240m_min",
+        "candidate_v1_observed_360m_min",
     ]
     persist_columns = [
         c for c in persist_columns if c in current.columns
@@ -15450,6 +15997,13 @@ def render_candidate_v1_frozen_monitor(
         "triggering_swing_count",
         "retest_timestamp",
         "candidate_v1_reaction_known_ts",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_mfe_180m_pct",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
+        "candidate_v1_mae_180m_pct",
+        "candidate_v1_mae_240m_pct",
+        "candidate_v1_mae_360m_pct",
     ]:
         if column in history.columns:
             history[column] = pd.to_numeric(
@@ -15523,6 +16077,16 @@ def render_candidate_v1_frozen_monitor(
             if forward_pending
             else None
         ),
+    )
+
+    _candidate_v1_render_extended_followup(
+        history,
+        key_prefix="candidate_v1_short_followup",
+    )
+
+    _candidate_v1_render_extended_followup(
+        history,
+        key_prefix="candidate_v1_long_followup",
     )
 
     st.caption(
@@ -15674,8 +16238,14 @@ def render_candidate_v1_frozen_monitor(
         "candidate_v1_aligned_rsi_tfs",
         "triggering_swing_count",
         "_first_hit_min",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket",
+        "candidate_v1_outcome_240m",
+        "candidate_v1_outcome_360m",
         "candidate_v1_mae_before_target_pct",
         "reaction_mfe_180m_pct",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
     ]
     display_columns = [
         column
@@ -15693,9 +16263,15 @@ def render_candidate_v1_frozen_monitor(
         "aligned_rsi_extreme_count": "Aligned RSI TFs N",
         "candidate_v1_aligned_rsi_tfs": "Aligned RSI TFs",
         "triggering_swing_count": "Trigger swings",
-        "_first_hit_min": "First +2% min",
+        "_first_hit_min": "First +2% <=180m",
+        "candidate_v1_first_hit_2pct_min_360": "First +2% <=360m",
+        "candidate_v1_hit_timing_bucket": "Hit timing",
+        "candidate_v1_outcome_240m": "Outcome 240m",
+        "candidate_v1_outcome_360m": "Outcome 360m",
         "candidate_v1_mae_before_target_pct": "MAE before +2% %",
         "reaction_mfe_180m_pct": "MFE180 %",
+        "candidate_v1_mfe_240m_pct": "MFE240 %",
+        "candidate_v1_mfe_360m_pct": "MFE360 %",
     })
 
     journal_event = st.dataframe(
@@ -16242,6 +16818,11 @@ def _candidate_v1_long_build_current_monitor(
                 column,
             ]
 
+    result = _candidate_v1_merge_extended_followup(
+        result,
+        threshold_pct=float(config.get("runner_threshold_pct", 2.0)),
+    )
+
     # Keep cohort assignment tied to the immutable Discovery ID set.
     result["candidate_v1_cohort"] = np.where(
         result["candidate_v1_event_key"].isin(
@@ -16339,6 +16920,21 @@ def _candidate_v1_long_snapshot_metadata(row):
         "candidate_v1_mae_before_target_pct",
         "candidate_v1_mae_scope",
         "candidate_v1_observed_path_min",
+        "candidate_v1_outcome_180m",
+        "candidate_v1_outcome_240m",
+        "candidate_v1_outcome_360m",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket",
+        "candidate_v1_observed_followup_min",
+        "candidate_v1_mfe_180m_pct",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
+        "candidate_v1_mae_180m_pct",
+        "candidate_v1_mae_240m_pct",
+        "candidate_v1_mae_360m_pct",
+        "candidate_v1_observed_180m_min",
+        "candidate_v1_observed_240m_min",
+        "candidate_v1_observed_360m_min",
     ]
     return {
         field: _candidate_v1_long_json_value(row.get(field))
@@ -16651,7 +17247,10 @@ def _candidate_v1_long_render_saved_inspector(history_row):
         errors="coerce",
     )
     first_hit = pd.to_numeric(
-        metadata.get("_first_hit_min"),
+        metadata.get(
+            "candidate_v1_first_hit_2pct_min_360",
+            metadata.get("_first_hit_min"),
+        ),
         errors="coerce",
     )
     mae = pd.to_numeric(
@@ -16668,7 +17267,7 @@ def _candidate_v1_long_render_saved_inspector(history_row):
         f"{float(room_pct):.2f}%" if pd.notna(room_pct) else "—",
     )
     i5.metric(
-        "First +2%",
+        "First +2% <=360m",
         f"{float(first_hit):.0f}m" if pd.notna(first_hit) else "—",
     )
     i6.metric(
@@ -16676,7 +17275,7 @@ def _candidate_v1_long_render_saved_inspector(history_row):
         f"{float(mae):.3f}%" if pd.notna(mae) else "—",
     )
 
-    i7, i8, i9, i10 = st.columns(4)
+    i7, i8, i9, i10, i11, i12 = st.columns(6)
     i7.metric(
         "Opposing TF",
         str(metadata.get("nearest_opposing_swing_tf") or "—"),
@@ -16690,6 +17289,14 @@ def _candidate_v1_long_render_saved_inspector(history_row):
         str(metadata.get("candidate_v1_aligned_rsi_tfs", "—")),
     )
     i10.metric(
+        "Outcome 240m",
+        str(metadata.get("candidate_v1_outcome_240m", "—")),
+    )
+    i11.metric(
+        "Outcome 360m",
+        str(metadata.get("candidate_v1_outcome_360m", "—")),
+    )
+    i12.metric(
         "Snapshot",
         (
             "✅ complete"
@@ -16885,6 +17492,21 @@ def _candidate_v1_long_persist_history(current):
         "candidate_v1_mae_before_target_pct",
         "candidate_v1_mae_scope",
         "candidate_v1_observed_path_min",
+        "candidate_v1_outcome_180m",
+        "candidate_v1_outcome_240m",
+        "candidate_v1_outcome_360m",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket",
+        "candidate_v1_observed_followup_min",
+        "candidate_v1_mfe_180m_pct",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
+        "candidate_v1_mae_180m_pct",
+        "candidate_v1_mae_240m_pct",
+        "candidate_v1_mae_360m_pct",
+        "candidate_v1_observed_180m_min",
+        "candidate_v1_observed_240m_min",
+        "candidate_v1_observed_360m_min",
     ]
     persist_columns = [
         c for c in persist_columns if c in current.columns
@@ -17014,6 +17636,13 @@ def render_candidate_v1_long_frozen_monitor(
         "triggering_swing_count",
         "retest_timestamp",
         "candidate_v1_reaction_known_ts",
+        "candidate_v1_first_hit_2pct_min_360",
+        "candidate_v1_mfe_180m_pct",
+        "candidate_v1_mfe_240m_pct",
+        "candidate_v1_mfe_360m_pct",
+        "candidate_v1_mae_180m_pct",
+        "candidate_v1_mae_240m_pct",
+        "candidate_v1_mae_360m_pct",
     ]:
         if column in history.columns:
             history[column] = pd.to_numeric(
@@ -17257,9 +17886,15 @@ def render_candidate_v1_long_frozen_monitor(
         "aligned_rsi_extreme_count": "Aligned RSI TFs N",
         "candidate_v1_aligned_rsi_tfs": "Aligned RSI TFs",
         "triggering_swing_count": "Trigger swings",
-        "_first_hit_min": "First +2% min",
+        "_first_hit_min": "First +2% <=180m",
+        "candidate_v1_first_hit_2pct_min_360": "First +2% <=360m",
+        "candidate_v1_hit_timing_bucket": "Hit timing",
+        "candidate_v1_outcome_240m": "Outcome 240m",
+        "candidate_v1_outcome_360m": "Outcome 360m",
         "candidate_v1_mae_before_target_pct": "MAE before +2% %",
         "reaction_mfe_180m_pct": "MFE180 %",
+        "candidate_v1_mfe_240m_pct": "MFE240 %",
+        "candidate_v1_mfe_360m_pct": "MFE360 %",
     })
 
     journal_event = st.dataframe(
@@ -30552,10 +31187,11 @@ if selected_section == "volume_exhaustion":
                     )
                 )
 
-            short_monitor_tab, long_monitor_tab = st.tabs(
+            short_monitor_tab, long_monitor_tab, total_monitor_tab = st.tabs(
                 [
                     "🔴 Candidate V1 SHORT",
                     "🟢 Candidate V1 LONG",
+                    "🟣 Candidate V1 TOTAL",
                 ]
             )
 
@@ -30570,6 +31206,9 @@ if selected_section == "volume_exhaustion":
                     retests_df=candidate_v1_retests_df,
                     config=candidate_v1_long_config,
                 )
+
+            with total_monitor_tab:
+                render_candidate_v1_total_monitor()
 
             st.markdown("---")
 
