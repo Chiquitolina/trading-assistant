@@ -16440,35 +16440,72 @@ def _candidate_v1_render_matched_reaction_control(
         )
         return
 
-    # Merge only context fields that are not already authoritative in the
-    # scanner row. If a future scanner version happens to carry one of these
-    # names too, prefer the reconstructed causal market context explicitly.
-    context_unique = control_context.drop_duplicates(
-        "candidate_v1_event_key"
-    ).copy()
-    controls = controls.merge(
-        context_unique,
-        on="candidate_v1_event_key",
-        how="left",
-        suffixes=("", "_ctx"),
-    )
-    for canonical in (
+    # Attach ONLY the causal market fields needed by this research block.
+    # Do not merge the whole context row: it also contains identity columns
+    # such as symbol/side and can create stale *_ctx columns. Those stale
+    # columns later collided with the execution-result merge (e.g. symbol_ctx).
+    market_context_fields = (
         "flow_candle_timestamp",
+        "flow_close_timestamp",
         "market_context_available",
         "market_breadth_4h",
         "btc_return_pct_4h",
+        "positive_symbols",
+        "valid_universe_size",
+        "configured_universe_size",
+        "coverage_pct",
         "return_pct_4h",
         "symbol_strength_vs_btc_4h",
         "return_rank_pct_4h",
+        "volume_rank_pct_4h",
         "relative_volume_4h",
         "primary_sector",
         "sector_return_pct_4h",
         "sector_breadth_4h",
+        "sector_relative_volume_4h",
+        "sector_return_rank_pct_4h",
         "sector_strength_vs_btc_4h",
-    ):
-        ctx_name = f"{canonical}_ctx"
-        if ctx_name in controls.columns:
-            controls[canonical] = controls[ctx_name]
+        "symbol_strength_vs_sector_4h",
+        "sector_valid_symbols",
+        "sector_configured_symbols",
+        "sector_coverage_pct",
+    )
+    context_unique = control_context.drop_duplicates(
+        "candidate_v1_event_key"
+    ).copy()
+    context_columns = [
+        "candidate_v1_event_key",
+        *[
+            column
+            for column in market_context_fields
+            if column in context_unique.columns
+        ],
+    ]
+    context_unique = context_unique[context_columns].copy()
+
+    # The reconstructed causal context is authoritative for these fields.
+    # Remove old copies and any stale suffix columns before the merge so the
+    # DataFrame schema remains unique across repeated dashboard reruns.
+    stale_context_columns = [
+        column
+        for column in controls.columns
+        if column in market_context_fields
+        or column.endswith("_ctx")
+    ]
+    controls = controls.drop(
+        columns=stale_context_columns,
+        errors="ignore",
+    )
+    controls = controls.merge(
+        context_unique,
+        on="candidate_v1_event_key",
+        how="left",
+        validate="many_to_one",
+    )
+    controls = controls.loc[
+        :,
+        ~controls.columns.duplicated(),
+    ].copy()
 
     controls = _candidate_v1_add_regime_labels(controls)
     candidates = _candidate_v1_add_regime_labels(
@@ -16774,12 +16811,71 @@ def _candidate_v1_render_matched_reaction_control(
         )
         return
 
+    # build_execution_grid already carries execution identity fields
+    # (symbol, side, reaction_timestamp). Merge only research metadata that is
+    # absent from the execution rows. This avoids pandas suffix collisions such
+    # as an existing symbol_ctx plus a new symbol -> symbol_ctx rename.
+    control_metadata_fields = (
+        "control_reason",
+        "is_candidate_v1_driver",
+        "flow_candle_timestamp",
+        "flow_close_timestamp",
+        "market_context_available",
+        "market_breadth_4h",
+        "btc_return_pct_4h",
+        "positive_symbols",
+        "valid_universe_size",
+        "configured_universe_size",
+        "coverage_pct",
+        "return_pct_4h",
+        "symbol_strength_vs_btc_4h",
+        "return_rank_pct_4h",
+        "volume_rank_pct_4h",
+        "relative_volume_4h",
+        "primary_sector",
+        "sector_return_pct_4h",
+        "sector_breadth_4h",
+        "sector_relative_volume_4h",
+        "sector_return_rank_pct_4h",
+        "sector_strength_vs_btc_4h",
+        "symbol_strength_vs_sector_4h",
+        "sector_valid_symbols",
+        "sector_configured_symbols",
+        "sector_coverage_pct",
+        "side_adjusted_strength_vs_btc_4h",
+        "Directional strength bucket",
+        "Breadth bucket",
+        "BTC 4h",
+        "Symbol vs BTC",
+        "Sector vs BTC",
+        "Market alignment",
+        "Symbol-side alignment",
+        "Sector-side alignment",
+    )
+    control_metadata = controls.drop_duplicates(
+        "candidate_v1_event_key"
+    ).copy()
+    metadata_columns = [
+        "candidate_v1_event_key",
+        *[
+            column
+            for column in control_metadata_fields
+            if column in control_metadata.columns
+            and column not in control_execution.columns
+        ],
+    ]
+    control_metadata = control_metadata[metadata_columns].copy()
+
     control_exec_context = control_execution.merge(
-        controls.drop_duplicates("candidate_v1_event_key"),
+        control_metadata,
         on="candidate_v1_event_key",
         how="left",
-        suffixes=("", "_ctx"),
+        validate="many_to_one",
     )
+    control_exec_context = control_exec_context.loc[
+        :,
+        ~control_exec_context.columns.duplicated(),
+    ].copy()
     control_exec_context = _candidate_v1_add_regime_labels(
         control_exec_context
     )
