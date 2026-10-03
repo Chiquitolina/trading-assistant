@@ -185,6 +185,27 @@ CANDIDATE_V1_MARKET_REGIME_STORE_FILE = (
     BASE_DIR / "reports" / "candidate_v1_analysis" / "market_regime_4h.pkl"
 )
 
+# Candidate V2 is a threshold-agnostic REACTION research universe. The first
+# run freezes the exact REACTION IDs that existed at discovery time; future
+# REACTIONs become FORWARD regardless of which strength threshold is being
+# inspected. This keeps threshold research from rewriting cohort membership.
+CANDIDATE_V2_CONFIG_FILE = (
+    BASE_DIR / "candidate_v2_research_config.json"
+)
+CANDIDATE_V2_HISTORY_FILE = (
+    BASE_DIR / "candidate_v2_monitor.csv"
+)
+CANDIDATE_V2_PATH_STORE_FILE = (
+    BASE_DIR / "reports" / "candidate_v2_analysis" / "paths_1m.pkl"
+)
+CANDIDATE_V2_MARKET_CONTEXT_FILE = (
+    BASE_DIR / "reports" / "candidate_v2_analysis" / "market_context_4h.pkl"
+)
+CANDIDATE_V2_STRENGTH_THRESHOLDS = (
+    0.00, 0.25, 0.50, 0.75, 1.00, 1.50,
+)
+
+
 # The Volume Exhaustion page is large; 5s caused expensive full-fragment
 # reruns even though Candidate path materialization itself is throttled to 60s.
 VOLUME_EXHAUSTION_UI_REFRESH_INTERVAL = "15s"
@@ -18167,6 +18188,1390 @@ def _candidate_v1_read_history_csv_cached(path_text, mtime_ns):
     return pd.read_csv(path_text)
 
 
+
+def _candidate_v2_atomic_write_json(payload, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _candidate_v2_atomic_write_csv(frame, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    frame.to_csv(tmp, index=False)
+    tmp.replace(path)
+
+
+def _candidate_v2_prepare_generic_rows(frame):
+    """Expose the generic Candidate-V1 analysis schema without changing V2 IDs."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    result = frame.copy()
+    if "candidate_v2_event_key" not in result.columns:
+        if "candidate_v1_event_key" in result.columns:
+            result["candidate_v2_event_key"] = result[
+                "candidate_v1_event_key"
+            ].astype(str)
+        else:
+            result["candidate_v2_event_key"] = (
+                result["symbol"].astype(str)
+                + "|"
+                + result["signal"].astype(str).str.upper()
+                + "|"
+                + pd.to_numeric(
+                    result["retest_timestamp"],
+                    errors="coerce",
+                )
+                .fillna(-1)
+                .astype("int64")
+                .astype(str)
+            )
+
+    if "candidate_v2_cohort" not in result.columns:
+        result["candidate_v2_cohort"] = "FORWARD"
+
+    # The fast path + market-context modules are selection-agnostic but their
+    # storage schema predates V2. Aliases let V2 reuse the same proven engines
+    # while persisting into completely separate V2 files.
+    result["candidate_v1_event_key"] = result[
+        "candidate_v2_event_key"
+    ].astype(str)
+    result["candidate_v1_cohort"] = result[
+        "candidate_v2_cohort"
+    ].astype(str)
+    if "side" not in result.columns:
+        result["side"] = result.get(
+            "signal",
+            pd.Series("", index=result.index),
+        )
+    result["side"] = (
+        result["side"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    return result
+
+
+def _candidate_v2_load_or_freeze_universe(retests_df):
+    """Persist the threshold-agnostic V2 REACTION universe and its cohorts."""
+    current = _candidate_v1_build_reaction_control_source(retests_df)
+    if current is None:
+        current = pd.DataFrame()
+    current = current.copy()
+
+    if not current.empty:
+        current["candidate_v2_event_key"] = current[
+            "candidate_v1_event_key"
+        ].astype(str)
+        current["side"] = (
+            current.get(
+                "signal",
+                pd.Series("", index=current.index),
+            )
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+
+    config = None
+    try:
+        if CANDIDATE_V2_CONFIG_FILE.exists():
+            loaded = json.loads(
+                CANDIDATE_V2_CONFIG_FILE.read_text(
+                    encoding="utf-8"
+                )
+            )
+            if isinstance(loaded, dict):
+                config = loaded
+    except Exception:
+        config = None
+
+    newly_frozen = False
+    if config is None and not current.empty:
+        keys = sorted(
+            current["candidate_v2_event_key"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        now_utc = pd.Timestamp.now(tz="UTC")
+        config = {
+            "version": 1,
+            "candidate": "Candidate V2 REACTION research universe",
+            "frozen_at_utc": now_utc.isoformat(),
+            "discovery_event_keys": keys,
+            "discovery_n": len(keys),
+            "threshold_agnostic": True,
+            "base_rule": (
+                "15m confirmed-swing REACTION. No RSI, HTF-room, "
+                "strength or Market Flow threshold is part of universe identity."
+            ),
+            "variants": {
+                "V2 Strength": "directional_strength_vs_btc_4h > 0",
+                "V2 Strong Strength": (
+                    "directional_strength_vs_btc_4h >= selected threshold"
+                ),
+                "V2 Strength + Flow": (
+                    "directional_strength_vs_btc_4h > 0 AND Market alignment = TAILWIND"
+                ),
+            },
+        }
+        try:
+            _candidate_v2_atomic_write_json(
+                config,
+                CANDIDATE_V2_CONFIG_FILE,
+            )
+            newly_frozen = True
+        except Exception:
+            pass
+
+    if config is None:
+        return pd.DataFrame(), None, False
+
+    discovery_keys = {
+        str(key)
+        for key in config.get(
+            "discovery_event_keys",
+            [],
+        )
+    }
+
+    historical = pd.DataFrame()
+    try:
+        if CANDIDATE_V2_HISTORY_FILE.exists():
+            historical = pd.read_csv(
+                CANDIDATE_V2_HISTORY_FILE
+            )
+    except Exception:
+        historical = pd.DataFrame()
+
+    pieces = []
+    if historical is not None and not historical.empty:
+        historical = historical.copy()
+        if "candidate_v2_event_key" not in historical.columns:
+            if "candidate_v1_event_key" in historical.columns:
+                historical["candidate_v2_event_key"] = historical[
+                    "candidate_v1_event_key"
+                ].astype(str)
+        historical["_v2_source_priority"] = 0
+        pieces.append(historical)
+
+    if not current.empty:
+        current["_v2_source_priority"] = 1
+        pieces.append(current)
+
+    if not pieces:
+        return pd.DataFrame(), config, newly_frozen
+
+    history = pd.concat(
+        pieces,
+        ignore_index=True,
+        sort=False,
+    )
+    if "candidate_v2_event_key" not in history.columns:
+        return pd.DataFrame(), config, newly_frozen
+
+    history = (
+        history.sort_values(
+            ["_v2_source_priority"],
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=["candidate_v2_event_key"],
+            keep="last",
+        )
+        .drop(columns=["_v2_source_priority"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+    history["candidate_v2_cohort"] = np.where(
+        history["candidate_v2_event_key"]
+        .astype(str)
+        .isin(discovery_keys),
+        "DISCOVERY",
+        "FORWARD",
+    )
+    history["candidate_v1_event_key"] = history[
+        "candidate_v2_event_key"
+    ].astype(str)
+    history["candidate_v1_cohort"] = history[
+        "candidate_v2_cohort"
+    ].astype(str)
+    if "side" not in history.columns:
+        history["side"] = history.get(
+            "signal",
+            pd.Series("", index=history.index),
+        )
+    history["side"] = (
+        history["side"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    try:
+        _candidate_v2_atomic_write_csv(
+            history,
+            CANDIDATE_V2_HISTORY_FILE,
+        )
+    except Exception:
+        pass
+
+    return history, config, newly_frozen
+
+
+def _candidate_v2_path_store(candidate_rows, force=False):
+    rows = _candidate_v2_prepare_generic_rows(candidate_rows)
+    if rows.empty:
+        return pd.DataFrame()
+    return candidate_v1_fast_refresh_path_store(
+        candidate_rows=rows,
+        store_path=CANDIDATE_V2_PATH_STORE_FILE,
+        candle_loader=load_volume_exhaustion_research_candles,
+        prepare_candles=_prepare_confirmed_swing_retest_candles,
+        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+        max_horizon=360,
+        refresh_interval_seconds=CANDIDATE_V1_PATH_REFRESH_SECONDS,
+        force=bool(force),
+    )
+
+
+def _candidate_v2_build_market_context(candidate_rows, force=False):
+    rows = _candidate_v2_prepare_generic_rows(candidate_rows)
+    if rows.empty:
+        return pd.DataFrame(), None
+
+    sector_map, sector_error = _candidate_v1_market_sector_metadata()
+    store = candidate_v1_refresh_market_regime_store(
+        candidate_rows=rows,
+        store_path=CANDIDATE_V2_MARKET_CONTEXT_FILE,
+        redis_client=market_flow_dashboard_service.redis,
+        universe_symbols=CANDIDATE_V1_MARKET_SYMBOLS,
+        sector_map=sector_map,
+        baseline_candles=42,
+        min_sector_symbols=int(
+            CANDIDATE_V1_MIN_SECTOR_SYMBOLS
+        ),
+        max_history=500,
+        force=bool(force),
+    )
+    context = candidate_v1_attach_market_context(
+        rows,
+        store,
+    )
+    if context is None or context.empty:
+        return rows.copy(), sector_error
+
+    context_fields = [
+        column
+        for column in context.columns
+        if column
+        not in {
+            "symbol",
+        }
+    ]
+    context_unique = context[
+        context_fields
+    ].drop_duplicates(
+        "candidate_v1_event_key",
+        keep="last",
+    )
+
+    result = rows.drop(
+        columns=[
+            column
+            for column in context_fields
+            if column != "candidate_v1_event_key"
+            and column in rows.columns
+        ],
+        errors="ignore",
+    ).merge(
+        context_unique,
+        on="candidate_v1_event_key",
+        how="left",
+        validate="many_to_one",
+    )
+    result = _candidate_v1_add_regime_labels(result)
+    result["candidate_v2_event_key"] = result[
+        "candidate_v1_event_key"
+    ].astype(str)
+    result["candidate_v2_cohort"] = result[
+        "candidate_v1_cohort"
+    ].astype(str)
+    return result, sector_error
+
+
+def _candidate_v2_attach_runner_followup(frame, force=False):
+    if frame is None or frame.empty:
+        return frame
+
+    rows = _candidate_v2_prepare_generic_rows(frame)
+    paths = _candidate_v2_path_store(
+        rows,
+        force=bool(force),
+    )
+    if paths is None or paths.empty:
+        return frame
+
+    metrics = candidate_v1_fast_build_followup_metrics(
+        candidate_rows=rows,
+        path_store=paths,
+        threshold_pct=2.0,
+        horizons=(180, 240, 360),
+    )
+    if metrics is None or metrics.empty:
+        return frame
+
+    metrics = metrics.drop_duplicates(
+        "candidate_v1_event_key",
+        keep="last",
+    ).set_index("candidate_v1_event_key")
+
+    result = frame.copy()
+    keys = result["candidate_v1_event_key"].astype(str)
+    rename_map = {
+        "candidate_v1_outcome_180m": "candidate_v2_outcome_180m",
+        "candidate_v1_outcome_240m": "candidate_v2_outcome_240m",
+        "candidate_v1_outcome_360m": "candidate_v2_outcome_360m",
+        "candidate_v1_mfe_180m_pct": "candidate_v2_mfe_180m_pct",
+        "candidate_v1_mae_180m_pct": "candidate_v2_mae_180m_pct",
+        "candidate_v1_mfe_240m_pct": "candidate_v2_mfe_240m_pct",
+        "candidate_v1_mae_240m_pct": "candidate_v2_mae_240m_pct",
+        "candidate_v1_mfe_360m_pct": "candidate_v2_mfe_360m_pct",
+        "candidate_v1_mae_360m_pct": "candidate_v2_mae_360m_pct",
+        "candidate_v1_first_hit_2pct_min_360": "candidate_v2_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket": "candidate_v2_hit_timing_bucket",
+    }
+    for source, target in rename_map.items():
+        if source in metrics.columns:
+            result[target] = keys.map(
+                metrics[source]
+            ).to_numpy()
+    return result
+
+
+def _candidate_v2_variant_mask(frame, variant, strong_threshold=0.50):
+    if frame is None or frame.empty:
+        return pd.Series(False, index=getattr(frame, "index", None))
+
+    strength = pd.to_numeric(
+        frame.get(
+            "side_adjusted_strength_vs_btc_4h",
+            pd.Series(np.nan, index=frame.index),
+        ),
+        errors="coerce",
+    )
+    market = frame.get(
+        "Market alignment",
+        pd.Series("UNKNOWN", index=frame.index),
+    ).fillna("UNKNOWN").astype(str)
+
+    if variant == "REACTION Base":
+        return strength.notna()
+    if variant == "Candidate V1 drivers":
+        driver_raw = frame.get(
+            "is_candidate_v1_driver",
+            pd.Series(False, index=frame.index),
+        )
+        if pd.api.types.is_bool_dtype(driver_raw):
+            driver_mask = driver_raw.fillna(False).astype(bool)
+        else:
+            driver_mask = (
+                driver_raw
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .isin(["true", "1", "yes"])
+            )
+        return driver_mask & strength.notna()
+    if variant == "V2 Strength":
+        return strength.gt(0.0)
+    if variant == "V2 Strong Strength":
+        return strength.ge(float(strong_threshold))
+    if variant == "V2 Strength + Flow":
+        return strength.gt(0.0) & market.eq("TAILWIND")
+    return pd.Series(False, index=frame.index)
+
+
+def _candidate_v2_execution_grid(
+    candidate_rows,
+    tp_values,
+    sl_values,
+    horizon_min,
+    entry_fee_pct,
+    exit_fee_pct,
+    entry_slippage_pct,
+    exit_slippage_pct,
+    notional_usdt,
+    force=False,
+):
+    rows = _candidate_v2_prepare_generic_rows(candidate_rows)
+    if rows.empty:
+        return pd.DataFrame()
+    paths = _candidate_v2_path_store(
+        rows,
+        force=bool(force),
+    )
+    if paths is None or paths.empty:
+        return pd.DataFrame()
+    return candidate_v1_fast_build_execution_grid(
+        candidate_rows=rows,
+        path_store=paths,
+        tp_values=tp_values,
+        sl_values=sl_values,
+        horizon_min=int(horizon_min),
+        entry_fee_pct=float(entry_fee_pct),
+        exit_fee_pct=float(exit_fee_pct),
+        entry_slippage_pct=float(entry_slippage_pct),
+        exit_slippage_pct=float(exit_slippage_pct),
+        notional_usdt=float(notional_usdt),
+    )
+
+
+def _candidate_v2_merge_execution_context(execution, context):
+    if execution is None or execution.empty:
+        return pd.DataFrame()
+    result = execution.copy()
+    if context is None or context.empty:
+        return result
+
+    keep = [
+        "candidate_v1_event_key",
+        "candidate_v2_event_key",
+        "candidate_v2_cohort",
+        "market_context_available",
+        "flow_candle_timestamp",
+        "flow_close_timestamp",
+        "market_breadth_4h",
+        "btc_return_pct_4h",
+        "return_pct_4h",
+        "symbol_strength_vs_btc_4h",
+        "side_adjusted_strength_vs_btc_4h",
+        "return_rank_pct_4h",
+        "volume_rank_pct_4h",
+        "relative_volume_4h",
+        "primary_sector",
+        "sector_return_pct_4h",
+        "sector_breadth_4h",
+        "sector_strength_vs_btc_4h",
+        "Market alignment",
+        "Symbol-side alignment",
+        "Sector-side alignment",
+        "Directional strength bucket",
+        "nearest_opposing_room_pct",
+        "aligned_rsi_extreme_count",
+        "aligned_rsi_extreme_timeframes",
+        "is_candidate_v1_driver",
+        "control_reason",
+    ]
+    keep = [column for column in keep if column in context.columns]
+    metadata = context[keep].drop_duplicates(
+        "candidate_v1_event_key",
+        keep="last",
+    )
+    stale = [
+        column
+        for column in keep
+        if column != "candidate_v1_event_key"
+        and column in result.columns
+    ]
+    result = result.drop(
+        columns=stale,
+        errors="ignore",
+    ).merge(
+        metadata,
+        on="candidate_v1_event_key",
+        how="left",
+        validate="many_to_one",
+    )
+    return result.loc[
+        :,
+        ~result.columns.duplicated(),
+    ].copy()
+
+
+def _candidate_v2_directional_bucket_series(frame):
+    strength = pd.to_numeric(
+        frame.get(
+            "side_adjusted_strength_vs_btc_4h",
+            pd.Series(np.nan, index=frame.index),
+        ),
+        errors="coerce",
+    )
+    return pd.Series(
+        np.select(
+            [
+                strength.le(-1.00),
+                strength.gt(-1.00) & strength.lt(-0.50),
+                strength.ge(-0.50) & strength.lt(0.00),
+                strength.ge(0.00) & strength.lt(0.25),
+                strength.ge(0.25) & strength.lt(0.50),
+                strength.ge(0.50) & strength.lt(0.75),
+                strength.ge(0.75) & strength.lt(1.00),
+                strength.ge(1.00),
+            ],
+            [
+                "<= -1.00% AGAINST",
+                "-1.00% to -0.50% AGAINST",
+                "-0.50% to 0% AGAINST",
+                "0% to +0.25% ALIGNED",
+                "+0.25% to +0.50% ALIGNED",
+                "+0.50% to +0.75% ALIGNED",
+                "+0.75% to +1.00% ALIGNED",
+                ">= +1.00% ALIGNED",
+            ],
+            default="UNKNOWN",
+        ),
+        index=frame.index,
+    )
+
+
+def _candidate_v2_monitor_table(frame, strong_threshold):
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    rows = []
+    variants = [
+        "REACTION Base",
+        "Candidate V1 drivers",
+        "V2 Strength",
+        "V2 Strong Strength",
+        "V2 Strength + Flow",
+    ]
+    for variant in variants:
+        subset = frame.loc[
+            _candidate_v2_variant_mask(
+                frame,
+                variant,
+                strong_threshold=strong_threshold,
+            )
+        ].copy()
+        if subset.empty:
+            continue
+        if "candidate_v2_outcome_180m" in subset.columns:
+            outcome = subset[
+                "candidate_v2_outcome_180m"
+            ].fillna("PENDING").astype(str)
+        else:
+            mfe180 = pd.to_numeric(
+                subset.get(
+                    "reaction_mfe_180m_pct",
+                    pd.Series(np.nan, index=subset.index),
+                ),
+                errors="coerce",
+            )
+            complete180 = subset.get(
+                "reaction_complete_180m",
+                pd.Series(False, index=subset.index),
+            )
+            if not pd.api.types.is_bool_dtype(complete180):
+                complete180 = (
+                    complete180
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                    .isin(["true", "1", "yes"])
+                )
+            else:
+                complete180 = complete180.fillna(False).astype(bool)
+            outcome = pd.Series(
+                np.select(
+                    [
+                        mfe180.ge(2.0),
+                        complete180 & mfe180.lt(2.0),
+                    ],
+                    ["HIT", "NO_HIT"],
+                    default="PENDING",
+                ),
+                index=subset.index,
+            )
+        resolved = outcome.isin(["HIT", "NO_HIT"])
+        hits = int(outcome.eq("HIT").sum())
+        resolved_n = int(resolved.sum())
+        rows.append({
+            "Variant": (
+                f"V2 Strong >= {float(strong_threshold):g}%"
+                if variant == "V2 Strong Strength"
+                else variant
+            ),
+            "N": int(subset["candidate_v2_event_key"].astype(str).nunique()),
+            "+2% 180m resolved": resolved_n,
+            "+2% 180m hits": hits,
+            "+2% hit rate %": (
+                round(hits / resolved_n * 100.0, 2)
+                if resolved_n
+                else np.nan
+            ),
+            "Median strength %": round(
+                float(
+                    pd.to_numeric(
+                        subset["side_adjusted_strength_vs_btc_4h"],
+                        errors="coerce",
+                    ).median()
+                ),
+                4,
+            ),
+            "4h boundaries": int(
+                pd.to_numeric(
+                    subset.get("flow_candle_timestamp"),
+                    errors="coerce",
+                ).dropna().nunique()
+            ),
+        })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_selected_pair(frame, tp, sl):
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    return frame.loc[
+        np.isclose(
+            pd.to_numeric(frame["TP %"], errors="coerce"),
+            float(tp),
+        )
+        & np.isclose(
+            pd.to_numeric(frame["SL %"], errors="coerce"),
+            float(sl),
+        )
+    ].copy()
+
+
+def _candidate_v2_variant_comparison_table(
+    selected_pair,
+    strong_threshold,
+):
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+
+    rows = []
+    variants = [
+        "REACTION Base",
+        "Candidate V1 drivers",
+        "V2 Strength",
+        "V2 Strong Strength",
+        "V2 Strength + Flow",
+    ]
+    base_n = int(
+        selected_pair["candidate_v1_event_key"]
+        .astype(str)
+        .nunique()
+    )
+    for variant in variants:
+        subset = selected_pair.loc[
+            _candidate_v2_variant_mask(
+                selected_pair,
+                variant,
+                strong_threshold=strong_threshold,
+            )
+        ].copy()
+        if subset.empty:
+            continue
+        stats = _candidate_v1_group_stats_extended(subset)
+        n = int(subset["candidate_v1_event_key"].astype(str).nunique())
+        rows.append({
+            "Variant": (
+                f"V2 Strong >= {float(strong_threshold):g}%"
+                if variant == "V2 Strong Strength"
+                else variant
+            ),
+            "Coverage %": round(n / base_n * 100.0, 2) if base_n else np.nan,
+            **stats,
+        })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_threshold_table(selected_pair):
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for side_name in ("TOTAL", "LONG", "SHORT"):
+        side_frame = selected_pair.copy()
+        if side_name != "TOTAL":
+            side_frame = side_frame.loc[
+                side_frame["side"].astype(str).str.upper().eq(side_name)
+            ].copy()
+        if side_frame.empty:
+            continue
+        base_n = int(
+            side_frame["candidate_v1_event_key"]
+            .astype(str)
+            .nunique()
+        )
+        strength = pd.to_numeric(
+            side_frame["side_adjusted_strength_vs_btc_4h"],
+            errors="coerce",
+        )
+        for threshold in CANDIDATE_V2_STRENGTH_THRESHOLDS:
+            subset = side_frame.loc[
+                strength.ge(float(threshold))
+            ].copy()
+            if subset.empty:
+                continue
+            stats = _candidate_v1_group_stats_extended(subset)
+            n = int(
+                subset["candidate_v1_event_key"]
+                .astype(str)
+                .nunique()
+            )
+            rows.append({
+                "Side": side_name,
+                "Strength >= %": float(threshold),
+                "Coverage %": round(n / base_n * 100.0, 2) if base_n else np.nan,
+                **stats,
+            })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_bucket_table(selected_pair):
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+    work = selected_pair.copy()
+    work["V2 strength bucket"] = _candidate_v2_directional_bucket_series(work)
+    bucket_order = [
+        "<= -1.00% AGAINST",
+        "-1.00% to -0.50% AGAINST",
+        "-0.50% to 0% AGAINST",
+        "0% to +0.25% ALIGNED",
+        "+0.25% to +0.50% ALIGNED",
+        "+0.50% to +0.75% ALIGNED",
+        "+0.75% to +1.00% ALIGNED",
+        ">= +1.00% ALIGNED",
+    ]
+    rows = []
+    for side_name in ("LONG", "SHORT"):
+        side_frame = work.loc[
+            work["side"].astype(str).str.upper().eq(side_name)
+        ].copy()
+        for bucket in bucket_order:
+            subset = side_frame.loc[
+                side_frame["V2 strength bucket"].astype(str).eq(bucket)
+            ].copy()
+            if subset.empty:
+                continue
+            stats = _candidate_v1_group_stats_extended(subset)
+            rows.append({
+                "Side": side_name,
+                "Directional strength": bucket,
+                **stats,
+            })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_strength_flow_table(selected_pair):
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+
+    rows = []
+    strength = pd.to_numeric(
+        selected_pair["side_adjusted_strength_vs_btc_4h"],
+        errors="coerce",
+    )
+    aligned = strength.gt(0.0)
+    against = strength.le(0.0)
+    market = selected_pair["Market alignment"].fillna("UNKNOWN").astype(str)
+    for side_name in ("LONG", "SHORT"):
+        side_mask = selected_pair["side"].astype(str).str.upper().eq(side_name)
+        for market_state in ("TAILWIND", "HEADWIND"):
+            for strength_label, strength_mask in (
+                ("ALIGNED >0", aligned),
+                ("AGAINST <=0", against),
+            ):
+                subset = selected_pair.loc[
+                    side_mask
+                    & market.eq(market_state)
+                    & strength_mask
+                ].copy()
+                if subset.empty:
+                    continue
+                stats = _candidate_v1_group_stats_extended(subset)
+                rows.append({
+                    "Side": side_name,
+                    "Market": market_state,
+                    "Strength": strength_label,
+                    **stats,
+                })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_market_increment_table(selected_pair):
+    """Does Market Flow add information after strength>0 is already true?"""
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+    work = selected_pair.loc[
+        pd.to_numeric(
+            selected_pair["side_adjusted_strength_vs_btc_4h"],
+            errors="coerce",
+        ).gt(0.0)
+    ].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for side_name in ("LONG", "SHORT"):
+        side_frame = work.loc[
+            work["side"].astype(str).str.upper().eq(side_name)
+        ]
+        for market_state in ("TAILWIND", "HEADWIND", "MIXED"):
+            subset = side_frame.loc[
+                side_frame["Market alignment"].astype(str).eq(market_state)
+            ].copy()
+            if subset.empty:
+                continue
+            stats = _candidate_v1_group_stats_extended(subset)
+            rows.append({
+                "Side": side_name,
+                "Market after strength>0": market_state,
+                **stats,
+            })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_render_matrix(summary, key_prefix, metric):
+    if summary is None or summary.empty:
+        st.info("No execution matrix is available for this V2 variant.")
+        return
+
+    if metric in {"Net PnL % pts", "Net PnL USDT"}:
+        source = summary.copy()
+        source["_display"] = source.apply(
+            lambda row: _candidate_v1_matrix_cell_text(row, metric),
+            axis=1,
+        )
+        matrix = source.pivot(
+            index="SL %",
+            columns="TP %",
+            values="_display",
+        ).sort_index()
+    else:
+        matrix = summary.pivot(
+            index="SL %",
+            columns="TP %",
+            values=metric,
+        ).sort_index()
+    matrix.index = [f"SL {float(v):g}%" for v in matrix.index]
+    matrix.columns = [f"TP {float(v):g}%" for v in matrix.columns]
+    st.dataframe(
+        matrix,
+        use_container_width=True,
+        key=f"{key_prefix}_matrix",
+    )
+
+
+def render_candidate_v2_research(retests_df):
+    st.markdown("### 🧪 Candidate V2 · REACTION + Relative Strength Research")
+    st.caption(
+        "V2 does not replace V1. Its frozen universe is every unique 15m causal "
+        "REACTION present when V2 is first run, plus future REACTIONs as FORWARD. "
+        "Thresholds never change cohort membership. RSI and HTF room are retained "
+        "as research fields but are not required by any V2 definition."
+    )
+
+    history, config, newly_frozen = _candidate_v2_load_or_freeze_universe(
+        retests_df
+    )
+    if history is None or history.empty or config is None:
+        st.info("No 15m causal REACTIONs are available for Candidate V2 yet.")
+        return
+
+    if newly_frozen:
+        st.success(
+            "Candidate V2 Discovery universe frozen from all currently visible "
+            "REACTION IDs. Strength/Flow thresholds did not participate in the freeze."
+        )
+
+    force_market = st.button(
+        "🔄 Rebuild V2 causal 4h contexts",
+        key="candidate_v2_force_market",
+        use_container_width=True,
+    )
+    with st.spinner("Attaching causal Market Flow to Candidate V2 REACTIONs..."):
+        context, sector_error = _candidate_v2_build_market_context(
+            history,
+            force=bool(force_market),
+        )
+    if sector_error:
+        st.caption(f"Sector metadata note: {sector_error}")
+    if context is None or context.empty:
+        st.warning("Candidate V2 market context is not available yet.")
+        return
+
+    market_ok = context.get(
+        "market_context_available",
+        pd.Series(False, index=context.index),
+    ).fillna(False).astype(bool)
+    valid_strength = pd.to_numeric(
+        context.get("side_adjusted_strength_vs_btc_4h"),
+        errors="coerce",
+    ).notna()
+    study = context.loc[market_ok & valid_strength].copy()
+
+    if study.empty:
+        st.info("No V2 REACTION has both causal Market Flow and directional strength yet.")
+        return
+
+    frozen_at = str(config.get("frozen_at_utc", "—"))
+    discovery_n = int(
+        history["candidate_v2_cohort"].astype(str).eq("DISCOVERY").sum()
+    )
+    forward_n = int(
+        history["candidate_v2_cohort"].astype(str).eq("FORWARD").sum()
+    )
+    boundaries = int(
+        pd.to_numeric(
+            study.get("flow_candle_timestamp"),
+            errors="coerce",
+        ).dropna().nunique()
+    )
+
+    h1, h2, h3, h4, h5 = st.columns(5)
+    h1.metric("REACTION universe", int(len(history)))
+    h2.metric("Discovery", discovery_n)
+    h3.metric("Forward", forward_n)
+    h4.metric("Causal strength", f"{len(study)}/{len(history)}")
+    h5.metric("4h boundaries", boundaries)
+    st.caption(
+        f"V2 universe frozen at {frozen_at}. Discovery membership is ID-based and "
+        "threshold-agnostic; late backfills are FORWARD."
+    )
+    if boundaries < 5:
+        st.warning(
+            f"Only {boundaries} causal 4h boundaries are represented. Strength is "
+            "cross-sectional symbol information, but Market/Breadth conclusions are "
+            "still regime observations rather than independent confirmation."
+        )
+
+    scope1, scope2, scope3 = st.columns(3)
+    with scope1:
+        side_scope = st.selectbox(
+            "V2 side",
+            ["TOTAL", "LONG", "SHORT"],
+            index=0,
+            key="candidate_v2_side_scope",
+        )
+    with scope2:
+        cohort_scope = st.selectbox(
+            "V2 cohort",
+            ["TOTAL", "DISCOVERY", "FORWARD"],
+            index=0,
+            key="candidate_v2_cohort_scope",
+        )
+    with scope3:
+        strong_threshold = st.selectbox(
+            "V2 Strong threshold",
+            options=[0.25, 0.50, 0.75, 1.00, 1.50],
+            index=1,
+            format_func=lambda value: f">= {value:g}%",
+            key="candidate_v2_strong_threshold",
+        )
+
+    scoped = study.copy()
+    if side_scope != "TOTAL":
+        scoped = scoped.loc[
+            scoped["side"].astype(str).str.upper().eq(side_scope)
+        ].copy()
+    if cohort_scope != "TOTAL":
+        scoped = scoped.loc[
+            scoped["candidate_v2_cohort"].astype(str).eq(cohort_scope)
+        ].copy()
+    if scoped.empty:
+        st.info("No V2 rows match this side/cohort selection.")
+        return
+
+    st.markdown("#### 1. V2 Monitor · same REACTION universe")
+    monitor = _candidate_v2_monitor_table(
+        scoped,
+        strong_threshold=strong_threshold,
+    )
+    if not monitor.empty:
+        st.dataframe(
+            monitor,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_monitor_table",
+        )
+
+    st.caption(
+        "Monitor +2%/180m is descriptive follow-up. The execution research below "
+        "uses chronological next-1m-open TP/SL first touch with explicit costs."
+    )
+
+    st.markdown("#### 2. Execution research · one engine for every V2 variant")
+    with st.form("candidate_v2_execution_form", clear_on_submit=False):
+        e1, e2, e3 = st.columns(3)
+        horizon_min = e1.selectbox(
+            "Execution horizon",
+            [60, 120, 180, 240, 360],
+            index=2,
+            format_func=lambda value: f"{value} min",
+            key="candidate_v2_horizon",
+        )
+        tp_raw = e2.text_input(
+            "TP grid %",
+            value="0.5,1.0,1.5,2.0,2.5,3.0",
+            key="candidate_v2_tp_grid",
+        )
+        sl_raw = e3.text_input(
+            "SL grid %",
+            value="0.5,1.0,1.5,2.0,2.5,3.0",
+            key="candidate_v2_sl_grid",
+        )
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        entry_fee = c1.number_input(
+            "Entry fee %", min_value=0.0, value=0.05, step=0.01,
+            format="%.3f", key="candidate_v2_entry_fee"
+        )
+        exit_fee = c2.number_input(
+            "Exit fee %", min_value=0.0, value=0.05, step=0.01,
+            format="%.3f", key="candidate_v2_exit_fee"
+        )
+        entry_slippage = c3.number_input(
+            "Entry slippage %", min_value=0.0, value=0.0, step=0.01,
+            format="%.3f", key="candidate_v2_entry_slippage"
+        )
+        exit_slippage = c4.number_input(
+            "Exit slippage %", min_value=0.0, value=0.0, step=0.01,
+            format="%.3f", key="candidate_v2_exit_slippage"
+        )
+        notional = c5.number_input(
+            "Notional / trade USDT", min_value=1.0, value=100.0, step=10.0,
+            key="candidate_v2_notional"
+        )
+        recalc = st.form_submit_button(
+            "Apply / recalculate V2 matrix",
+            use_container_width=True,
+        )
+
+    force_paths = st.button(
+        "🔄 Refresh V2 1m paths + recalculate",
+        key="candidate_v2_force_paths",
+        use_container_width=True,
+    )
+    tp_values = _candidate_v1_parse_grid_values(tp_raw, default=(2.0,))
+    sl_values = _candidate_v1_parse_grid_values(sl_raw, default=(2.0,))
+
+    snapshot_key = "candidate_v2_execution_snapshot_v1"
+    snapshot = st.session_state.get(snapshot_key)
+    source_signature = (
+        len(scoped),
+        tuple(sorted(scoped["candidate_v2_event_key"].astype(str).tolist())),
+        str(side_scope),
+        str(cohort_scope),
+    )
+    should_build = bool(recalc or force_paths)
+    if not isinstance(snapshot, dict) and not should_build:
+        st.info(
+            "V2 execution paths are intentionally not materialized on page load. "
+            "Press Apply / recalculate V2 matrix to build the first persisted "
+            "1m snapshot. After that, completed 360m paths are reused from disk."
+        )
+        return
+    if should_build:
+        with st.spinner("Building shared V2 REACTION execution paths..."):
+            execution = _candidate_v2_execution_grid(
+                scoped,
+                tp_values=tp_values,
+                sl_values=sl_values,
+                horizon_min=int(horizon_min),
+                entry_fee_pct=float(entry_fee),
+                exit_fee_pct=float(exit_fee),
+                entry_slippage_pct=float(entry_slippage),
+                exit_slippage_pct=float(exit_slippage),
+                notional_usdt=float(notional),
+                force=bool(force_paths),
+            )
+            exec_context = _candidate_v2_merge_execution_context(
+                execution,
+                scoped,
+            )
+        if exec_context is None or exec_context.empty:
+            st.warning("No contiguous V2 1m execution paths are available yet.")
+            return
+        snapshot = {
+            "exec_context": exec_context.copy(),
+            "tp_values": tuple(tp_values),
+            "sl_values": tuple(sl_values),
+            "horizon": int(horizon_min),
+            "source_signature": source_signature,
+            "created_at": time.time(),
+        }
+        st.session_state[snapshot_key] = snapshot
+
+    if not isinstance(snapshot, dict):
+        return
+    exec_context = snapshot.get("exec_context", pd.DataFrame())
+    if exec_context is None or exec_context.empty:
+        return
+    snap_tp = tuple(snapshot.get("tp_values", tp_values))
+    snap_sl = tuple(snapshot.get("sl_values", sl_values))
+    snap_horizon = int(snapshot.get("horizon", horizon_min))
+    if snapshot.get("source_signature") != source_signature:
+        st.info(
+            "The V2 side/cohort universe changed after this matrix snapshot. "
+            "Press Apply / recalculate to move the snapshot."
+        )
+
+    variant = st.selectbox(
+        "Execution matrix variant",
+        [
+            "REACTION Base",
+            "Candidate V1 drivers",
+            "V2 Strength",
+            "V2 Strong Strength",
+            "V2 Strength + Flow",
+        ],
+        index=2,
+        key="candidate_v2_matrix_variant",
+    )
+    variant_mask = _candidate_v2_variant_mask(
+        exec_context,
+        variant,
+        strong_threshold=strong_threshold,
+    )
+    variant_exec = exec_context.loc[variant_mask].copy()
+    variant_summary = _candidate_v1_execution_grid_summary(variant_exec)
+    m1, m2, m3 = st.columns(3)
+    m1.metric(
+        "Variant candidates",
+        int(variant_exec["candidate_v1_event_key"].astype(str).nunique())
+        if not variant_exec.empty else 0,
+    )
+    m2.metric("Horizon", f"{snap_horizon}m")
+    m3.metric(
+        "Strong threshold",
+        f">= {float(strong_threshold):g}%"
+        if variant == "V2 Strong Strength" else "—",
+    )
+
+    metric = st.selectbox(
+        "V2 matrix metric",
+        [
+            "Net PnL % pts",
+            "Net PnL USDT",
+            "Avg net/trade %",
+            "Profit factor",
+            "Win rate %",
+            "TP rate %",
+            "Max drawdown % pts",
+            "Resolved",
+        ],
+        index=0,
+        key="candidate_v2_matrix_metric",
+    )
+    _candidate_v2_render_matrix(
+        variant_summary,
+        key_prefix="candidate_v2_execution",
+        metric=metric,
+    )
+
+    p1, p2 = st.columns(2)
+    tp_list = list(snap_tp)
+    sl_list = list(snap_sl)
+    tp_index = min(range(len(tp_list)), key=lambda i: abs(tp_list[i] - 2.0))
+    sl_index = min(range(len(sl_list)), key=lambda i: abs(sl_list[i] - 2.0))
+    selected_tp = p1.selectbox(
+        "Inspect V2 TP",
+        tp_list,
+        index=tp_index,
+        format_func=lambda value: f"{value:g}%",
+        key="candidate_v2_inspect_tp",
+    )
+    selected_sl = p2.selectbox(
+        "Inspect V2 SL",
+        sl_list,
+        index=sl_index,
+        format_func=lambda value: f"{value:g}%",
+        key="candidate_v2_inspect_sl",
+    )
+    selected_pair = _candidate_v2_selected_pair(
+        exec_context,
+        selected_tp,
+        selected_sl,
+    )
+    if selected_pair.empty:
+        return
+
+    st.markdown("#### 3. Permanent comparison · same execution pair")
+    st.caption(
+        "REACTION Base, frozen V1 drivers and the three V2 variants are compared "
+        "inside the exact same V2 REACTION universe, with the same TP/SL, horizon "
+        "and costs. This avoids giving a variant a different market window."
+    )
+    comparison = _candidate_v2_variant_comparison_table(
+        selected_pair,
+        strong_threshold=strong_threshold,
+    )
+    if not comparison.empty:
+        st.dataframe(
+            comparison,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_permanent_comparison",
+        )
+        st.download_button(
+            "Download V2 variant comparison CSV",
+            data=comparison.to_csv(index=False).encode("utf-8"),
+            file_name=(
+                f"candidate_v2_variants_tp{float(selected_tp):g}_"
+                f"sl{float(selected_sl):g}_{snap_horizon}m.csv"
+            ),
+            mime="text/csv",
+            key="candidate_v2_comparison_download",
+        )
+
+    st.markdown("#### 4. Strength threshold study")
+    st.caption(
+        "All thresholds are evaluated simultaneously. Coverage is shown so a high "
+        "PF on a tiny tail cannot silently become the chosen rule. LONG and SHORT "
+        "remain separate in the same table."
+    )
+    threshold_table = _candidate_v2_threshold_table(selected_pair)
+    if not threshold_table.empty:
+        st.dataframe(
+            threshold_table,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_threshold_table",
+        )
+        st.download_button(
+            "Download V2 threshold study CSV",
+            data=threshold_table.to_csv(index=False).encode("utf-8"),
+            file_name=(
+                f"candidate_v2_strength_thresholds_tp{float(selected_tp):g}_"
+                f"sl{float(selected_sl):g}_{snap_horizon}m.csv"
+            ),
+            mime="text/csv",
+            key="candidate_v2_threshold_download",
+        )
+
+    with st.expander("Directional strength distribution · negative controls included", expanded=True):
+        bucket_table = _candidate_v2_bucket_table(selected_pair)
+        if not bucket_table.empty:
+            st.dataframe(
+                bucket_table,
+                use_container_width=True,
+                hide_index=True,
+                key="candidate_v2_bucket_table",
+            )
+
+    st.markdown("#### 5. Strength × Market Flow")
+    st.caption(
+        "This is intentionally a second layer. V2 Strength tests relative strength "
+        "alone; V2 Strength + Flow asks whether TAILWIND adds information after "
+        "directional strength is already positive."
+    )
+    cross = _candidate_v2_strength_flow_table(selected_pair)
+    if not cross.empty:
+        st.dataframe(
+            cross,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_strength_flow_cross",
+        )
+
+    market_increment = _candidate_v2_market_increment_table(selected_pair)
+    if not market_increment.empty:
+        st.markdown("###### Market Flow incremental value after strength > 0")
+        st.dataframe(
+            market_increment,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_market_increment",
+        )
+
+    st.markdown("#### 6. Full V2 causal journal")
+    show_journal = st.toggle(
+        "Show/export full V2 REACTION context",
+        value=False,
+        key="candidate_v2_show_journal",
+    )
+    if show_journal:
+        journal = scoped.copy()
+        journal["Reaction"] = (
+            pd.to_datetime(
+                pd.to_numeric(
+                    journal["retest_timestamp"],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+            .dt.strftime("%Y-%m-%d %H:%M")
+        )
+        journal["4h snapshot"] = (
+            pd.to_datetime(
+                pd.to_numeric(
+                    journal["flow_candle_timestamp"],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+            .dt.strftime("%Y-%m-%d %H:%M")
+        )
+        cols = [
+            "candidate_v2_event_key",
+            "candidate_v2_cohort",
+            "symbol",
+            "side",
+            "Reaction",
+            "4h snapshot",
+            "side_adjusted_strength_vs_btc_4h",
+            "Directional strength bucket",
+            "market_breadth_4h",
+            "btc_return_pct_4h",
+            "return_pct_4h",
+            "return_rank_pct_4h",
+            "relative_volume_4h",
+            "Market alignment",
+            "primary_sector",
+            "sector_strength_vs_btc_4h",
+            "nearest_opposing_room_pct",
+            "aligned_rsi_extreme_count",
+            "aligned_rsi_extreme_timeframes",
+            "is_candidate_v1_driver",
+            "control_reason",
+            "candidate_v2_outcome_180m",
+            "candidate_v2_outcome_240m",
+            "candidate_v2_outcome_360m",
+            "candidate_v2_mfe_180m_pct",
+            "candidate_v2_mae_180m_pct",
+            "candidate_v2_mfe_360m_pct",
+            "candidate_v2_mae_360m_pct",
+        ]
+        cols = [column for column in cols if column in journal.columns]
+        export = journal[cols].copy()
+        st.dataframe(
+            export,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_full_journal",
+        )
+        st.download_button(
+            "Download full Candidate V2 causal journal CSV",
+            data=export.to_csv(index=False).encode("utf-8"),
+            file_name="candidate_v2_causal_journal.csv",
+            mime="text/csv",
+            key="candidate_v2_journal_download",
+        )
+
+
 def render_candidate_v1_total_monitor(retests_df=None):
     """Combined persisted view of the frozen SHORT + LONG Candidate V1 sets."""
     frames = []
@@ -34303,6 +35708,7 @@ if selected_section == "reaction_swing_lab":
                 "Research view",
                 options=[
                     "🧊 Candidate V1",
+                    "🧪 Candidate V2",
                     "🔁 REACTION / Retests",
                     "🎯 Pivots / Confirmations",
                     "📍 Event swing structure",
@@ -34463,6 +35869,86 @@ if selected_section == "reaction_swing_lab":
                     render_candidate_v1_total_monitor(
                         retests_df=candidate_v1_retests_df,
                     )
+
+            elif lab_mode == "🧪 Candidate V2":
+                # V2 deliberately reuses the exact same 15m structural scanner
+                # parameters as frozen V1 so only the downstream selection
+                # hypothesis changes. The V2 universe itself is all REACTIONs.
+                candidate_v1_config = (
+                    _candidate_v1_load_or_freeze_config(
+                        detector="3x3",
+                        min_swing_prominence_pct=0.0,
+                        retest_tolerance_pct=float(
+                            CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT
+                        ),
+                        min_departure_pct=float(
+                            CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
+                        ),
+                        max_retest_age_minutes=int(
+                            CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
+                        ),
+                    )
+                )
+                with st.spinner(
+                    "Scanning the shared 15m causal REACTION universe for V2..."
+                ):
+                    candidate_v2_retests_df = (
+                        scan_confirmed_swing_retests_all_symbols(
+                            symbols=structural_symbols,
+                            swing_timeframes=(
+                                str(
+                                    candidate_v1_config.get(
+                                        "swing_timeframe",
+                                        "15m",
+                                    )
+                                ),
+                            ),
+                            swing_detector_items=(
+                                (
+                                    str(
+                                        candidate_v1_config.get(
+                                            "swing_timeframe",
+                                            "15m",
+                                        )
+                                    ),
+                                    str(
+                                        candidate_v1_config.get(
+                                            "swing_detector",
+                                            "3x3",
+                                        )
+                                    ),
+                                ),
+                            ),
+                            min_swing_prominence_pct=float(
+                                candidate_v1_config.get(
+                                    "min_swing_prominence_pct",
+                                    0.0,
+                                )
+                            ),
+                            retest_tolerance_pct=float(
+                                candidate_v1_config.get(
+                                    "retest_tolerance_pct",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
+                                )
+                            ),
+                            min_departure_pct=float(
+                                candidate_v1_config.get(
+                                    "min_departure_pct",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
+                                )
+                            ),
+                            max_age_minutes=int(
+                                candidate_v1_config.get(
+                                    "max_confirmation_to_retest_min",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
+                                )
+                            ),
+                            max_retest_age_minutes=4320,
+                        )
+                    )
+                render_candidate_v2_research(
+                    retests_df=candidate_v2_retests_df,
+                )
 
             elif lab_mode == "🔁 REACTION / Retests":
                 control_1, control_2, control_3 = (
