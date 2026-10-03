@@ -93,7 +93,11 @@ MARKET_FLOW_TIMEFRAME_MS = (
 
 )
 
+PRODUCER_LOCK_STARTUP_WAIT_SECONDS = (
+    PRODUCER_LOCK_TTL_SECONDS + 15
+)
 
+PRODUCER_LOCK_STARTUP_POLL_SECONDS = 2
 
 # Esperamos que termine de llegar el batch
 
@@ -270,12 +274,10 @@ class MarketDataService:
 
 
 
-        if not self._acquire_producer_lock():
-
+        if not self._acquire_producer_lock_with_wait():
             raise RuntimeError(
-
-                "Another market data producer is active"
-
+                "Another market data producer is active "
+                "after producer-lock startup wait"
             )
 
 
@@ -3633,6 +3635,86 @@ class MarketDataService:
 
         )
 
+    def _acquire_producer_lock_with_wait(self):
+        started = time.monotonic()
+
+        while not self.stop_event.is_set():
+            if self._acquire_producer_lock():
+                waited = time.monotonic() - started
+
+                print(
+                    "[MARKET DATA SERVICE] "
+                    "producer lock acquired "
+                    f"service_id={self.service_id} "
+                    f"waited={waited:.1f}s"
+                )
+
+                return True
+
+            elapsed = time.monotonic() - started
+
+            try:
+                owner = self.publisher.redis.get(
+                    PRODUCER_LOCK_KEY
+                )
+
+                lock_ttl = self.publisher.redis.ttl(
+                    PRODUCER_LOCK_KEY
+                )
+
+                heartbeat_raw = self.publisher.redis.get(
+                    HEARTBEAT_KEY
+                )
+
+                heartbeat_ttl = self.publisher.redis.ttl(
+                    HEARTBEAT_KEY
+                )
+
+                heartbeat_owner = None
+
+                if heartbeat_raw:
+                    try:
+                        heartbeat_payload = json.loads(
+                            heartbeat_raw
+                        )
+
+                        heartbeat_owner = (
+                            heartbeat_payload.get(
+                                "service_id"
+                            )
+                        )
+                    except Exception:
+                        heartbeat_owner = None
+
+                print(
+                    "[MARKET DATA SERVICE] "
+                    "producer lock busy | "
+                    f"owner={owner} "
+                    f"lock_ttl={lock_ttl}s "
+                    f"heartbeat_owner={heartbeat_owner} "
+                    f"heartbeat_ttl={heartbeat_ttl}s "
+                    f"waited={elapsed:.1f}s"
+                )
+
+            except Exception as exc:
+                print(
+                    "[MARKET DATA SERVICE] "
+                    "producer lock diagnostics failed | "
+                    f"error={exc}"
+                )
+
+            if (
+                elapsed
+                >= PRODUCER_LOCK_STARTUP_WAIT_SECONDS
+            ):
+                return False
+
+            if self.stop_event.wait(
+                PRODUCER_LOCK_STARTUP_POLL_SECONDS
+            ):
+                return False
+
+        return False
 
 
     def _acquire_producer_lock(self):

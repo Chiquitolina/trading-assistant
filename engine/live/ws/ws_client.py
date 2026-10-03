@@ -135,8 +135,14 @@ class WSClient:
                         if dead_groups:
                             print(
                                 f"\033[91m[WS CLIENT]\033[0m "
-                                f"❌ Dead WS groups detected: {dead_groups}"
+                                f"❌ Dead WS groups detected: "
+                                f"{dead_groups} | forcing reconnect"
                             )
+
+                            self.is_connected = False
+                            self._is_reconnecting = True
+
+                            continue
 
                 if self._is_reconnecting:
                     self._reconnect()
