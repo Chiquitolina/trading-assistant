@@ -74,6 +74,21 @@ from engine.live.research.swing_detector import (
     SwingDetector,
 )
 
+from dashboard.analytics.candidate_v1_fast_analysis import (
+    build_execution_grid as candidate_v1_fast_build_execution_grid,
+    build_followup_metrics as candidate_v1_fast_build_followup_metrics,
+    refresh_path_store as candidate_v1_fast_refresh_path_store,
+)
+
+# Streamlit fragments keep Candidate controls from rerunning the entire
+# Volume Exhaustion page. Fallback preserves compatibility with older builds.
+_candidate_fragment = getattr(st, "fragment", None)
+if _candidate_fragment is None:
+    def _candidate_fragment(func=None, **_kwargs):
+        if func is not None:
+            return func
+        return lambda wrapped: wrapped
+
 TRADES_FILE = BASE_DIR / "trades.csv"
 VOLUME_EXHAUSTION_EVENTS_FILE = (
     BASE_DIR / "volume_exhaustion_events.csv"
@@ -146,6 +161,13 @@ CANDIDATE_V1_LONG_SNAPSHOT_DIR = (
 )
 CANDIDATE_V1_LONG_SNAPSHOT_PRE_MINUTES = CANDIDATE_V1_SNAPSHOT_PRE_MINUTES
 CANDIDATE_V1_LONG_SNAPSHOT_POST_MINUTES = CANDIDATE_V1_SNAPSHOT_POST_MINUTES
+
+# Persisted causal 1m paths shared by SHORT, LONG and TOTAL analysis.
+# Completed 360m paths remain available after Redis history rolls forward.
+CANDIDATE_V1_PATH_STORE_FILE = (
+    BASE_DIR / "reports" / "candidate_v1_analysis" / "paths_1m.pkl"
+)
+CANDIDATE_V1_PATH_REFRESH_SECONDS = 60
 
 DASHBOARD_CACHE_DIR = (
     BASE_DIR
@@ -14365,6 +14387,76 @@ def _candidate_v1_load_or_freeze_config(
     return defaults
 
 
+def _candidate_v1_fast_path_store(candidate_rows, force=False):
+    """Refresh/read the shared persisted causal 1m path store.
+
+    Redis is touched only for unseen or still-incomplete events, and at most
+    once per refresh interval for already-known pending paths. Completed 360m
+    paths are immutable and remain available after Redis rolls forward.
+    """
+    if candidate_rows is None or candidate_rows.empty:
+        return pd.DataFrame()
+
+    return candidate_v1_fast_refresh_path_store(
+        candidate_rows=candidate_rows,
+        store_path=CANDIDATE_V1_PATH_STORE_FILE,
+        candle_loader=load_volume_exhaustion_research_candles,
+        prepare_candles=_prepare_confirmed_swing_retest_candles,
+        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+        max_horizon=360,
+        refresh_interval_seconds=CANDIDATE_V1_PATH_REFRESH_SECONDS,
+        force=bool(force),
+    )
+
+
+def _candidate_v1_attach_fast_path_metrics(
+    result,
+    threshold_pct=2.0,
+):
+    """Attach MAE-before-target + 180/240/360 metrics in one shared pass."""
+    if result is None or result.empty:
+        return result
+
+    path_store = _candidate_v1_fast_path_store(result)
+    if path_store is None or path_store.empty:
+        return result
+
+    metrics = candidate_v1_fast_build_followup_metrics(
+        candidate_rows=result,
+        path_store=path_store,
+        threshold_pct=float(threshold_pct),
+        horizons=(180, 240, 360),
+    )
+    if metrics is None or metrics.empty:
+        return result
+
+    metrics = metrics.drop_duplicates(
+        subset=["candidate_v1_event_key"],
+        keep="last",
+    ).set_index("candidate_v1_event_key")
+
+    keys = result["candidate_v1_event_key"].astype(str)
+    for column in metrics.columns:
+        if column == "candidate_v1_event_key":
+            continue
+        mapped = keys.map(metrics[column])
+        result[column] = mapped.to_numpy()
+
+    # Official frozen 180m outcome remains authoritative.
+    if "candidate_v1_outcome_180m" not in result.columns:
+        result["candidate_v1_outcome_180m"] = result.get(
+            "candidate_v1_outcome",
+            "PENDING",
+        )
+    else:
+        result["candidate_v1_outcome_180m"] = (
+            result["candidate_v1_outcome_180m"]
+            .fillna(result.get("candidate_v1_outcome"))
+        )
+
+    return result
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def _candidate_v1_mae_before_target(
     candidate_rows,
@@ -14869,7 +14961,6 @@ def _candidate_v1_parse_grid_values(raw_value, default=(2.0,)):
     return tuple(sorted(set(values))[:20])
 
 
-@st.cache_data(ttl=120, show_spinner=False)
 def _candidate_v1_execution_first_touch_grid(
     candidate_rows,
     tp_values,
@@ -14882,255 +14973,31 @@ def _candidate_v1_execution_first_touch_grid(
     notional_usdt=100.0,
     candle_limit=5000,
 ):
-    """Chronological TP/SL first-touch research from the next causal 1m open.
+    """Fast first-touch matrix backed by the persisted 360m path store.
 
-    Entry is the OPEN of the next consecutive 1m candle after the REACTION
-    candle closes. Every TP/SL pair is scanned candle-by-candle. If both TP and
-    SL are touched inside the same 1m candle, OHLC cannot prove the intrabar
-    order, so the row is labelled SL_AMBIGUOUS and charged as SL (conservative).
-
-    If neither barrier is touched and a complete horizon is available, the
-    trade exits at that horizon's close. Data gaps censor the path instead of
-    being bridged.
+    Expensive candle loading/path reconstruction is independent from TP/SL,
+    fees, notional and selected horizon. Those controls now operate on the
+    already-materialized causal path instead of rescanning Redis per grid cell.
     """
     if candidate_rows is None or candidate_rows.empty:
         return pd.DataFrame()
 
-    required = {"symbol", "signal", "retest_timestamp"}
-    if not required.issubset(candidate_rows.columns):
+    path_store = _candidate_v1_fast_path_store(candidate_rows)
+    if path_store is None or path_store.empty:
         return pd.DataFrame()
 
-    tp_values = tuple(float(v) for v in tp_values if float(v) > 0)
-    sl_values = tuple(float(v) for v in sl_values if float(v) > 0)
-    horizon_min = max(1, int(horizon_min))
-    notional_usdt = max(0.0, float(notional_usdt))
-
-    if not tp_values or not sl_values:
-        return pd.DataFrame()
-
-    execution_cost_pct = max(
-        0.0,
-        float(entry_fee_pct)
-        + float(exit_fee_pct)
-        + float(entry_slippage_pct)
-        + float(exit_slippage_pct),
+    return candidate_v1_fast_build_execution_grid(
+        candidate_rows=candidate_rows,
+        path_store=path_store,
+        tp_values=tp_values,
+        sl_values=sl_values,
+        horizon_min=int(horizon_min),
+        entry_fee_pct=float(entry_fee_pct),
+        exit_fee_pct=float(exit_fee_pct),
+        entry_slippage_pct=float(entry_slippage_pct),
+        exit_slippage_pct=float(exit_slippage_pct),
+        notional_usdt=float(notional_usdt),
     )
-
-    rows = []
-
-    for symbol, symbol_rows in candidate_rows.groupby("symbol", sort=False):
-        candles = load_volume_exhaustion_research_candles(
-            symbol=str(symbol),
-            timeframe="1m",
-            limit=int(candle_limit),
-        )
-        prepared = _prepare_confirmed_swing_retest_candles(candles)
-        if prepared.empty:
-            continue
-
-        timestamps = prepared["timestamp"].astype("int64").to_numpy()
-        opens = prepared["open"].astype(float).to_numpy()
-        highs = prepared["high"].astype(float).to_numpy()
-        lows = prepared["low"].astype(float).to_numpy()
-        closes = prepared["close"].astype(float).to_numpy()
-
-        segment_end = np.empty(len(timestamps), dtype=np.int64)
-        for idx in range(len(timestamps) - 1, -1, -1):
-            if (
-                idx == len(timestamps) - 1
-                or int(timestamps[idx + 1])
-                != int(timestamps[idx]) + 60_000
-            ):
-                segment_end[idx] = idx
-            else:
-                segment_end[idx] = segment_end[idx + 1]
-
-        for _, candidate in symbol_rows.iterrows():
-            try:
-                reaction_ts = int(candidate["retest_timestamp"])
-                side = str(candidate["signal"]).upper()
-            except (KeyError, TypeError, ValueError):
-                continue
-
-            if side not in {"LONG", "SHORT"}:
-                continue
-
-            entry_ts = reaction_ts + 60_000
-            start_idx = int(np.searchsorted(timestamps, entry_ts, side="left"))
-            if (
-                start_idx >= len(timestamps)
-                or int(timestamps[start_idx]) != entry_ts
-            ):
-                continue
-
-            entry_price = float(opens[start_idx])
-            if not np.isfinite(entry_price) or entry_price <= 0:
-                continue
-
-            contiguous_end = int(segment_end[start_idx])
-            max_end_idx = min(
-                contiguous_end,
-                int(start_idx + horizon_min - 1),
-            )
-            available_bars = max_end_idx - start_idx + 1
-            if available_bars <= 0:
-                continue
-
-            for tp_pct in tp_values:
-                for sl_pct in sl_values:
-                    if side == "LONG":
-                        tp_price = entry_price * (1.0 + tp_pct / 100.0)
-                        sl_price = entry_price * (1.0 - sl_pct / 100.0)
-                    else:
-                        tp_price = entry_price * (1.0 - tp_pct / 100.0)
-                        sl_price = entry_price * (1.0 + sl_pct / 100.0)
-
-                    outcome = None
-                    hit_idx = None
-                    gross_pnl_pct = np.nan
-                    exit_price = np.nan
-
-                    for idx in range(start_idx, max_end_idx + 1):
-                        high = float(highs[idx])
-                        low = float(lows[idx])
-
-                        if side == "LONG":
-                            tp_hit = high >= tp_price
-                            sl_hit = low <= sl_price
-                        else:
-                            tp_hit = low <= tp_price
-                            sl_hit = high >= sl_price
-
-                        if tp_hit and sl_hit:
-                            outcome = "SL_AMBIGUOUS"
-                            hit_idx = idx
-                            exit_price = float(sl_price)
-                            gross_pnl_pct = -float(sl_pct)
-                            break
-
-                        if sl_hit:
-                            outcome = "SL"
-                            hit_idx = idx
-                            exit_price = float(sl_price)
-                            gross_pnl_pct = -float(sl_pct)
-                            break
-
-                        if tp_hit:
-                            outcome = "TP"
-                            hit_idx = idx
-                            exit_price = float(tp_price)
-                            gross_pnl_pct = float(tp_pct)
-                            break
-
-                    path_complete = available_bars >= horizon_min
-                    if outcome is None:
-                        if path_complete:
-                            outcome = "TIME_EXIT"
-                            hit_idx = int(start_idx + horizon_min - 1)
-                            exit_price = float(closes[hit_idx])
-                            if side == "LONG":
-                                gross_pnl_pct = (
-                                    exit_price / entry_price - 1.0
-                                ) * 100.0
-                            else:
-                                gross_pnl_pct = (
-                                    1.0 - exit_price / entry_price
-                                ) * 100.0
-                        else:
-                            outcome = "PENDING"
-
-                    exit_ts = (
-                        int(timestamps[hit_idx])
-                        if hit_idx is not None
-                        else np.nan
-                    )
-                    first_touch_min = (
-                        float(
-                            (
-                                int(timestamps[hit_idx])
-                                - int(entry_ts)
-                            ) / 60_000.0
-                        )
-                        if hit_idx is not None
-                        else np.nan
-                    )
-
-                    excursion_end_idx = (
-                        int(hit_idx)
-                        if hit_idx is not None
-                        else int(max_end_idx)
-                    )
-                    path_high = float(
-                        np.nanmax(highs[start_idx : excursion_end_idx + 1])
-                    )
-                    path_low = float(
-                        np.nanmin(lows[start_idx : excursion_end_idx + 1])
-                    )
-                    if side == "LONG":
-                        mfe_pct = max(
-                            0.0,
-                            (path_high / entry_price - 1.0) * 100.0,
-                        )
-                        mae_pct = max(
-                            0.0,
-                            (1.0 - path_low / entry_price) * 100.0,
-                        )
-                    else:
-                        mfe_pct = max(
-                            0.0,
-                            (1.0 - path_low / entry_price) * 100.0,
-                        )
-                        mae_pct = max(
-                            0.0,
-                            (path_high / entry_price - 1.0) * 100.0,
-                        )
-
-                    resolved = outcome != "PENDING"
-                    net_pnl_pct = (
-                        float(gross_pnl_pct) - execution_cost_pct
-                        if resolved and pd.notna(gross_pnl_pct)
-                        else np.nan
-                    )
-                    net_pnl_usdt = (
-                        notional_usdt * float(net_pnl_pct) / 100.0
-                        if pd.notna(net_pnl_pct)
-                        else np.nan
-                    )
-
-                    rows.append({
-                        "candidate_v1_event_key": candidate.get(
-                            "candidate_v1_event_key"
-                        ),
-                        "candidate_v1_cohort": candidate.get(
-                            "candidate_v1_cohort",
-                            "FORWARD",
-                        ),
-                        "symbol": str(symbol),
-                        "side": side,
-                        "reaction_timestamp": int(reaction_ts),
-                        "entry_timestamp": int(entry_ts),
-                        "entry_price": float(entry_price),
-                        "TP %": float(tp_pct),
-                        "SL %": float(sl_pct),
-                        "tp_price": float(tp_price),
-                        "sl_price": float(sl_price),
-                        "Outcome": outcome,
-                        "first_touch_min": first_touch_min,
-                        "exit_timestamp": exit_ts,
-                        "exit_price": exit_price,
-                        "gross_pnl_pct": gross_pnl_pct,
-                        "execution_cost_pct": (
-                            execution_cost_pct if resolved else np.nan
-                        ),
-                        "net_pnl_pct": net_pnl_pct,
-                        "net_pnl_usdt": net_pnl_usdt,
-                        "mfe_until_exit_pct": float(mfe_pct),
-                        "mae_until_exit_pct": float(mae_pct),
-                        "observed_bars": int(available_bars),
-                        "path_complete": bool(path_complete),
-                    })
-
-    return pd.DataFrame(rows)
 
 
 def _candidate_v1_execution_grid_summary(path_results):
@@ -15269,86 +15136,96 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
         "gaps/incomplete paths remain PENDING. Candidate V1 itself is not changed."
     )
 
-    scope_c1, scope_c2, scope_c3 = st.columns(3)
-    side_scope = scope_c1.selectbox(
-        "Side",
-        options=["TOTAL", "LONG", "SHORT"],
-        index=0,
-        key=f"{key_prefix}_side",
-    )
-    cohort_scope = scope_c2.selectbox(
-        "Cohort",
-        options=["FORWARD", "TOTAL", "DISCOVERY"],
-        index=0,
-        key=f"{key_prefix}_cohort",
-    )
-    horizon_min = scope_c3.selectbox(
-        "Execution horizon",
-        options=[60, 120, 180, 240, 360],
-        index=2,
-        format_func=lambda value: f"{value} min",
-        key=f"{key_prefix}_horizon",
-    )
+    with st.form(
+        key=f"{key_prefix}_config_form",
+        clear_on_submit=False,
+    ):
+        scope_c1, scope_c2, scope_c3 = st.columns(3)
+        side_scope = scope_c1.selectbox(
+            "Side",
+            options=["TOTAL", "LONG", "SHORT"],
+            index=0,
+            key=f"{key_prefix}_side",
+        )
+        cohort_scope = scope_c2.selectbox(
+            "Cohort",
+            options=["FORWARD", "TOTAL", "DISCOVERY"],
+            index=0,
+            key=f"{key_prefix}_cohort",
+        )
+        horizon_min = scope_c3.selectbox(
+            "Execution horizon",
+            options=[60, 120, 180, 240, 360],
+            index=2,
+            format_func=lambda value: f"{value} min",
+            key=f"{key_prefix}_horizon",
+        )
 
-    grid_c1, grid_c2 = st.columns(2)
-    tp_raw = grid_c1.text_input(
-        "TP grid %",
-        value="0.5,1.0,1.5,2.0,2.5,3.0",
-        key=f"{key_prefix}_tp_grid",
-    )
-    sl_raw = grid_c2.text_input(
-        "SL grid %",
-        value="0.5,1.0,1.5,2.0,2.5,3.0",
-        key=f"{key_prefix}_sl_grid",
-    )
+        grid_c1, grid_c2 = st.columns(2)
+        tp_raw = grid_c1.text_input(
+            "TP grid %",
+            value="0.5,1.0,1.5,2.0,2.5,3.0",
+            key=f"{key_prefix}_tp_grid",
+        )
+        sl_raw = grid_c2.text_input(
+            "SL grid %",
+            value="0.5,1.0,1.5,2.0,2.5,3.0",
+            key=f"{key_prefix}_sl_grid",
+        )
+
+        cost_c1, cost_c2, cost_c3, cost_c4, cost_c5 = st.columns(5)
+        entry_fee_pct = cost_c1.number_input(
+            "Entry fee %",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.05,
+            step=0.01,
+            format="%.3f",
+            key=f"{key_prefix}_entry_fee",
+        )
+        exit_fee_pct = cost_c2.number_input(
+            "Exit fee %",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.05,
+            step=0.01,
+            format="%.3f",
+            key=f"{key_prefix}_exit_fee",
+        )
+        entry_slippage_pct = cost_c3.number_input(
+            "Entry slippage %",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.0,
+            step=0.01,
+            format="%.3f",
+            key=f"{key_prefix}_entry_slippage",
+        )
+        exit_slippage_pct = cost_c4.number_input(
+            "Exit slippage %",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.0,
+            step=0.01,
+            format="%.3f",
+            key=f"{key_prefix}_exit_slippage",
+        )
+        notional_usdt = cost_c5.number_input(
+            "Notional / trade USDT",
+            min_value=1.0,
+            max_value=1_000_000.0,
+            value=100.0,
+            step=10.0,
+            key=f"{key_prefix}_notional",
+        )
+
+        st.form_submit_button(
+            "Apply / recalculate matrix",
+            use_container_width=True,
+        )
+
     tp_values = _candidate_v1_parse_grid_values(tp_raw, default=(2.0,))
     sl_values = _candidate_v1_parse_grid_values(sl_raw, default=(2.0,))
-
-    cost_c1, cost_c2, cost_c3, cost_c4, cost_c5 = st.columns(5)
-    entry_fee_pct = cost_c1.number_input(
-        "Entry fee %",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.05,
-        step=0.01,
-        format="%.3f",
-        key=f"{key_prefix}_entry_fee",
-    )
-    exit_fee_pct = cost_c2.number_input(
-        "Exit fee %",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.05,
-        step=0.01,
-        format="%.3f",
-        key=f"{key_prefix}_exit_fee",
-    )
-    entry_slippage_pct = cost_c3.number_input(
-        "Entry slippage %",
-        min_value=0.0,
-        max_value=2.0,
-        value=0.0,
-        step=0.01,
-        format="%.3f",
-        key=f"{key_prefix}_entry_slippage",
-    )
-    exit_slippage_pct = cost_c4.number_input(
-        "Exit slippage %",
-        min_value=0.0,
-        max_value=2.0,
-        value=0.0,
-        step=0.01,
-        format="%.3f",
-        key=f"{key_prefix}_exit_slippage",
-    )
-    notional_usdt = cost_c5.number_input(
-        "Notional / trade USDT",
-        min_value=1.0,
-        max_value=1_000_000.0,
-        value=100.0,
-        step=10.0,
-        key=f"{key_prefix}_notional",
-    )
 
     subset = history.copy()
     side_column = (
@@ -15577,6 +15454,7 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
     )
 
 
+@_candidate_fragment
 def render_candidate_v1_total_monitor():
     """Combined persisted view of the frozen SHORT + LONG Candidate V1 sets."""
     frames = []
@@ -15609,6 +15487,14 @@ def render_candidate_v1_total_monitor():
     history = history.drop_duplicates(
         subset=["Candidate side", "candidate_v1_event_key"],
         keep="last",
+    )
+
+    # Refresh derived 180/240/360 metrics from the persisted raw 1m paths.
+    # This keeps TOTAL current even when the SHORT/LONG CSVs have not yet been
+    # rewritten on this exact Streamlit rerun. Raw paths are the source of truth.
+    history = _candidate_v1_attach_fast_path_metrics(
+        history,
+        threshold_pct=2.0,
     )
 
     official = history.get(
@@ -15749,6 +15635,7 @@ def render_candidate_v1_total_monitor():
         else:
             _candidate_v1_render_saved_inspector(row)
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _candidate_v1_build_current_monitor(
     retests_df,
     config,
@@ -15896,25 +15783,7 @@ def _candidate_v1_build_current_monitor(
         aligned_tfs.append(",".join(active) if active else "—")
     result["candidate_v1_aligned_rsi_tfs"] = aligned_tfs
 
-    path_metrics = _candidate_v1_mae_before_target(
-        result,
-        threshold_pct=float(
-            config.get("runner_threshold_pct", 2.0)
-        ),
-        horizon_min=int(
-            config.get("runner_horizon_min", 180)
-        ),
-        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
-    )
-    if path_metrics is not None and not path_metrics.empty:
-        common = result.index.intersection(path_metrics.index)
-        for column in path_metrics.columns:
-            result.loc[common, column] = path_metrics.loc[
-                common,
-                column,
-            ]
-
-    result = _candidate_v1_merge_extended_followup(
+    result = _candidate_v1_attach_fast_path_metrics(
         result,
         threshold_pct=float(config.get("runner_threshold_pct", 2.0)),
     )
@@ -16658,6 +16527,7 @@ def _candidate_v1_persist_history(current):
     return merged
 
 
+@_candidate_fragment
 def render_candidate_v1_frozen_monitor(
     retests_df,
     config,
@@ -17381,6 +17251,7 @@ def _candidate_v1_long_mae_before_target(
     return pd.DataFrame(rows).set_index("_row_index")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _candidate_v1_long_build_current_monitor(
     retests_df,
     config,
@@ -17534,25 +17405,7 @@ def _candidate_v1_long_build_current_monitor(
         aligned_tfs.append(",".join(active) if active else "—")
     result["candidate_v1_aligned_rsi_tfs"] = aligned_tfs
 
-    path_metrics = _candidate_v1_long_mae_before_target(
-        result,
-        threshold_pct=float(
-            config.get("runner_threshold_pct", 2.0)
-        ),
-        horizon_min=int(
-            config.get("runner_horizon_min", 180)
-        ),
-        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
-    )
-    if path_metrics is not None and not path_metrics.empty:
-        common = result.index.intersection(path_metrics.index)
-        for column in path_metrics.columns:
-            result.loc[common, column] = path_metrics.loc[
-                common,
-                column,
-            ]
-
-    result = _candidate_v1_merge_extended_followup(
+    result = _candidate_v1_attach_fast_path_metrics(
         result,
         threshold_pct=float(config.get("runner_threshold_pct", 2.0)),
     )
@@ -18290,6 +18143,7 @@ def _candidate_v1_long_persist_history(current):
     return merged
 
 
+@_candidate_fragment
 def render_candidate_v1_long_frozen_monitor(
     retests_df,
     config,
