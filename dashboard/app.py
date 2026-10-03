@@ -16389,6 +16389,45 @@ def _candidate_v1_render_matched_reaction_control(
         st.info("No non-Candidate REACTIONs exist in the current scanner window.")
         return
 
+    # Normalize the REACTION-control schema to the same directional naming used
+    # by Candidate market-regime analysis. The scanner calls this field
+    # ``signal`` while the regime-label helper consumes ``side``. Without this
+    # alias every control was classified as Directional strength = UNKNOWN and
+    # was subsequently removed before matching.
+    if "side" not in controls.columns:
+        controls["side"] = controls.get(
+            "signal",
+            pd.Series("", index=controls.index),
+        )
+    controls["side"] = (
+        controls["side"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    total_reactions_n = int(
+        reaction_source["candidate_v1_event_key"]
+        .astype(str)
+        .nunique()
+    )
+    raw_control_n = int(
+        controls["candidate_v1_event_key"]
+        .astype(str)
+        .nunique()
+    )
+    universe_symbols = {
+        str(symbol).upper()
+        for symbol in CANDIDATE_V1_MARKET_SYMBOLS
+    }
+    controls["_in_market_universe"] = (
+        controls["symbol"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .isin(universe_symbols)
+    )
+
     try:
         control_context, _ = _candidate_v1_build_market_context(
             controls,
@@ -16401,42 +16440,205 @@ def _candidate_v1_render_matched_reaction_control(
         )
         return
 
+    # Merge only context fields that are not already authoritative in the
+    # scanner row. If a future scanner version happens to carry one of these
+    # names too, prefer the reconstructed causal market context explicitly.
+    context_unique = control_context.drop_duplicates(
+        "candidate_v1_event_key"
+    ).copy()
     controls = controls.merge(
-        control_context.drop_duplicates("candidate_v1_event_key"),
+        context_unique,
         on="candidate_v1_event_key",
         how="left",
         suffixes=("", "_ctx"),
     )
+    for canonical in (
+        "flow_candle_timestamp",
+        "market_context_available",
+        "market_breadth_4h",
+        "btc_return_pct_4h",
+        "return_pct_4h",
+        "symbol_strength_vs_btc_4h",
+        "return_rank_pct_4h",
+        "relative_volume_4h",
+        "primary_sector",
+        "sector_return_pct_4h",
+        "sector_breadth_4h",
+        "sector_strength_vs_btc_4h",
+    ):
+        ctx_name = f"{canonical}_ctx"
+        if ctx_name in controls.columns:
+            controls[canonical] = controls[ctx_name]
+
     controls = _candidate_v1_add_regime_labels(controls)
     candidates = _candidate_v1_add_regime_labels(
         selected_context.copy()
     )
 
-    controls = controls.loc[
+    control_market_ok = controls.get(
+        "market_context_available",
+        pd.Series(False, index=controls.index),
+    ).fillna(False).astype(bool)
+    control_boundary_ok = pd.to_numeric(
         controls.get(
-            "market_context_available",
-            pd.Series(False, index=controls.index),
-        ).fillna(False).astype(bool)
-        & controls["Directional strength bucket"].astype(str).ne("UNKNOWN")
-        & pd.to_numeric(
-            controls["flow_candle_timestamp"],
-            errors="coerce",
-        ).notna()
+            "flow_candle_timestamp",
+            pd.Series(np.nan, index=controls.index),
+        ),
+        errors="coerce",
+    ).notna()
+    control_strength_ok = (
+        controls.get(
+            "Directional strength bucket",
+            pd.Series("UNKNOWN", index=controls.index),
+        )
+        .fillna("UNKNOWN")
+        .astype(str)
+        .ne("UNKNOWN")
+    )
+
+    candidate_market_ok = candidates.get(
+        "market_context_available",
+        pd.Series(False, index=candidates.index),
+    ).fillna(False).astype(bool)
+    candidate_boundary_ok = pd.to_numeric(
+        candidates.get(
+            "flow_candle_timestamp",
+            pd.Series(np.nan, index=candidates.index),
+        ),
+        errors="coerce",
+    ).notna()
+    candidate_strength_ok = (
+        candidates.get(
+            "Directional strength bucket",
+            pd.Series("UNKNOWN", index=candidates.index),
+        )
+        .fillna("UNKNOWN")
+        .astype(str)
+        .ne("UNKNOWN")
+    )
+
+    control_with_market_n = int(
+        controls.loc[control_market_ok, "candidate_v1_event_key"]
+        .astype(str)
+        .nunique()
+    )
+    control_with_strength_n = int(
+        controls.loc[
+            control_market_ok
+            & control_boundary_ok
+            & control_strength_ok,
+            "candidate_v1_event_key",
+        ]
+        .astype(str)
+        .nunique()
+    )
+    candidate_match_context_n = int(
+        candidates.loc[
+            candidate_market_ok
+            & candidate_boundary_ok
+            & candidate_strength_ok,
+            "candidate_v1_event_key",
+        ]
+        .astype(str)
+        .nunique()
+    )
+
+    with st.expander(
+        "Matched-control diagnostics",
+        expanded=(
+            control_with_strength_n == 0
+            or candidate_match_context_n == 0
+        ),
+    ):
+        d1, d2, d3, d4, d5 = st.columns(5)
+        d1.metric("REACTIONs", total_reactions_n)
+        d2.metric("Non-Candidate", raw_control_n)
+        d3.metric("In Market Flow universe", int(
+            controls.loc[
+                controls["_in_market_universe"].fillna(False),
+                "candidate_v1_event_key",
+            ].astype(str).nunique()
+        ))
+        d4.metric("Controls + causal context", control_with_market_n)
+        d5.metric("Controls + strength", control_with_strength_n)
+
+        st.caption(
+            "Controls + strength is the pool that can enter exact matching. "
+            "A row needs a causal 4h snapshot, symbol-vs-BTC return and a "
+            "known LONG/SHORT side. Candidate context available: "
+            f"{candidate_match_context_n}."
+        )
+
+        missing_rows = []
+        missing_rows.append({
+            "Stage": "Raw non-Candidate REACTION",
+            "N": raw_control_n,
+        })
+        missing_rows.append({
+            "Stage": "Symbol in Market Flow universe",
+            "N": int(
+                controls.loc[
+                    controls["_in_market_universe"].fillna(False),
+                    "candidate_v1_event_key",
+                ].astype(str).nunique()
+            ),
+        })
+        missing_rows.append({
+            "Stage": "Causal Market Flow attached",
+            "N": control_with_market_n,
+        })
+        missing_rows.append({
+            "Stage": "Directional strength known",
+            "N": control_with_strength_n,
+        })
+        st.dataframe(
+            pd.DataFrame(missing_rows),
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_matched_control_diagnostic_stages",
+        )
+
+        no_context = controls.loc[~control_market_ok].copy()
+        if not no_context.empty:
+            missing_symbol_counts = (
+                no_context.assign(
+                    symbol=no_context["symbol"].astype(str).str.upper()
+                )
+                .groupby(
+                    ["symbol", "_in_market_universe"],
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="REACTIONs without context")
+                .sort_values(
+                    "REACTIONs without context",
+                    ascending=False,
+                )
+                .head(20)
+            )
+            st.markdown("###### Missing-context symbols")
+            st.dataframe(
+                missing_symbol_counts,
+                use_container_width=True,
+                hide_index=True,
+                key=f"{key_prefix}_matched_control_missing_context",
+            )
+
+    controls = controls.loc[
+        control_market_ok
+        & control_boundary_ok
+        & control_strength_ok
     ].copy()
     candidates = candidates.loc[
-        candidates.get(
-            "market_context_available",
-            pd.Series(False, index=candidates.index),
-        ).fillna(False).astype(bool)
-        & candidates["Directional strength bucket"].astype(str).ne("UNKNOWN")
-        & pd.to_numeric(
-            candidates["flow_candle_timestamp"],
-            errors="coerce",
-        ).notna()
+        candidate_market_ok
+        & candidate_boundary_ok
+        & candidate_strength_ok
     ].copy()
     if controls.empty or candidates.empty:
         st.info(
-            "Not enough causal Market Flow context is available for matched controls."
+            "Matched-control test cannot run yet: no rows survive the causal "
+            "Market Flow + directional-strength requirements. Open Matched-control "
+            "diagnostics above to see exactly which stage is empty."
         )
         return
 
@@ -16458,12 +16660,83 @@ def _candidate_v1_render_matched_reaction_control(
         st.info("Candidate rows do not have enough causal context to match.")
         return
 
+    pre_strata_controls = controls.copy()
     controls = controls.merge(
         candidate_strata.assign(_matchable=True),
         on=match_cols,
         how="inner",
     )
+
+    matchable_control_n = int(
+        controls["candidate_v1_event_key"].astype(str).nunique()
+    ) if not controls.empty else 0
+    matchable_candidate_keys = set()
+    if not controls.empty:
+        occupied_control_strata = controls[
+            match_cols
+        ].drop_duplicates()
+        candidate_matchable = candidates.merge(
+            occupied_control_strata.assign(_control_exists=True),
+            on=match_cols,
+            how="inner",
+        )
+        matchable_candidate_keys = set(
+            candidate_matchable["candidate_v1_event_key"]
+            .astype(str)
+            .tolist()
+        )
+
+    st.caption(
+        "Exact matchability · "
+        f"controls {matchable_control_n}/{total_control_pool_n} · "
+        f"Candidates {len(matchable_candidate_keys)}/{int(candidates['candidate_v1_event_key'].astype(str).nunique())}. "
+        "Match key = side + exact causal 4h snapshot + directional-strength bucket."
+    )
+
     if controls.empty:
+        with st.expander(
+            "Why no exact Candidate/control strata overlap?",
+            expanded=True,
+        ):
+            candidate_counts = (
+                candidates.groupby(
+                    match_cols,
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="Candidate N")
+            )
+            control_counts = (
+                pre_strata_controls.groupby(
+                    match_cols,
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="Control N")
+            )
+            strata_diagnostic = candidate_counts.merge(
+                control_counts,
+                on=match_cols,
+                how="outer",
+            ).fillna({
+                "Candidate N": 0,
+                "Control N": 0,
+            })
+            strata_diagnostic["Candidate N"] = (
+                strata_diagnostic["Candidate N"].astype(int)
+            )
+            strata_diagnostic["Control N"] = (
+                strata_diagnostic["Control N"].astype(int)
+            )
+            st.dataframe(
+                strata_diagnostic.sort_values(
+                    ["flow_candle_timestamp", "side", "Directional strength bucket"],
+                    kind="stable",
+                ),
+                use_container_width=True,
+                hide_index=True,
+                key=f"{key_prefix}_matched_control_strata_diagnostics",
+            )
         st.info(
             "No non-Candidate REACTION shares the selected Candidate strata yet."
         )
@@ -17142,6 +17415,13 @@ def _candidate_v1_render_market_regime_analysis(
         snap_horizon=snap_horizon,
         selected_paths=selected_paths,
         key_prefix=key_prefix,
+    )
+
+    st.markdown("---")
+    st.markdown("##### Candidate-only regime-conditioned TP/SL matrix")
+    st.caption(
+        "Everything below this divider is Candidate V1 only. It is NOT the "
+        "matched-control comparison above."
     )
 
     regime_filter = st.selectbox(
