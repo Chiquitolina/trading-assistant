@@ -19043,9 +19043,10 @@ def _candidate_v2_snapshot_variant_table(selected_pair):
     """Compare Base / Flow / Strength / Flow+Strength inside each causal 4h snapshot.
 
     The execution slice is already fixed to one TP/SL/horizon/cost configuration.
-    N counts unique REACTION candidates in the variant/snapshot cell; Net/Avg/PF/WR
-    and MFE/MAE are computed only from resolved execution rows, matching the rest
-    of Candidate V2 execution research.
+    N counts unique REACTION candidates in the variant/snapshot cell. Resolved,
+    Pending and Maturity % make censoring explicit. Net/Avg/PF/WR and MFE/MAE are
+    computed only from resolved execution rows, matching the rest of Candidate V2
+    execution research.
     """
     if selected_pair is None or selected_pair.empty:
         return pd.DataFrame()
@@ -19152,6 +19153,9 @@ def _candidate_v2_snapshot_variant_table(selected_pair):
                 if subset.empty:
                     stats = {
                         "N": 0,
+                        "Resolved": 0,
+                        "Pending": 0,
+                        "Maturity": np.nan,
                         "Net": np.nan,
                         "Avg": np.nan,
                         "PF": np.nan,
@@ -19166,10 +19170,20 @@ def _candidate_v2_snapshot_variant_table(selected_pair):
                         if "candidate_v1_event_key" in subset.columns
                         else "candidate_v2_event_key"
                     )
+                    candidate_n = int(
+                        subset[event_col].astype(str).nunique()
+                    ) if event_col in subset.columns else int(len(subset))
+                    resolved_n = int(ext.get("Resolved", 0) or 0)
+                    pending_n = int(ext.get("Pending", 0) or 0)
                     stats = {
-                        "N": int(
-                            subset[event_col].astype(str).nunique()
-                        ) if event_col in subset.columns else int(len(subset)),
+                        "N": candidate_n,
+                        "Resolved": resolved_n,
+                        "Pending": pending_n,
+                        "Maturity": (
+                            round(resolved_n / candidate_n * 100.0, 2)
+                            if candidate_n > 0
+                            else np.nan
+                        ),
                         "Net": ext.get("Net pts", np.nan),
                         "Avg": ext.get("Avg %", np.nan),
                         "PF": ext.get("PF", np.nan),
@@ -19185,6 +19199,9 @@ def _candidate_v2_snapshot_variant_table(selected_pair):
                     "Breadth %": breadth,
                     "BTC return %": btc_return,
                     "N": stats["N"],
+                    "Resolved": stats["Resolved"],
+                    "Pending": stats["Pending"],
+                    "Maturity %": stats["Maturity"],
                     "Net pts": stats["Net"],
                     "Avg %": stats["Avg"],
                     "PF": stats["PF"],
@@ -19669,8 +19686,9 @@ def render_candidate_v2_research(retests_df):
     st.caption(
         "Each causal 4h boundary is evaluated independently with the exact same "
         "TP/SL, horizon and execution costs selected above. N is the number of "
-        "REACTION candidates in that snapshot/variant; Net, Avg, PF, WR, MFE and "
-        "MAE use resolved execution rows only. Zero-N rows are kept deliberately "
+        "REACTION candidates in that snapshot/variant. Resolved/Pending make path "
+        "maturity explicit, and Maturity % = Resolved / N. Net, Avg, PF, WR, MFE "
+        "and MAE use resolved execution rows only. Zero-N rows are kept deliberately "
         "so missing TAILWIND/Strength combinations are visible rather than hidden."
     )
     snapshot_stability = _candidate_v2_snapshot_variant_table(selected_pair)
