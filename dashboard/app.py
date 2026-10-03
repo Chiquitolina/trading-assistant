@@ -7586,6 +7586,7 @@ if trigger_tf in (None, "", "N/A"):
 DASHBOARD_SECTIONS = {
     "overview": "📊 Overview",
     "volume_exhaustion": "⚡ Volume Exhaustion",
+    "micro_reaction": "🧬 Micro REACTION",
     "reaction_swing_lab": "🧪 Reaction & Swing Lab",
     "swing_sweep_reclaim": "🧹 Swing Sweep → Reclaim",
     "geometry_scanner": "📐 Geometry Scanner",
@@ -7629,6 +7630,7 @@ if (
     and selected_section not in {
         "geometry_scanner",
         "volume_exhaustion",
+        "micro_reaction",
         "swing_sweep_reclaim",
     }
 ):
@@ -9347,6 +9349,8 @@ def _attach_confirmed_swing_order_recovery_analysis(
     retest = dict(retest)
 
     retest["first_touch_entry_price"] = np.nan
+    retest["first_touch_entry_timestamp"] = np.nan
+    retest["first_touch_entry_time"] = pd.NaT
     retest["first_touch_60m_complete"] = False
     retest["first_touch_60m_results"] = {}
 
@@ -9412,6 +9416,13 @@ def _attach_confirmed_swing_order_recovery_analysis(
         return retest
 
     retest["first_touch_entry_price"] = entry_price
+    retest["first_touch_entry_timestamp"] = int(timestamps[start_idx])
+    retest["first_touch_entry_time"] = pd.to_datetime(
+        int(timestamps[start_idx]),
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).tz_convert(TZ)
 
     # 60m TP/SL first-touch matrix.
     horizon_end = start_idx + 60 - 1
@@ -26765,6 +26776,201 @@ def build_volume_exhaustion_chart(
     return fig
 
 
+def build_micro_reaction_chart(
+    candles,
+    symbol,
+    swing_points_by_timeframe=None,
+    swing_candles_by_timeframe=None,
+    confirmed_swing_retests=None,
+):
+    """1m execution view for causal 1m/5m swing REACTION research.
+
+    Reuses the proven pivot/confirmation/retest overlays from the old Volume
+    Exhaustion inspector, but removes the exhaustion event itself and adds the
+    two missing causal milestones: departure and hypothetical next-1m-open
+    entry. The X range remains owned by the visible 1m candles.
+    """
+    dummy_event = {
+        "symbol": str(symbol),
+        "candle_open_timestamp": None,
+        "close": None,
+        "potential_side": "NEUTRAL",
+    }
+
+    fig = build_volume_exhaustion_chart(
+        candles=candles,
+        event_row=dummy_event,
+        swing_points_by_timeframe=(
+            swing_points_by_timeframe or {}
+        ),
+        swing_candles_by_timeframe=(
+            swing_candles_by_timeframe or {}
+        ),
+        max_confirmation_move_pct=None,
+        confirmed_swing_retests=confirmed_swing_retests,
+    )
+
+    if (
+        confirmed_swing_retests is not None
+        and not confirmed_swing_retests.empty
+    ):
+        overlays = confirmed_swing_retests.copy()
+
+        # Departure is the first candle that satisfied the required move-away
+        # after the swing had already become actionable.
+        if {
+            "departure_timestamp",
+            "departure_price",
+            "signal",
+            "timeframe",
+            "detector",
+        }.issubset(overlays.columns):
+            departure_ts = pd.to_numeric(
+                overlays["departure_timestamp"],
+                errors="coerce",
+            )
+            departure_price = pd.to_numeric(
+                overlays["departure_price"],
+                errors="coerce",
+            )
+            valid_departure = (
+                departure_ts.notna()
+                & departure_price.notna()
+            )
+
+            if valid_departure.any():
+                departure_rows = overlays.loc[
+                    valid_departure
+                ].copy()
+                fig.add_trace(
+                    go.Scatter(
+                        x=pd.to_datetime(
+                            pd.to_numeric(
+                                departure_rows[
+                                    "departure_timestamp"
+                                ],
+                                errors="coerce",
+                            ),
+                            unit="ms",
+                            utc=True,
+                            errors="coerce",
+                        ).dt.tz_convert(TZ),
+                        y=pd.to_numeric(
+                            departure_rows["departure_price"],
+                            errors="coerce",
+                        ),
+                        mode="markers",
+                        marker={
+                            "size": 9,
+                            "symbol": "square-open",
+                        },
+                        name="Departure",
+                        customdata=departure_rows[
+                            [
+                                "signal",
+                                "timeframe",
+                                "detector",
+                                "swing_price",
+                                "max_departure_pct",
+                            ]
+                        ].to_numpy(),
+                        hovertemplate=(
+                            "<b>Departure</b><br>"
+                            "Time: %{x}<br>"
+                            "Price: %{y:.8f}<br>"
+                            "Side: %{customdata[0]}<br>"
+                            "Swing TF: %{customdata[1]}<br>"
+                            "Detector: %{customdata[2]}<br>"
+                            "Swing price: %{customdata[3]:.8f}<br>"
+                            "Max departure: %{customdata[4]:.4f}%"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+        # A REACTION is known only after its 1m candle closes. Entry is the
+        # next consecutive 1m open, exactly matching the existing execution
+        # research engine. Failed/indecisive first touches do not get entries.
+        if {
+            "status",
+            "first_touch_entry_timestamp",
+            "first_touch_entry_price",
+            "signal",
+            "timeframe",
+            "detector",
+            "retest_price",
+        }.issubset(overlays.columns):
+            entries = overlays.loc[
+                overlays["status"]
+                .fillna("")
+                .astype(str)
+                .eq("REACTION")
+            ].copy()
+            entry_ts = pd.to_numeric(
+                entries["first_touch_entry_timestamp"],
+                errors="coerce",
+            )
+            entry_price = pd.to_numeric(
+                entries["first_touch_entry_price"],
+                errors="coerce",
+            )
+            valid_entry = entry_ts.notna() & entry_price.notna()
+            entries = entries.loc[valid_entry].copy()
+
+            if not entries.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=pd.to_datetime(
+                            pd.to_numeric(
+                                entries[
+                                    "first_touch_entry_timestamp"
+                                ],
+                                errors="coerce",
+                            ),
+                            unit="ms",
+                            utc=True,
+                            errors="coerce",
+                        ).dt.tz_convert(TZ),
+                        y=pd.to_numeric(
+                            entries["first_touch_entry_price"],
+                            errors="coerce",
+                        ),
+                        mode="markers",
+                        marker={
+                            "size": 13,
+                            "symbol": "star",
+                        },
+                        name="REACTION entry · next 1m open",
+                        customdata=entries[
+                            [
+                                "signal",
+                                "timeframe",
+                                "detector",
+                                "retest_price",
+                                "swing_price",
+                            ]
+                        ].to_numpy(),
+                        hovertemplate=(
+                            "<b>Hypothetical entry</b><br>"
+                            "Time: %{x}<br>"
+                            "Entry: %{y:.8f}<br>"
+                            "Side: %{customdata[0]}<br>"
+                            "Swing TF: %{customdata[1]}<br>"
+                            "Detector: %{customdata[2]}<br>"
+                            "Retest price: %{customdata[3]:.8f}<br>"
+                            "Swing price: %{customdata[4]:.8f}"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+    fig.update_layout(
+        title=(
+            f"{str(symbol)} · Micro REACTION · "
+            "1m execution view"
+        ),
+    )
+    return fig
 
 
 # ============================================================
@@ -36150,6 +36356,694 @@ if selected_section == "volume_exhaustion":
         )
 
     render_volume_exhaustion_live()
+
+
+if selected_section == "micro_reaction":
+    st.markdown("## 🧬 Micro REACTION")
+    st.caption(
+        "Causal swing-retest research on smaller structural timeframes. "
+        "Choose 1m, 5m or both; each timeframe can use 2x2, 3x3 or 5x5. "
+        "The chart shows pivot → confirmation → departure → first retest, "
+        "and a hypothetical entry only after a REACTION is known, at the "
+        "next consecutive 1m open."
+    )
+
+    events = load_volume_exhaustion_events()
+
+    configured_symbols = {
+        str(symbol)
+        for symbol in CANDIDATE_V1_MARKET_SYMBOLS
+        if str(symbol).strip()
+    }
+    event_symbols = set()
+    if (
+        events is not None
+        and not events.empty
+        and "symbol" in events.columns
+    ):
+        event_symbols = set(
+            events["symbol"]
+            .dropna()
+            .astype(str)
+            .tolist()
+        )
+
+    micro_symbols = tuple(
+        sorted(configured_symbols | event_symbols)
+    )
+
+    if not micro_symbols:
+        st.info(
+            "No symbol universe is available for Micro REACTION research."
+        )
+    else:
+        top_1, top_2, top_3 = st.columns([1.1, 1.4, 1.6])
+
+        with top_1:
+            micro_scope = st.selectbox(
+                "Scanner scope",
+                ["Selected symbol", "All symbols"],
+                index=0,
+                key="micro_reaction_scope",
+            )
+
+        with top_2:
+            default_symbol_index = (
+                list(micro_symbols).index("BTCUSDT")
+                if "BTCUSDT" in micro_symbols
+                else 0
+            )
+            selected_micro_symbol = st.selectbox(
+                "Symbol",
+                options=list(micro_symbols),
+                index=default_symbol_index,
+                key="micro_reaction_symbol",
+            )
+
+        with top_3:
+            micro_timeframes = st.multiselect(
+                "Structural timeframes",
+                options=["1m", "5m"],
+                default=["1m", "5m"],
+                key="micro_reaction_timeframes",
+            )
+
+        detector_1, detector_2, detector_3 = st.columns(3)
+        detector_options = ["2x2", "3x3", "5x5"]
+
+        with detector_1:
+            micro_detector_1m = st.selectbox(
+                "1m pivot detector",
+                detector_options,
+                index=2,
+                key="micro_reaction_detector_1m",
+            )
+
+        with detector_2:
+            micro_detector_5m = st.selectbox(
+                "5m pivot detector",
+                detector_options,
+                index=2,
+                key="micro_reaction_detector_5m",
+            )
+
+        with detector_3:
+            micro_prominence = st.number_input(
+                "Min swing prominence %",
+                min_value=0.0,
+                value=0.0,
+                step=0.05,
+                format="%.2f",
+                key="micro_reaction_prominence",
+            )
+
+        parameter_1, parameter_2, parameter_3 = st.columns(3)
+        with parameter_1:
+            micro_tolerance = st.number_input(
+                "Retest tolerance %",
+                min_value=0.0,
+                value=0.10,
+                step=0.01,
+                format="%.3f",
+                key="micro_reaction_tolerance",
+                help=(
+                    "Accepted band around the confirmed swing level for the "
+                    "first causal return."
+                ),
+            )
+
+        with parameter_2:
+            micro_departure = st.number_input(
+                "Min move-away before retest %",
+                min_value=0.0,
+                value=0.20,
+                step=0.05,
+                format="%.3f",
+                key="micro_reaction_departure",
+            )
+
+        with parameter_3:
+            micro_max_age = st.number_input(
+                "Max confirmation → retest (min)",
+                min_value=1,
+                max_value=2880,
+                value=120,
+                step=15,
+                key="micro_reaction_max_age",
+            )
+
+        filter_1, filter_2, filter_3, filter_4 = st.columns(4)
+        with filter_1:
+            micro_recent_minutes = st.number_input(
+                "Max age since retest (min)",
+                min_value=1,
+                max_value=10080,
+                value=360,
+                step=30,
+                key="micro_reaction_recent_minutes",
+            )
+
+        with filter_2:
+            micro_status_filter = st.selectbox(
+                "First-touch status",
+                [
+                    "REACTION only",
+                    "All first touches",
+                    "Failed only",
+                    "Indecisive only",
+                ],
+                index=0,
+                key="micro_reaction_status_filter",
+            )
+
+        with filter_3:
+            micro_side_filter = st.selectbox(
+                "Side",
+                ["ALL", "LONG", "SHORT"],
+                index=0,
+                key="micro_reaction_side_filter",
+            )
+
+        with filter_4:
+            micro_chart_candles = st.slider(
+                "Visible 1m candles",
+                min_value=120,
+                max_value=2000,
+                value=600,
+                step=60,
+                key="micro_reaction_chart_candles",
+            )
+
+        if not micro_timeframes:
+            st.info("Select at least one structural timeframe.")
+        else:
+            detector_windows = {}
+            if "1m" in micro_timeframes:
+                detector_windows["1m"] = str(micro_detector_1m)
+            if "5m" in micro_timeframes:
+                detector_windows["5m"] = str(micro_detector_5m)
+
+            # -------------------------------------------------
+            # Selected-symbol visual reconstruction.
+            # -------------------------------------------------
+            st.markdown("### Visual causal reconstruction")
+            st.caption(
+                "Triangles = pivots · open circles = confirmation available · "
+                "open squares = minimum departure reached · diamonds = first "
+                "retest status · stars = hypothetical REACTION entry at the "
+                "next 1m open."
+            )
+
+            chart_candles = load_volume_exhaustion_research_candles(
+                symbol=str(selected_micro_symbol),
+                timeframe="1m",
+                limit=int(micro_chart_candles),
+            )
+
+            if chart_candles is None or chart_candles.empty:
+                st.warning(
+                    "No closed 1m candles are available for the selected symbol."
+                )
+            else:
+                swing_points_by_timeframe = {}
+                swing_candles_by_timeframe = {}
+
+                for micro_tf in micro_timeframes:
+                    detector_name = detector_windows.get(
+                        micro_tf,
+                        "5x5",
+                    )
+                    try:
+                        detector_bars = int(
+                            str(detector_name).split("x")[0]
+                        )
+                    except (TypeError, ValueError):
+                        detector_bars = 5
+
+                    detector = SwingDetector(
+                        left_bars=detector_bars,
+                        right_bars=detector_bars,
+                        min_prominence_pct=float(
+                            micro_prominence
+                        ),
+                    )
+
+                    if micro_tf == "1m":
+                        timeframe_candles = chart_candles.copy()
+                    else:
+                        tf_limit = min(
+                            400,
+                            max(
+                                120,
+                                int(
+                                    np.ceil(
+                                        float(micro_chart_candles)
+                                        / 5.0
+                                    )
+                                )
+                                + 40,
+                            ),
+                        )
+                        timeframe_candles = (
+                            load_volume_exhaustion_research_candles(
+                                symbol=str(selected_micro_symbol),
+                                timeframe=micro_tf,
+                                limit=tf_limit,
+                            )
+                        )
+
+                    if (
+                        timeframe_candles is None
+                        or timeframe_candles.empty
+                    ):
+                        continue
+
+                    swing_candles_by_timeframe[micro_tf] = (
+                        timeframe_candles
+                    )
+                    swing_points_by_timeframe[micro_tf] = (
+                        detector.detect_all(
+                            timeframe_candles.to_dict(
+                                orient="records"
+                            )
+                        )
+                    )
+
+                chart_retests = (
+                    scan_confirmed_swing_retests_all_symbols(
+                        symbols=(str(selected_micro_symbol),),
+                        swing_timeframes=tuple(
+                            micro_timeframes
+                        ),
+                        swing_detector_items=tuple(
+                            sorted(detector_windows.items())
+                        ),
+                        min_swing_prominence_pct=float(
+                            micro_prominence
+                        ),
+                        retest_tolerance_pct=float(
+                            micro_tolerance
+                        ),
+                        min_departure_pct=float(
+                            micro_departure
+                        ),
+                        max_age_minutes=int(
+                            micro_max_age
+                        ),
+                        max_retest_age_minutes=max(
+                            int(micro_recent_minutes),
+                            int(micro_chart_candles),
+                        ),
+                    )
+                )
+
+                chart_view = chart_retests.copy()
+                if not chart_view.empty:
+                    if micro_status_filter == "REACTION only":
+                        chart_view = chart_view.loc[
+                            chart_view["status"]
+                            .astype(str)
+                            .eq("REACTION")
+                        ].copy()
+                    elif micro_status_filter == "Failed only":
+                        chart_view = chart_view.loc[
+                            chart_view["status"]
+                            .astype(str)
+                            .eq("TOUCH_FAILED")
+                        ].copy()
+                    elif micro_status_filter == "Indecisive only":
+                        chart_view = chart_view.loc[
+                            chart_view["status"]
+                            .astype(str)
+                            .eq("TOUCH_INDECISIVE")
+                        ].copy()
+
+                    if micro_side_filter != "ALL":
+                        chart_view = chart_view.loc[
+                            chart_view["signal"]
+                            .astype(str)
+                            .eq(micro_side_filter)
+                        ].copy()
+
+                micro_fig = build_micro_reaction_chart(
+                    candles=chart_candles,
+                    symbol=str(selected_micro_symbol),
+                    swing_points_by_timeframe=(
+                        swing_points_by_timeframe
+                    ),
+                    swing_candles_by_timeframe=(
+                        swing_candles_by_timeframe
+                    ),
+                    confirmed_swing_retests=chart_view,
+                )
+                st.plotly_chart(
+                    micro_fig,
+                    use_container_width=True,
+                    key="micro_reaction_main_chart",
+                    config={
+                        "displaylogo": False,
+                        "scrollZoom": True,
+                    },
+                )
+
+                # Quick counts for the exact selected-symbol visual universe.
+                q1, q2, q3, q4, q5 = st.columns(5)
+                q1.metric(
+                    "First retests",
+                    int(len(chart_retests)),
+                )
+                q2.metric(
+                    "REACTION",
+                    int(
+                        chart_retests["status"]
+                        .astype(str)
+                        .eq("REACTION")
+                        .sum()
+                    )
+                    if not chart_retests.empty
+                    else 0,
+                )
+                q3.metric(
+                    "Failed",
+                    int(
+                        chart_retests["status"]
+                        .astype(str)
+                        .eq("TOUCH_FAILED")
+                        .sum()
+                    )
+                    if not chart_retests.empty
+                    else 0,
+                )
+                q4.metric(
+                    "1m",
+                    int(
+                        chart_retests["timeframe"]
+                        .astype(str)
+                        .eq("1m")
+                        .sum()
+                    )
+                    if not chart_retests.empty
+                    else 0,
+                )
+                q5.metric(
+                    "5m",
+                    int(
+                        chart_retests["timeframe"]
+                        .astype(str)
+                        .eq("5m")
+                        .sum()
+                    )
+                    if not chart_retests.empty
+                    else 0,
+                )
+
+            # -------------------------------------------------
+            # Scanner / event table.
+            # -------------------------------------------------
+            st.markdown("---")
+            st.markdown("### Micro REACTION scanner")
+
+            scanner_symbols = (
+                (str(selected_micro_symbol),)
+                if micro_scope == "Selected symbol"
+                else micro_symbols
+            )
+
+            if micro_scope == "All symbols":
+                st.caption(
+                    "All-symbol mode can be CPU-heavy. The existing scanner is "
+                    "cached for 120 seconds for identical parameters."
+                )
+
+            with st.spinner(
+                "Scanning "
+                f"{', '.join(micro_timeframes)} confirmed-swing retests "
+                f"across {len(scanner_symbols)} symbol(s)..."
+            ):
+                micro_retests_df = (
+                    scan_confirmed_swing_retests_all_symbols(
+                        symbols=scanner_symbols,
+                        swing_timeframes=tuple(
+                            micro_timeframes
+                        ),
+                        swing_detector_items=tuple(
+                            sorted(detector_windows.items())
+                        ),
+                        min_swing_prominence_pct=float(
+                            micro_prominence
+                        ),
+                        retest_tolerance_pct=float(
+                            micro_tolerance
+                        ),
+                        min_departure_pct=float(
+                            micro_departure
+                        ),
+                        max_age_minutes=int(
+                            micro_max_age
+                        ),
+                        max_retest_age_minutes=int(
+                            micro_recent_minutes
+                        ),
+                    )
+                )
+
+            scanner_view = micro_retests_df.copy()
+            if not scanner_view.empty:
+                if micro_status_filter == "REACTION only":
+                    scanner_view = scanner_view.loc[
+                        scanner_view["status"]
+                        .astype(str)
+                        .eq("REACTION")
+                    ].copy()
+                elif micro_status_filter == "Failed only":
+                    scanner_view = scanner_view.loc[
+                        scanner_view["status"]
+                        .astype(str)
+                        .eq("TOUCH_FAILED")
+                    ].copy()
+                elif micro_status_filter == "Indecisive only":
+                    scanner_view = scanner_view.loc[
+                        scanner_view["status"]
+                        .astype(str)
+                        .eq("TOUCH_INDECISIVE")
+                    ].copy()
+
+                if micro_side_filter != "ALL":
+                    scanner_view = scanner_view.loc[
+                        scanner_view["signal"]
+                        .astype(str)
+                        .eq(micro_side_filter)
+                    ].copy()
+
+            if scanner_view.empty:
+                st.info(
+                    "No Micro REACTION first touches match the current filters."
+                )
+            else:
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Rows", int(len(scanner_view)))
+                m2.metric(
+                    "REACTION",
+                    int(
+                        scanner_view["status"]
+                        .astype(str)
+                        .eq("REACTION")
+                        .sum()
+                    ),
+                )
+                m3.metric(
+                    "LONG",
+                    int(
+                        scanner_view["signal"]
+                        .astype(str)
+                        .eq("LONG")
+                        .sum()
+                    ),
+                )
+                m4.metric(
+                    "SHORT",
+                    int(
+                        scanner_view["signal"]
+                        .astype(str)
+                        .eq("SHORT")
+                        .sum()
+                    ),
+                )
+                m5.metric(
+                    "Symbols",
+                    int(
+                        scanner_view["symbol"]
+                        .astype(str)
+                        .nunique()
+                    ),
+                )
+
+                display_columns = [
+                    "symbol",
+                    "timeframe",
+                    "detector",
+                    "signal",
+                    "status",
+                    "swing_price",
+                    "pivot_time",
+                    "confirmation_available",
+                    "departure_time",
+                    "retest_time",
+                    "first_touch_entry_time",
+                    "first_touch_entry_price",
+                    "max_departure_pct",
+                    "confirmed_to_retest_min",
+                    "retest_distance_pct",
+                    "penetration_pct",
+                    "reaction_mfe_15m_pct",
+                    "reaction_mae_15m_pct",
+                    "reaction_mfe_30m_pct",
+                    "reaction_mae_30m_pct",
+                    "reaction_mfe_60m_pct",
+                    "reaction_mae_60m_pct",
+                ]
+                display_columns = [
+                    column
+                    for column in display_columns
+                    if column in scanner_view.columns
+                ]
+
+                display = scanner_view[
+                    display_columns
+                ].copy()
+
+                numeric_display_columns = [
+                    "swing_price",
+                    "first_touch_entry_price",
+                    "max_departure_pct",
+                    "confirmed_to_retest_min",
+                    "retest_distance_pct",
+                    "penetration_pct",
+                    "reaction_mfe_15m_pct",
+                    "reaction_mae_15m_pct",
+                    "reaction_mfe_30m_pct",
+                    "reaction_mae_30m_pct",
+                    "reaction_mfe_60m_pct",
+                    "reaction_mae_60m_pct",
+                ]
+                for column in numeric_display_columns:
+                    if column in display.columns:
+                        display[column] = pd.to_numeric(
+                            display[column],
+                            errors="coerce",
+                        ).round(5)
+
+                st.dataframe(
+                    display,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="micro_reaction_scanner_table",
+                )
+
+                # ---------------------------------------------
+                # One-event causal timeline inspector.
+                # ---------------------------------------------
+                st.markdown("### Inspect one Micro REACTION")
+                labels = []
+                label_to_index = {}
+                for row_index, row in scanner_view.iterrows():
+                    retest_time = row.get("retest_time")
+                    if pd.notna(retest_time):
+                        try:
+                            time_text = pd.Timestamp(
+                                retest_time
+                            ).strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            time_text = str(retest_time)
+                    else:
+                        time_text = str(
+                            row.get("retest_timestamp", row_index)
+                        )
+
+                    label = (
+                        f"{row.get('symbol', '—')} · "
+                        f"{row.get('timeframe', '—')} "
+                        f"{row.get('detector', '—')} · "
+                        f"{row.get('signal', '—')} · "
+                        f"{row.get('status', '—')} · "
+                        f"{time_text}"
+                    )
+                    labels.append(label)
+                    label_to_index[label] = row_index
+
+                selected_micro_label = st.selectbox(
+                    "Micro REACTION event",
+                    options=labels,
+                    key="micro_reaction_event_select",
+                )
+                selected_micro_row = scanner_view.loc[
+                    label_to_index[selected_micro_label]
+                ]
+
+                timeline_rows = [
+                    {
+                        "Stage": "Pivot",
+                        "Time": selected_micro_row.get(
+                            "pivot_time"
+                        ),
+                        "Price": selected_micro_row.get(
+                            "swing_price"
+                        ),
+                    },
+                    {
+                        "Stage": "Confirmation available",
+                        "Time": selected_micro_row.get(
+                            "confirmation_available"
+                        ),
+                        "Price": selected_micro_row.get(
+                            "entry_price"
+                        ),
+                    },
+                    {
+                        "Stage": "Departure",
+                        "Time": selected_micro_row.get(
+                            "departure_time"
+                        ),
+                        "Price": selected_micro_row.get(
+                            "departure_price"
+                        ),
+                    },
+                    {
+                        "Stage": "First retest",
+                        "Time": selected_micro_row.get(
+                            "retest_time"
+                        ),
+                        "Price": selected_micro_row.get(
+                            "retest_price"
+                        ),
+                    },
+                    {
+                        "Stage": "Hypothetical entry",
+                        "Time": selected_micro_row.get(
+                            "first_touch_entry_time"
+                        ),
+                        "Price": selected_micro_row.get(
+                            "first_touch_entry_price"
+                        ),
+                    },
+                ]
+                timeline_df = pd.DataFrame(timeline_rows)
+                timeline_df["Price"] = pd.to_numeric(
+                    timeline_df["Price"],
+                    errors="coerce",
+                ).round(8)
+                st.dataframe(
+                    timeline_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="micro_reaction_timeline_table",
+                )
+
+                st.caption(
+                    "The entry row is populated only when the next consecutive "
+                    "1m candle exists. It is not the retest close and does not "
+                    "use intrabar hindsight."
+                )
 
 
 if selected_section == "reaction_swing_lab":
