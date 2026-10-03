@@ -19229,6 +19229,205 @@ def _candidate_v2_snapshot_variant_table(selected_pair):
     return result.reset_index(drop=True)
 
 
+
+def _candidate_v2_mature_snapshot_summary(selected_pair, min_maturity=80.0):
+    """Summarize only causal 4h snapshots whose execution paths are mature.
+
+    A snapshot/variant is eligible when it has at least one candidate and
+    Resolved / N >= min_maturity. Snapshot win/loss counts are based on the
+    snapshot's resolved Net pts. Aggregate PF/Net/Avg/WR are recomputed from the
+    pooled resolved trades across the mature snapshots; PF is never averaged.
+    """
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+
+    required = {
+        "side",
+        "flow_candle_timestamp",
+        "Market alignment",
+        "side_adjusted_strength_vs_btc_4h",
+    }
+    if not required.issubset(selected_pair.columns):
+        return pd.DataFrame()
+
+    work = selected_pair.copy()
+    work["_flow_ts"] = pd.to_numeric(
+        work["flow_candle_timestamp"],
+        errors="coerce",
+    )
+    work["_strength"] = pd.to_numeric(
+        work["side_adjusted_strength_vs_btc_4h"],
+        errors="coerce",
+    )
+    work = work.loc[work["_flow_ts"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    variant_defs = (
+        ("REACTION Base", lambda frame: pd.Series(True, index=frame.index)),
+        (
+            "TAILWIND only",
+            lambda frame: frame["Market alignment"]
+            .fillna("UNKNOWN")
+            .astype(str)
+            .eq("TAILWIND"),
+        ),
+        (
+            "Strength > 0 only",
+            lambda frame: frame["_strength"].gt(0.0),
+        ),
+        (
+            "TAILWIND + Strength > 0",
+            lambda frame: (
+                frame["Market alignment"]
+                .fillna("UNKNOWN")
+                .astype(str)
+                .eq("TAILWIND")
+                & frame["_strength"].gt(0.0)
+            ),
+        ),
+    )
+
+    rows = []
+    for side_name in ("LONG", "SHORT"):
+        side_frame = work.loc[
+            work["side"].astype(str).str.upper().eq(side_name)
+        ].copy()
+        if side_frame.empty:
+            continue
+
+        for variant_name, mask_builder in variant_defs:
+            variant_frame = side_frame.loc[
+                mask_builder(side_frame).fillna(False)
+            ].copy()
+
+            mature_parts = []
+            snapshot_avgs = []
+            positive_snapshots = 0
+            negative_snapshots = 0
+            neutral_snapshots = 0
+
+            if not variant_frame.empty:
+                for flow_ts in sorted(
+                    variant_frame["_flow_ts"].dropna().unique()
+                ):
+                    snapshot = variant_frame.loc[
+                        variant_frame["_flow_ts"].eq(float(flow_ts))
+                    ].copy()
+                    if snapshot.empty:
+                        continue
+
+                    event_col = (
+                        "candidate_v1_event_key"
+                        if "candidate_v1_event_key" in snapshot.columns
+                        else "candidate_v2_event_key"
+                    )
+                    candidate_n = (
+                        int(snapshot[event_col].astype(str).nunique())
+                        if event_col in snapshot.columns
+                        else int(len(snapshot))
+                    )
+                    ext = _candidate_v1_group_stats_extended(snapshot)
+                    resolved_n = int(ext.get("Resolved", 0) or 0)
+                    maturity = (
+                        resolved_n / candidate_n * 100.0
+                        if candidate_n > 0
+                        else np.nan
+                    )
+                    if (
+                        candidate_n <= 0
+                        or pd.isna(maturity)
+                        or float(maturity) < float(min_maturity)
+                    ):
+                        continue
+
+                    mature_parts.append(snapshot)
+                    snapshot_avg = pd.to_numeric(
+                        pd.Series([ext.get("Avg %", np.nan)]),
+                        errors="coerce",
+                    ).iloc[0]
+                    snapshot_net = pd.to_numeric(
+                        pd.Series([ext.get("Net pts", np.nan)]),
+                        errors="coerce",
+                    ).iloc[0]
+                    if pd.notna(snapshot_avg):
+                        snapshot_avgs.append(float(snapshot_avg))
+                    if pd.notna(snapshot_net):
+                        if float(snapshot_net) > 0:
+                            positive_snapshots += 1
+                        elif float(snapshot_net) < 0:
+                            negative_snapshots += 1
+                        else:
+                            neutral_snapshots += 1
+
+            mature_count = len(mature_parts)
+            if mature_parts:
+                pooled = pd.concat(
+                    mature_parts,
+                    ignore_index=False,
+                    sort=False,
+                )
+                pooled_stats = _candidate_v1_group_stats_extended(pooled)
+                event_col = (
+                    "candidate_v1_event_key"
+                    if "candidate_v1_event_key" in pooled.columns
+                    else "candidate_v2_event_key"
+                )
+                candidate_n = (
+                    int(pooled[event_col].astype(str).nunique())
+                    if event_col in pooled.columns
+                    else int(len(pooled))
+                )
+                resolved_n = int(pooled_stats.get("Resolved", 0) or 0)
+            else:
+                pooled_stats = {}
+                candidate_n = 0
+                resolved_n = 0
+
+            rows.append({
+                "Side": side_name,
+                "Variant": variant_name,
+                "Mature snapshots": int(mature_count),
+                "Positive snapshots": int(positive_snapshots),
+                "Negative snapshots": int(negative_snapshots),
+                "Neutral snapshots": int(neutral_snapshots),
+                "Candidates": int(candidate_n),
+                "Resolved": int(resolved_n),
+                "Avg of snapshot Avg %": (
+                    round(float(np.mean(snapshot_avgs)), 4)
+                    if snapshot_avgs
+                    else np.nan
+                ),
+                "Median snapshot Avg %": (
+                    round(float(np.median(snapshot_avgs)), 4)
+                    if snapshot_avgs
+                    else np.nan
+                ),
+                "Aggregate Net pts": pooled_stats.get("Net pts", np.nan),
+                "Aggregate Avg %": pooled_stats.get("Avg %", np.nan),
+                "Aggregate PF": pooled_stats.get("PF", np.nan),
+                "Aggregate WR %": pooled_stats.get("WR %", np.nan),
+            })
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    variant_order = {
+        "REACTION Base": 0,
+        "TAILWIND only": 1,
+        "Strength > 0 only": 2,
+        "TAILWIND + Strength > 0": 3,
+    }
+    result["_variant_order"] = result["Variant"].map(variant_order)
+    result = result.sort_values(
+        ["Side", "_variant_order"],
+        ascending=[True, True],
+        kind="stable",
+    ).drop(columns=["_variant_order"])
+    return result.reset_index(drop=True)
+
+
 def _candidate_v2_render_matrix(summary, key_prefix, metric):
     if summary is None or summary.empty:
         st.info("No execution matrix is available for this V2 variant.")
@@ -19719,6 +19918,51 @@ def render_candidate_v2_research(retests_df):
             mime="text/csv",
             key="candidate_v2_snapshot_stability_download",
         )
+
+        st.markdown("##### Mature snapshot summary · Maturity >= 80%")
+        st.caption(
+            "Only snapshot/variant cells with Resolved / N >= 80% and N > 0 are "
+            "included. Positive/negative counts use each snapshot's Net pts. "
+            "Avg of snapshot Avg % and Median snapshot Avg % weight every mature "
+            "4h boundary equally; Aggregate PF/Net/Avg/WR are recomputed from all "
+            "resolved trades pooled across those mature boundaries (PF is not "
+            "averaged). Zero-N market states do not count as mature snapshots."
+        )
+        mature_summary = _candidate_v2_mature_snapshot_summary(
+            selected_pair,
+            min_maturity=80.0,
+        )
+        if mature_summary.empty:
+            st.info("No >=80% mature causal 4h snapshots are available yet.")
+        else:
+            for mature_side in ("LONG", "SHORT"):
+                side_summary = mature_summary.loc[
+                    mature_summary["Side"].astype(str).eq(mature_side)
+                ].drop(columns=["Side"]).copy()
+                if side_summary.empty:
+                    continue
+                st.markdown(f"###### {mature_side} · mature snapshots")
+                st.dataframe(
+                    side_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_mature_snapshot_summary_"
+                        f"{mature_side.lower()}"
+                    ),
+                )
+
+            st.download_button(
+                "Download V2 mature snapshot summary CSV",
+                data=mature_summary.to_csv(index=False).encode("utf-8"),
+                file_name=(
+                    f"candidate_v2_mature_snapshot_summary_"
+                    f"tp{float(selected_tp):g}_sl{float(selected_sl):g}_"
+                    f"{snap_horizon}m.csv"
+                ),
+                mime="text/csv",
+                key="candidate_v2_mature_snapshot_summary_download",
+            )
 
     st.markdown("#### 7. Full V2 causal journal")
     show_journal = st.toggle(
