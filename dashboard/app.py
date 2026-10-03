@@ -7558,6 +7558,7 @@ if trigger_tf in (None, "", "N/A"):
 DASHBOARD_SECTIONS = {
     "overview": "📊 Overview",
     "volume_exhaustion": "⚡ Volume Exhaustion",
+    "reaction_swing_lab": "🧪 Reaction & Swing Lab",
     "swing_sweep_reclaim": "🧹 Swing Sweep → Reclaim",
     "geometry_scanner": "📐 Geometry Scanner",
     "btc_correlation": "₿ BTC Correlation",
@@ -31747,11 +31748,13 @@ if selected_section == "swing_sweep_reclaim":
             )
 
 
+
 if selected_section == "volume_exhaustion":
     st.markdown("## ⚡ Volume Exhaustion")
     st.caption(
-        "Research-only inspector. LONG/SHORT are potential "
-        "exhaustion directions, not trading signals."
+        "Inspector focused only on Volume Exhaustion events. "
+        "Confirmed swings, pivots, REACTION research and Candidate V1 "
+        "were moved to the separate Reaction & Swing Lab."
     )
 
     @st.fragment(run_every=VOLUME_EXHAUSTION_UI_REFRESH_INTERVAL)
@@ -31782,11 +31785,6 @@ if selected_section == "volume_exhaustion":
             )
             return
 
-        # Filled later, after the fixed Candidate V1 scan has enough inputs.
-        # The container itself is created here so the monitor stays at the
-        # very top of the Volume Exhaustion tab.
-        candidate_v1_top_slot = st.container()
-
         long_events = valid_events[
             valid_events["potential_side"].eq("LONG")
         ]
@@ -31798,10 +31796,7 @@ if selected_section == "volume_exhaustion":
             st.columns(4)
         )
 
-        summary_1.metric(
-            "Events",
-            len(valid_events),
-        )
+        summary_1.metric("Events", len(valid_events))
         summary_2.metric(
             "Potential LONG",
             len(long_events),
@@ -31875,11 +31870,9 @@ if selected_section == "volume_exhaustion":
             local_time = row.get("event_time_local")
 
             if pd.notna(local_time):
-                time_label = local_time.strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+                time_text = str(local_time)
             else:
-                time_label = str(
+                time_text = str(
                     row.get(
                         "candle_open_timestamp",
                         index,
@@ -31887,10 +31880,10 @@ if selected_section == "volume_exhaustion":
                 )
 
             label = (
-                f"{time_label} · "
+                f"{time_text} · "
                 f"{row.get('potential_side', '—')} · "
-                f"RSI {row.get('rsi_1m', float('nan')):.1f} · "
-                f"Vol {row.get('relative_volume', float('nan')):.2f}x"
+                f"vol {float(row.get('relative_volume', 0.0)):.2f}x · "
+                f"RSI {float(row.get('rsi_1m', 0.0)):.1f}"
             )
 
             event_options.append(label)
@@ -31961,21 +31954,14 @@ if selected_section == "volume_exhaustion":
             st.columns(4)
         )
 
-        for column in [
-            "move_3m_pct",
-            "move_5m_pct",
-            "volume_3m_ratio",
-            "close_location",
-        ]:
-            if column not in selected_event.index:
-                selected_event[column] = np.nan
-
         metric_5.metric(
             "Move 3m",
             (
-                f"{float(selected_event['move_3m_pct']):.3f}%"
+                f"{float(selected_event.get('move_3m_pct')):.3f}%"
                 if pd.notna(
-                    selected_event["move_3m_pct"]
+                    selected_event.get(
+                        "move_3m_pct"
+                    )
                 )
                 else "—"
             ),
@@ -31983,9 +31969,11 @@ if selected_section == "volume_exhaustion":
         metric_6.metric(
             "Move 5m",
             (
-                f"{float(selected_event['move_5m_pct']):.3f}%"
+                f"{float(selected_event.get('move_5m_pct')):.3f}%"
                 if pd.notna(
-                    selected_event["move_5m_pct"]
+                    selected_event.get(
+                        "move_5m_pct"
+                    )
                 )
                 else "—"
             ),
@@ -31993,9 +31981,11 @@ if selected_section == "volume_exhaustion":
         metric_7.metric(
             "Volume 3m",
             (
-                f"{float(selected_event['volume_3m_ratio']):.2f}x"
+                f"{float(selected_event.get('volume_3m_ratio')):.2f}x"
                 if pd.notna(
-                    selected_event["volume_3m_ratio"]
+                    selected_event.get(
+                        "volume_3m_ratio"
+                    )
                 )
                 else "—"
             ),
@@ -32003,362 +31993,24 @@ if selected_section == "volume_exhaustion":
         metric_8.metric(
             "Close location",
             (
-                f"{float(selected_event['close_location']):.2f}"
+                f"{float(selected_event.get('close_location')):.2f}"
                 if pd.notna(
-                    selected_event["close_location"]
+                    selected_event.get(
+                        "close_location"
+                    )
                 )
                 else "—"
             ),
         )
 
-        swing_control_1, swing_control_2 = (
-            st.columns([1.2, 2.2])
-        )
-
-        with swing_control_1:
-            show_swings = st.checkbox(
-                "Show swings",
-                value=True,
-                key="volume_exhaustion_show_swings",
-            )
-
-        with swing_control_2:
-            min_swing_prominence_pct = st.number_input(
-                "Min swing prominence %",
-                min_value=0.0,
-                value=0.0,
-                step=0.05,
-                format="%.2f",
-                key="volume_exhaustion_swing_prominence",
-            )
-
-        swing_timeframes = st.multiselect(
-            "Swing timeframes",
-            options=["1m", "5m", "15m", "30m", "1h"],
-            default=["1m", "5m", "15m"],
-            key="volume_exhaustion_swing_timeframes",
-        )
-
-        default_swing_detectors = {
-            "1m": "5x5",
-            "5m": "5x5",
-            "15m": "3x3",
-            "30m": "3x3",
-            "1h": "2x2",
-        }
-
-        swing_detector_windows = {}
-
-        if show_swings and swing_timeframes:
-            st.caption("Swing detector by timeframe")
-
-            detector_columns = st.columns(
-                len(swing_timeframes)
-            )
-
-            for detector_column, swing_timeframe in zip(
-                detector_columns,
-                swing_timeframes,
-            ):
-                detector_options = [
-                    "2x2",
-                    "3x3",
-                    "5x5",
-                ]
-                default_detector = (
-                    default_swing_detectors.get(
-                        swing_timeframe,
-                        "5x5",
-                    )
-                )
-
-                with detector_column:
-                    swing_detector_windows[
-                        swing_timeframe
-                    ] = st.selectbox(
-                        f"{swing_timeframe} detector",
-                        detector_options,
-                        index=detector_options.index(
-                            default_detector
-                        ),
-                        key=(
-                            "volume_exhaustion_"
-                            f"swing_window_{swing_timeframe}"
-                        ),
-                    )
-
-        confirmation_filter_1, confirmation_filter_2 = (
-            st.columns([1.5, 2.0])
-        )
-
-        with confirmation_filter_1:
-            filter_by_confirmation_move = st.checkbox(
-                "Filter by pivot → confirmation move",
-                value=False,
-                key=(
-                    "volume_exhaustion_"
-                    "filter_confirmation_move"
-                ),
-            )
-
-        with confirmation_filter_2:
-            max_confirmation_move_pct = st.number_input(
-                "Max pivot → confirmation move %",
-                min_value=0.0,
-                value=0.30,
-                step=0.05,
-                format="%.2f",
-                disabled=not filter_by_confirmation_move,
-                key=(
-                    "volume_exhaustion_"
-                    "max_confirmation_move_pct"
-                ),
-            )
-
-        st.markdown("#### Confirmed swing retest research")
-        retest_control_1, retest_control_2, retest_control_3 = st.columns(3)
-        with retest_control_1:
-            show_confirmed_retests = st.checkbox(
-                "Show confirmed swing retests",
-                value=True,
-                key="confirmed_swing_retest_show",
-            )
-        with retest_control_2:
-            retest_tolerance_pct = st.number_input(
-                "Retest tolerance %",
-                min_value=0.0,
-                value=CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
-                step=0.01,
-                format="%.3f",
-                key="confirmed_swing_retest_tolerance",
-            )
-        with retest_control_3:
-            min_retest_departure_pct = st.number_input(
-                "Min move-away before retest %",
-                min_value=0.0,
-                value=CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
-                step=0.05,
-                format="%.3f",
-                key="confirmed_swing_retest_departure",
-            )
-
-        retest_control_4, retest_control_5, retest_control_6 = st.columns(3)
-        with retest_control_4:
-            retest_max_age_minutes = st.number_input(
-                "Max minutes confirmation → retest",
-                min_value=15,
-                max_value=2880,
-                value=CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
-                step=30,
-                key="confirmed_swing_retest_max_age",
-            )
-        with retest_control_5:
-            retest_reaction_filter = st.selectbox(
-                "Retest type",
-                [
-                    "All retests",
-                    "Reaction only",
-                    "Non-reaction touches",
-                    "Failed only",
-                    "Indecisive only",
-                ],
-                key="confirmed_swing_retest_type_filter",
-            )
-        with retest_control_6:
-            retest_side_filter = st.selectbox(
-                "Retest side",
-                ["ALL", "LONG", "SHORT"],
-                key="confirmed_swing_retest_side_filter",
-            )
-
-        retest_scanner_scope = st.selectbox(
-            "Retest scanner scope",
-            ["All symbols", "Selected symbol"],
-            key="confirmed_swing_retest_scope",
-            help=(
-                "All symbols scans the symbol universe already present in "
-                "the Volume Exhaustion journal; Selected symbol only scans "
-                "the symbol currently open in the inspector."
-            ),
-        )
-
-        # Confirmed-swing retest research is intentionally fixed to 15m.
-        # This is the structural timeframe we want to study and it avoids
-        # spending CPU scanning unrelated 1m/5m/30m/1h swing sets.
-        retest_timeframe_filter = "15m"
-        st.caption(
-            "Retest scanner timeframe: 15m only. "
-            "The detector still follows the 15m detector setting above."
-        )
-        retest_recent_minutes = st.number_input(
-            "Max age since retest (minutes)",
-            min_value=1,
-            max_value=10080,
-            value=1440,
-            step=60,
-            key="confirmed_swing_retest_recent_minutes",
-        )
-
         candle_limit = st.slider(
             "Chart 1m candles",
             min_value=60,
-            max_value=5000,
+            max_value=2000,
             value=180,
             step=20,
             key="volume_exhaustion_candle_limit",
         )
-
-        # -----------------------------------------------------
-        # CANDIDATE V1 · FROZEN MONITOR
-        # Freeze the base 15m retest identity on first run, then ignore later
-        # UI edits for this monitor. The candidate filters themselves are
-        # permanently SHORT + RSI>=1 TF + opposing room>=1%.
-        # -----------------------------------------------------
-        candidate_v1_detector = swing_detector_windows.get(
-            "15m",
-            default_swing_detectors.get("15m", "3x3"),
-        )
-        candidate_v1_config = _candidate_v1_load_or_freeze_config(
-            detector=candidate_v1_detector,
-            min_swing_prominence_pct=float(min_swing_prominence_pct),
-            retest_tolerance_pct=float(retest_tolerance_pct),
-            min_departure_pct=float(min_retest_departure_pct),
-            max_retest_age_minutes=int(retest_max_age_minutes),
-        )
-
-        # LONG V1 is the exact mirror of the frozen SHORT rule. Structural
-        # parameters come from the already-frozen SHORT config so the only
-        # intentional difference is direction.
-        candidate_v1_long_config = _candidate_v1_long_load_or_freeze_config(
-            detector=str(
-                candidate_v1_config.get(
-                    "swing_detector",
-                    candidate_v1_detector,
-                )
-            ),
-            min_swing_prominence_pct=float(
-                candidate_v1_config.get(
-                    "min_swing_prominence_pct",
-                    min_swing_prominence_pct,
-                )
-            ),
-            retest_tolerance_pct=float(
-                candidate_v1_config.get(
-                    "retest_tolerance_pct",
-                    retest_tolerance_pct,
-                )
-            ),
-            min_departure_pct=float(
-                candidate_v1_config.get(
-                    "min_departure_pct",
-                    min_retest_departure_pct,
-                )
-            ),
-            max_retest_age_minutes=int(
-                candidate_v1_config.get(
-                    "max_confirmation_to_retest_min",
-                    retest_max_age_minutes,
-                )
-            ),
-        )
-
-        candidate_v1_symbols = tuple(
-            sorted(
-                events["symbol"]
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            )
-        )
-
-        with candidate_v1_top_slot:
-            with st.spinner(
-                "Updating frozen Candidate V1 SHORT + LONG monitors..."
-            ):
-                # One structural scan feeds both directional monitors. Their
-                # persistence, cohorts, snapshots and journals remain separate.
-                candidate_v1_retests_df = (
-                    scan_confirmed_swing_retests_all_symbols(
-                        symbols=candidate_v1_symbols,
-                        swing_timeframes=(
-                            str(
-                                candidate_v1_config.get(
-                                    "swing_timeframe",
-                                    "15m",
-                                )
-                            ),
-                        ),
-                        swing_detector_items=(
-                            (
-                                str(
-                                    candidate_v1_config.get(
-                                        "swing_timeframe",
-                                        "15m",
-                                    )
-                                ),
-                                str(
-                                    candidate_v1_config.get(
-                                        "swing_detector",
-                                        candidate_v1_detector,
-                                    )
-                                ),
-                            ),
-                        ),
-                        min_swing_prominence_pct=float(
-                            candidate_v1_config.get(
-                                "min_swing_prominence_pct",
-                                min_swing_prominence_pct,
-                            )
-                        ),
-                        retest_tolerance_pct=float(
-                            candidate_v1_config.get(
-                                "retest_tolerance_pct",
-                                retest_tolerance_pct,
-                            )
-                        ),
-                        min_departure_pct=float(
-                            candidate_v1_config.get(
-                                "min_departure_pct",
-                                min_retest_departure_pct,
-                            )
-                        ),
-                        max_age_minutes=int(
-                            candidate_v1_config.get(
-                                "max_confirmation_to_retest_min",
-                                retest_max_age_minutes,
-                            )
-                        ),
-                        # Keep enough recent derived events to update pending
-                        # outcomes; persisted monitor history keeps older rows.
-                        max_retest_age_minutes=4320,
-                    )
-                )
-
-            short_monitor_tab, long_monitor_tab, total_monitor_tab = st.tabs(
-                [
-                    "🔴 Candidate V1 SHORT",
-                    "🟢 Candidate V1 LONG",
-                    "🟣 Candidate V1 TOTAL",
-                ]
-            )
-
-            with short_monitor_tab:
-                render_candidate_v1_frozen_monitor(
-                    retests_df=candidate_v1_retests_df,
-                    config=candidate_v1_config,
-                )
-
-            with long_monitor_tab:
-                render_candidate_v1_long_frozen_monitor(
-                    retests_df=candidate_v1_retests_df,
-                    config=candidate_v1_long_config,
-                )
-
-            with total_monitor_tab:
-                render_candidate_v1_total_monitor()
-
-            st.markdown("---")
 
         candles = (
             geometry_scanner_data_service
@@ -32369,161 +32021,23 @@ if selected_section == "volume_exhaustion":
             )
         )
 
-        if candles.empty:
+        if candles is None or candles.empty:
             st.error(
-                "Could not load live 1m candles for "
-                f"{selected_symbol}."
+                f"Could not load live 1m candles "
+                f"for {selected_symbol}."
             )
-            st.code(
-                str(
-                    geometry_scanner_data_service
-                    .last_error
-                )
-            )
-            return
-
-        event_ts = selected_event.get(
-            "candle_open_timestamp"
-        )
-
-        if pd.notna(event_ts):
-            event_ts = int(event_ts)
-            oldest_ts = int(
-                pd.to_numeric(
-                    candles["timestamp"],
-                    errors="coerce",
-                ).dropna().min()
-            )
-
-            if event_ts < oldest_ts:
-                st.warning(
-                    "The selected event is older than the "
-                    "current Redis candle window. The event "
-                    "remains stored, but its original candles "
-                    "are no longer in this live buffer."
-                )
-
-        swing_points_by_timeframe = {}
-        swing_candles_by_timeframe = {}
-        swing_structure_at_event = {}
-
-        if show_swings:
-            for swing_timeframe in swing_timeframes:
-                swing_window = (
-                    swing_detector_windows.get(
-                        swing_timeframe,
-                        default_swing_detectors.get(
-                            swing_timeframe,
-                            "5x5",
-                        ),
-                    )
-                )
-
-                swing_bars = int(
-                    swing_window.split("x")[0]
-                )
-
-                swing_detector = SwingDetector(
-                    left_bars=swing_bars,
-                    right_bars=swing_bars,
-                    min_prominence_pct=(
-                        float(min_swing_prominence_pct)
-                    ),
-                )
-
-                if swing_timeframe == "1m":
-                    swing_tf_candles_df = candles
-                else:
-                    swing_tf_candles_df = (
+            if geometry_scanner_data_service.last_error:
+                st.code(
+                    str(
                         geometry_scanner_data_service
-                        .get_closed_candles(
-                            symbol=selected_symbol,
-                            timeframe=swing_timeframe,
-                            limit=400,
-                        )
-                    )
-
-                if swing_tf_candles_df.empty:
-                    continue
-
-                swing_candles_by_timeframe[
-                    swing_timeframe
-                ] = swing_tf_candles_df.copy()
-
-                swing_tf_candles = (
-                    swing_tf_candles_df.to_dict(
-                        orient="records"
+                        .last_error
                     )
                 )
-
-                swing_points_by_timeframe[
-                    swing_timeframe
-                ] = swing_detector.detect_all(
-                    swing_tf_candles
-                )
-
-                if pd.notna(event_ts):
-                    swing_structure_at_event[
-                        swing_timeframe
-                    ] = {
-                        "high": (
-                            swing_detector
-                            .last_confirmed_high(
-                                swing_tf_candles,
-                                as_of_timestamp=int(event_ts),
-                            )
-                        ),
-                        "low": (
-                            swing_detector
-                            .last_confirmed_low(
-                                swing_tf_candles,
-                                as_of_timestamp=int(event_ts),
-                            )
-                        ),
-                    }
-
-        chart_confirmation_study_df = (
-            build_volume_exhaustion_confirmation_edge_study(
-                candles=candles,
-                swing_points_by_timeframe=swing_points_by_timeframe,
-                swing_candles_by_timeframe=swing_candles_by_timeframe,
-                swing_detector_windows=swing_detector_windows,
-                max_confirmation_move_pct=None,
-            )
-        )
-        if not chart_confirmation_study_df.empty:
-            chart_confirmation_study_df.insert(
-                0,
-                "symbol",
-                str(selected_symbol),
-            )
-
-        chart_retests_df = pd.DataFrame()
-        if show_confirmed_retests and not chart_confirmation_study_df.empty:
-            chart_retests_df = (
-                build_confirmed_swing_retests_from_confirmation_study(
-                    study_df=chart_confirmation_study_df,
-                    retest_tolerance_pct=float(retest_tolerance_pct),
-                    min_departure_pct=float(min_retest_departure_pct),
-                    max_age_minutes=int(retest_max_age_minutes),
-                    candle_limit=int(candle_limit),
-                    candle_overrides={str(selected_symbol): candles},
-                )
-            )
+            return
 
         figure = build_volume_exhaustion_chart(
             candles=candles,
             event_row=selected_event,
-            swing_points_by_timeframe=swing_points_by_timeframe,
-            swing_candles_by_timeframe=(
-                swing_candles_by_timeframe
-            ),
-            max_confirmation_move_pct=(
-                float(max_confirmation_move_pct)
-                if filter_by_confirmation_move
-                else None
-            ),
-            confirmed_swing_retests=chart_retests_df,
         )
 
         st.plotly_chart(
@@ -32536,174 +32050,6 @@ if selected_section == "volume_exhaustion":
             },
         )
 
-
-        # Reuse the unfiltered selected-symbol confirmation study built above.
-        # The chart distance filter is now an in-memory slice instead of a
-        # second replay pass.
-        confirmation_edge_study_df = (
-            filter_volume_exhaustion_confirmation_study_by_move(
-                chart_confirmation_study_df,
-                (
-                    float(max_confirmation_move_pct)
-                    if filter_by_confirmation_move
-                    else None
-                ),
-            )
-        )
-
-        render_volume_exhaustion_confirmation_edge_study(
-            study_df=confirmation_edge_study_df,
-            candle_limit=candle_limit,
-            max_confirmation_move_pct=max_confirmation_move_pct,
-        )
-
-        st.markdown("---")
-
-        bucket_max_confirmation_move_pct = (
-            float(max_confirmation_move_pct)
-            if filter_by_confirmation_move
-            else None
-        )
-
-        bucket_scope = st.selectbox(
-            "Bucket study scope",
-            ["Selected symbol", "All symbols"],
-            key="volume_exhaustion_bucket_scope",
-            help=(
-                "Research uses all 1m candles currently available in Redis. "
-                "It is independent from the chart candle slider above."
-            ),
-        )
-
-        all_retest_available_symbols = tuple(
-            sorted(
-                events["symbol"]
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            )
-        )
-
-        research_symbols = (
-            (str(selected_symbol),)
-            if bucket_scope == "Selected symbol"
-            else tuple(
-                sorted(
-                    valid_events["symbol"]
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                    .tolist()
-                )
-            )
-        )
-
-        retest_symbols = (
-            all_retest_available_symbols
-            if retest_scanner_scope == "All symbols"
-            else (str(selected_symbol),)
-        )
-
-        st.caption(
-            "Research window: automatic · First-Touch/MFE/MAE uses every "
-            "1m candle currently available (up to "
-            f"{VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT:,} requested per symbol). "
-            "The confirmed-swing retest scanner is separate and lightweight: "
-            "it scans only the selected retest timeframe and does not build "
-            "the TP × SL matrix for every symbol."
-        )
-
-        # Heavy First-Touch/MFE/MAE research is built only for the bucket scope.
-        # A Selected-symbol bucket must not trigger an all-symbol replay merely
-        # because the retest scanner is set to All symbols.
-        with st.spinner(
-            "Building First-Touch research universe..."
-        ):
-            control_study_df = (
-                build_volume_exhaustion_confirmation_study_all_symbols(
-                    symbols=research_symbols,
-                    candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
-                    swing_timeframes=tuple(swing_timeframes),
-                    swing_detector_items=tuple(
-                        sorted(swing_detector_windows.items())
-                    ),
-                    min_swing_prominence_pct=float(
-                        min_swing_prominence_pct
-                    ),
-                    max_confirmation_move_pct=None,
-                )
-            )
-
-        # Lightweight all-symbol retest scan: 15m only, no MFE/MAE
-        # calculation and no 81-cell First-Touch replay.
-        selected_retest_timeframes = ("15m",)
-        retest_detector_windows = dict(swing_detector_windows)
-        retest_detector_windows.setdefault(
-            "15m",
-            default_swing_detectors.get("15m", "3x3"),
-        )
-        with st.spinner(
-            f"Scanning 15m confirmed swing retests "
-            f"across {len(retest_symbols)} symbol(s)..."
-        ):
-            confirmed_swing_retests_df = (
-                scan_confirmed_swing_retests_all_symbols(
-                    symbols=retest_symbols,
-                    swing_timeframes=selected_retest_timeframes,
-                    swing_detector_items=tuple(
-                        sorted(retest_detector_windows.items())
-                    ),
-                    min_swing_prominence_pct=float(
-                        min_swing_prominence_pct
-                    ),
-                    retest_tolerance_pct=float(retest_tolerance_pct),
-                    min_departure_pct=float(min_retest_departure_pct),
-                    max_age_minutes=int(retest_max_age_minutes),
-                    max_retest_age_minutes=int(retest_recent_minutes),
-                )
-            )
-
-        render_confirmed_swing_retest_scanner(
-            retests_df=confirmed_swing_retests_df,
-            reaction_filter=retest_reaction_filter,
-            side_filter=retest_side_filter,
-            timeframe_filter=str(retest_timeframe_filter),
-            max_retest_age_minutes=int(retest_recent_minutes),
-        )
-
-        st.markdown("---")
-
-        bucket_study_df = (
-            filter_volume_exhaustion_confirmation_study_by_move(
-                control_study_df,
-                bucket_max_confirmation_move_pct,
-            )
-        )
-
-        bucket_scope_label = (
-            str(selected_symbol)
-            if bucket_scope == "Selected symbol"
-            else f"All symbols ({len(research_symbols)} available)"
-        )
-
-        render_volume_exhaustion_confirmation_bucket_study(
-            study_df=bucket_study_df,
-            candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
-            scope_label=bucket_scope_label,
-            max_confirmation_move_pct=(
-                bucket_max_confirmation_move_pct
-            ),
-        )
-
-        render_volume_exhaustion_first_touch_replay(
-            filtered_study_df=bucket_study_df,
-            control_study_df=control_study_df,
-            max_confirmation_move_pct=(
-                bucket_max_confirmation_move_pct
-            ),
-        )
-
         latest_candle_ts = pd.to_datetime(
             pd.to_numeric(
                 candles["timestamp"],
@@ -32714,232 +32060,11 @@ if selected_section == "volume_exhaustion":
         ).tz_convert(TZ)
 
         st.caption(
-            "Auto-refresh: 5s · chart uses closed 1m "
-            "candles from Redis · latest candle: "
+            "This tab intentionally shows no swing/reaction overlays. "
+            "Those moved to Reaction & Swing Lab. "
+            "Latest closed 1m candle: "
             f"{latest_candle_ts.strftime('%Y-%m-%d %H:%M:%S')}"
         )
-
-        if show_swings:
-            st.markdown("### Structure at event")
-
-            event_price = selected_event.get("close")
-            structure_rows = []
-
-            timeframe_ms = {
-                "1m": 60_000,
-                "5m": 5 * 60_000,
-                "15m": 15 * 60_000,
-                "30m": 30 * 60_000,
-                "1h": 60 * 60_000,
-            }
-
-            if (
-                pd.notna(event_ts)
-                and pd.notna(event_price)
-            ):
-                event_price_float = float(event_price)
-
-                for swing_timeframe in swing_timeframes:
-                    structure = (
-                        swing_structure_at_event.get(
-                            swing_timeframe,
-                            {},
-                        )
-                    )
-
-                    for side_label, side_key in (
-                        ("LOW", "low"),
-                        ("HIGH", "high"),
-                    ):
-                        swing_point = structure.get(side_key)
-
-                        if swing_point is None:
-                            continue
-
-                        swing_price = float(swing_point.price)
-                        distance_pct = (
-                            (
-                                event_price_float
-                                - swing_price
-                            )
-                            / swing_price
-                            * 100.0
-                        )
-
-                        bar_ms = timeframe_ms.get(
-                            swing_timeframe
-                        )
-                        age_bars = None
-
-                        if bar_ms:
-                            age_bars = max(
-                                0,
-                                int(
-                                    (
-                                        int(event_ts)
-                                        - int(
-                                            swing_point
-                                            .pivot_timestamp
-                                        )
-                                    )
-                                    // bar_ms
-                                ),
-                            )
-
-                        structure_rows.append({
-                            "timeframe": swing_timeframe,
-                            "side": side_label,
-                            "swing_price": swing_price,
-                            "distance_pct": distance_pct,
-                            "abs_distance_pct": abs(distance_pct),
-                            "age_bars": age_bars,
-                            "pivot_time": (
-                                pd.to_datetime(
-                                    int(
-                                        swing_point
-                                        .pivot_timestamp
-                                    ),
-                                    unit="ms",
-                                    utc=True,
-                                )
-                                .tz_convert(TZ)
-                                .strftime("%Y-%m-%d %H:%M")
-                            ),
-                            "confirmed_time": (
-                                pd.to_datetime(
-                                    int(
-                                        swing_point
-                                        .confirmed_timestamp
-                                    ),
-                                    unit="ms",
-                                    utc=True,
-                                )
-                                .tz_convert(TZ)
-                                .strftime("%Y-%m-%d %H:%M")
-                            ),
-                        })
-
-            if structure_rows:
-                structure_df = pd.DataFrame(structure_rows)
-
-                display_structure_df = structure_df[
-                    [
-                        "timeframe",
-                        "side",
-                        "swing_price",
-                        "distance_pct",
-                        "age_bars",
-                        "pivot_time",
-                        "confirmed_time",
-                    ]
-                ].copy()
-
-                display_structure_df[
-                    "swing_price"
-                ] = display_structure_df[
-                    "swing_price"
-                ].round(8)
-
-                display_structure_df[
-                    "distance_pct"
-                ] = display_structure_df[
-                    "distance_pct"
-                ].round(4)
-
-                st.dataframe(
-                    display_structure_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                st.caption(
-                    "Confluence is descriptive only. "
-                    "The threshold is adjustable for research "
-                    "and is not a trading filter."
-                )
-
-                confluence_threshold_pct = st.number_input(
-                    "Swing confluence distance %",
-                    min_value=0.0,
-                    value=0.20,
-                    step=0.05,
-                    format="%.2f",
-                    key=(
-                        "volume_exhaustion_"
-                        "swing_confluence_distance"
-                    ),
-                )
-
-                low_confluence = int(
-                    (
-                        structure_df["side"].eq("LOW")
-                        & structure_df[
-                            "abs_distance_pct"
-                        ].le(
-                            float(confluence_threshold_pct)
-                        )
-                    ).sum()
-                )
-
-                high_confluence = int(
-                    (
-                        structure_df["side"].eq("HIGH")
-                        & structure_df[
-                            "abs_distance_pct"
-                        ].le(
-                            float(confluence_threshold_pct)
-                        )
-                    ).sum()
-                )
-
-                conf_1, conf_2, conf_3 = st.columns(3)
-
-                conf_1.metric(
-                    "LOW confluence",
-                    low_confluence,
-                )
-                conf_2.metric(
-                    "HIGH confluence",
-                    high_confluence,
-                )
-                conf_3.metric(
-                    "Threshold",
-                    f"{float(confluence_threshold_pct):.2f}%",
-                )
-
-                selected_potential_side = str(
-                    selected_event.get(
-                        "potential_side",
-                        "NEUTRAL",
-                    )
-                )
-
-                if selected_potential_side == "LONG":
-                    st.caption(
-                        "LONG research context: "
-                        f"{low_confluence} selected timeframe(s) "
-                        "have a confirmed swing LOW within "
-                        f"{float(confluence_threshold_pct):.2f}% "
-                        "of the event price."
-                    )
-                elif selected_potential_side == "SHORT":
-                    st.caption(
-                        "SHORT research context: "
-                        f"{high_confluence} selected timeframe(s) "
-                        "have a confirmed swing HIGH within "
-                        f"{float(confluence_threshold_pct):.2f}% "
-                        "of the event price."
-                    )
-            else:
-                st.info(
-                    "No confirmed swing structure is available "
-                    "for the selected event and timeframes."
-                )
-
-            st.caption(
-                "Structure uses only swings confirmed at or "
-                "before the selected event timestamp."
-            )
 
         table_columns = [
             "event_time_local",
@@ -32961,7 +32086,9 @@ if selected_section == "volume_exhaustion":
             if column in side_events.columns
         ]
 
-        st.markdown("### Detected candidates")
+        st.markdown(
+            "### Detected exhaustion events"
+        )
         st.dataframe(
             side_events.sort_values(
                 "event_time_utc",
@@ -32971,11 +32098,1173 @@ if selected_section == "volume_exhaustion":
             hide_index=True,
         )
 
-        render_volume_exhaustion_outcome_research(
-            events=events,
+    render_volume_exhaustion_live()
+
+
+if selected_section == "reaction_swing_lab":
+    st.markdown(
+        "## 🧪 Reaction & Swing Lab"
+    )
+    st.caption(
+        "Structural research separated from Volume Exhaustion: "
+        "Candidate V1, confirmed-swing REACTIONs/retests, "
+        "pivot → confirmation studies and future swing labels. "
+        "Research definitions and persisted Candidate cohorts are unchanged."
+    )
+
+    events = load_volume_exhaustion_events()
+
+    if (
+        events is None
+        or events.empty
+        or "symbol" not in events.columns
+    ):
+        st.info(
+            "No symbol universe is available yet. "
+            "The current structural scanner keeps using the "
+            "same persisted symbol universe as before so this "
+            "UI move does not change Candidate V1 membership."
+        )
+    else:
+        structural_symbols = tuple(
+            sorted(
+                events["symbol"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
         )
 
-    render_volume_exhaustion_live()
+        if not structural_symbols:
+            st.info(
+                "No symbols are available for structural research."
+            )
+        else:
+            lab_mode = st.radio(
+                "Research view",
+                options=[
+                    "🧊 Candidate V1",
+                    "🔁 REACTION / Retests",
+                    "🎯 Pivots / Confirmations",
+                    "📍 Event swing structure",
+                    "🧬 Volume → future swings",
+                ],
+                horizontal=True,
+                key="reaction_swing_lab_mode",
+            )
+
+            st.caption(
+                "Only the selected research view is rendered. "
+                "This keeps the heavy all-symbol scans from running "
+                "when you are inspecting another part of the lab."
+            )
+
+            if lab_mode == "🧊 Candidate V1":
+                candidate_v1_config = (
+                    _candidate_v1_load_or_freeze_config(
+                        detector="3x3",
+                        min_swing_prominence_pct=0.0,
+                        retest_tolerance_pct=float(
+                            CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT
+                        ),
+                        min_departure_pct=float(
+                            CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
+                        ),
+                        max_retest_age_minutes=int(
+                            CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
+                        ),
+                    )
+                )
+
+                candidate_v1_long_config = (
+                    _candidate_v1_long_load_or_freeze_config(
+                        detector=str(
+                            candidate_v1_config.get(
+                                "swing_detector",
+                                "3x3",
+                            )
+                        ),
+                        min_swing_prominence_pct=float(
+                            candidate_v1_config.get(
+                                "min_swing_prominence_pct",
+                                0.0,
+                            )
+                        ),
+                        retest_tolerance_pct=float(
+                            candidate_v1_config.get(
+                                "retest_tolerance_pct",
+                                CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
+                            )
+                        ),
+                        min_departure_pct=float(
+                            candidate_v1_config.get(
+                                "min_departure_pct",
+                                CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
+                            )
+                        ),
+                        max_retest_age_minutes=int(
+                            candidate_v1_config.get(
+                                "max_confirmation_to_retest_min",
+                                CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
+                            )
+                        ),
+                    )
+                )
+
+                with st.spinner(
+                    "Updating frozen Candidate V1 "
+                    "SHORT + LONG monitors..."
+                ):
+                    candidate_v1_retests_df = (
+                        scan_confirmed_swing_retests_all_symbols(
+                            symbols=structural_symbols,
+                            swing_timeframes=(
+                                str(
+                                    candidate_v1_config.get(
+                                        "swing_timeframe",
+                                        "15m",
+                                    )
+                                ),
+                            ),
+                            swing_detector_items=(
+                                (
+                                    str(
+                                        candidate_v1_config.get(
+                                            "swing_timeframe",
+                                            "15m",
+                                        )
+                                    ),
+                                    str(
+                                        candidate_v1_config.get(
+                                            "swing_detector",
+                                            "3x3",
+                                        )
+                                    ),
+                                ),
+                            ),
+                            min_swing_prominence_pct=float(
+                                candidate_v1_config.get(
+                                    "min_swing_prominence_pct",
+                                    0.0,
+                                )
+                            ),
+                            retest_tolerance_pct=float(
+                                candidate_v1_config.get(
+                                    "retest_tolerance_pct",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
+                                )
+                            ),
+                            min_departure_pct=float(
+                                candidate_v1_config.get(
+                                    "min_departure_pct",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
+                                )
+                            ),
+                            max_age_minutes=int(
+                                candidate_v1_config.get(
+                                    "max_confirmation_to_retest_min",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
+                                )
+                            ),
+                            max_retest_age_minutes=4320,
+                        )
+                    )
+
+                (
+                    short_monitor_tab,
+                    long_monitor_tab,
+                    total_monitor_tab,
+                ) = st.tabs(
+                    [
+                        "🔴 Candidate V1 SHORT",
+                        "🟢 Candidate V1 LONG",
+                        "🟣 Candidate V1 TOTAL",
+                    ]
+                )
+
+                with short_monitor_tab:
+                    render_candidate_v1_frozen_monitor(
+                        retests_df=(
+                            candidate_v1_retests_df
+                        ),
+                        config=candidate_v1_config,
+                    )
+
+                with long_monitor_tab:
+                    render_candidate_v1_long_frozen_monitor(
+                        retests_df=(
+                            candidate_v1_retests_df
+                        ),
+                        config=(
+                            candidate_v1_long_config
+                        ),
+                    )
+
+                with total_monitor_tab:
+                    render_candidate_v1_total_monitor()
+
+            elif lab_mode == "🔁 REACTION / Retests":
+                control_1, control_2, control_3 = (
+                    st.columns(3)
+                )
+
+                with control_1:
+                    retest_scope = st.selectbox(
+                        "Scanner scope",
+                        [
+                            "All symbols",
+                            "Selected symbol",
+                        ],
+                        key=(
+                            "reaction_lab_retest_scope"
+                        ),
+                    )
+
+                with control_2:
+                    selected_retest_symbol = (
+                        st.selectbox(
+                            "Selected symbol",
+                            options=list(
+                                structural_symbols
+                            ),
+                            key=(
+                                "reaction_lab_retest_symbol"
+                            ),
+                        )
+                    )
+
+                with control_3:
+                    retest_detector = st.selectbox(
+                        "15m swing detector",
+                        ["2x2", "3x3", "5x5"],
+                        index=1,
+                        key=(
+                            "reaction_lab_retest_detector"
+                        ),
+                    )
+
+                control_4, control_5, control_6 = (
+                    st.columns(3)
+                )
+
+                with control_4:
+                    retest_prominence = (
+                        st.number_input(
+                            "Min swing prominence %",
+                            min_value=0.0,
+                            value=0.0,
+                            step=0.05,
+                            format="%.2f",
+                            key=(
+                                "reaction_lab_retest_prominence"
+                            ),
+                        )
+                    )
+
+                with control_5:
+                    retest_tolerance_pct = (
+                        st.number_input(
+                            "Retest tolerance %",
+                            min_value=0.0,
+                            value=(
+                                CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT
+                            ),
+                            step=0.01,
+                            format="%.3f",
+                            key=(
+                                "reaction_lab_retest_tolerance"
+                            ),
+                        )
+                    )
+
+                with control_6:
+                    min_retest_departure_pct = (
+                        st.number_input(
+                            "Min move-away before retest %",
+                            min_value=0.0,
+                            value=(
+                                CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
+                            ),
+                            step=0.05,
+                            format="%.3f",
+                            key=(
+                                "reaction_lab_retest_departure"
+                            ),
+                        )
+                    )
+
+                control_7, control_8, control_9 = (
+                    st.columns(3)
+                )
+
+                with control_7:
+                    retest_max_age_minutes = (
+                        st.number_input(
+                            "Max minutes confirmation → retest",
+                            min_value=15,
+                            max_value=2880,
+                            value=(
+                                CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
+                            ),
+                            step=30,
+                            key=(
+                                "reaction_lab_retest_max_age"
+                            ),
+                        )
+                    )
+
+                with control_8:
+                    retest_reaction_filter = (
+                        st.selectbox(
+                            "Retest type",
+                            [
+                                "All retests",
+                                "Reaction only",
+                                "Non-reaction touches",
+                                "Failed only",
+                                "Indecisive only",
+                            ],
+                            key=(
+                                "reaction_lab_retest_type"
+                            ),
+                        )
+                    )
+
+                with control_9:
+                    retest_side_filter = (
+                        st.selectbox(
+                            "Retest side",
+                            ["ALL", "LONG", "SHORT"],
+                            key=(
+                                "reaction_lab_retest_side"
+                            ),
+                        )
+                    )
+
+                retest_recent_minutes = (
+                    st.number_input(
+                        "Max age since retest (minutes)",
+                        min_value=1,
+                        max_value=10080,
+                        value=1440,
+                        step=60,
+                        key=(
+                            "reaction_lab_retest_recent"
+                        ),
+                    )
+                )
+
+                retest_symbols = (
+                    structural_symbols
+                    if retest_scope == "All symbols"
+                    else (
+                        str(
+                            selected_retest_symbol
+                        ),
+                    )
+                )
+
+                with st.spinner(
+                    "Scanning 15m confirmed swing "
+                    f"retests across "
+                    f"{len(retest_symbols)} symbol(s)..."
+                ):
+                    confirmed_swing_retests_df = (
+                        scan_confirmed_swing_retests_all_symbols(
+                            symbols=retest_symbols,
+                            swing_timeframes=("15m",),
+                            swing_detector_items=(
+                                (
+                                    "15m",
+                                    str(
+                                        retest_detector
+                                    ),
+                                ),
+                            ),
+                            min_swing_prominence_pct=float(
+                                retest_prominence
+                            ),
+                            retest_tolerance_pct=float(
+                                retest_tolerance_pct
+                            ),
+                            min_departure_pct=float(
+                                min_retest_departure_pct
+                            ),
+                            max_age_minutes=int(
+                                retest_max_age_minutes
+                            ),
+                            max_retest_age_minutes=int(
+                                retest_recent_minutes
+                            ),
+                        )
+                    )
+
+                render_confirmed_swing_retest_scanner(
+                    retests_df=(
+                        confirmed_swing_retests_df
+                    ),
+                    reaction_filter=(
+                        retest_reaction_filter
+                    ),
+                    side_filter=(
+                        retest_side_filter
+                    ),
+                    timeframe_filter="15m",
+                    max_retest_age_minutes=int(
+                        retest_recent_minutes
+                    ),
+                )
+
+            elif lab_mode == "🎯 Pivots / Confirmations":
+                control_1, control_2, control_3 = (
+                    st.columns(3)
+                )
+
+                with control_1:
+                    pivot_scope = st.selectbox(
+                        "Study scope",
+                        [
+                            "Selected symbol",
+                            "All symbols",
+                        ],
+                        key=(
+                            "reaction_lab_pivot_scope"
+                        ),
+                    )
+
+                with control_2:
+                    selected_pivot_symbol = (
+                        st.selectbox(
+                            "Selected symbol",
+                            options=list(
+                                structural_symbols
+                            ),
+                            key=(
+                                "reaction_lab_pivot_symbol"
+                            ),
+                        )
+                    )
+
+                with control_3:
+                    pivot_prominence = (
+                        st.number_input(
+                            "Min swing prominence %",
+                            min_value=0.0,
+                            value=0.0,
+                            step=0.05,
+                            format="%.2f",
+                            key=(
+                                "reaction_lab_pivot_prominence"
+                            ),
+                        )
+                    )
+
+                swing_timeframes = st.multiselect(
+                    "Swing timeframes",
+                    options=[
+                        "1m",
+                        "5m",
+                        "15m",
+                        "30m",
+                        "1h",
+                    ],
+                    default=[
+                        "1m",
+                        "5m",
+                        "15m",
+                    ],
+                    key=(
+                        "reaction_lab_pivot_timeframes"
+                    ),
+                )
+
+                default_swing_detectors = {
+                    "1m": "5x5",
+                    "5m": "5x5",
+                    "15m": "3x3",
+                    "30m": "3x3",
+                    "1h": "2x2",
+                }
+
+                swing_detector_windows = {}
+
+                if swing_timeframes:
+                    detector_columns = st.columns(
+                        len(
+                            swing_timeframes
+                        )
+                    )
+
+                    for (
+                        detector_column,
+                        swing_timeframe,
+                    ) in zip(
+                        detector_columns,
+                        swing_timeframes,
+                    ):
+                        detector_options = [
+                            "2x2",
+                            "3x3",
+                            "5x5",
+                        ]
+                        default_detector = (
+                            default_swing_detectors.get(
+                                swing_timeframe,
+                                "5x5",
+                            )
+                        )
+
+                        with detector_column:
+                            swing_detector_windows[
+                                swing_timeframe
+                            ] = st.selectbox(
+                                (
+                                    f"{swing_timeframe} "
+                                    "detector"
+                                ),
+                                detector_options,
+                                index=(
+                                    detector_options.index(
+                                        default_detector
+                                    )
+                                ),
+                                key=(
+                                    "reaction_lab_"
+                                    "pivot_detector_"
+                                    f"{swing_timeframe}"
+                                ),
+                            )
+
+                filter_1, filter_2 = st.columns(
+                    [1.5, 2.0]
+                )
+
+                with filter_1:
+                    filter_by_confirmation_move = (
+                        st.checkbox(
+                            "Filter by pivot → confirmation move",
+                            value=False,
+                            key=(
+                                "reaction_lab_"
+                                "pivot_filter_move"
+                            ),
+                        )
+                    )
+
+                with filter_2:
+                    max_confirmation_move_pct = (
+                        st.number_input(
+                            "Max pivot → confirmation move %",
+                            min_value=0.0,
+                            value=1.0,
+                            step=0.05,
+                            format="%.2f",
+                            key=(
+                                "reaction_lab_"
+                                "pivot_max_move"
+                            ),
+                        )
+                    )
+
+                if not swing_timeframes:
+                    st.info(
+                        "Select at least one swing timeframe."
+                    )
+                else:
+                    research_symbols = (
+                        (
+                            str(
+                                selected_pivot_symbol
+                            ),
+                        )
+                        if (
+                            pivot_scope
+                            == "Selected symbol"
+                        )
+                        else structural_symbols
+                    )
+
+                    max_move = (
+                        float(
+                            max_confirmation_move_pct
+                        )
+                        if (
+                            filter_by_confirmation_move
+                        )
+                        else None
+                    )
+
+                    with st.spinner(
+                        "Building causal pivot → "
+                        "confirmation research..."
+                    ):
+                        control_study_df = (
+                            build_volume_exhaustion_confirmation_study_all_symbols(
+                                symbols=(
+                                    research_symbols
+                                ),
+                                candle_limit=(
+                                    VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+                                ),
+                                swing_timeframes=tuple(
+                                    swing_timeframes
+                                ),
+                                swing_detector_items=tuple(
+                                    swing_detector_windows.items()
+                                ),
+                                min_swing_prominence_pct=float(
+                                    pivot_prominence
+                                ),
+                                max_confirmation_move_pct=(
+                                    max_move
+                                ),
+                            )
+                        )
+
+                    render_volume_exhaustion_confirmation_edge_study(
+                        study_df=(
+                            control_study_df
+                        ),
+                        candle_limit=(
+                            VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+                        ),
+                        max_confirmation_move_pct=(
+                            float(
+                                max_confirmation_move_pct
+                            )
+                            if (
+                                filter_by_confirmation_move
+                            )
+                            else 999.0
+                        ),
+                    )
+
+                    st.markdown("---")
+
+                    scope_label = (
+                        str(
+                            selected_pivot_symbol
+                        )
+                        if (
+                            pivot_scope
+                            == "Selected symbol"
+                        )
+                        else (
+                            "All symbols "
+                            f"({len(research_symbols)})"
+                        )
+                    )
+
+                    render_volume_exhaustion_confirmation_bucket_study(
+                        study_df=(
+                            control_study_df
+                        ),
+                        candle_limit=(
+                            VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+                        ),
+                        scope_label=(
+                            scope_label
+                        ),
+                        max_confirmation_move_pct=(
+                            max_move
+                        ),
+                    )
+
+                    render_volume_exhaustion_first_touch_replay(
+                        filtered_study_df=(
+                            control_study_df
+                        ),
+                        control_study_df=(
+                            control_study_df
+                        ),
+                        max_confirmation_move_pct=(
+                            max_move
+                        ),
+                    )
+
+            elif lab_mode == "📍 Event swing structure":
+                event_side = st.selectbox(
+                    "Event side",
+                    ["ALL", "LONG", "SHORT"],
+                    key=(
+                        "reaction_lab_event_side"
+                    ),
+                )
+
+                event_view = events.copy()
+
+                if (
+                    event_side != "ALL"
+                    and "potential_side"
+                    in event_view.columns
+                ):
+                    event_view = event_view[
+                        event_view[
+                            "potential_side"
+                        ].eq(event_side)
+                    ].copy()
+
+                event_symbols = sorted(
+                    event_view["symbol"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+
+                if not event_symbols:
+                    st.info(
+                        "No events match this side."
+                    )
+                else:
+                    selected_event_symbol = (
+                        st.selectbox(
+                            "Event symbol",
+                            event_symbols,
+                            key=(
+                                "reaction_lab_event_symbol"
+                            ),
+                        )
+                    )
+
+                    symbol_events = event_view[
+                        event_view["symbol"].eq(
+                            selected_event_symbol
+                        )
+                    ].copy()
+
+                    if (
+                        "event_time_utc"
+                        in symbol_events.columns
+                    ):
+                        symbol_events = (
+                            symbol_events.sort_values(
+                                "event_time_utc",
+                                ascending=False,
+                            )
+                        )
+
+                    labels = []
+                    lookup = {}
+
+                    for (
+                        row_index,
+                        row,
+                    ) in symbol_events.iterrows():
+                        event_time = row.get(
+                            "event_time_local"
+                        )
+                        label = (
+                            f"{event_time} · "
+                            f"{row.get('potential_side', '—')} · "
+                            f"{row.get('event_id', row_index)}"
+                        )
+                        labels.append(label)
+                        lookup[label] = row_index
+
+                    selected_event_label = (
+                        st.selectbox(
+                            "Volume event",
+                            labels,
+                            key=(
+                                "reaction_lab_event_select"
+                            ),
+                        )
+                    )
+                    selected_event = (
+                        symbol_events.loc[
+                            lookup[
+                                selected_event_label
+                            ]
+                        ]
+                    )
+
+                    structure_timeframes = (
+                        st.multiselect(
+                            "Swing timeframes",
+                            [
+                                "1m",
+                                "5m",
+                                "15m",
+                                "30m",
+                                "1h",
+                            ],
+                            default=[
+                                "1m",
+                                "5m",
+                                "15m",
+                            ],
+                            key=(
+                                "reaction_lab_"
+                                "event_timeframes"
+                            ),
+                        )
+                    )
+
+                    event_prominence = (
+                        st.number_input(
+                            "Min swing prominence %",
+                            min_value=0.0,
+                            value=0.0,
+                            step=0.05,
+                            format="%.2f",
+                            key=(
+                                "reaction_lab_"
+                                "event_prominence"
+                            ),
+                        )
+                    )
+
+                    default_detectors = {
+                        "1m": "5x5",
+                        "5m": "5x5",
+                        "15m": "3x3",
+                        "30m": "3x3",
+                        "1h": "2x2",
+                    }
+                    detector_windows = {}
+
+                    if structure_timeframes:
+                        detector_columns = (
+                            st.columns(
+                                len(
+                                    structure_timeframes
+                                )
+                            )
+                        )
+
+                        for (
+                            detector_column,
+                            swing_timeframe,
+                        ) in zip(
+                            detector_columns,
+                            structure_timeframes,
+                        ):
+                            options = [
+                                "2x2",
+                                "3x3",
+                                "5x5",
+                            ]
+                            default_value = (
+                                default_detectors.get(
+                                    swing_timeframe,
+                                    "5x5",
+                                )
+                            )
+
+                            with detector_column:
+                                detector_windows[
+                                    swing_timeframe
+                                ] = st.selectbox(
+                                    (
+                                        f"{swing_timeframe} "
+                                        "detector"
+                                    ),
+                                    options,
+                                    index=(
+                                        options.index(
+                                            default_value
+                                        )
+                                    ),
+                                    key=(
+                                        "reaction_lab_"
+                                        "event_detector_"
+                                        f"{swing_timeframe}"
+                                    ),
+                                )
+
+                    event_chart_limit = st.slider(
+                        "Chart 1m candles",
+                        min_value=60,
+                        max_value=2000,
+                        value=240,
+                        step=20,
+                        key=(
+                            "reaction_lab_"
+                            "event_chart_limit"
+                        ),
+                    )
+
+                    event_candles = (
+                        geometry_scanner_data_service
+                        .get_closed_candles(
+                            symbol=(
+                                selected_event_symbol
+                            ),
+                            timeframe="1m",
+                            limit=int(
+                                event_chart_limit
+                            ),
+                        )
+                    )
+
+                    if (
+                        event_candles is None
+                        or event_candles.empty
+                    ):
+                        st.info(
+                            "No 1m candles are available "
+                            "for this event."
+                        )
+                    else:
+                        event_ts = selected_event.get(
+                            "candle_open_timestamp"
+                        )
+                        if pd.notna(event_ts):
+                            event_ts = int(
+                                event_ts
+                            )
+
+                        swing_points_by_timeframe = {}
+                        swing_candles_by_timeframe = {}
+                        structure_rows = []
+
+                        for swing_timeframe in (
+                            structure_timeframes
+                        ):
+                            detector_name = (
+                                detector_windows.get(
+                                    swing_timeframe,
+                                    default_detectors.get(
+                                        swing_timeframe,
+                                        "5x5",
+                                    ),
+                                )
+                            )
+                            swing_bars = int(
+                                detector_name.split(
+                                    "x"
+                                )[0]
+                            )
+                            detector = SwingDetector(
+                                left_bars=swing_bars,
+                                right_bars=swing_bars,
+                                min_prominence_pct=float(
+                                    event_prominence
+                                ),
+                            )
+
+                            if (
+                                swing_timeframe
+                                == "1m"
+                            ):
+                                timeframe_candles = (
+                                    event_candles
+                                )
+                            else:
+                                timeframe_candles = (
+                                    geometry_scanner_data_service
+                                    .get_closed_candles(
+                                        symbol=(
+                                            selected_event_symbol
+                                        ),
+                                        timeframe=(
+                                            swing_timeframe
+                                        ),
+                                        limit=400,
+                                    )
+                                )
+
+                            if (
+                                timeframe_candles
+                                is None
+                                or timeframe_candles.empty
+                            ):
+                                continue
+
+                            swing_candles_by_timeframe[
+                                swing_timeframe
+                            ] = (
+                                timeframe_candles.copy()
+                            )
+                            records = (
+                                timeframe_candles
+                                .to_dict(
+                                    orient="records"
+                                )
+                            )
+                            points = (
+                                detector.detect_all(
+                                    records
+                                )
+                            )
+                            swing_points_by_timeframe[
+                                swing_timeframe
+                            ] = points
+
+                            if pd.notna(event_ts):
+                                for (
+                                    side_label,
+                                    point,
+                                ) in [
+                                    (
+                                        "LOW",
+                                        detector.last_confirmed_low(
+                                            records,
+                                            as_of_timestamp=int(
+                                                event_ts
+                                            ),
+                                        ),
+                                    ),
+                                    (
+                                        "HIGH",
+                                        detector.last_confirmed_high(
+                                            records,
+                                            as_of_timestamp=int(
+                                                event_ts
+                                            ),
+                                        ),
+                                    ),
+                                ]:
+                                    if point is None:
+                                        continue
+
+                                    event_price = pd.to_numeric(
+                                        selected_event.get(
+                                            "close"
+                                        ),
+                                        errors="coerce",
+                                    )
+                                    if pd.isna(
+                                        event_price
+                                    ):
+                                        continue
+
+                                    swing_price = float(
+                                        point.price
+                                    )
+                                    distance_pct = (
+                                        (
+                                            float(
+                                                event_price
+                                            )
+                                            - swing_price
+                                        )
+                                        / swing_price
+                                        * 100.0
+                                    )
+
+                                    structure_rows.append(
+                                        {
+                                            "timeframe": (
+                                                swing_timeframe
+                                            ),
+                                            "side": (
+                                                side_label
+                                            ),
+                                            "swing_price": (
+                                                swing_price
+                                            ),
+                                            "distance_pct": (
+                                                distance_pct
+                                            ),
+                                            "pivot_time": (
+                                                pd.to_datetime(
+                                                    int(
+                                                        point.pivot_timestamp
+                                                    ),
+                                                    unit="ms",
+                                                    utc=True,
+                                                )
+                                                .tz_convert(
+                                                    TZ
+                                                )
+                                                .strftime(
+                                                    "%Y-%m-%d %H:%M"
+                                                )
+                                            ),
+                                            "confirmed_time": (
+                                                pd.to_datetime(
+                                                    int(
+                                                        point.confirmed_timestamp
+                                                    ),
+                                                    unit="ms",
+                                                    utc=True,
+                                                )
+                                                .tz_convert(
+                                                    TZ
+                                                )
+                                                .strftime(
+                                                    "%Y-%m-%d %H:%M"
+                                                )
+                                            ),
+                                        }
+                                    )
+
+                        event_fig = (
+                            build_volume_exhaustion_chart(
+                                candles=(
+                                    event_candles
+                                ),
+                                event_row=(
+                                    selected_event
+                                ),
+                                swing_points_by_timeframe=(
+                                    swing_points_by_timeframe
+                                ),
+                                swing_candles_by_timeframe=(
+                                    swing_candles_by_timeframe
+                                ),
+                            )
+                        )
+
+                        st.plotly_chart(
+                            event_fig,
+                            use_container_width=True,
+                            key=(
+                                "reaction_lab_"
+                                "event_structure_chart"
+                            ),
+                            config={
+                                "displaylogo": False,
+                                "scrollZoom": True,
+                            },
+                        )
+
+                        if structure_rows:
+                            structure_df = (
+                                pd.DataFrame(
+                                    structure_rows
+                                )
+                            )
+                            structure_df[
+                                "swing_price"
+                            ] = (
+                                pd.to_numeric(
+                                    structure_df[
+                                        "swing_price"
+                                    ],
+                                    errors="coerce",
+                                ).round(8)
+                            )
+                            structure_df[
+                                "distance_pct"
+                            ] = (
+                                pd.to_numeric(
+                                    structure_df[
+                                        "distance_pct"
+                                    ],
+                                    errors="coerce",
+                                ).round(4)
+                            )
+
+                            st.dataframe(
+                                structure_df,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        else:
+                            st.info(
+                                "No confirmed swing "
+                                "structure was available "
+                                "at this event timestamp."
+                            )
+
+            else:
+                render_volume_exhaustion_outcome_research(
+                    events=events,
+                )
 
 
 if selected_section == "geometry_scanner":
