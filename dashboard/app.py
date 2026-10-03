@@ -169,6 +169,10 @@ CANDIDATE_V1_PATH_STORE_FILE = (
 )
 CANDIDATE_V1_PATH_REFRESH_SECONDS = 60
 
+# The Volume Exhaustion page is large; 5s caused expensive full-fragment
+# reruns even though Candidate path materialization itself is throttled to 60s.
+VOLUME_EXHAUSTION_UI_REFRESH_INTERVAL = "15s"
+
 DASHBOARD_CACHE_DIR = (
     BASE_DIR
     / "reports"
@@ -14972,6 +14976,7 @@ def _candidate_v1_execution_first_touch_grid(
     exit_slippage_pct=0.0,
     notional_usdt=100.0,
     candle_limit=5000,
+    force_path_refresh=False,
 ):
     """Fast first-touch matrix backed by the persisted 360m path store.
 
@@ -14982,7 +14987,10 @@ def _candidate_v1_execution_first_touch_grid(
     if candidate_rows is None or candidate_rows.empty:
         return pd.DataFrame()
 
-    path_store = _candidate_v1_fast_path_store(candidate_rows)
+    path_store = _candidate_v1_fast_path_store(
+        candidate_rows,
+        force=bool(force_path_refresh),
+    )
     if path_store is None or path_store.empty:
         return pd.DataFrame()
 
@@ -15121,8 +15129,68 @@ def _candidate_v1_execution_grid_summary(path_results):
     return pd.DataFrame(summary_rows)
 
 
+def _candidate_v1_matrix_source_signature(frame):
+    """Cheap session-local identity for the Candidate rows backing a matrix."""
+    if frame is None or frame.empty:
+        return (0, None, 0)
+
+    key_col = "candidate_v1_event_key"
+    keys = (
+        tuple(sorted(frame[key_col].dropna().astype(str).unique().tolist()))
+        if key_col in frame.columns
+        else tuple()
+    )
+    reaction = pd.to_numeric(
+        frame.get("retest_timestamp", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    latest = int(reaction.max()) if not reaction.empty else None
+    return (len(keys), latest, hash(keys))
+
+
+def _candidate_v1_path_store_mtime_ns():
+    try:
+        return int(CANDIDATE_V1_PATH_STORE_FILE.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _candidate_v1_matrix_cell_text(row, metric):
+    value = pd.to_numeric(row.get(metric), errors="coerce")
+    if pd.isna(value):
+        return "—"
+
+    win_rate = pd.to_numeric(row.get("Win rate %"), errors="coerce")
+    pf = pd.to_numeric(row.get("Profit factor"), errors="coerce")
+
+    if pd.isna(win_rate):
+        wr_text = "—"
+    else:
+        wr_text = f"{float(win_rate):.1f}%"
+
+    if pd.isna(pf):
+        pf_text = "—"
+    elif np.isfinite(float(pf)):
+        pf_text = f"{float(pf):.2f}"
+    else:
+        pf_text = "∞"
+
+    prefix = "+" if float(value) > 0 else ""
+    if metric == "Net PnL USDT":
+        value_text = f"{prefix}{float(value):.2f}"
+    else:
+        value_text = f"{prefix}{float(value):.2f}"
+
+    return f"{value_text} (WR {wr_text} · PF {pf_text})"
+
+
 def _candidate_v1_render_execution_matrix(history, key_prefix):
-    """Configurable execution-research matrix for persisted Candidate V1 rows."""
+    """Execution matrix with an explicit frozen UI snapshot.
+
+    Expensive path/grid work only runs on the first render or when the user
+    presses Apply / Refresh. Inspect TP/SL and metric changes operate on the
+    frozen DataFrames kept in session_state, so they cannot move the matrix.
+    """
     if history is None or history.empty:
         return
 
@@ -15130,10 +15198,8 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
     st.caption(
         "Research execution starts at the OPEN of the next consecutive 1m candle "
         "after REACTION becomes known. TP and SL are checked chronologically on "
-        "every 1m candle. If both are touched in the same candle, intrabar order "
-        "is unknowable from OHLC: it is labelled SL_AMBIGUOUS and charged as SL. "
-        "If neither is touched, a complete horizon exits at its closing price; "
-        "gaps/incomplete paths remain PENDING. Candidate V1 itself is not changed."
+        "every 1m candle. Same-candle TP+SL is SL_AMBIGUOUS and charged as SL. "
+        "The matrix is now a frozen snapshot: Inspect TP/SL never recalculates it."
     )
 
     with st.form(
@@ -15219,10 +15285,20 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
             key=f"{key_prefix}_notional",
         )
 
-        st.form_submit_button(
+        submitted = st.form_submit_button(
             "Apply / recalculate matrix",
             use_container_width=True,
         )
+
+    refresh_paths = st.button(
+        "🔄 Refresh Candidate paths + recalculate",
+        key=f"{key_prefix}_force_refresh",
+        use_container_width=True,
+        help=(
+            "Forces one refresh of incomplete 1m Candidate paths, then builds "
+            "a new matrix snapshot. Completed 360m paths are never reloaded."
+        ),
+    )
 
     tp_values = _candidate_v1_parse_grid_values(tp_raw, default=(2.0,))
     sl_values = _candidate_v1_parse_grid_values(sl_raw, default=(2.0,))
@@ -15246,29 +15322,90 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
         st.info("No Candidate V1 rows match this side/cohort selection.")
         return
 
-    path_results = _candidate_v1_execution_first_touch_grid(
-        candidate_rows=subset,
-        tp_values=tp_values,
-        sl_values=sl_values,
-        horizon_min=int(horizon_min),
-        entry_fee_pct=float(entry_fee_pct),
-        exit_fee_pct=float(exit_fee_pct),
-        entry_slippage_pct=float(entry_slippage_pct),
-        exit_slippage_pct=float(exit_slippage_pct),
-        notional_usdt=float(notional_usdt),
-        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+    snapshot_key = f"{key_prefix}_matrix_snapshot_v2"
+    snapshot = st.session_state.get(snapshot_key)
+    source_signature = _candidate_v1_matrix_source_signature(subset)
+    current_store_mtime = _candidate_v1_path_store_mtime_ns()
+
+    needs_initial_snapshot = not isinstance(snapshot, dict)
+    should_recalculate = bool(
+        submitted
+        or refresh_paths
+        or needs_initial_snapshot
     )
-    if path_results.empty:
-        st.warning(
-            "No contiguous 1m execution paths are available for the selected "
-            "Candidate rows. Older rows can become unavailable after the 1m "
-            "research history rolls forward."
-        )
+
+    if should_recalculate:
+        with st.spinner("Building Candidate execution matrix snapshot..."):
+            path_results = _candidate_v1_execution_first_touch_grid(
+                candidate_rows=subset,
+                tp_values=tp_values,
+                sl_values=sl_values,
+                horizon_min=int(horizon_min),
+                entry_fee_pct=float(entry_fee_pct),
+                exit_fee_pct=float(exit_fee_pct),
+                entry_slippage_pct=float(entry_slippage_pct),
+                exit_slippage_pct=float(exit_slippage_pct),
+                notional_usdt=float(notional_usdt),
+                candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+                force_path_refresh=bool(refresh_paths),
+            )
+            summary = _candidate_v1_execution_grid_summary(path_results)
+
+        if path_results is None or path_results.empty or summary.empty:
+            st.warning(
+                "No contiguous 1m execution paths are available for the selected "
+                "Candidate rows yet."
+            )
+            return
+
+        snapshot = {
+            "path_results": path_results.copy(),
+            "summary": summary.copy(),
+            "tp_values": tuple(tp_values),
+            "sl_values": tuple(sl_values),
+            "horizon_min": int(horizon_min),
+            "side_scope": str(side_scope),
+            "cohort_scope": str(cohort_scope),
+            "entry_fee_pct": float(entry_fee_pct),
+            "exit_fee_pct": float(exit_fee_pct),
+            "entry_slippage_pct": float(entry_slippage_pct),
+            "exit_slippage_pct": float(exit_slippage_pct),
+            "notional_usdt": float(notional_usdt),
+            "source_signature": source_signature,
+            "path_store_mtime_ns": _candidate_v1_path_store_mtime_ns(),
+            "created_at": time.time(),
+        }
+        st.session_state[snapshot_key] = snapshot
+
+    if not isinstance(snapshot, dict):
         return
 
-    summary = _candidate_v1_execution_grid_summary(path_results)
-    if summary.empty:
+    path_results = snapshot.get("path_results", pd.DataFrame())
+    summary = snapshot.get("summary", pd.DataFrame())
+    if path_results is None or path_results.empty or summary is None or summary.empty:
         return
+
+    snap_tp_values = tuple(snapshot.get("tp_values", tp_values))
+    snap_sl_values = tuple(snapshot.get("sl_values", sl_values))
+    snap_horizon = int(snapshot.get("horizon_min", horizon_min))
+
+    age_seconds = max(0.0, time.time() - float(snapshot.get("created_at", time.time())))
+    source_changed = snapshot.get("source_signature") != source_signature
+    store_changed = snapshot.get("path_store_mtime_ns") != current_store_mtime
+
+    st.caption(
+        "Matrix snapshot · "
+        f"{snapshot.get('side_scope', side_scope)} / "
+        f"{snapshot.get('cohort_scope', cohort_scope)} / "
+        f"{snap_horizon}m · "
+        f"age {age_seconds:.0f}s · "
+        f"{len(set(path_results['candidate_v1_event_key'].astype(str)))} candidates."
+    )
+    if source_changed or store_changed:
+        st.info(
+            "New Candidate/path data is available, but this matrix stays frozen "
+            "until you press Apply / recalculate or Refresh paths + recalculate."
+        )
 
     metric_options = [
         "Net PnL % pts",
@@ -15287,11 +15424,24 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
         key=f"{key_prefix}_metric",
     )
 
-    matrix = summary.pivot(
-        index="SL %",
-        columns="TP %",
-        values=metric,
-    ).sort_index(ascending=True)
+    if metric in {"Net PnL % pts", "Net PnL USDT"}:
+        matrix_source = summary.copy()
+        matrix_source["_display"] = matrix_source.apply(
+            lambda row: _candidate_v1_matrix_cell_text(row, metric),
+            axis=1,
+        )
+        matrix = matrix_source.pivot(
+            index="SL %",
+            columns="TP %",
+            values="_display",
+        ).sort_index(ascending=True)
+    else:
+        matrix = summary.pivot(
+            index="SL %",
+            columns="TP %",
+            values=metric,
+        ).sort_index(ascending=True)
+
     matrix.index = [f"SL {float(v):g}%" for v in matrix.index]
     matrix.columns = [f"TP {float(v):g}%" for v in matrix.columns]
     st.dataframe(
@@ -15299,15 +15449,21 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
         use_container_width=True,
         key=f"{key_prefix}_matrix",
     )
-    st.caption(
-        "Net PnL % pts is additive across equal-notional trades at x1; it is "
-        "not compounded account return. Execution cost = entry fee + exit fee "
-        "+ configured entry/exit slippage for every resolved trade."
-    )
+    if metric in {"Net PnL % pts", "Net PnL USDT"}:
+        st.caption(
+            "Each PnL cell shows: PnL (WR win rate · PF profit factor). "
+            "The PnL is additive across equal-notional x1 trades; it is not a "
+            "compounded account return."
+        )
+    else:
+        st.caption(
+            "Execution cost = entry fee + exit fee + configured entry/exit "
+            "slippage for every resolved trade."
+        )
 
     pair_c1, pair_c2 = st.columns(2)
-    tp_list = list(tp_values)
-    sl_list = list(sl_values)
+    tp_list = list(snap_tp_values)
+    sl_list = list(snap_sl_values)
     tp_default = min(range(len(tp_list)), key=lambda i: abs(tp_list[i] - 2.0))
     sl_default = min(range(len(sl_list)), key=lambda i: abs(sl_list[i] - 2.0))
     selected_tp = pair_c1.selectbox(
@@ -15366,6 +15522,15 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
     )
     s4.metric("Avg net/trade", f"{float(row['Avg net/trade %']):+.3f}%")
     s5.metric("Max DD", f"{float(row['Max drawdown % pts']):.2f} pts")
+
+    show_detail = st.toggle(
+        "Show trade-by-trade detail",
+        value=False,
+        key=f"{key_prefix}_show_detail",
+        help="Keeping this closed avoids formatting/rendering the full detail table on every inspect change.",
+    )
+    if not show_detail:
+        return
 
     selected_paths["Reaction"] = (
         pd.to_datetime(
@@ -15447,11 +15612,18 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
         file_name=(
             f"candidate_v1_execution_"
             f"tp{float(selected_tp):g}_sl{float(selected_sl):g}_"
-            f"{int(horizon_min)}m.csv"
+            f"{snap_horizon}m.csv"
         ),
         mime="text/csv",
         key=f"{key_prefix}_download",
     )
+
+
+@st.cache_data(show_spinner=False)
+def _candidate_v1_read_history_csv_cached(path_text, mtime_ns):
+    """Parse a Candidate journal only when the file itself changes."""
+    _ = mtime_ns  # cache-busting argument tied to the filesystem version
+    return pd.read_csv(path_text)
 
 
 @_candidate_fragment
@@ -15464,7 +15636,10 @@ def render_candidate_v1_total_monitor():
     ):
         try:
             if path.exists():
-                frame = pd.read_csv(path)
+                frame = _candidate_v1_read_history_csv_cached(
+                    str(path),
+                    int(path.stat().st_mtime_ns),
+                )
                 if not frame.empty:
                     frame = frame.copy()
                     frame["Candidate side"] = side
@@ -31199,7 +31374,7 @@ if selected_section == "volume_exhaustion":
         "exhaustion directions, not trading signals."
     )
 
-    @st.fragment(run_every="5s")
+    @st.fragment(run_every=VOLUME_EXHAUSTION_UI_REFRESH_INTERVAL)
     def render_volume_exhaustion_live():
         events = load_volume_exhaustion_events()
 
