@@ -19038,6 +19038,180 @@ def _candidate_v2_market_increment_table(selected_pair):
     return pd.DataFrame(rows)
 
 
+
+def _candidate_v2_snapshot_variant_table(selected_pair):
+    """Compare Base / Flow / Strength / Flow+Strength inside each causal 4h snapshot.
+
+    The execution slice is already fixed to one TP/SL/horizon/cost configuration.
+    N counts unique REACTION candidates in the variant/snapshot cell; Net/Avg/PF/WR
+    and MFE/MAE are computed only from resolved execution rows, matching the rest
+    of Candidate V2 execution research.
+    """
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+
+    required = {
+        "side",
+        "flow_candle_timestamp",
+        "market_breadth_4h",
+        "btc_return_pct_4h",
+        "Market alignment",
+        "side_adjusted_strength_vs_btc_4h",
+    }
+    if not required.issubset(selected_pair.columns):
+        return pd.DataFrame()
+
+    work = selected_pair.copy()
+    work["_flow_ts"] = pd.to_numeric(
+        work["flow_candle_timestamp"],
+        errors="coerce",
+    )
+    work["_strength"] = pd.to_numeric(
+        work["side_adjusted_strength_vs_btc_4h"],
+        errors="coerce",
+    )
+    work["_breadth"] = pd.to_numeric(
+        work["market_breadth_4h"],
+        errors="coerce",
+    )
+    work["_btc_return"] = pd.to_numeric(
+        work["btc_return_pct_4h"],
+        errors="coerce",
+    )
+    work = work.loc[work["_flow_ts"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    variant_defs = (
+        ("REACTION Base", lambda frame: pd.Series(True, index=frame.index)),
+        (
+            "TAILWIND only",
+            lambda frame: frame["Market alignment"]
+            .fillna("UNKNOWN")
+            .astype(str)
+            .eq("TAILWIND"),
+        ),
+        (
+            "Strength > 0 only",
+            lambda frame: frame["_strength"].gt(0.0),
+        ),
+        (
+            "TAILWIND + Strength > 0",
+            lambda frame: (
+                frame["Market alignment"]
+                .fillna("UNKNOWN")
+                .astype(str)
+                .eq("TAILWIND")
+                & frame["_strength"].gt(0.0)
+            ),
+        ),
+    )
+
+    rows = []
+    for side_name in ("LONG", "SHORT"):
+        side_frame = work.loc[
+            work["side"].astype(str).str.upper().eq(side_name)
+        ].copy()
+        if side_frame.empty:
+            continue
+
+        for flow_ts in sorted(side_frame["_flow_ts"].dropna().unique()):
+            snapshot = side_frame.loc[
+                side_frame["_flow_ts"].eq(float(flow_ts))
+            ].copy()
+            if snapshot.empty:
+                continue
+
+            breadth_values = snapshot["_breadth"].dropna()
+            btc_values = snapshot["_btc_return"].dropna()
+            breadth = (
+                round(float(breadth_values.median()), 4)
+                if not breadth_values.empty
+                else np.nan
+            )
+            btc_return = (
+                round(float(btc_values.median()), 4)
+                if not btc_values.empty
+                else np.nan
+            )
+            snapshot_label = (
+                pd.to_datetime(
+                    float(flow_ts),
+                    unit="ms",
+                    utc=True,
+                    errors="coerce",
+                )
+                .tz_convert(TZ)
+                .strftime("%Y-%m-%d %H:%M")
+            )
+
+            for variant_name, mask_builder in variant_defs:
+                mask = mask_builder(snapshot)
+                subset = snapshot.loc[mask.fillna(False)].copy()
+
+                if subset.empty:
+                    stats = {
+                        "N": 0,
+                        "Net": np.nan,
+                        "Avg": np.nan,
+                        "PF": np.nan,
+                        "WR": np.nan,
+                        "MFE": np.nan,
+                        "MAE": np.nan,
+                    }
+                else:
+                    ext = _candidate_v1_group_stats_extended(subset)
+                    event_col = (
+                        "candidate_v1_event_key"
+                        if "candidate_v1_event_key" in subset.columns
+                        else "candidate_v2_event_key"
+                    )
+                    stats = {
+                        "N": int(
+                            subset[event_col].astype(str).nunique()
+                        ) if event_col in subset.columns else int(len(subset)),
+                        "Net": ext.get("Net pts", np.nan),
+                        "Avg": ext.get("Avg %", np.nan),
+                        "PF": ext.get("PF", np.nan),
+                        "WR": ext.get("WR %", np.nan),
+                        "MFE": ext.get("Avg MFE %", np.nan),
+                        "MAE": ext.get("Avg MAE %", np.nan),
+                    }
+
+                rows.append({
+                    "Side": side_name,
+                    "Snapshot 4h": snapshot_label,
+                    "Variant": variant_name,
+                    "Breadth %": breadth,
+                    "BTC return %": btc_return,
+                    "N": stats["N"],
+                    "Net pts": stats["Net"],
+                    "Avg %": stats["Avg"],
+                    "PF": stats["PF"],
+                    "WR %": stats["WR"],
+                    "Avg MFE %": stats["MFE"],
+                    "Avg MAE %": stats["MAE"],
+                })
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    variant_order = {
+        "REACTION Base": 0,
+        "TAILWIND only": 1,
+        "Strength > 0 only": 2,
+        "TAILWIND + Strength > 0": 3,
+    }
+    result["_variant_order"] = result["Variant"].map(variant_order)
+    result = result.sort_values(
+        ["Side", "Snapshot 4h", "_variant_order"],
+        ascending=[True, True, True],
+        kind="stable",
+    ).drop(columns=["_variant_order"])
+    return result.reset_index(drop=True)
+
+
 def _candidate_v2_render_matrix(summary, key_prefix, metric):
     if summary is None or summary.empty:
         st.info("No execution matrix is available for this V2 variant.")
@@ -19491,7 +19665,44 @@ def render_candidate_v2_research(retests_df):
             key="candidate_v2_market_increment",
         )
 
-    st.markdown("#### 6. Full V2 causal journal")
+    st.markdown("#### 6. Stability by causal 4h snapshot")
+    st.caption(
+        "Each causal 4h boundary is evaluated independently with the exact same "
+        "TP/SL, horizon and execution costs selected above. N is the number of "
+        "REACTION candidates in that snapshot/variant; Net, Avg, PF, WR, MFE and "
+        "MAE use resolved execution rows only. Zero-N rows are kept deliberately "
+        "so missing TAILWIND/Strength combinations are visible rather than hidden."
+    )
+    snapshot_stability = _candidate_v2_snapshot_variant_table(selected_pair)
+    if snapshot_stability.empty:
+        st.info("No causal 4h snapshot stability rows are available yet.")
+    else:
+        for stability_side in ("LONG", "SHORT"):
+            side_stability = snapshot_stability.loc[
+                snapshot_stability["Side"].astype(str).eq(stability_side)
+            ].drop(columns=["Side"]).copy()
+            if side_stability.empty:
+                continue
+            st.markdown(f"###### {stability_side}")
+            st.dataframe(
+                side_stability,
+                use_container_width=True,
+                hide_index=True,
+                key=f"candidate_v2_snapshot_stability_{stability_side.lower()}",
+            )
+
+        st.download_button(
+            "Download V2 snapshot stability CSV",
+            data=snapshot_stability.to_csv(index=False).encode("utf-8"),
+            file_name=(
+                f"candidate_v2_snapshot_stability_tp{float(selected_tp):g}_"
+                f"sl{float(selected_sl):g}_{snap_horizon}m.csv"
+            ),
+            mime="text/csv",
+            key="candidate_v2_snapshot_stability_download",
+        )
+
+    st.markdown("#### 7. Full V2 causal journal")
     show_journal = st.toggle(
         "Show/export full V2 REACTION context",
         value=False,
