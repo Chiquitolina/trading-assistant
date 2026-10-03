@@ -14844,6 +14844,739 @@ def _candidate_v1_render_extended_followup(history, key_prefix):
                     )
 
 
+
+def _candidate_v1_parse_grid_values(raw_value, default=(2.0,)):
+    """Parse a comma-separated TP/SL grid into sorted positive percentages."""
+    if isinstance(raw_value, (list, tuple, set)):
+        parts = list(raw_value)
+    else:
+        parts = str(raw_value or "").replace(";", ",").split(",")
+
+    values = []
+    for part in parts:
+        try:
+            value = float(str(part).strip())
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(value) or value <= 0:
+            continue
+        values.append(round(value, 6))
+
+    if not values:
+        values = [float(v) for v in default]
+
+    # Keep the UI responsive even if a very long list is pasted accidentally.
+    return tuple(sorted(set(values))[:20])
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _candidate_v1_execution_first_touch_grid(
+    candidate_rows,
+    tp_values,
+    sl_values,
+    horizon_min=180,
+    entry_fee_pct=0.05,
+    exit_fee_pct=0.05,
+    entry_slippage_pct=0.0,
+    exit_slippage_pct=0.0,
+    notional_usdt=100.0,
+    candle_limit=5000,
+):
+    """Chronological TP/SL first-touch research from the next causal 1m open.
+
+    Entry is the OPEN of the next consecutive 1m candle after the REACTION
+    candle closes. Every TP/SL pair is scanned candle-by-candle. If both TP and
+    SL are touched inside the same 1m candle, OHLC cannot prove the intrabar
+    order, so the row is labelled SL_AMBIGUOUS and charged as SL (conservative).
+
+    If neither barrier is touched and a complete horizon is available, the
+    trade exits at that horizon's close. Data gaps censor the path instead of
+    being bridged.
+    """
+    if candidate_rows is None or candidate_rows.empty:
+        return pd.DataFrame()
+
+    required = {"symbol", "signal", "retest_timestamp"}
+    if not required.issubset(candidate_rows.columns):
+        return pd.DataFrame()
+
+    tp_values = tuple(float(v) for v in tp_values if float(v) > 0)
+    sl_values = tuple(float(v) for v in sl_values if float(v) > 0)
+    horizon_min = max(1, int(horizon_min))
+    notional_usdt = max(0.0, float(notional_usdt))
+
+    if not tp_values or not sl_values:
+        return pd.DataFrame()
+
+    execution_cost_pct = max(
+        0.0,
+        float(entry_fee_pct)
+        + float(exit_fee_pct)
+        + float(entry_slippage_pct)
+        + float(exit_slippage_pct),
+    )
+
+    rows = []
+
+    for symbol, symbol_rows in candidate_rows.groupby("symbol", sort=False):
+        candles = load_volume_exhaustion_research_candles(
+            symbol=str(symbol),
+            timeframe="1m",
+            limit=int(candle_limit),
+        )
+        prepared = _prepare_confirmed_swing_retest_candles(candles)
+        if prepared.empty:
+            continue
+
+        timestamps = prepared["timestamp"].astype("int64").to_numpy()
+        opens = prepared["open"].astype(float).to_numpy()
+        highs = prepared["high"].astype(float).to_numpy()
+        lows = prepared["low"].astype(float).to_numpy()
+        closes = prepared["close"].astype(float).to_numpy()
+
+        segment_end = np.empty(len(timestamps), dtype=np.int64)
+        for idx in range(len(timestamps) - 1, -1, -1):
+            if (
+                idx == len(timestamps) - 1
+                or int(timestamps[idx + 1])
+                != int(timestamps[idx]) + 60_000
+            ):
+                segment_end[idx] = idx
+            else:
+                segment_end[idx] = segment_end[idx + 1]
+
+        for _, candidate in symbol_rows.iterrows():
+            try:
+                reaction_ts = int(candidate["retest_timestamp"])
+                side = str(candidate["signal"]).upper()
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if side not in {"LONG", "SHORT"}:
+                continue
+
+            entry_ts = reaction_ts + 60_000
+            start_idx = int(np.searchsorted(timestamps, entry_ts, side="left"))
+            if (
+                start_idx >= len(timestamps)
+                or int(timestamps[start_idx]) != entry_ts
+            ):
+                continue
+
+            entry_price = float(opens[start_idx])
+            if not np.isfinite(entry_price) or entry_price <= 0:
+                continue
+
+            contiguous_end = int(segment_end[start_idx])
+            max_end_idx = min(
+                contiguous_end,
+                int(start_idx + horizon_min - 1),
+            )
+            available_bars = max_end_idx - start_idx + 1
+            if available_bars <= 0:
+                continue
+
+            for tp_pct in tp_values:
+                for sl_pct in sl_values:
+                    if side == "LONG":
+                        tp_price = entry_price * (1.0 + tp_pct / 100.0)
+                        sl_price = entry_price * (1.0 - sl_pct / 100.0)
+                    else:
+                        tp_price = entry_price * (1.0 - tp_pct / 100.0)
+                        sl_price = entry_price * (1.0 + sl_pct / 100.0)
+
+                    outcome = None
+                    hit_idx = None
+                    gross_pnl_pct = np.nan
+                    exit_price = np.nan
+
+                    for idx in range(start_idx, max_end_idx + 1):
+                        high = float(highs[idx])
+                        low = float(lows[idx])
+
+                        if side == "LONG":
+                            tp_hit = high >= tp_price
+                            sl_hit = low <= sl_price
+                        else:
+                            tp_hit = low <= tp_price
+                            sl_hit = high >= sl_price
+
+                        if tp_hit and sl_hit:
+                            outcome = "SL_AMBIGUOUS"
+                            hit_idx = idx
+                            exit_price = float(sl_price)
+                            gross_pnl_pct = -float(sl_pct)
+                            break
+
+                        if sl_hit:
+                            outcome = "SL"
+                            hit_idx = idx
+                            exit_price = float(sl_price)
+                            gross_pnl_pct = -float(sl_pct)
+                            break
+
+                        if tp_hit:
+                            outcome = "TP"
+                            hit_idx = idx
+                            exit_price = float(tp_price)
+                            gross_pnl_pct = float(tp_pct)
+                            break
+
+                    path_complete = available_bars >= horizon_min
+                    if outcome is None:
+                        if path_complete:
+                            outcome = "TIME_EXIT"
+                            hit_idx = int(start_idx + horizon_min - 1)
+                            exit_price = float(closes[hit_idx])
+                            if side == "LONG":
+                                gross_pnl_pct = (
+                                    exit_price / entry_price - 1.0
+                                ) * 100.0
+                            else:
+                                gross_pnl_pct = (
+                                    1.0 - exit_price / entry_price
+                                ) * 100.0
+                        else:
+                            outcome = "PENDING"
+
+                    exit_ts = (
+                        int(timestamps[hit_idx])
+                        if hit_idx is not None
+                        else np.nan
+                    )
+                    first_touch_min = (
+                        float(
+                            (
+                                int(timestamps[hit_idx])
+                                - int(entry_ts)
+                            ) / 60_000.0
+                        )
+                        if hit_idx is not None
+                        else np.nan
+                    )
+
+                    excursion_end_idx = (
+                        int(hit_idx)
+                        if hit_idx is not None
+                        else int(max_end_idx)
+                    )
+                    path_high = float(
+                        np.nanmax(highs[start_idx : excursion_end_idx + 1])
+                    )
+                    path_low = float(
+                        np.nanmin(lows[start_idx : excursion_end_idx + 1])
+                    )
+                    if side == "LONG":
+                        mfe_pct = max(
+                            0.0,
+                            (path_high / entry_price - 1.0) * 100.0,
+                        )
+                        mae_pct = max(
+                            0.0,
+                            (1.0 - path_low / entry_price) * 100.0,
+                        )
+                    else:
+                        mfe_pct = max(
+                            0.0,
+                            (1.0 - path_low / entry_price) * 100.0,
+                        )
+                        mae_pct = max(
+                            0.0,
+                            (path_high / entry_price - 1.0) * 100.0,
+                        )
+
+                    resolved = outcome != "PENDING"
+                    net_pnl_pct = (
+                        float(gross_pnl_pct) - execution_cost_pct
+                        if resolved and pd.notna(gross_pnl_pct)
+                        else np.nan
+                    )
+                    net_pnl_usdt = (
+                        notional_usdt * float(net_pnl_pct) / 100.0
+                        if pd.notna(net_pnl_pct)
+                        else np.nan
+                    )
+
+                    rows.append({
+                        "candidate_v1_event_key": candidate.get(
+                            "candidate_v1_event_key"
+                        ),
+                        "candidate_v1_cohort": candidate.get(
+                            "candidate_v1_cohort",
+                            "FORWARD",
+                        ),
+                        "symbol": str(symbol),
+                        "side": side,
+                        "reaction_timestamp": int(reaction_ts),
+                        "entry_timestamp": int(entry_ts),
+                        "entry_price": float(entry_price),
+                        "TP %": float(tp_pct),
+                        "SL %": float(sl_pct),
+                        "tp_price": float(tp_price),
+                        "sl_price": float(sl_price),
+                        "Outcome": outcome,
+                        "first_touch_min": first_touch_min,
+                        "exit_timestamp": exit_ts,
+                        "exit_price": exit_price,
+                        "gross_pnl_pct": gross_pnl_pct,
+                        "execution_cost_pct": (
+                            execution_cost_pct if resolved else np.nan
+                        ),
+                        "net_pnl_pct": net_pnl_pct,
+                        "net_pnl_usdt": net_pnl_usdt,
+                        "mfe_until_exit_pct": float(mfe_pct),
+                        "mae_until_exit_pct": float(mae_pct),
+                        "observed_bars": int(available_bars),
+                        "path_complete": bool(path_complete),
+                    })
+
+    return pd.DataFrame(rows)
+
+
+def _candidate_v1_execution_grid_summary(path_results):
+    if path_results is None or path_results.empty:
+        return pd.DataFrame()
+
+    summary_rows = []
+    for (tp_pct, sl_pct), group in path_results.groupby(
+        ["TP %", "SL %"],
+        sort=True,
+    ):
+        resolved = group.loc[group["Outcome"].ne("PENDING")].copy()
+        if resolved.empty:
+            summary_rows.append({
+                "TP %": float(tp_pct),
+                "SL %": float(sl_pct),
+                "N": int(len(group)),
+                "Resolved": 0,
+                "Pending": int(len(group)),
+                "TP": 0,
+                "SL": 0,
+                "Ambiguous": 0,
+                "Time exit": 0,
+                "Win rate %": np.nan,
+                "TP rate %": np.nan,
+                "Gross PnL % pts": np.nan,
+                "Execution cost % pts": np.nan,
+                "Net PnL % pts": np.nan,
+                "Avg net/trade %": np.nan,
+                "Profit factor": np.nan,
+                "Max drawdown % pts": np.nan,
+                "Net PnL USDT": np.nan,
+            })
+            continue
+
+        net = pd.to_numeric(
+            resolved["net_pnl_pct"],
+            errors="coerce",
+        ).fillna(0.0)
+        gross = pd.to_numeric(
+            resolved["gross_pnl_pct"],
+            errors="coerce",
+        ).fillna(0.0)
+        cost = pd.to_numeric(
+            resolved["execution_cost_pct"],
+            errors="coerce",
+        ).fillna(0.0)
+        net_usdt = pd.to_numeric(
+            resolved["net_pnl_usdt"],
+            errors="coerce",
+        ).fillna(0.0)
+
+        wins = net[net > 0]
+        losses = net[net < 0]
+        profit_factor = (
+            float(wins.sum() / abs(losses.sum()))
+            if not losses.empty and abs(float(losses.sum())) > 1e-12
+            else (np.inf if not wins.empty else np.nan)
+        )
+
+        chronological = resolved.copy()
+        chronological["_ts"] = pd.to_numeric(
+            chronological["entry_timestamp"],
+            errors="coerce",
+        )
+        chronological = chronological.sort_values(
+            ["_ts", "symbol"],
+            kind="stable",
+        )
+        pnl_path = pd.to_numeric(
+            chronological["net_pnl_pct"],
+            errors="coerce",
+        ).fillna(0.0).to_numpy(dtype=float)
+        cumulative = np.cumsum(pnl_path)
+        if len(cumulative):
+            running_peak = np.maximum.accumulate(
+                np.concatenate(([0.0], cumulative))
+            )[1:]
+            drawdown = cumulative - running_peak
+            max_drawdown = max(0.0, -float(np.min(drawdown)))
+        else:
+            max_drawdown = np.nan
+
+        outcomes = resolved["Outcome"].astype(str)
+        tp_count = int(outcomes.eq("TP").sum())
+        ambiguous_count = int(outcomes.eq("SL_AMBIGUOUS").sum())
+        sl_count = int(outcomes.eq("SL").sum())
+        time_exit_count = int(outcomes.eq("TIME_EXIT").sum())
+
+        summary_rows.append({
+            "TP %": float(tp_pct),
+            "SL %": float(sl_pct),
+            "N": int(len(group)),
+            "Resolved": int(len(resolved)),
+            "Pending": int(group["Outcome"].eq("PENDING").sum()),
+            "TP": tp_count,
+            "SL": sl_count,
+            "Ambiguous": ambiguous_count,
+            "Time exit": time_exit_count,
+            "Win rate %": round(
+                float(net.gt(0).mean() * 100.0),
+                3,
+            ),
+            "TP rate %": round(
+                tp_count / len(resolved) * 100.0,
+                3,
+            ),
+            "Gross PnL % pts": round(float(gross.sum()), 4),
+            "Execution cost % pts": round(float(cost.sum()), 4),
+            "Net PnL % pts": round(float(net.sum()), 4),
+            "Avg net/trade %": round(float(net.mean()), 5),
+            "Profit factor": (
+                round(float(profit_factor), 4)
+                if np.isfinite(profit_factor)
+                else profit_factor
+            ),
+            "Max drawdown % pts": round(float(max_drawdown), 4),
+            "Net PnL USDT": round(float(net_usdt.sum()), 4),
+        })
+
+    return pd.DataFrame(summary_rows)
+
+
+def _candidate_v1_render_execution_matrix(history, key_prefix):
+    """Configurable execution-research matrix for persisted Candidate V1 rows."""
+    if history is None or history.empty:
+        return
+
+    st.markdown("#### 🧮 Execution matrix · chronological TP/SL first-touch")
+    st.caption(
+        "Research execution starts at the OPEN of the next consecutive 1m candle "
+        "after REACTION becomes known. TP and SL are checked chronologically on "
+        "every 1m candle. If both are touched in the same candle, intrabar order "
+        "is unknowable from OHLC: it is labelled SL_AMBIGUOUS and charged as SL. "
+        "If neither is touched, a complete horizon exits at its closing price; "
+        "gaps/incomplete paths remain PENDING. Candidate V1 itself is not changed."
+    )
+
+    scope_c1, scope_c2, scope_c3 = st.columns(3)
+    side_scope = scope_c1.selectbox(
+        "Side",
+        options=["TOTAL", "LONG", "SHORT"],
+        index=0,
+        key=f"{key_prefix}_side",
+    )
+    cohort_scope = scope_c2.selectbox(
+        "Cohort",
+        options=["FORWARD", "TOTAL", "DISCOVERY"],
+        index=0,
+        key=f"{key_prefix}_cohort",
+    )
+    horizon_min = scope_c3.selectbox(
+        "Execution horizon",
+        options=[60, 120, 180, 240, 360],
+        index=2,
+        format_func=lambda value: f"{value} min",
+        key=f"{key_prefix}_horizon",
+    )
+
+    grid_c1, grid_c2 = st.columns(2)
+    tp_raw = grid_c1.text_input(
+        "TP grid %",
+        value="0.5,1.0,1.5,2.0,2.5,3.0",
+        key=f"{key_prefix}_tp_grid",
+    )
+    sl_raw = grid_c2.text_input(
+        "SL grid %",
+        value="0.5,1.0,1.5,2.0,2.5,3.0",
+        key=f"{key_prefix}_sl_grid",
+    )
+    tp_values = _candidate_v1_parse_grid_values(tp_raw, default=(2.0,))
+    sl_values = _candidate_v1_parse_grid_values(sl_raw, default=(2.0,))
+
+    cost_c1, cost_c2, cost_c3, cost_c4, cost_c5 = st.columns(5)
+    entry_fee_pct = cost_c1.number_input(
+        "Entry fee %",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.05,
+        step=0.01,
+        format="%.3f",
+        key=f"{key_prefix}_entry_fee",
+    )
+    exit_fee_pct = cost_c2.number_input(
+        "Exit fee %",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.05,
+        step=0.01,
+        format="%.3f",
+        key=f"{key_prefix}_exit_fee",
+    )
+    entry_slippage_pct = cost_c3.number_input(
+        "Entry slippage %",
+        min_value=0.0,
+        max_value=2.0,
+        value=0.0,
+        step=0.01,
+        format="%.3f",
+        key=f"{key_prefix}_entry_slippage",
+    )
+    exit_slippage_pct = cost_c4.number_input(
+        "Exit slippage %",
+        min_value=0.0,
+        max_value=2.0,
+        value=0.0,
+        step=0.01,
+        format="%.3f",
+        key=f"{key_prefix}_exit_slippage",
+    )
+    notional_usdt = cost_c5.number_input(
+        "Notional / trade USDT",
+        min_value=1.0,
+        max_value=1_000_000.0,
+        value=100.0,
+        step=10.0,
+        key=f"{key_prefix}_notional",
+    )
+
+    subset = history.copy()
+    side_column = (
+        "Candidate side"
+        if "Candidate side" in subset.columns
+        else "signal"
+    )
+    if side_scope != "TOTAL" and side_column in subset.columns:
+        subset = subset.loc[
+            subset[side_column].astype(str).str.upper().eq(side_scope)
+        ].copy()
+    if cohort_scope != "TOTAL" and "candidate_v1_cohort" in subset.columns:
+        subset = subset.loc[
+            subset["candidate_v1_cohort"].astype(str).eq(cohort_scope)
+        ].copy()
+
+    if subset.empty:
+        st.info("No Candidate V1 rows match this side/cohort selection.")
+        return
+
+    path_results = _candidate_v1_execution_first_touch_grid(
+        candidate_rows=subset,
+        tp_values=tp_values,
+        sl_values=sl_values,
+        horizon_min=int(horizon_min),
+        entry_fee_pct=float(entry_fee_pct),
+        exit_fee_pct=float(exit_fee_pct),
+        entry_slippage_pct=float(entry_slippage_pct),
+        exit_slippage_pct=float(exit_slippage_pct),
+        notional_usdt=float(notional_usdt),
+        candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
+    )
+    if path_results.empty:
+        st.warning(
+            "No contiguous 1m execution paths are available for the selected "
+            "Candidate rows. Older rows can become unavailable after the 1m "
+            "research history rolls forward."
+        )
+        return
+
+    summary = _candidate_v1_execution_grid_summary(path_results)
+    if summary.empty:
+        return
+
+    metric_options = [
+        "Net PnL % pts",
+        "Net PnL USDT",
+        "Avg net/trade %",
+        "Profit factor",
+        "Win rate %",
+        "TP rate %",
+        "Max drawdown % pts",
+        "Resolved",
+    ]
+    metric = st.selectbox(
+        "Matrix metric",
+        options=metric_options,
+        index=0,
+        key=f"{key_prefix}_metric",
+    )
+
+    matrix = summary.pivot(
+        index="SL %",
+        columns="TP %",
+        values=metric,
+    ).sort_index(ascending=True)
+    matrix.index = [f"SL {float(v):g}%" for v in matrix.index]
+    matrix.columns = [f"TP {float(v):g}%" for v in matrix.columns]
+    st.dataframe(
+        matrix,
+        use_container_width=True,
+        key=f"{key_prefix}_matrix",
+    )
+    st.caption(
+        "Net PnL % pts is additive across equal-notional trades at x1; it is "
+        "not compounded account return. Execution cost = entry fee + exit fee "
+        "+ configured entry/exit slippage for every resolved trade."
+    )
+
+    pair_c1, pair_c2 = st.columns(2)
+    tp_list = list(tp_values)
+    sl_list = list(sl_values)
+    tp_default = min(range(len(tp_list)), key=lambda i: abs(tp_list[i] - 2.0))
+    sl_default = min(range(len(sl_list)), key=lambda i: abs(sl_list[i] - 2.0))
+    selected_tp = pair_c1.selectbox(
+        "Inspect TP",
+        options=tp_list,
+        index=tp_default,
+        format_func=lambda value: f"{value:g}%",
+        key=f"{key_prefix}_inspect_tp",
+    )
+    selected_sl = pair_c2.selectbox(
+        "Inspect SL",
+        options=sl_list,
+        index=sl_default,
+        format_func=lambda value: f"{value:g}%",
+        key=f"{key_prefix}_inspect_sl",
+    )
+
+    selected_summary = summary.loc[
+        np.isclose(summary["TP %"], float(selected_tp))
+        & np.isclose(summary["SL %"], float(selected_sl))
+    ]
+    selected_paths = path_results.loc[
+        np.isclose(path_results["TP %"], float(selected_tp))
+        & np.isclose(path_results["SL %"], float(selected_sl))
+    ].copy()
+
+    if selected_summary.empty or selected_paths.empty:
+        return
+
+    row = selected_summary.iloc[0]
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Resolved", f"{int(row['Resolved'])}/{int(row['N'])}")
+    m2.metric("TP", int(row["TP"]))
+    m3.metric(
+        "SL",
+        int(row["SL"] + row["Ambiguous"]),
+        delta=(
+            f"{int(row['Ambiguous'])} same-candle ambiguous"
+            if int(row["Ambiguous"])
+            else None
+        ),
+    )
+    m4.metric("Time exit", int(row["Time exit"]))
+    m5.metric("Net PnL", f"{float(row['Net PnL % pts']):+.2f} pts")
+    m6.metric("Net USDT", f"{float(row['Net PnL USDT']):+.2f}")
+
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("Win rate", f"{float(row['Win rate %']):.1f}%")
+    s2.metric("TP rate", f"{float(row['TP rate %']):.1f}%")
+    pf = row["Profit factor"]
+    s3.metric(
+        "Profit factor",
+        "∞" if pd.notna(pf) and not np.isfinite(float(pf)) else (
+            f"{float(pf):.2f}" if pd.notna(pf) else "—"
+        ),
+    )
+    s4.metric("Avg net/trade", f"{float(row['Avg net/trade %']):+.3f}%")
+    s5.metric("Max DD", f"{float(row['Max drawdown % pts']):.2f} pts")
+
+    selected_paths["Reaction"] = (
+        pd.to_datetime(
+            pd.to_numeric(
+                selected_paths["reaction_timestamp"],
+                errors="coerce",
+            ),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+        .dt.strftime("%Y-%m-%d %H:%M")
+    )
+    selected_paths["Entry"] = (
+        pd.to_datetime(
+            pd.to_numeric(
+                selected_paths["entry_timestamp"],
+                errors="coerce",
+            ),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+        .dt.strftime("%Y-%m-%d %H:%M")
+    )
+
+    detail = selected_paths[[
+        "candidate_v1_cohort",
+        "symbol",
+        "side",
+        "Reaction",
+        "Entry",
+        "entry_price",
+        "Outcome",
+        "first_touch_min",
+        "gross_pnl_pct",
+        "execution_cost_pct",
+        "net_pnl_pct",
+        "net_pnl_usdt",
+        "mfe_until_exit_pct",
+        "mae_until_exit_pct",
+        "observed_bars",
+    ]].copy()
+    detail = detail.rename(columns={
+        "candidate_v1_cohort": "Cohort",
+        "symbol": "Symbol",
+        "side": "Side",
+        "entry_price": "Entry price",
+        "first_touch_min": "First touch min",
+        "gross_pnl_pct": "Gross PnL %",
+        "execution_cost_pct": "Costs %",
+        "net_pnl_pct": "Net PnL %",
+        "net_pnl_usdt": "Net PnL USDT",
+        "mfe_until_exit_pct": "MFE until exit %",
+        "mae_until_exit_pct": "MAE until exit %",
+        "observed_bars": "Observed 1m bars",
+    })
+    detail = detail.sort_values(
+        ["Reaction", "Symbol"],
+        ascending=[False, True],
+        kind="stable",
+    )
+
+    st.markdown(
+        f"##### Trade-by-trade · TP {float(selected_tp):g}% / "
+        f"SL {float(selected_sl):g}%"
+    )
+    st.dataframe(
+        detail,
+        use_container_width=True,
+        hide_index=True,
+        key=f"{key_prefix}_detail",
+    )
+    st.download_button(
+        "Download selected TP/SL trade paths CSV",
+        data=detail.to_csv(index=False).encode("utf-8"),
+        file_name=(
+            f"candidate_v1_execution_"
+            f"tp{float(selected_tp):g}_sl{float(selected_sl):g}_"
+            f"{int(horizon_min)}m.csv"
+        ),
+        mime="text/csv",
+        key=f"{key_prefix}_download",
+    )
+
+
 def render_candidate_v1_total_monitor():
     """Combined persisted view of the frozen SHORT + LONG Candidate V1 sets."""
     frames = []
@@ -14899,6 +15632,11 @@ def render_candidate_v1_total_monitor():
     _candidate_v1_render_extended_followup(
         history,
         key_prefix="candidate_v1_total_followup",
+    )
+
+    _candidate_v1_render_execution_matrix(
+        history,
+        key_prefix="candidate_v1_total_execution",
     )
 
     st.markdown("#### Side comparison")
@@ -16084,10 +16822,6 @@ def render_candidate_v1_frozen_monitor(
         key_prefix="candidate_v1_short_followup",
     )
 
-    _candidate_v1_render_extended_followup(
-        history,
-        key_prefix="candidate_v1_long_followup",
-    )
 
     st.caption(
         "MAE-before-2% is strict: for HITs it stops BEFORE the 1m candle that "
@@ -17716,6 +18450,11 @@ def render_candidate_v1_long_frozen_monitor(
             if forward_pending
             else None
         ),
+    )
+
+    _candidate_v1_render_extended_followup(
+        history,
+        key_prefix="candidate_v1_long_followup",
     )
 
     st.caption(
