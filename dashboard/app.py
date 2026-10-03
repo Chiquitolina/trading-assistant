@@ -81,14 +81,9 @@ from dashboard.analytics.candidate_v1_fast_analysis import (
     refresh_path_store as candidate_v1_fast_refresh_path_store,
 )
 
-# Streamlit fragments keep Candidate controls from rerunning the entire
-# Volume Exhaustion page. Fallback preserves compatibility with older builds.
-_candidate_fragment = getattr(st, "fragment", None)
-if _candidate_fragment is None:
-    def _candidate_fragment(func=None, **_kwargs):
-        if func is not None:
-            return func
-        return lambda wrapped: wrapped
+# Candidate monitor functions intentionally are NOT decorated with st.fragment.
+# They render inside render_volume_exhaustion_live(), which is already a fragment.
+# Nesting Streamlit fragments can duplicate widget/form IDs during fragment reruns.
 
 TRADES_FILE = BASE_DIR / "trades.csv"
 VOLUME_EXHAUSTION_EVENTS_FILE = (
@@ -15627,7 +15622,6 @@ def _candidate_v1_read_history_csv_cached(path_text, mtime_ns):
     return pd.read_csv(path_text)
 
 
-@_candidate_fragment
 def render_candidate_v1_total_monitor():
     """Combined persisted view of the frozen SHORT + LONG Candidate V1 sets."""
     frames = []
@@ -16703,7 +16697,6 @@ def _candidate_v1_persist_history(current):
     return merged
 
 
-@_candidate_fragment
 def render_candidate_v1_frozen_monitor(
     retests_df,
     config,
@@ -18319,7 +18312,6 @@ def _candidate_v1_long_persist_history(current):
     return merged
 
 
-@_candidate_fragment
 def render_candidate_v1_long_frozen_monitor(
     retests_df,
     config,
