@@ -15305,9 +15305,539 @@ def _candidate_v1_regime_performance_table(frame, bucket_column, bucket_order=No
     return pd.DataFrame(rows)
 
 
+
+def _candidate_v1_execution_slice_stats(frame):
+    """Compact execution stats for one already-selected TP/SL slice."""
+    if frame is None or frame.empty:
+        return {
+            "Candidates": 0,
+            "Resolved": 0,
+            "Pending": 0,
+            "TP": 0,
+            "SL": 0,
+            "Time exit": 0,
+            "Net pts": np.nan,
+            "Avg %": np.nan,
+            "WR %": np.nan,
+            "PF": np.nan,
+        }
+
+    work = frame.copy()
+    net = pd.to_numeric(
+        work.get("net_pnl_pct"),
+        errors="coerce",
+    )
+    outcome = work.get(
+        "Outcome",
+        pd.Series("PENDING", index=work.index),
+    ).fillna("PENDING").astype(str)
+
+    resolved_mask = outcome.ne("PENDING") & net.notna()
+    resolved = work.loc[resolved_mask].copy()
+    resolved_net = pd.to_numeric(
+        resolved.get("net_pnl_pct"),
+        errors="coerce",
+    ).dropna()
+
+    pf = _candidate_v1_pf_from_net(resolved_net)
+    tp_count = int(
+        resolved.get(
+            "Outcome",
+            pd.Series("", index=resolved.index),
+        )
+        .astype(str)
+        .eq("TP")
+        .sum()
+    )
+    sl_count = int(
+        resolved.get(
+            "Outcome",
+            pd.Series("", index=resolved.index),
+        )
+        .astype(str)
+        .isin(["SL", "SL_AMBIGUOUS"])
+        .sum()
+    )
+    time_exit_count = int(
+        resolved.get(
+            "Outcome",
+            pd.Series("", index=resolved.index),
+        )
+        .astype(str)
+        .eq("TIME_EXIT")
+        .sum()
+    )
+
+    return {
+        "Candidates": int(
+            work["candidate_v1_event_key"]
+            .astype(str)
+            .nunique()
+        )
+        if "candidate_v1_event_key" in work.columns
+        else int(len(work)),
+        "Resolved": int(len(resolved_net)),
+        "Pending": int(outcome.eq("PENDING").sum()),
+        "TP": tp_count,
+        "SL": sl_count,
+        "Time exit": time_exit_count,
+        "Net pts": (
+            round(float(resolved_net.sum()), 4)
+            if len(resolved_net)
+            else np.nan
+        ),
+        "Avg %": (
+            round(float(resolved_net.mean()), 4)
+            if len(resolved_net)
+            else np.nan
+        ),
+        "WR %": (
+            round(
+                float(
+                    resolved_net.gt(0).mean()
+                    * 100.0
+                ),
+                2,
+            )
+            if len(resolved_net)
+            else np.nan
+        ),
+        "PF": (
+            round(float(pf), 3)
+            if pd.notna(pf)
+            and np.isfinite(float(pf))
+            else (
+                float("inf")
+                if pd.notna(pf)
+                else np.nan
+            )
+        ),
+    }
+
+
+def _candidate_v1_market_symbol_quadrant_table(
+    frame,
+    include_mixed=False,
+):
+    """Market alignment × symbol-vs-BTC alignment, split by side."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    rows = []
+    market_states = (
+        ["TAILWIND", "MIXED", "HEADWIND"]
+        if include_mixed
+        else ["TAILWIND", "HEADWIND"]
+    )
+
+    for side_name in ("LONG", "SHORT"):
+        side_frame = frame.loc[
+            frame.get(
+                "side",
+                pd.Series("", index=frame.index),
+            )
+            .astype(str)
+            .str.upper()
+            .eq(side_name)
+        ].copy()
+
+        for market_state in market_states:
+            for symbol_state in (
+                "ALIGNED",
+                "AGAINST",
+            ):
+                subset = side_frame.loc[
+                    side_frame[
+                        "Market alignment"
+                    ].astype(str).eq(
+                        market_state
+                    )
+                    & side_frame[
+                        "Symbol-side alignment"
+                    ].astype(str).eq(
+                        symbol_state
+                    )
+                ].copy()
+
+                if subset.empty:
+                    continue
+
+                stats = (
+                    _candidate_v1_execution_slice_stats(
+                        subset
+                    )
+                )
+                rows.append({
+                    "Side": side_name,
+                    "Market": market_state,
+                    "Symbol vs BTC": (
+                        symbol_state
+                    ),
+                    **stats,
+                })
+
+    return pd.DataFrame(rows)
+
+
+def _candidate_v1_controlled_contrast_table(frame):
+    """Controlled comparisons so obvious market drift is not mistaken for edge."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    rows = []
+
+    def add_contrast(
+        side_name,
+        contrast,
+        hold_constant,
+        a_label,
+        a_frame,
+        b_label,
+        b_frame,
+    ):
+        stats_a = (
+            _candidate_v1_execution_slice_stats(
+                a_frame
+            )
+        )
+        stats_b = (
+            _candidate_v1_execution_slice_stats(
+                b_frame
+            )
+        )
+
+        if (
+            stats_a["Candidates"] == 0
+            and stats_b["Candidates"] == 0
+        ):
+            return
+
+        avg_a = pd.to_numeric(
+            stats_a["Avg %"],
+            errors="coerce",
+        )
+        avg_b = pd.to_numeric(
+            stats_b["Avg %"],
+            errors="coerce",
+        )
+
+        delta_avg = (
+            float(avg_a) - float(avg_b)
+            if pd.notna(avg_a)
+            and pd.notna(avg_b)
+            else np.nan
+        )
+
+        rows.append({
+            "Side": side_name,
+            "Contrast": contrast,
+            "Held constant": hold_constant,
+            "A": a_label,
+            "A resolved": stats_a["Resolved"],
+            "A Avg %": stats_a["Avg %"],
+            "A PF": stats_a["PF"],
+            "B": b_label,
+            "B resolved": stats_b["Resolved"],
+            "B Avg %": stats_b["Avg %"],
+            "B PF": stats_b["PF"],
+            "Δ Avg A-B %": (
+                round(delta_avg, 4)
+                if pd.notna(delta_avg)
+                else np.nan
+            ),
+        })
+
+    for side_name in ("LONG", "SHORT"):
+        side_frame = frame.loc[
+            frame.get(
+                "side",
+                pd.Series("", index=frame.index),
+            )
+            .astype(str)
+            .str.upper()
+            .eq(side_name)
+        ].copy()
+
+        # Does symbol relative strength add information after
+        # holding the broad market regime constant?
+        for market_state in (
+            "TAILWIND",
+            "HEADWIND",
+        ):
+            market_frame = side_frame.loc[
+                side_frame[
+                    "Market alignment"
+                ].astype(str).eq(
+                    market_state
+                )
+            ]
+
+            add_contrast(
+                side_name=side_name,
+                contrast=(
+                    "Symbol alignment effect"
+                ),
+                hold_constant=(
+                    f"Market={market_state}"
+                ),
+                a_label="ALIGNED",
+                a_frame=market_frame.loc[
+                    market_frame[
+                        "Symbol-side alignment"
+                    ].astype(str).eq(
+                        "ALIGNED"
+                    )
+                ],
+                b_label="AGAINST",
+                b_frame=market_frame.loc[
+                    market_frame[
+                        "Symbol-side alignment"
+                    ].astype(str).eq(
+                        "AGAINST"
+                    )
+                ],
+            )
+
+        # Does broad market regime still matter after holding
+        # symbol relative strength constant?
+        for symbol_state in (
+            "ALIGNED",
+            "AGAINST",
+        ):
+            symbol_frame = side_frame.loc[
+                side_frame[
+                    "Symbol-side alignment"
+                ].astype(str).eq(
+                    symbol_state
+                )
+            ]
+
+            add_contrast(
+                side_name=side_name,
+                contrast=(
+                    "Market alignment effect"
+                ),
+                hold_constant=(
+                    f"Symbol={symbol_state}"
+                ),
+                a_label="TAILWIND",
+                a_frame=symbol_frame.loc[
+                    symbol_frame[
+                        "Market alignment"
+                    ].astype(str).eq(
+                        "TAILWIND"
+                    )
+                ],
+                b_label="HEADWIND",
+                b_frame=symbol_frame.loc[
+                    symbol_frame[
+                        "Market alignment"
+                    ].astype(str).eq(
+                        "HEADWIND"
+                    )
+                ],
+            )
+
+    return pd.DataFrame(rows)
+
+
+def _candidate_v1_breadth_residual_cross_table(
+    frame,
+    side_scope="SHORT",
+):
+    """Occupied breadth × symbol residual cells only; no decorative heatmap."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    work = frame.copy()
+
+    if side_scope in {"LONG", "SHORT"}:
+        work = work.loc[
+            work.get(
+                "side",
+                pd.Series("", index=work.index),
+            )
+            .astype(str)
+            .str.upper()
+            .eq(side_scope)
+        ].copy()
+
+    breadth_order = [
+        "<40%",
+        "40–50%",
+        "50–60%",
+        "60–70%",
+        ">=70%",
+    ]
+    residual_order = [
+        "<= -1%",
+        "-1% to 0%",
+        "0% to +1%",
+        ">= +1%",
+    ]
+
+    rows = []
+    for breadth_bucket in breadth_order:
+        for residual_bucket in residual_order:
+            subset = work.loc[
+                work[
+                    "Breadth bucket"
+                ].astype(str).eq(
+                    breadth_bucket
+                )
+                & work[
+                    "Symbol vs BTC"
+                ].astype(str).eq(
+                    residual_bucket
+                )
+            ].copy()
+
+            if subset.empty:
+                continue
+
+            stats = (
+                _candidate_v1_execution_slice_stats(
+                    subset
+                )
+            )
+            rows.append({
+                "Breadth": breadth_bucket,
+                "Symbol vs BTC": (
+                    residual_bucket
+                ),
+                **stats,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def _candidate_v1_quadrant_cohort_table(frame):
+    """Discovery/Forward robustness for the same 2×2 structural cells."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    cohort_column = "candidate_v1_cohort"
+    if cohort_column not in frame.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for cohort in (
+        "DISCOVERY",
+        "FORWARD",
+    ):
+        cohort_frame = frame.loc[
+            frame[cohort_column]
+            .astype(str)
+            .str.upper()
+            .eq(cohort)
+        ].copy()
+
+        if cohort_frame.empty:
+            continue
+
+        quadrants = (
+            _candidate_v1_market_symbol_quadrant_table(
+                cohort_frame,
+                include_mixed=False,
+            )
+        )
+
+        if quadrants.empty:
+            continue
+
+        quadrants.insert(
+            0,
+            "Cohort",
+            cohort,
+        )
+        rows.append(quadrants)
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.concat(
+        rows,
+        ignore_index=True,
+        sort=False,
+    )
+
+
+def _candidate_v1_context_overlap_table(frame):
+    """Counts whether BTC direction and breadth are giving independent states."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    work = frame.copy()
+    required = {
+        "candidate_v1_event_key",
+        "BTC 4h",
+        "Breadth bucket",
+    }
+    if not required.issubset(work.columns):
+        return pd.DataFrame()
+
+    unique = work.drop_duplicates(
+        "candidate_v1_event_key"
+    )
+    overlap = (
+        unique.groupby(
+            [
+                "BTC 4h",
+                "Breadth bucket",
+            ],
+            dropna=False,
+        )
+        .size()
+        .reset_index(name="Candidates")
+        .sort_values(
+            "Candidates",
+            ascending=False,
+        )
+        .reset_index(drop=True)
+    )
+    return overlap
+
 def _candidate_v1_regime_filter_mask(frame, label):
     if label == "ALL causal contexts":
         return pd.Series(True, index=frame.index)
+
+    combined_filters = {
+        "Market TAILWIND + Symbol aligned": (
+            "TAILWIND",
+            "ALIGNED",
+        ),
+        "Market TAILWIND + Symbol against": (
+            "TAILWIND",
+            "AGAINST",
+        ),
+        "Market HEADWIND + Symbol aligned": (
+            "HEADWIND",
+            "ALIGNED",
+        ),
+        "Market HEADWIND + Symbol against": (
+            "HEADWIND",
+            "AGAINST",
+        ),
+    }
+    if label in combined_filters:
+        market_state, symbol_state = (
+            combined_filters[label]
+        )
+        return (
+            frame.get(
+                "Market alignment",
+                pd.Series("", index=frame.index),
+            )
+            .astype(str)
+            .eq(market_state)
+            & frame.get(
+                "Symbol-side alignment",
+                pd.Series("", index=frame.index),
+            )
+            .astype(str)
+            .eq(symbol_state)
+        )
+
     mapping = {
         "Breadth <40%": ("Breadth bucket", "<40%"),
         "Breadth 40–50%": ("Breadth bucket", "40–50%"),
@@ -15440,6 +15970,188 @@ def _candidate_v1_render_market_regime_analysis(
     else:
         st.dataframe(performance, use_container_width=True, hide_index=True)
 
+    st.markdown("##### Market × symbol controlled analysis")
+    st.caption(
+        "This is the important cross-check: it separates broad market drift "
+        "from the symbol's own relative strength versus BTC. It uses the exact "
+        "same selected TP/SL pair and execution costs as the frozen matrix."
+    )
+
+    min_resolved = st.number_input(
+        "Minimum resolved trades to mark a cell as readable",
+        min_value=1,
+        max_value=100,
+        value=3,
+        step=1,
+        key=f"{key_prefix}_cross_min_resolved",
+    )
+
+    quadrants = _candidate_v1_market_symbol_quadrant_table(
+        selected_context,
+        include_mixed=False,
+    )
+    if quadrants.empty:
+        st.info(
+            "No occupied TAILWIND/HEADWIND × ALIGNED/AGAINST "
+            "quadrants are available yet."
+        )
+    else:
+        quadrants = quadrants.copy()
+        quadrants["Sample"] = np.where(
+            pd.to_numeric(
+                quadrants["Resolved"],
+                errors="coerce",
+            ).fillna(0).ge(
+                int(min_resolved)
+            ),
+            "READABLE",
+            (
+                "<"
+                + str(int(min_resolved))
+                + " resolved"
+            ),
+        )
+        st.dataframe(
+            quadrants,
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_market_symbol_quadrants",
+        )
+        st.download_button(
+            "Download market × symbol quadrants CSV",
+            data=quadrants.to_csv(
+                index=False
+            ).encode("utf-8"),
+            file_name=(
+                "candidate_v1_market_symbol_quadrants_"
+                f"tp{float(selected_tp):g}_"
+                f"sl{float(selected_sl):g}_"
+                f"{int(snap_horizon)}m.csv"
+            ),
+            mime="text/csv",
+            key=f"{key_prefix}_quadrant_download",
+        )
+
+    contrasts = _candidate_v1_controlled_contrast_table(
+        selected_context
+    )
+    if not contrasts.empty:
+        st.markdown("###### Controlled contrasts")
+        st.caption(
+            "Symbol effect holds Market alignment constant. "
+            "Market effect holds Symbol alignment constant. "
+            "Δ Avg A-B is descriptive; tiny samples are not treated as proof."
+        )
+        st.dataframe(
+            contrasts,
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_controlled_contrasts",
+        )
+
+    with st.expander(
+        "Breadth × symbol residual details",
+        expanded=False,
+    ):
+        breadth_side = st.selectbox(
+            "Side for breadth × residual cross",
+            options=["SHORT", "LONG", "TOTAL"],
+            index=0,
+            key=f"{key_prefix}_breadth_residual_side",
+        )
+        breadth_residual = (
+            _candidate_v1_breadth_residual_cross_table(
+                selected_context,
+                side_scope=breadth_side,
+            )
+        )
+        if breadth_residual.empty:
+            st.info(
+                "No occupied breadth × symbol-residual cells "
+                "for this selection."
+            )
+        else:
+            breadth_residual["Sample"] = np.where(
+                pd.to_numeric(
+                    breadth_residual["Resolved"],
+                    errors="coerce",
+                ).fillna(0).ge(
+                    int(min_resolved)
+                ),
+                "READABLE",
+                (
+                    "<"
+                    + str(int(min_resolved))
+                    + " resolved"
+                ),
+            )
+            st.dataframe(
+                breadth_residual,
+                use_container_width=True,
+                hide_index=True,
+                key=f"{key_prefix}_breadth_residual_table",
+            )
+
+    cohort_cross = _candidate_v1_quadrant_cohort_table(
+        selected_context
+    )
+    with st.expander(
+        "Discovery vs Forward robustness",
+        expanded=False,
+    ):
+        if cohort_cross.empty:
+            st.caption(
+                "This matrix snapshot contains only one cohort. "
+                "Set Cohort = TOTAL and recalculate if you want "
+                "Discovery and Forward compared under the same TP/SL pair."
+            )
+        else:
+            cohort_cross["Sample"] = np.where(
+                pd.to_numeric(
+                    cohort_cross["Resolved"],
+                    errors="coerce",
+                ).fillna(0).ge(
+                    int(min_resolved)
+                ),
+                "READABLE",
+                (
+                    "<"
+                    + str(int(min_resolved))
+                    + " resolved"
+                ),
+            )
+            st.dataframe(
+                cohort_cross,
+                use_container_width=True,
+                hide_index=True,
+                key=f"{key_prefix}_cohort_quadrants",
+            )
+
+    with st.expander(
+        "BTC direction × breadth overlap check",
+        expanded=False,
+    ):
+        overlap = _candidate_v1_context_overlap_table(
+            selected_context
+        )
+        if overlap.empty:
+            st.info(
+                "No overlap diagnostic is available."
+            )
+        else:
+            st.caption(
+                "Use this to see whether BTC direction and breadth "
+                "are actually supplying independent states in the current "
+                "sample. If only a couple of combinations exist, do not "
+                "count them as two independent confirmations."
+            )
+            st.dataframe(
+                overlap,
+                use_container_width=True,
+                hide_index=True,
+                key=f"{key_prefix}_btc_breadth_overlap",
+            )
+
     regime_filter = st.selectbox(
         "Regime-conditioned matrix",
         options=[
@@ -15453,6 +16165,10 @@ def _candidate_v1_render_market_regime_analysis(
             "BTC 4h >=0%",
             "Market TAILWIND",
             "Market HEADWIND",
+            "Market TAILWIND + Symbol aligned",
+            "Market TAILWIND + Symbol against",
+            "Market HEADWIND + Symbol aligned",
+            "Market HEADWIND + Symbol against",
             "Symbol aligned with side",
             "Symbol against side",
             "Sector aligned with side",
@@ -15501,10 +16217,12 @@ def _candidate_v1_render_market_regime_analysis(
         key=f"{key_prefix}_regime_show_context",
     )
     if show_context:
-        context_detail = selected_context[[
+        detail_columns = [
             "candidate_v1_event_key",
+            "candidate_v1_cohort",
             "symbol",
             "side",
+            "reaction_timestamp",
             "flow_candle_timestamp",
             "market_breadth_4h",
             "btc_return_pct_4h",
@@ -15519,13 +16237,81 @@ def _candidate_v1_render_market_regime_analysis(
             "Market alignment",
             "Symbol-side alignment",
             "Sector-side alignment",
-        ]].copy()
-        context_detail["4h snapshot"] = pd.to_datetime(
-            pd.to_numeric(context_detail["flow_candle_timestamp"], errors="coerce"),
-            unit="ms", utc=True, errors="coerce",
-        ).dt.tz_convert(TZ).dt.strftime("%Y-%m-%d %H:%M")
-        context_detail = context_detail.drop(columns=["flow_candle_timestamp"])
-        st.dataframe(context_detail, use_container_width=True, hide_index=True)
+            "Outcome",
+            "first_touch_min",
+            "gross_pnl_pct",
+            "execution_cost_pct",
+            "net_pnl_pct",
+            "net_pnl_usdt",
+            "mfe_until_exit_pct",
+            "mae_until_exit_pct",
+            "observed_bars",
+            "path_complete",
+        ]
+        detail_columns = [
+            column
+            for column in detail_columns
+            if column in selected_context.columns
+        ]
+        context_detail = selected_context[
+            detail_columns
+        ].copy()
+
+        if "reaction_timestamp" in context_detail.columns:
+            context_detail["Reaction"] = pd.to_datetime(
+                pd.to_numeric(
+                    context_detail[
+                        "reaction_timestamp"
+                    ],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            ).dt.tz_convert(TZ).dt.strftime(
+                "%Y-%m-%d %H:%M"
+            )
+
+        if "flow_candle_timestamp" in context_detail.columns:
+            context_detail["4h snapshot"] = pd.to_datetime(
+                pd.to_numeric(
+                    context_detail[
+                        "flow_candle_timestamp"
+                    ],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            ).dt.tz_convert(TZ).dt.strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            context_detail = context_detail.drop(
+                columns=[
+                    "flow_candle_timestamp"
+                ]
+            )
+
+        st.dataframe(
+            context_detail,
+            use_container_width=True,
+            hide_index=True,
+            key=f"{key_prefix}_causal_context_detail",
+        )
+        st.download_button(
+            "Download full Candidate causal contexts CSV",
+            data=context_detail.to_csv(
+                index=False
+            ).encode("utf-8"),
+            file_name=(
+                "candidate_v1_causal_contexts_"
+                f"tp{float(selected_tp):g}_"
+                f"sl{float(selected_sl):g}_"
+                f"{int(snap_horizon)}m.csv"
+            ),
+            mime="text/csv",
+            key=f"{key_prefix}_causal_context_download",
+        )
 
 
 def _candidate_v1_matrix_cell_text(row, metric):
