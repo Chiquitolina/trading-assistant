@@ -80,6 +80,13 @@ from dashboard.analytics.candidate_v1_fast_analysis import (
     build_followup_metrics as candidate_v1_fast_build_followup_metrics,
     refresh_path_store as candidate_v1_fast_refresh_path_store,
 )
+from dashboard.analytics.candidate_v1_market_regime import (
+    attach_candidate_market_context as candidate_v1_attach_market_context,
+    refresh_market_regime_store as candidate_v1_refresh_market_regime_store,
+)
+from config.strategies.v1 import SYMBOLS as CANDIDATE_V1_MARKET_SYMBOLS
+from config.market_sectors import MIN_SECTOR_SYMBOLS as CANDIDATE_V1_MIN_SECTOR_SYMBOLS
+from engine.live.data.market_sector_catalog import MarketSectorCatalog
 
 # Candidate monitor functions intentionally are NOT decorated with st.fragment.
 # They render inside render_volume_exhaustion_live(), which is already a fragment.
@@ -164,6 +171,12 @@ CANDIDATE_V1_PATH_STORE_FILE = (
     BASE_DIR / "reports" / "candidate_v1_analysis" / "paths_1m.pkl"
 )
 CANDIDATE_V1_PATH_REFRESH_SECONDS = 60
+
+# Persisted causal 4h cross-sectional snapshots used only for research
+# segmentation. Candidate V1 selection itself never reads these fields.
+CANDIDATE_V1_MARKET_REGIME_STORE_FILE = (
+    BASE_DIR / "reports" / "candidate_v1_analysis" / "market_regime_4h.pkl"
+)
 
 # The Volume Exhaustion page is large; 5s caused expensive full-fragment
 # reruns even though Candidate path materialization itself is throttled to 60s.
@@ -15151,6 +15164,369 @@ def _candidate_v1_path_store_mtime_ns():
         return None
 
 
+
+@st.cache_resource(show_spinner=False)
+def _candidate_v1_market_sector_metadata():
+    """Static sector taxonomy only; no market values are taken from the future."""
+    try:
+        catalog = MarketSectorCatalog(
+            required_symbols=CANDIDATE_V1_MARKET_SYMBOLS,
+        )
+        sector_map = {}
+        for sector, symbols in catalog.symbols_by_primary_sector().items():
+            for symbol in symbols:
+                sector_map[str(symbol).upper()] = str(sector)
+        return sector_map, None
+    except Exception as exc:
+        return {}, f"{type(exc).__name__}:{exc}"
+
+
+def _candidate_v1_build_market_context(candidate_rows, force=False):
+    if candidate_rows is None or candidate_rows.empty:
+        return pd.DataFrame(), None
+
+    sector_map, sector_error = _candidate_v1_market_sector_metadata()
+    store = candidate_v1_refresh_market_regime_store(
+        candidate_rows=candidate_rows,
+        store_path=CANDIDATE_V1_MARKET_REGIME_STORE_FILE,
+        redis_client=market_flow_dashboard_service.redis,
+        universe_symbols=CANDIDATE_V1_MARKET_SYMBOLS,
+        sector_map=sector_map,
+        baseline_candles=42,
+        min_sector_symbols=int(CANDIDATE_V1_MIN_SECTOR_SYMBOLS),
+        max_history=500,
+        force=bool(force),
+    )
+    context = candidate_v1_attach_market_context(candidate_rows, store)
+    return context, sector_error
+
+
+def _candidate_v1_pf_from_net(values):
+    series = pd.to_numeric(values, errors="coerce").dropna()
+    gross_profit = float(series.loc[series.gt(0)].sum())
+    gross_loss = abs(float(series.loc[series.lt(0)].sum()))
+    if gross_loss > 0:
+        return gross_profit / gross_loss
+    if gross_profit > 0:
+        return float("inf")
+    return np.nan
+
+
+def _candidate_v1_add_regime_labels(frame):
+    result = frame.copy()
+    breadth = pd.to_numeric(result.get("market_breadth_4h"), errors="coerce")
+    btc = pd.to_numeric(result.get("btc_return_pct_4h"), errors="coerce")
+    residual = pd.to_numeric(result.get("symbol_strength_vs_btc_4h"), errors="coerce")
+    sector_strength = pd.to_numeric(result.get("sector_strength_vs_btc_4h"), errors="coerce")
+    side = result.get("side", pd.Series("", index=result.index)).fillna("").astype(str).str.upper()
+
+    result["Breadth bucket"] = pd.cut(
+        breadth,
+        bins=[-np.inf, 40, 50, 60, 70, np.inf],
+        labels=["<40%", "40–50%", "50–60%", "60–70%", ">=70%"],
+        right=False,
+    ).astype(object)
+    result["BTC 4h"] = np.select(
+        [btc.lt(0), btc.ge(0)],
+        ["BTC < 0%", "BTC >= 0%"],
+        default="UNKNOWN",
+    )
+    result["Symbol vs BTC"] = np.select(
+        [residual.lt(-1.0), residual.between(-1.0, 0.0, inclusive="left"), residual.between(0.0, 1.0, inclusive="left"), residual.ge(1.0)],
+        ["<= -1%", "-1% to 0%", "0% to +1%", ">= +1%"],
+        default="UNKNOWN",
+    )
+    result["Sector vs BTC"] = np.select(
+        [sector_strength.lt(0), sector_strength.ge(0)],
+        ["Sector weaker than BTC", "Sector >= BTC"],
+        default="UNKNOWN",
+    )
+
+    long_side = side.eq("LONG")
+    short_side = side.eq("SHORT")
+    breadth_tailwind = (long_side & breadth.ge(50)) | (short_side & breadth.lt(50))
+    breadth_headwind = (long_side & breadth.lt(50)) | (short_side & breadth.ge(50))
+    btc_tailwind = (long_side & btc.ge(0)) | (short_side & btc.lt(0))
+    btc_headwind = (long_side & btc.lt(0)) | (short_side & btc.ge(0))
+    result["Market alignment"] = np.select(
+        [breadth_tailwind & btc_tailwind, breadth_headwind & btc_headwind],
+        ["TAILWIND", "HEADWIND"],
+        default="MIXED",
+    )
+
+    symbol_aligned = (long_side & residual.ge(0)) | (short_side & residual.le(0))
+    symbol_against = (long_side & residual.lt(0)) | (short_side & residual.gt(0))
+    result["Symbol-side alignment"] = np.select(
+        [symbol_aligned, symbol_against],
+        ["ALIGNED", "AGAINST"],
+        default="UNKNOWN",
+    )
+
+    sector_aligned = (long_side & sector_strength.ge(0)) | (short_side & sector_strength.le(0))
+    sector_against = (long_side & sector_strength.lt(0)) | (short_side & sector_strength.gt(0))
+    result["Sector-side alignment"] = np.select(
+        [sector_aligned, sector_against],
+        ["ALIGNED", "AGAINST"],
+        default="UNKNOWN",
+    )
+    return result
+
+
+def _candidate_v1_regime_performance_table(frame, bucket_column, bucket_order=None):
+    if frame is None or frame.empty or bucket_column not in frame.columns:
+        return pd.DataFrame()
+
+    rows = []
+    bucket_values = (
+        bucket_order
+        if bucket_order is not None
+        else [value for value in frame[bucket_column].dropna().astype(str).unique().tolist() if value != "UNKNOWN"]
+    )
+    for bucket in bucket_values:
+        bucket_frame = frame.loc[frame[bucket_column].astype(str).eq(str(bucket))]
+        if bucket_frame.empty:
+            continue
+        row = {"Bucket": str(bucket)}
+        for side_name in ("LONG", "SHORT"):
+            side_frame = bucket_frame.loc[bucket_frame["side"].astype(str).str.upper().eq(side_name)]
+            resolved = side_frame.loc[pd.to_numeric(side_frame.get("net_pnl_pct"), errors="coerce").notna()].copy()
+            net = pd.to_numeric(resolved.get("net_pnl_pct"), errors="coerce").dropna()
+            wins = int(net.gt(0).sum())
+            prefix = side_name
+            row[f"{prefix} N"] = int(side_frame["candidate_v1_event_key"].astype(str).nunique()) if not side_frame.empty else 0
+            row[f"{prefix} resolved"] = int(len(net))
+            row[f"{prefix} Net pts"] = round(float(net.sum()), 4) if len(net) else np.nan
+            row[f"{prefix} WR %"] = round(wins / len(net) * 100.0, 2) if len(net) else np.nan
+            pf = _candidate_v1_pf_from_net(net)
+            row[f"{prefix} PF"] = round(float(pf), 3) if pd.notna(pf) and np.isfinite(float(pf)) else (float("inf") if pd.notna(pf) else np.nan)
+            row[f"{prefix} Avg %"] = round(float(net.mean()), 4) if len(net) else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _candidate_v1_regime_filter_mask(frame, label):
+    if label == "ALL causal contexts":
+        return pd.Series(True, index=frame.index)
+    mapping = {
+        "Breadth <40%": ("Breadth bucket", "<40%"),
+        "Breadth 40–50%": ("Breadth bucket", "40–50%"),
+        "Breadth 50–60%": ("Breadth bucket", "50–60%"),
+        "Breadth 60–70%": ("Breadth bucket", "60–70%"),
+        "Breadth >=70%": ("Breadth bucket", ">=70%"),
+        "BTC 4h <0%": ("BTC 4h", "BTC < 0%"),
+        "BTC 4h >=0%": ("BTC 4h", "BTC >= 0%"),
+        "Market TAILWIND": ("Market alignment", "TAILWIND"),
+        "Market HEADWIND": ("Market alignment", "HEADWIND"),
+        "Symbol aligned with side": ("Symbol-side alignment", "ALIGNED"),
+        "Symbol against side": ("Symbol-side alignment", "AGAINST"),
+        "Sector aligned with side": ("Sector-side alignment", "ALIGNED"),
+        "Sector against side": ("Sector-side alignment", "AGAINST"),
+    }
+    column_value = mapping.get(label)
+    if column_value is None:
+        return pd.Series(True, index=frame.index)
+    column, value = column_value
+    return frame.get(column, pd.Series("", index=frame.index)).astype(str).eq(value)
+
+
+def _candidate_v1_render_market_regime_analysis(
+    history,
+    path_results,
+    selected_paths,
+    selected_tp,
+    selected_sl,
+    snap_horizon,
+    metric,
+    key_prefix,
+):
+    st.markdown("##### 🌊 Performance by causal Market Regime")
+    st.caption(
+        "Every Candidate is mapped to the latest fully closed 4h cross-sectional "
+        "snapshot that was knowable when its REACTION closed. The current Market "
+        "Flow card is never backfilled into old trades. This is research-only and "
+        "does not change Candidate V1 selection."
+    )
+
+    snapshot_keys = set(path_results["candidate_v1_event_key"].astype(str).unique())
+    candidate_rows = history.loc[
+        history["candidate_v1_event_key"].astype(str).isin(snapshot_keys)
+    ].copy()
+
+    force_context = st.button(
+        "🔄 Rebuild causal 4h contexts",
+        key=f"{key_prefix}_regime_refresh",
+        help="Recomputes the persisted 4h context for the matrix Candidate set from Redis histories.",
+    )
+    try:
+        with st.spinner("Loading causal 4h market contexts..."):
+            context, sector_error = _candidate_v1_build_market_context(
+                candidate_rows,
+                force=bool(force_context),
+            )
+    except Exception as exc:
+        st.warning(f"Causal Market Flow context unavailable: {type(exc).__name__}: {exc}")
+        return
+
+    if context is None or context.empty:
+        st.info("No causal 4h Market Flow contexts are available yet.")
+        return
+
+    context_available = context.get(
+        "market_context_available",
+        pd.Series(False, index=context.index),
+    ).fillna(False).astype(bool)
+    covered_keys = set(context.loc[context_available, "candidate_v1_event_key"].astype(str))
+    total_keys = set(candidate_rows["candidate_v1_event_key"].astype(str))
+    unique_boundaries = pd.to_numeric(
+        context.loc[context_available, "flow_candle_timestamp"], errors="coerce"
+    ).dropna().nunique()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Context coverage", f"{len(covered_keys)}/{len(total_keys)}")
+    c2.metric("Causal 4h boundaries", int(unique_boundaries))
+    median_breadth = pd.to_numeric(
+        context.loc[context_available, "market_breadth_4h"], errors="coerce"
+    ).median()
+    c3.metric("Median breadth", f"{median_breadth:.1f}%" if pd.notna(median_breadth) else "—")
+    median_btc = pd.to_numeric(
+        context.loc[context_available, "btc_return_pct_4h"], errors="coerce"
+    ).median()
+    c4.metric("Median BTC 4h", f"{median_btc:+.2f}%" if pd.notna(median_btc) else "—")
+    if sector_error:
+        st.caption(f"Sector taxonomy unavailable for some/all rows: {sector_error}")
+
+    exec_context = path_results.merge(
+        context.drop_duplicates("candidate_v1_event_key"),
+        on="candidate_v1_event_key",
+        how="left",
+        suffixes=("", "_ctx"),
+    )
+    exec_context = _candidate_v1_add_regime_labels(exec_context)
+
+    selected_context = selected_paths.merge(
+        context.drop_duplicates("candidate_v1_event_key"),
+        on="candidate_v1_event_key",
+        how="left",
+        suffixes=("", "_ctx"),
+    )
+    selected_context = _candidate_v1_add_regime_labels(selected_context)
+
+    dimension_options = {
+        "Market breadth 4h": ("Breadth bucket", ["<40%", "40–50%", "50–60%", "60–70%", ">=70%"]),
+        "BTC 4h direction": ("BTC 4h", ["BTC < 0%", "BTC >= 0%"]),
+        "Symbol residual vs BTC": ("Symbol vs BTC", ["<= -1%", "-1% to 0%", "0% to +1%", ">= +1%"]),
+        "Market alignment with side": ("Market alignment", ["TAILWIND", "MIXED", "HEADWIND"]),
+        "Symbol strength alignment": ("Symbol-side alignment", ["ALIGNED", "AGAINST"]),
+        "Sector strength alignment": ("Sector-side alignment", ["ALIGNED", "AGAINST"]),
+    }
+    dimension_label = st.selectbox(
+        "Regime dimension",
+        options=list(dimension_options),
+        key=f"{key_prefix}_regime_dimension",
+    )
+    bucket_col, bucket_order = dimension_options[dimension_label]
+    performance = _candidate_v1_regime_performance_table(
+        selected_context,
+        bucket_col,
+        bucket_order=bucket_order,
+    )
+    st.caption(
+        f"Selected execution pair: TP {float(selected_tp):g}% / SL {float(selected_sl):g}% / {int(snap_horizon)}m. "
+        "Net/PF/WR include the same costs and time exits as the frozen matrix snapshot."
+    )
+    if performance.empty:
+        st.info("Not enough resolved executions with causal context for this dimension yet.")
+    else:
+        st.dataframe(performance, use_container_width=True, hide_index=True)
+
+    regime_filter = st.selectbox(
+        "Regime-conditioned matrix",
+        options=[
+            "ALL causal contexts",
+            "Breadth <40%",
+            "Breadth 40–50%",
+            "Breadth 50–60%",
+            "Breadth 60–70%",
+            "Breadth >=70%",
+            "BTC 4h <0%",
+            "BTC 4h >=0%",
+            "Market TAILWIND",
+            "Market HEADWIND",
+            "Symbol aligned with side",
+            "Symbol against side",
+            "Sector aligned with side",
+            "Sector against side",
+        ],
+        key=f"{key_prefix}_regime_matrix_filter",
+    )
+    causal_mask = exec_context.get(
+        "market_context_available",
+        pd.Series(False, index=exec_context.index),
+    ).fillna(False).astype(bool)
+    regime_mask = _candidate_v1_regime_filter_mask(exec_context, regime_filter)
+    conditioned = exec_context.loc[causal_mask & regime_mask].copy()
+    conditioned_candidates = conditioned["candidate_v1_event_key"].astype(str).nunique() if not conditioned.empty else 0
+    st.caption(
+        f"Conditioned matrix uses {conditioned_candidates} Candidate(s). It reuses the frozen 1m execution paths; no TP/SL replay is rerun."
+    )
+    if conditioned.empty:
+        st.info("No Candidates match this causal regime filter.")
+    else:
+        conditioned_summary = _candidate_v1_execution_grid_summary(conditioned)
+        if not conditioned_summary.empty:
+            if metric in {"Net PnL % pts", "Net PnL USDT"}:
+                display_source = conditioned_summary.copy()
+                display_source["_display"] = display_source.apply(
+                    lambda row: _candidate_v1_matrix_cell_text(row, metric), axis=1
+                )
+                conditioned_matrix = display_source.pivot(
+                    index="SL %", columns="TP %", values="_display"
+                ).sort_index()
+            else:
+                conditioned_matrix = conditioned_summary.pivot(
+                    index="SL %", columns="TP %", values=metric
+                ).sort_index()
+            conditioned_matrix.index = [f"SL {float(v):g}%" for v in conditioned_matrix.index]
+            conditioned_matrix.columns = [f"TP {float(v):g}%" for v in conditioned_matrix.columns]
+            st.dataframe(
+                conditioned_matrix,
+                use_container_width=True,
+                key=f"{key_prefix}_regime_matrix",
+            )
+
+    show_context = st.toggle(
+        "Show Candidate causal market contexts",
+        value=False,
+        key=f"{key_prefix}_regime_show_context",
+    )
+    if show_context:
+        context_detail = selected_context[[
+            "candidate_v1_event_key",
+            "symbol",
+            "side",
+            "flow_candle_timestamp",
+            "market_breadth_4h",
+            "btc_return_pct_4h",
+            "return_pct_4h",
+            "symbol_strength_vs_btc_4h",
+            "return_rank_pct_4h",
+            "relative_volume_4h",
+            "primary_sector",
+            "sector_return_pct_4h",
+            "sector_breadth_4h",
+            "sector_strength_vs_btc_4h",
+            "Market alignment",
+            "Symbol-side alignment",
+            "Sector-side alignment",
+        ]].copy()
+        context_detail["4h snapshot"] = pd.to_datetime(
+            pd.to_numeric(context_detail["flow_candle_timestamp"], errors="coerce"),
+            unit="ms", utc=True, errors="coerce",
+        ).dt.tz_convert(TZ).dt.strftime("%Y-%m-%d %H:%M")
+        context_detail = context_detail.drop(columns=["flow_candle_timestamp"])
+        st.dataframe(context_detail, use_container_width=True, hide_index=True)
+
+
 def _candidate_v1_matrix_cell_text(row, metric):
     value = pd.to_numeric(row.get(metric), errors="coerce")
     if pd.isna(value):
@@ -15518,6 +15894,17 @@ def _candidate_v1_render_execution_matrix(history, key_prefix):
     )
     s4.metric("Avg net/trade", f"{float(row['Avg net/trade %']):+.3f}%")
     s5.metric("Max DD", f"{float(row['Max drawdown % pts']):.2f} pts")
+
+    _candidate_v1_render_market_regime_analysis(
+        history=history,
+        path_results=path_results,
+        selected_paths=selected_paths,
+        selected_tp=selected_tp,
+        selected_sl=selected_sl,
+        snap_horizon=snap_horizon,
+        metric=metric,
+        key_prefix=key_prefix,
+    )
 
     show_detail = st.toggle(
         "Show trade-by-trade detail",
