@@ -19155,6 +19155,9 @@ def _candidate_v2_snapshot_variant_table(selected_pair):
                         "N": 0,
                         "Resolved": 0,
                         "Pending": 0,
+                        "TP": 0,
+                        "SL": 0,
+                        "Time exit": 0,
                         "Maturity": np.nan,
                         "Net": np.nan,
                         "Avg": np.nan,
@@ -19179,6 +19182,9 @@ def _candidate_v2_snapshot_variant_table(selected_pair):
                         "N": candidate_n,
                         "Resolved": resolved_n,
                         "Pending": pending_n,
+                        "TP": int(ext.get("TP", 0) or 0),
+                        "SL": int(ext.get("SL", 0) or 0),
+                        "Time exit": int(ext.get("Time exit", 0) or 0),
                         "Maturity": (
                             round(resolved_n / candidate_n * 100.0, 2)
                             if candidate_n > 0
@@ -19201,6 +19207,9 @@ def _candidate_v2_snapshot_variant_table(selected_pair):
                     "N": stats["N"],
                     "Resolved": stats["Resolved"],
                     "Pending": stats["Pending"],
+                    "TP": stats["TP"],
+                    "SL": stats["SL"],
+                    "Time exit": stats["Time exit"],
                     "Maturity %": stats["Maturity"],
                     "Net pts": stats["Net"],
                     "Avg %": stats["Avg"],
@@ -19393,6 +19402,10 @@ def _candidate_v2_mature_snapshot_summary(selected_pair, min_maturity=80.0):
                 "Neutral snapshots": int(neutral_snapshots),
                 "Candidates": int(candidate_n),
                 "Resolved": int(resolved_n),
+                "Pending": int(pooled_stats.get("Pending", 0) or 0),
+                "TP": int(pooled_stats.get("TP", 0) or 0),
+                "SL": int(pooled_stats.get("SL", 0) or 0),
+                "Time exit": int(pooled_stats.get("Time exit", 0) or 0),
                 "Avg of snapshot Avg %": (
                     round(float(np.mean(snapshot_avgs)), 4)
                     if snapshot_avgs
@@ -19923,10 +19936,12 @@ def render_candidate_v2_research(retests_df):
         st.caption(
             "Only snapshot/variant cells with Resolved / N >= 80% and N > 0 are "
             "included. Positive/negative counts use each snapshot's Net pts. "
-            "Avg of snapshot Avg % and Median snapshot Avg % weight every mature "
-            "4h boundary equally; Aggregate PF/Net/Avg/WR are recomputed from all "
-            "resolved trades pooled across those mature boundaries (PF is not "
-            "averaged). Zero-N market states do not count as mature snapshots."
+            "TP / SL / Time exit are counts from the currently selected TP, SL "
+            "and horizon above. Avg of snapshot Avg % and Median snapshot Avg % "
+            "weight every mature 4h boundary equally; Aggregate PF/Net/Avg/WR are "
+            "recomputed from all resolved trades pooled across those mature "
+            "boundaries (PF is not averaged). Zero-N market states do not count "
+            "as mature snapshots."
         )
         mature_summary = _candidate_v2_mature_snapshot_summary(
             selected_pair,
