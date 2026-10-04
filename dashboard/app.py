@@ -27089,6 +27089,298 @@ def build_micro_reaction_comparison_table(retests_df):
     )
 
 
+
+def build_micro_reaction_historical_overlay_chart(
+    candles,
+    symbol,
+    retests_df,
+    show_structure=False,
+    show_outcome_labels=False,
+    outcome_horizon=30,
+):
+    """Long 1m chart with every visible causal Micro REACTION.
+
+    This view is deliberately lighter than the normal structural overlay: it
+    does not redraw every detected pivot in the market. By default it plots only
+    REACTION retests + next-1m-open entries, with MFE/MAE in hover. Optional
+    structure markers add only the parent pivot/confirmation/departure of those
+    REACTIONs. This keeps 2k-5k candle inspections usable.
+    """
+    if candles is None or candles.empty:
+        return go.Figure()
+
+    work = _prepare_confirmed_swing_retest_candles(candles)
+    if work.empty:
+        return go.Figure()
+
+    work["chart_time"] = pd.to_datetime(
+        pd.to_numeric(work["timestamp"], errors="coerce"),
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+    work = work.dropna(subset=["chart_time"]).copy()
+    if work.empty:
+        return go.Figure()
+
+    visible_start_ms = int(work["timestamp"].min())
+    visible_end_ms = int(work["timestamp"].max())
+    visible_start_time = work["chart_time"].iloc[0]
+    visible_end_time = work["chart_time"].iloc[-1]
+    visible_end_with_padding = visible_end_time + pd.Timedelta(minutes=1)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Candlestick(
+            x=work["chart_time"],
+            open=work["open"],
+            high=work["high"],
+            low=work["low"],
+            close=work["close"],
+            name="1m",
+        )
+    )
+
+    if retests_df is None or retests_df.empty:
+        reactions = pd.DataFrame()
+    else:
+        reactions = retests_df.copy()
+        if "status" in reactions.columns:
+            reactions = reactions.loc[
+                reactions["status"].fillna("").astype(str).eq("REACTION")
+            ].copy()
+        reaction_ts = pd.to_numeric(
+            reactions.get(
+                "retest_timestamp",
+                pd.Series(np.nan, index=reactions.index),
+            ),
+            errors="coerce",
+        )
+        reactions = reactions.loc[
+            reaction_ts.between(
+                visible_start_ms,
+                visible_end_ms,
+                inclusive="both",
+            )
+        ].copy()
+
+    horizon = int(outcome_horizon)
+    mfe_col = f"reaction_mfe_{horizon}m_pct"
+    mae_col = f"reaction_mae_{horizon}m_pct"
+
+    if not reactions.empty:
+        # Optional parent-structure markers. Only structures that actually led
+        # to a visible REACTION are drawn; unrelated pivots stay out of the
+        # 5,000-candle view.
+        if bool(show_structure):
+            structure_specs = [
+                (
+                    "Parent pivot",
+                    "pivot_timestamp",
+                    "swing_price",
+                    "triangle-up",
+                ),
+                (
+                    "Confirmation",
+                    "actionable_timestamp",
+                    "entry_price",
+                    "circle-open",
+                ),
+                (
+                    "Departure",
+                    "departure_timestamp",
+                    "departure_price",
+                    "square-open",
+                ),
+            ]
+            for label, ts_col, price_col, marker_symbol in structure_specs:
+                if ts_col not in reactions.columns or price_col not in reactions.columns:
+                    continue
+                ts_values = pd.to_numeric(reactions[ts_col], errors="coerce")
+                price_values = pd.to_numeric(reactions[price_col], errors="coerce")
+                valid = ts_values.notna() & price_values.notna()
+                if not valid.any():
+                    continue
+                rows = reactions.loc[valid].copy()
+                fig.add_trace(
+                    go.Scatter(
+                        x=pd.to_datetime(
+                            pd.to_numeric(rows[ts_col], errors="coerce"),
+                            unit="ms",
+                            utc=True,
+                            errors="coerce",
+                        ).dt.tz_convert(TZ),
+                        y=pd.to_numeric(rows[price_col], errors="coerce"),
+                        mode="markers",
+                        marker={"size": 7, "symbol": marker_symbol},
+                        name=label,
+                        customdata=rows[
+                            [column for column in ["signal", "timeframe", "detector"] if column in rows.columns]
+                        ].to_numpy(),
+                        hovertemplate=(
+                            f"<b>{label}</b><br>"
+                            "Time: %{x}<br>"
+                            "Price: %{y:.8f}"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+        for side in ("LONG", "SHORT"):
+            side_rows = reactions.loc[
+                reactions.get(
+                    "signal",
+                    pd.Series("", index=reactions.index),
+                ).fillna("").astype(str).eq(side)
+            ].copy()
+            if side_rows.empty:
+                continue
+
+            # REACTION marker at the causal first retest candle.
+            retest_time = pd.to_datetime(
+                pd.to_numeric(side_rows["retest_timestamp"], errors="coerce"),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            ).dt.tz_convert(TZ)
+            retest_price = pd.to_numeric(
+                side_rows.get(
+                    "retest_price",
+                    pd.Series(np.nan, index=side_rows.index),
+                ),
+                errors="coerce",
+            )
+
+            custom_columns = [
+                "timeframe",
+                "detector",
+                "swing_price",
+                "first_touch_entry_price",
+                "reaction_mfe_15m_pct",
+                "reaction_mae_15m_pct",
+                "reaction_mfe_30m_pct",
+                "reaction_mae_30m_pct",
+                "reaction_mfe_60m_pct",
+                "reaction_mae_60m_pct",
+            ]
+            for column in custom_columns:
+                if column not in side_rows.columns:
+                    side_rows[column] = np.nan
+
+            text_values = None
+            mode = "markers"
+            if bool(show_outcome_labels):
+                mfe_values = pd.to_numeric(
+                    side_rows.get(mfe_col),
+                    errors="coerce",
+                )
+                mae_values = pd.to_numeric(
+                    side_rows.get(mae_col),
+                    errors="coerce",
+                )
+                text_values = [
+                    (
+                        f"+{float(mfe):.2f}% / -{float(mae):.2f}%"
+                        if pd.notna(mfe) and pd.notna(mae)
+                        else "pending"
+                    )
+                    for mfe, mae in zip(mfe_values, mae_values)
+                ]
+                mode = "markers+text"
+
+            fig.add_trace(
+                go.Scatter(
+                    x=retest_time,
+                    y=retest_price,
+                    mode=mode,
+                    text=text_values,
+                    textposition="top center",
+                    marker={"size": 10, "symbol": "diamond"},
+                    name=f"REACTION {side}",
+                    customdata=side_rows[custom_columns].to_numpy(),
+                    hovertemplate=(
+                        f"<b>REACTION {side}</b><br>"
+                        "Time: %{x}<br>"
+                        "Retest: %{y:.8f}<br>"
+                        "TF: %{customdata[0]}<br>"
+                        "Detector: %{customdata[1]}<br>"
+                        "Swing: %{customdata[2]:.8f}<br>"
+                        "Next-open entry: %{customdata[3]:.8f}<br>"
+                        "MFE/MAE 15m: +%{customdata[4]:.3f}% / -%{customdata[5]:.3f}%<br>"
+                        "MFE/MAE 30m: +%{customdata[6]:.3f}% / -%{customdata[7]:.3f}%<br>"
+                        "MFE/MAE 60m: +%{customdata[8]:.3f}% / -%{customdata[9]:.3f}%"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+            # Entry marker is the next consecutive 1m open after REACTION close.
+            entry_ts = pd.to_numeric(
+                side_rows.get(
+                    "first_touch_entry_timestamp",
+                    pd.Series(np.nan, index=side_rows.index),
+                ),
+                errors="coerce",
+            )
+            entry_price = pd.to_numeric(
+                side_rows.get(
+                    "first_touch_entry_price",
+                    pd.Series(np.nan, index=side_rows.index),
+                ),
+                errors="coerce",
+            )
+            valid_entry = entry_ts.notna() & entry_price.notna()
+            if valid_entry.any():
+                entry_rows = side_rows.loc[valid_entry].copy()
+                fig.add_trace(
+                    go.Scatter(
+                        x=pd.to_datetime(
+                            pd.to_numeric(
+                                entry_rows["first_touch_entry_timestamp"],
+                                errors="coerce",
+                            ),
+                            unit="ms",
+                            utc=True,
+                            errors="coerce",
+                        ).dt.tz_convert(TZ),
+                        y=pd.to_numeric(
+                            entry_rows["first_touch_entry_price"],
+                            errors="coerce",
+                        ),
+                        mode="markers",
+                        marker={"size": 11, "symbol": "star"},
+                        name=f"Entry {side} · next 1m open",
+                        customdata=entry_rows[
+                            ["timeframe", "detector", "retest_price"]
+                        ].to_numpy(),
+                        hovertemplate=(
+                            f"<b>{side} entry</b><br>"
+                            "Time: %{x}<br>"
+                            "Entry: %{y:.8f}<br>"
+                            "TF: %{customdata[0]}<br>"
+                            "Detector: %{customdata[1]}<br>"
+                            "Retest: %{customdata[2]:.8f}"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+    fig.update_layout(
+        height=700,
+        margin={"l": 10, "r": 10, "t": 50, "b": 10},
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        title=(
+            f"{str(symbol)} · Micro REACTION · historical overlay · "
+            f"{len(reactions)} visible REACTION(s)"
+        ),
+    )
+    fig.update_xaxes(
+        range=[visible_start_time, visible_end_with_padding],
+        autorange=False,
+    )
+    return fig
+
 def build_micro_reaction_selected_event_chart(
     candles,
     event_row,
@@ -36781,6 +37073,27 @@ if selected_section == "micro_reaction":
                 key="micro_reaction_max_age",
             )
 
+        view_1, view_2 = st.columns([1.2, 2.8])
+        with view_1:
+            micro_view_mode = st.radio(
+                "View mode",
+                [
+                    "Recent overlay",
+                    "Historical overlay",
+                    "Focused event",
+                ],
+                index=0,
+                key="micro_reaction_view_mode",
+            )
+
+        with view_2:
+            st.caption(
+                "Recent overlay keeps the original structural chart. Historical "
+                "overlay is optimized for long 1m windows and draws every visible "
+                "REACTION without rendering unrelated pivots. Focused event isolates "
+                "one causal Pivot → Confirmation → Departure → Retest → Entry route."
+            )
+
         filter_1, filter_2, filter_3, filter_4 = st.columns(4)
         with filter_1:
             micro_recent_minutes = st.number_input(
@@ -36814,14 +37127,58 @@ if selected_section == "micro_reaction":
             )
 
         with filter_4:
-            micro_chart_candles = st.slider(
-                "Visible 1m candles",
-                min_value=120,
-                max_value=2000,
-                value=600,
-                step=60,
-                key="micro_reaction_chart_candles",
-            )
+            if micro_view_mode == "Historical overlay":
+                micro_chart_candles = st.slider(
+                    "Historical 1m candles",
+                    min_value=500,
+                    max_value=int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
+                    value=min(2000, int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT)),
+                    step=250,
+                    key="micro_reaction_historical_chart_candles",
+                )
+            else:
+                micro_chart_candles = st.slider(
+                    "Visible 1m candles",
+                    min_value=120,
+                    max_value=2000,
+                    value=600,
+                    step=60,
+                    key="micro_reaction_recent_chart_candles",
+                )
+
+        micro_historical_show_structure = False
+        micro_historical_show_labels = False
+        micro_historical_outcome_horizon = 30
+        if micro_view_mode == "Historical overlay":
+            history_1, history_2, history_3 = st.columns(3)
+            with history_1:
+                micro_historical_show_structure = st.checkbox(
+                    "Show parent structure markers",
+                    value=False,
+                    key="micro_reaction_historical_show_structure",
+                    help=(
+                        "Adds only the parent pivot, confirmation and departure "
+                        "for REACTIONs visible in the historical window."
+                    ),
+                )
+            with history_2:
+                micro_historical_show_labels = st.checkbox(
+                    "Show MFE / MAE labels",
+                    value=False,
+                    key="micro_reaction_historical_show_labels",
+                    help=(
+                        "Can get visually dense on large windows. MFE/MAE remain "
+                        "available in hover even when labels are hidden."
+                    ),
+                )
+            with history_3:
+                micro_historical_outcome_horizon = st.selectbox(
+                    "Label horizon",
+                    [15, 30, 60],
+                    index=1,
+                    format_func=lambda value: f"{value}m",
+                    key="micro_reaction_historical_outcome_horizon",
+                )
 
         if not micro_timeframes:
             st.info("Select at least one structural timeframe.")
@@ -36833,15 +37190,30 @@ if selected_section == "micro_reaction":
                 detector_windows["5m"] = str(micro_detector_5m)
 
             # -------------------------------------------------
-            # Selected-symbol visual reconstruction.
+            # Selected-symbol visual reconstruction / historical overlay.
             # -------------------------------------------------
             st.markdown("### Visual causal reconstruction")
-            st.caption(
-                "Triangles = pivots · open circles = confirmation available · "
-                "open squares = minimum departure reached · diamonds = first "
-                "retest status · stars = hypothetical REACTION entry at the "
-                "next 1m open."
-            )
+
+            if micro_view_mode == "Historical overlay":
+                st.caption(
+                    "Long-window mode: diamonds = every visible causal REACTION · "
+                    "stars = next-1m-open hypothetical entries. MFE/MAE 15m/30m/60m "
+                    "are available in hover. The scanner uses the full Redis 1m "
+                    "research window so changing only the chart length does not "
+                    "redefine the structural rules."
+                )
+            elif micro_view_mode == "Focused event":
+                st.caption(
+                    "Focused mode isolates one event so parentage is unambiguous: "
+                    "Pivot → Confirmation → Departure → Retest → Entry."
+                )
+            else:
+                st.caption(
+                    "Triangles = pivots · open circles = confirmation available · "
+                    "open squares = minimum departure reached · diamonds = first "
+                    "retest status · stars = hypothetical REACTION entry at the "
+                    "next 1m open."
+                )
 
             chart_candles = load_volume_exhaustion_research_candles(
                 symbol=str(selected_micro_symbol),
@@ -36854,195 +37226,292 @@ if selected_section == "micro_reaction":
                     "No closed 1m candles are available for the selected symbol."
                 )
             else:
-                swing_points_by_timeframe = {}
-                swing_candles_by_timeframe = {}
-
-                for micro_tf in micro_timeframes:
-                    detector_name = detector_windows.get(
-                        micro_tf,
-                        "5x5",
+                # Historical mode always scans the full currently retained 1m
+                # research window. The visible slider then only slices the chart;
+                # it does not change the REACTION definition or scanner horizon.
+                chart_scan_recent_minutes = (
+                    int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT)
+                    if micro_view_mode == "Historical overlay"
+                    else max(
+                        int(micro_recent_minutes),
+                        int(micro_chart_candles),
                     )
-                    try:
-                        detector_bars = int(
-                            str(detector_name).split("x")[0]
-                        )
-                    except (TypeError, ValueError):
-                        detector_bars = 5
-
-                    detector = SwingDetector(
-                        left_bars=detector_bars,
-                        right_bars=detector_bars,
-                        min_prominence_pct=float(
-                            micro_prominence
-                        ),
-                    )
-
-                    if micro_tf == "1m":
-                        timeframe_candles = chart_candles.copy()
-                    else:
-                        tf_limit = min(
-                            400,
-                            max(
-                                120,
-                                int(
-                                    np.ceil(
-                                        float(micro_chart_candles)
-                                        / 5.0
-                                    )
-                                )
-                                + 40,
-                            ),
-                        )
-                        timeframe_candles = (
-                            load_volume_exhaustion_research_candles(
-                                symbol=str(selected_micro_symbol),
-                                timeframe=micro_tf,
-                                limit=tf_limit,
-                            )
-                        )
-
-                    if (
-                        timeframe_candles is None
-                        or timeframe_candles.empty
-                    ):
-                        continue
-
-                    swing_candles_by_timeframe[micro_tf] = (
-                        timeframe_candles
-                    )
-                    swing_points_by_timeframe[micro_tf] = (
-                        detector.detect_all(
-                            timeframe_candles.to_dict(
-                                orient="records"
-                            )
-                        )
-                    )
+                )
 
                 chart_retests = (
                     scan_confirmed_swing_retests_all_symbols(
                         symbols=(str(selected_micro_symbol),),
-                        swing_timeframes=tuple(
-                            micro_timeframes
-                        ),
+                        swing_timeframes=tuple(micro_timeframes),
                         swing_detector_items=tuple(
                             sorted(detector_windows.items())
                         ),
-                        min_swing_prominence_pct=float(
-                            micro_prominence
-                        ),
-                        retest_tolerance_pct=float(
-                            micro_tolerance
-                        ),
-                        min_departure_pct=float(
-                            micro_departure
-                        ),
-                        max_age_minutes=int(
-                            micro_max_age
-                        ),
-                        max_retest_age_minutes=max(
-                            int(micro_recent_minutes),
-                            int(micro_chart_candles),
-                        ),
+                        min_swing_prominence_pct=float(micro_prominence),
+                        retest_tolerance_pct=float(micro_tolerance),
+                        min_departure_pct=float(micro_departure),
+                        max_age_minutes=int(micro_max_age),
+                        max_retest_age_minutes=int(chart_scan_recent_minutes),
                     )
+                )
+
+                visible_start_ms = int(
+                    pd.to_numeric(
+                        chart_candles["timestamp"],
+                        errors="coerce",
+                    ).dropna().min()
+                )
+                visible_end_ms = int(
+                    pd.to_numeric(
+                        chart_candles["timestamp"],
+                        errors="coerce",
+                    ).dropna().max()
                 )
 
                 chart_view = chart_retests.copy()
                 if not chart_view.empty:
+                    retest_ts = pd.to_numeric(
+                        chart_view["retest_timestamp"],
+                        errors="coerce",
+                    )
+                    chart_view = chart_view.loc[
+                        retest_ts.between(
+                            visible_start_ms,
+                            visible_end_ms,
+                            inclusive="both",
+                        )
+                    ].copy()
+
                     if micro_status_filter == "REACTION only":
                         chart_view = chart_view.loc[
-                            chart_view["status"]
-                            .astype(str)
-                            .eq("REACTION")
+                            chart_view["status"].astype(str).eq("REACTION")
                         ].copy()
                     elif micro_status_filter == "Failed only":
                         chart_view = chart_view.loc[
-                            chart_view["status"]
-                            .astype(str)
-                            .eq("TOUCH_FAILED")
+                            chart_view["status"].astype(str).eq("TOUCH_FAILED")
                         ].copy()
                     elif micro_status_filter == "Indecisive only":
                         chart_view = chart_view.loc[
-                            chart_view["status"]
-                            .astype(str)
-                            .eq("TOUCH_INDECISIVE")
+                            chart_view["status"].astype(str).eq("TOUCH_INDECISIVE")
                         ].copy()
 
                     if micro_side_filter != "ALL":
                         chart_view = chart_view.loc[
-                            chart_view["signal"]
-                            .astype(str)
-                            .eq(micro_side_filter)
+                            chart_view["signal"].astype(str).eq(micro_side_filter)
                         ].copy()
 
-                micro_fig = build_micro_reaction_chart(
-                    candles=chart_candles,
-                    symbol=str(selected_micro_symbol),
-                    swing_points_by_timeframe=(
-                        swing_points_by_timeframe
-                    ),
-                    swing_candles_by_timeframe=(
-                        swing_candles_by_timeframe
-                    ),
-                    confirmed_swing_retests=chart_view,
-                )
-                st.plotly_chart(
-                    micro_fig,
-                    use_container_width=True,
-                    key="micro_reaction_main_chart",
-                    config={
-                        "displaylogo": False,
-                        "scrollZoom": True,
-                    },
-                )
+                if micro_view_mode == "Historical overlay":
+                    # Historical overlay is deliberately REACTION-only even when
+                    # the table filter is broader. Failed/indecisive first touches
+                    # remain available in the scanner below.
+                    historical_view = chart_view.copy()
+                    if not historical_view.empty:
+                        historical_view = historical_view.loc[
+                            historical_view["status"].astype(str).eq("REACTION")
+                        ].copy()
 
-                # Quick counts for the exact selected-symbol visual universe.
+                    historical_fig = build_micro_reaction_historical_overlay_chart(
+                        candles=chart_candles,
+                        symbol=str(selected_micro_symbol),
+                        retests_df=historical_view,
+                        show_structure=bool(micro_historical_show_structure),
+                        show_outcome_labels=bool(micro_historical_show_labels),
+                        outcome_horizon=int(micro_historical_outcome_horizon),
+                    )
+                    st.plotly_chart(
+                        historical_fig,
+                        use_container_width=True,
+                        key="micro_reaction_historical_chart",
+                        config={
+                            "displaylogo": False,
+                            "scrollZoom": True,
+                        },
+                    )
+
+                    if int(micro_chart_candles) >= int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT):
+                        st.caption(
+                            "Left-edge note: this chart is using the complete 1m "
+                            "history currently retained for research. Events whose "
+                            "pivot/confirmation happened before that retained window "
+                            "can be right-censored near the far left edge."
+                        )
+
+                    if historical_view.empty:
+                        st.info(
+                            "No causal REACTION falls inside the visible historical window."
+                        )
+                    else:
+                        st.markdown("#### Visible historical REACTIONs")
+                        historical_columns = [
+                            "timeframe",
+                            "detector",
+                            "signal",
+                            "retest_time",
+                            "first_touch_entry_time",
+                            "first_touch_entry_price",
+                            "reaction_mfe_15m_pct",
+                            "reaction_mae_15m_pct",
+                            "reaction_mfe_30m_pct",
+                            "reaction_mae_30m_pct",
+                            "reaction_mfe_60m_pct",
+                            "reaction_mae_60m_pct",
+                        ]
+                        historical_columns = [
+                            column
+                            for column in historical_columns
+                            if column in historical_view.columns
+                        ]
+                        historical_display = historical_view[
+                            historical_columns
+                        ].copy()
+                        for column in historical_display.columns:
+                            if column.endswith("_pct") or column == "first_touch_entry_price":
+                                historical_display[column] = pd.to_numeric(
+                                    historical_display[column],
+                                    errors="coerce",
+                                ).round(5)
+                        st.dataframe(
+                            historical_display,
+                            use_container_width=True,
+                            hide_index=True,
+                            key="micro_reaction_historical_visible_table",
+                        )
+
+                elif micro_view_mode == "Focused event":
+                    if chart_view.empty:
+                        st.info(
+                            "No Micro REACTION first touch matches the current "
+                            "symbol/window/filters."
+                        )
+                    else:
+                        focused_labels = []
+                        focused_lookup = {}
+                        for focused_index, focused_row in chart_view.iterrows():
+                            focused_time = focused_row.get("retest_time")
+                            try:
+                                focused_time_text = pd.Timestamp(
+                                    focused_time
+                                ).strftime("%Y-%m-%d %H:%M")
+                            except Exception:
+                                focused_time_text = str(focused_time)
+                            focused_label = (
+                                f"{focused_row.get('timeframe', '—')} "
+                                f"{focused_row.get('detector', '—')} · "
+                                f"{focused_row.get('signal', '—')} · "
+                                f"{focused_row.get('status', '—')} · "
+                                f"{focused_time_text}"
+                            )
+                            focused_labels.append(focused_label)
+                            focused_lookup[focused_label] = focused_index
+
+                        focused_selected_label = st.selectbox(
+                            "Focused event",
+                            focused_labels,
+                            index=0,
+                            key="micro_reaction_top_focused_event",
+                        )
+                        focused_row = chart_view.loc[
+                            focused_lookup[focused_selected_label]
+                        ]
+                        focused_fig = build_micro_reaction_selected_event_chart(
+                            candles=chart_candles,
+                            event_row=focused_row,
+                        )
+                        st.plotly_chart(
+                            focused_fig,
+                            use_container_width=True,
+                            key="micro_reaction_top_focused_chart",
+                            config={
+                                "displaylogo": False,
+                                "scrollZoom": True,
+                            },
+                        )
+
+                else:
+                    swing_points_by_timeframe = {}
+                    swing_candles_by_timeframe = {}
+
+                    for micro_tf in micro_timeframes:
+                        detector_name = detector_windows.get(micro_tf, "5x5")
+                        try:
+                            detector_bars = int(str(detector_name).split("x")[0])
+                        except (TypeError, ValueError):
+                            detector_bars = 5
+
+                        detector = SwingDetector(
+                            left_bars=detector_bars,
+                            right_bars=detector_bars,
+                            min_prominence_pct=float(micro_prominence),
+                        )
+
+                        if micro_tf == "1m":
+                            timeframe_candles = chart_candles.copy()
+                        else:
+                            tf_limit = min(
+                                400,
+                                max(
+                                    120,
+                                    int(np.ceil(float(micro_chart_candles) / 5.0)) + 40,
+                                ),
+                            )
+                            timeframe_candles = load_volume_exhaustion_research_candles(
+                                symbol=str(selected_micro_symbol),
+                                timeframe=micro_tf,
+                                limit=tf_limit,
+                            )
+
+                        if timeframe_candles is None or timeframe_candles.empty:
+                            continue
+
+                        swing_candles_by_timeframe[micro_tf] = timeframe_candles
+                        swing_points_by_timeframe[micro_tf] = detector.detect_all(
+                            timeframe_candles.to_dict(orient="records")
+                        )
+
+                    micro_fig = build_micro_reaction_chart(
+                        candles=chart_candles,
+                        symbol=str(selected_micro_symbol),
+                        swing_points_by_timeframe=swing_points_by_timeframe,
+                        swing_candles_by_timeframe=swing_candles_by_timeframe,
+                        confirmed_swing_retests=chart_view,
+                    )
+                    st.plotly_chart(
+                        micro_fig,
+                        use_container_width=True,
+                        key="micro_reaction_main_chart",
+                        config={
+                            "displaylogo": False,
+                            "scrollZoom": True,
+                        },
+                    )
+
+                # Quick counts for the exact visible selected-symbol universe.
                 q1, q2, q3, q4, q5 = st.columns(5)
-                q1.metric(
-                    "First retests",
-                    int(len(chart_retests)),
-                )
+                q1.metric("Visible first retests", int(len(chart_view)))
                 q2.metric(
                     "REACTION",
                     int(
-                        chart_retests["status"]
-                        .astype(str)
-                        .eq("REACTION")
-                        .sum()
+                        chart_view["status"].astype(str).eq("REACTION").sum()
                     )
-                    if not chart_retests.empty
+                    if not chart_view.empty
                     else 0,
                 )
                 q3.metric(
                     "Failed",
                     int(
-                        chart_retests["status"]
-                        .astype(str)
-                        .eq("TOUCH_FAILED")
-                        .sum()
+                        chart_view["status"].astype(str).eq("TOUCH_FAILED").sum()
                     )
-                    if not chart_retests.empty
+                    if not chart_view.empty
                     else 0,
                 )
                 q4.metric(
                     "1m",
-                    int(
-                        chart_retests["timeframe"]
-                        .astype(str)
-                        .eq("1m")
-                        .sum()
-                    )
-                    if not chart_retests.empty
+                    int(chart_view["timeframe"].astype(str).eq("1m").sum())
+                    if not chart_view.empty
                     else 0,
                 )
                 q5.metric(
                     "5m",
-                    int(
-                        chart_retests["timeframe"]
-                        .astype(str)
-                        .eq("5m")
-                        .sum()
-                    )
-                    if not chart_retests.empty
+                    int(chart_view["timeframe"].astype(str).eq("5m").sum())
+                    if not chart_view.empty
                     else 0,
                 )
 
