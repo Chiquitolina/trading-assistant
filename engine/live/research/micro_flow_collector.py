@@ -274,7 +274,14 @@ class MicroFlowCollector:
             )
 
     def _write_completed_event(self, event):
-        row = dict(event)
+        # Keep the private first-touch state available until after the
+        # completed event has been persisted.  EVENT_COLUMNS ignores private
+        # keys, while _write_first_touch_event() needs _tp/_sl touch maps.
+        row = {
+            key: value
+            for key, value in event.items()
+            if not key.startswith("_")
+        }
         row["completed_at_utc"] = self._iso_utc(
             int(time.time() * 1000)
         )
@@ -882,12 +889,11 @@ class MicroFlowCollector:
 
             if timestamp >= max_end_ts:
                 if event.get("complete_5m"):
-                    clean = {
-                        key: value
-                        for key, value in event.items()
-                        if not key.startswith("_")
-                    }
-                    self._write_completed_event(clean)
+                    # Pass the full in-memory event so the first-touch writer
+                    # can persist the private TP/SL touch timestamps.
+                    # _write_completed_event() strips private keys only for
+                    # micro_flow_events.csv.
+                    self._write_completed_event(event)
                 else:
                     self.events_invalidated += 1
                 continue
