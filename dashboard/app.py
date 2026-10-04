@@ -9452,11 +9452,17 @@ def _attach_confirmed_swing_reaction_run(retest, forward_cache):
 # Micro REACTION is a short-horizon execution study. These metrics are
 # measured from the actual hypothetical entry (next consecutive 1m open),
 # not from the REACTION candle close.
-MICRO_REACTION_RESEARCH_METRICS_VERSION = "scalp_entry_v1"
+MICRO_REACTION_RESEARCH_METRICS_VERSION = "scalp_entry_v2_first_touch"
 MICRO_REACTION_SCALP_HORIZONS = (1, 3, 5, 10, 15, 30)
 MICRO_REACTION_PRIMARY_HORIZONS = (1, 3, 5)
 MICRO_REACTION_SECONDARY_HORIZONS = (10, 15, 30)
 MICRO_REACTION_5M_HIT_THRESHOLDS = (0.10, 0.20, 0.30)
+
+# Chronological scalp execution research. These grids are intentionally small:
+# the hypothesis is a fast 1m/3m/5m trade, not a wide swing-position exit.
+MICRO_REACTION_SCALP_TP_GRID = (0.10, 0.15, 0.20, 0.25, 0.30)
+MICRO_REACTION_SCALP_SL_GRID = (0.10, 0.15, 0.20)
+MICRO_REACTION_SCALP_MATRIX_HORIZONS = (1, 3, 5)
 
 
 CONFIRMED_SWING_FIRST_TOUCH_TP_GRID = (
@@ -9499,6 +9505,9 @@ def _attach_confirmed_swing_order_recovery_analysis(
     retest["first_touch_entry_time"] = pd.NaT
     retest["first_touch_60m_complete"] = False
     retest["first_touch_60m_results"] = {}
+    # First TP/SL hit over the first five executable 1m candles. The payload is
+    # later sliced at 1m / 3m / 5m without rescanning price history.
+    retest["micro_reaction_scalp_path_results_5m"] = {}
 
     # Short-horizon Micro REACTION metrics are measured from the executable
     # next-1m-open entry. Keep them separate from reaction_mfe_* fields, whose
@@ -9737,6 +9746,75 @@ def _attach_confirmed_swing_order_recovery_analysis(
                 retest[
                     f"reaction_entry_hit_adverse_{threshold_key}_within_5m"
                 ] = bool(mae_5m >= float(threshold_pct))
+
+        # ------------------------------------------------------------
+        # Chronological Micro REACTION TP-vs-SL first touch (max 5m).
+        # Same-candle TP+SL is conservatively treated as SL_AMBIGUOUS.
+        # ------------------------------------------------------------
+        scalp_scan_bars = min(
+            int(available_bars),
+            max(MICRO_REACTION_SCALP_MATRIX_HORIZONS),
+        )
+        if scalp_scan_bars > 0:
+            scalp_results = {}
+            for tp_pct in MICRO_REACTION_SCALP_TP_GRID:
+                for sl_pct in MICRO_REACTION_SCALP_SL_GRID:
+                    if side == "LONG":
+                        tp_price = entry_price * (
+                            1.0 + float(tp_pct) / 100.0
+                        )
+                        sl_price = entry_price * (
+                            1.0 - float(sl_pct) / 100.0
+                        )
+                    else:
+                        tp_price = entry_price * (
+                            1.0 - float(tp_pct) / 100.0
+                        )
+                        sl_price = entry_price * (
+                            1.0 + float(sl_pct) / 100.0
+                        )
+
+                    first_outcome = "NO_HIT"
+                    first_hit_bar = np.nan
+                    first_hit_minutes = np.nan
+
+                    for offset in range(scalp_scan_bars):
+                        idx = start_idx + offset
+                        high = float(highs[idx])
+                        low = float(lows[idx])
+
+                        if side == "LONG":
+                            tp_hit = high >= tp_price
+                            sl_hit = low <= sl_price
+                        else:
+                            tp_hit = low <= tp_price
+                            sl_hit = high >= sl_price
+
+                        if tp_hit and sl_hit:
+                            first_outcome = "SL_AMBIGUOUS"
+                            first_hit_bar = int(offset + 1)
+                            first_hit_minutes = float(offset)
+                            break
+                        if sl_hit:
+                            first_outcome = "SL"
+                            first_hit_bar = int(offset + 1)
+                            first_hit_minutes = float(offset)
+                            break
+                        if tp_hit:
+                            first_outcome = "TP"
+                            first_hit_bar = int(offset + 1)
+                            first_hit_minutes = float(offset)
+                            break
+
+                    scalp_results[
+                        _confirmed_swing_first_touch_key(tp_pct, sl_pct)
+                    ] = {
+                        "outcome": first_outcome,
+                        "hit_bar": first_hit_bar,
+                        "hit_minutes": first_hit_minutes,
+                    }
+
+            retest["micro_reaction_scalp_path_results_5m"] = scalp_results
 
     complete_horizons = []
     time_exit_returns = {}
@@ -11243,6 +11321,242 @@ def build_micro_reaction_historical_signal_table(
     return (
         table
         .sort_values("Reaction time", ascending=False, na_position="last")
+        .reset_index(drop=True)
+    )
+
+
+def build_micro_reaction_scalp_tp_sl_matrix(
+    retests_df,
+    fee_per_side_pct=0.05,
+    slippage_per_side_pct=0.0,
+):
+    """Chronological TP/SL matrix for executable Micro REACTION entries.
+
+    Every trade starts at the next consecutive 1m open after REACTION is known.
+    For a selected 1m/3m/5m horizon, TP/SL is honored only when its first hit
+    occurs inside that horizon; otherwise the trade exits at that horizon close.
+    Same-1m TP+SL ambiguity is conservatively scored as SL_AMBIGUOUS.
+    """
+    if retests_df is None or retests_df.empty:
+        return pd.DataFrame()
+
+    required = {"timeframe", "detector", "signal", "status"}
+    if not required.issubset(retests_df.columns):
+        return pd.DataFrame()
+
+    try:
+        fee_per_side_pct = max(0.0, float(fee_per_side_pct))
+        slippage_per_side_pct = max(0.0, float(slippage_per_side_pct))
+    except (TypeError, ValueError):
+        return pd.DataFrame()
+
+    roundtrip_cost_pct = 2.0 * (
+        fee_per_side_pct + slippage_per_side_pct
+    )
+
+    reactions = retests_df.loc[
+        retests_df["status"].fillna("").astype(str).eq("REACTION")
+    ].copy()
+    if reactions.empty:
+        return pd.DataFrame()
+
+    rows = []
+    grouped = reactions.groupby(
+        ["timeframe", "detector", "signal"],
+        dropna=False,
+        sort=True,
+    )
+
+    for (timeframe, detector, side), group in grouped:
+        for horizon in MICRO_REACTION_SCALP_MATRIX_HORIZONS:
+            horizon = int(horizon)
+            complete_col = f"reaction_entry_complete_{horizon}m"
+            return_col = f"reaction_entry_return_{horizon}m_pct"
+
+            complete = (
+                group.get(
+                    complete_col,
+                    pd.Series(False, index=group.index),
+                )
+                .fillna(False)
+                .astype(bool)
+            )
+            horizon_return = pd.to_numeric(
+                group.get(
+                    return_col,
+                    pd.Series(np.nan, index=group.index),
+                ),
+                errors="coerce",
+            )
+            eligible = group.loc[complete & horizon_return.notna()].copy()
+            if eligible.empty:
+                continue
+
+            for tp_pct in MICRO_REACTION_SCALP_TP_GRID:
+                for sl_pct in MICRO_REACTION_SCALP_SL_GRID:
+                    key = _confirmed_swing_first_touch_key(tp_pct, sl_pct)
+                    trade_rows = []
+
+                    for row_index, event in eligible.iterrows():
+                        path_map = event.get(
+                            "micro_reaction_scalp_path_results_5m",
+                            {},
+                        )
+                        if not isinstance(path_map, dict):
+                            continue
+
+                        path_result = path_map.get(key)
+                        if not isinstance(path_result, dict):
+                            continue
+
+                        first_outcome = str(
+                            path_result.get("outcome", "NO_HIT")
+                        )
+                        first_hit_bar = pd.to_numeric(
+                            path_result.get("hit_bar"),
+                            errors="coerce",
+                        )
+                        first_hit_minutes = pd.to_numeric(
+                            path_result.get("hit_minutes"),
+                            errors="coerce",
+                        )
+
+                        hit_inside_horizon = (
+                            first_outcome
+                            in {"TP", "SL", "SL_AMBIGUOUS"}
+                            and pd.notna(first_hit_bar)
+                            and int(first_hit_bar) <= horizon
+                        )
+
+                        if hit_inside_horizon:
+                            if first_outcome == "TP":
+                                gross_pct = float(tp_pct)
+                                exit_reason = "TP"
+                            elif first_outcome == "SL_AMBIGUOUS":
+                                gross_pct = -float(sl_pct)
+                                exit_reason = "SL_AMBIGUOUS"
+                            else:
+                                gross_pct = -float(sl_pct)
+                                exit_reason = "SL"
+                            hit_minutes = (
+                                float(first_hit_minutes)
+                                if pd.notna(first_hit_minutes)
+                                else np.nan
+                            )
+                        else:
+                            gross_pct = pd.to_numeric(
+                                event.get(return_col),
+                                errors="coerce",
+                            )
+                            if pd.isna(gross_pct):
+                                continue
+                            gross_pct = float(gross_pct)
+                            exit_reason = "TIME_EXIT"
+                            hit_minutes = np.nan
+
+                        net_pct = float(gross_pct) - roundtrip_cost_pct
+                        trade_rows.append({
+                            "exit_reason": exit_reason,
+                            "gross_pct": float(gross_pct),
+                            "net_pct": float(net_pct),
+                            "hit_minutes": hit_minutes,
+                        })
+
+                    if not trade_rows:
+                        continue
+
+                    trades = pd.DataFrame(trade_rows)
+                    net = pd.to_numeric(trades["net_pct"], errors="coerce").dropna()
+                    gross = pd.to_numeric(
+                        trades["gross_pct"], errors="coerce"
+                    ).dropna()
+                    if net.empty:
+                        continue
+
+                    profits = float(net.loc[net.gt(0.0)].sum())
+                    losses = float(-net.loc[net.lt(0.0)].sum())
+                    if losses > 0:
+                        profit_factor = profits / losses
+                    elif profits > 0:
+                        profit_factor = np.inf
+                    else:
+                        profit_factor = np.nan
+
+                    exit_reason = trades["exit_reason"].astype(str)
+                    hit_minutes = pd.to_numeric(
+                        trades["hit_minutes"], errors="coerce"
+                    ).dropna()
+                    n = int(len(trades))
+
+                    rows.append({
+                        "TF": str(timeframe),
+                        "Detector": str(detector),
+                        "Side": str(side),
+                        "Horizon": f"{horizon}m",
+                        "TP %": float(tp_pct),
+                        "SL %": float(sl_pct),
+                        "N": n,
+                        "TP first": int(exit_reason.eq("TP").sum()),
+                        "SL first": int(exit_reason.eq("SL").sum()),
+                        "Ambig→SL": int(exit_reason.eq("SL_AMBIGUOUS").sum()),
+                        "Time exit": int(exit_reason.eq("TIME_EXIT").sum()),
+                        "TP first %": float(exit_reason.eq("TP").mean() * 100.0),
+                        "SL+Ambig %": float(
+                            exit_reason.isin(["SL", "SL_AMBIGUOUS"]).mean()
+                            * 100.0
+                        ),
+                        "Time exit %": float(
+                            exit_reason.eq("TIME_EXIT").mean() * 100.0
+                        ),
+                        "Net win %": float(net.gt(0.0).mean() * 100.0),
+                        "Avg gross %": float(gross.mean()),
+                        "Avg net %": float(net.mean()),
+                        "Median net %": float(net.median()),
+                        "PF": float(profit_factor),
+                        "Total net %": float(net.sum()),
+                        "Avg hit min": (
+                            float(hit_minutes.mean())
+                            if not hit_minutes.empty
+                            else np.nan
+                        ),
+                        "Median hit min": (
+                            float(hit_minutes.median())
+                            if not hit_minutes.empty
+                            else np.nan
+                        ),
+                        "Roundtrip cost %": float(roundtrip_cost_pct),
+                    })
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    numeric_cols = [
+        "TP %", "SL %", "TP first %", "SL+Ambig %", "Time exit %",
+        "Net win %", "Avg gross %", "Avg net %", "Median net %",
+        "PF", "Total net %", "Avg hit min", "Median hit min",
+        "Roundtrip cost %",
+    ]
+    for column in numeric_cols:
+        if column in result.columns:
+            result[column] = pd.to_numeric(
+                result[column], errors="coerce"
+            ).round(4)
+
+    tf_order = {"1m": 0, "5m": 1}
+    side_order = {"LONG": 0, "SHORT": 1}
+    horizon_order = {"1m": 0, "3m": 1, "5m": 2}
+    result["_tf"] = result["TF"].map(tf_order).fillna(99)
+    result["_side"] = result["Side"].map(side_order).fillna(99)
+    result["_h"] = result["Horizon"].map(horizon_order).fillna(99)
+
+    return (
+        result
+        .sort_values(
+            ["_tf", "Detector", "_side", "_h", "TP %", "SL %"],
+            kind="stable",
+        )
+        .drop(columns=["_tf", "_side", "_h"])
         .reset_index(drop=True)
     )
 
@@ -39100,10 +39414,137 @@ if selected_section == "micro_reaction":
                         )
                         st.caption(
                             "Hit +X% ≤5m and Adverse X% ≤5m are independent reach "
-                            "rates. A signal can count in both if both excursions occur; "
-                            "the chronological TP-vs-SL first-touch matrix is a separate "
-                            "next step."
+                            "rates. A signal can count in both if both excursions occur. "
+                            "The matrix below resolves the actual chronological first touch."
                         )
+
+                        st.markdown("#### Chronological scalp TP / SL matrix")
+                        st.caption(
+                            "Every scenario starts at the executable next-1m-open entry. "
+                            "Within the selected 1m / 3m / 5m horizon, whichever TP or SL "
+                            "is touched first wins. If both are touched inside the same 1m "
+                            "candle, the result is conservatively SL_AMBIGUOUS. If neither "
+                            "is touched, the trade exits at the horizon close. Fees and "
+                            "slippage are deducted on both entry and exit."
+                        )
+
+                        matrix_c1, matrix_c2, matrix_c3, matrix_c4 = st.columns(4)
+                        with matrix_c1:
+                            scalp_fee_per_side = st.number_input(
+                                "Fee per side %",
+                                min_value=0.0,
+                                value=0.05,
+                                step=0.01,
+                                format="%.3f",
+                                key="micro_reaction_scalp_matrix_fee",
+                            )
+                        with matrix_c2:
+                            scalp_slippage_per_side = st.number_input(
+                                "Slippage per side %",
+                                min_value=0.0,
+                                value=0.00,
+                                step=0.01,
+                                format="%.3f",
+                                key="micro_reaction_scalp_matrix_slippage",
+                            )
+                        with matrix_c3:
+                            scalp_matrix_horizon = st.selectbox(
+                                "Matrix horizon",
+                                ["1m", "3m", "5m"],
+                                index=2,
+                                key="micro_reaction_scalp_matrix_horizon",
+                            )
+                        with matrix_c4:
+                            scalp_matrix_side = st.selectbox(
+                                "Matrix side",
+                                ["ALL", "LONG", "SHORT"],
+                                index=0,
+                                key="micro_reaction_scalp_matrix_side",
+                            )
+
+                        matrix_sort = st.selectbox(
+                            "Rank scenarios by",
+                            ["Avg net %", "PF", "Net win %", "Total net %"],
+                            index=0,
+                            key="micro_reaction_scalp_matrix_sort",
+                        )
+
+                        scalp_matrix = build_micro_reaction_scalp_tp_sl_matrix(
+                            stored_global_retests,
+                            fee_per_side_pct=float(scalp_fee_per_side),
+                            slippage_per_side_pct=float(scalp_slippage_per_side),
+                        )
+
+                        if scalp_matrix.empty:
+                            st.info(
+                                "No chronological scalp matrix payload is available yet. "
+                                "Press Build again after this update so the historical "
+                                "REACTION paths are regenerated with first-touch data."
+                            )
+                        else:
+                            scalp_matrix_view = scalp_matrix.loc[
+                                scalp_matrix["Horizon"].astype(str).eq(
+                                    str(scalp_matrix_horizon)
+                                )
+                            ].copy()
+                            if scalp_matrix_side != "ALL":
+                                scalp_matrix_view = scalp_matrix_view.loc[
+                                    scalp_matrix_view["Side"].astype(str).eq(
+                                        str(scalp_matrix_side)
+                                    )
+                                ].copy()
+
+                            if not scalp_matrix_view.empty:
+                                scalp_matrix_view = scalp_matrix_view.sort_values(
+                                    matrix_sort,
+                                    ascending=False,
+                                    na_position="last",
+                                    kind="stable",
+                                ).reset_index(drop=True)
+
+                                matrix_display_columns = [
+                                    "TF", "Detector", "Side", "Horizon",
+                                    "TP %", "SL %", "N",
+                                    "TP first", "SL first", "Ambig→SL", "Time exit",
+                                    "TP first %", "SL+Ambig %", "Time exit %",
+                                    "Net win %", "Avg gross %", "Avg net %",
+                                    "Median net %", "PF", "Total net %",
+                                    "Avg hit min", "Median hit min",
+                                    "Roundtrip cost %",
+                                ]
+                                matrix_display_columns = [
+                                    column
+                                    for column in matrix_display_columns
+                                    if column in scalp_matrix_view.columns
+                                ]
+                                st.dataframe(
+                                    scalp_matrix_view[matrix_display_columns],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key="micro_reaction_scalp_tp_sl_matrix_table",
+                                )
+                                st.caption(
+                                    "Hit minute 0 means TP/SL occurred during the entry "
+                                    "1m candle. Net win % and PF use net returns after the "
+                                    "configured round-trip costs; TP first % is structural "
+                                    "first-touch frequency and can differ from Net win %."
+                                )
+
+                                matrix_csv_window = (
+                                    stored_global_config.get("window", "historical")
+                                    if isinstance(stored_global_config, dict)
+                                    else "historical"
+                                )
+                                st.download_button(
+                                    "Download full scalp TP/SL matrix CSV",
+                                    data=scalp_matrix.to_csv(index=False).encode("utf-8"),
+                                    file_name=(
+                                        "micro_reaction_scalp_tp_sl_matrix_"
+                                        f"{str(matrix_csv_window).lower()}.csv"
+                                    ),
+                                    mime="text/csv",
+                                    key="micro_reaction_scalp_matrix_download",
+                                )
 
                         st.markdown("#### Follow-through context · 10m / 15m / 30m")
                         secondary_columns = [
