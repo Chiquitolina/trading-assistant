@@ -20,7 +20,7 @@ from engine.live.data.redis_market_data_protocol import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 WINDOWS_SECONDS = (1, 3, 5, 15)
 OUTCOME_HORIZONS_MINUTES = (1, 3, 5)
 
@@ -151,6 +151,8 @@ class MicroFlowCollector:
         self.events_created = 0
         self.events_completed = 0
         self.events_invalidated = 0
+        self.synthetic_event_candidates_skipped = 0
+        self.synthetic_entry_invalidations = 0
         self.csv_errors = 0
         self.last_message_timestamp = None
         self.started_at_ms = int(time.time() * 1000)
@@ -535,8 +537,21 @@ class MicroFlowCollector:
     def _maybe_create_events(self, feature):
         symbol = str(feature["symbol"]).upper()
         timestamp = int(feature["timestamp"])
+        event_types = self._event_types_for_feature(feature)
 
-        for event_type, side in self._event_types_for_feature(feature):
+        # Synthetic seconds are useful inside rolling time windows because
+        # "no trade happened" is real microstructure information. They must
+        # never become signal timestamps, however: there was no executed trade
+        # in that second and a stale rolling imbalance can otherwise look like
+        # fresh absorption/momentum. A real aggTrade second must anchor every
+        # research event.
+        if bool(feature.get("synthetic", False)) or int(
+            feature.get("trade_count", 0) or 0
+        ) <= 0:
+            self.synthetic_event_candidates_skipped += len(event_types)
+            return
+
+        for event_type, side in event_types:
             key = (symbol, event_type)
             last_ts = self.last_event_timestamp.get(key)
             if (
@@ -607,9 +622,20 @@ class MicroFlowCollector:
                     self.events_invalidated += 1
                     continue
 
+                # Entry is deliberately strict: the immediately following
+                # one-second bucket must contain a real executed aggTrade. If
+                # that second was synthetic, using its carried-forward price
+                # would invent executable liquidity and contaminate MFE/MAE.
+                if bool(bar.get("synthetic", False)) or int(
+                    bar.get("trade_count", 0) or 0
+                ) <= 0:
+                    self.synthetic_entry_invalidations += 1
+                    self.events_invalidated += 1
+                    continue
+
                 event["entry_price"] = float(bar["open"])
                 event["entry_trade_count"] = int(bar["trade_count"])
-                event["entry_synthetic"] = bool(bar.get("synthetic", False))
+                event["entry_synthetic"] = False
 
             if timestamp < entry_ts:
                 keep.append(event)
@@ -743,11 +769,22 @@ class MicroFlowCollector:
             "events_created": self.events_created,
             "events_completed": self.events_completed,
             "events_invalidated": self.events_invalidated,
+            "synthetic_event_candidates_skipped": (
+                self.synthetic_event_candidates_skipped
+            ),
+            "synthetic_entry_invalidations": (
+                self.synthetic_entry_invalidations
+            ),
             "pending_events": pending_count,
             "csv_errors": self.csv_errors,
             "last_message_timestamp": self.last_message_timestamp,
             "updated_at": int(time.time() * 1000),
             "started_at": self.started_at_ms,
+            "execution_policy": {
+                "event_requires_real_second": True,
+                "entry_requires_immediate_next_real_second": True,
+                "synthetic_seconds_allowed_in_rolling_windows": True,
+            },
             "thresholds": {
                 "flow_threshold": self.flow_threshold,
                 "min_relative_activity": self.min_relative_activity,
