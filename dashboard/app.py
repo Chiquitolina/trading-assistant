@@ -12026,6 +12026,417 @@ def build_micro_reaction_driver_leaderboard(
     ).reset_index(drop=True)
 
 
+# Broad, pre-declared causal regions selected from the first single-driver
+# Micro REACTION research pass.  The goal is to test whether independent
+# pieces of the same structural story reinforce each other without tuning an
+# exact threshold to every sample.  Every condition below is known by the
+# REACTION close, before the executable next-1m-open entry.
+MICRO_REACTION_CROSS_CONDITIONS = {
+    "departure_1_1_5": {
+        "label": "Departure 1.00–1.50%",
+        "source": "max_departure_pct",
+        "min": 1.00,
+        "max": 1.50,
+        "tier": "PRIMARY",
+    },
+    "rel_volume_lt_1": {
+        "label": "Rel vol <1.00x",
+        "source": "reaction_relative_volume_30",
+        "max": 1.00,
+        "tier": "PRIMARY",
+    },
+    "rejection_wick_ge_0_8": {
+        "label": "Rejection wick ≥0.80",
+        "source": "reaction_rejection_wick_share",
+        "min": 0.80,
+        "tier": "PRIMARY",
+    },
+    "confirm_retest_30_60": {
+        "label": "Confirm→Retest 30–60m",
+        "source": "confirmed_to_retest_min",
+        "min": 30.0,
+        "max": 60.0,
+        "tier": "PRIMARY",
+    },
+    "close_strength_0_55_0_85": {
+        "label": "Close strength 0.55–0.85",
+        "source": "reaction_close_strength",
+        "min": 0.55,
+        "max": 0.85,
+        "tier": "SECONDARY",
+    },
+}
+
+
+def _micro_reaction_cross_condition_mask(frame, condition_key):
+    """Return a causal boolean mask for one pre-declared cross condition."""
+    spec = MICRO_REACTION_CROSS_CONDITIONS.get(str(condition_key))
+    if spec is None or frame is None or frame.empty:
+        return pd.Series(False, index=getattr(frame, "index", None), dtype=bool)
+
+    values = pd.to_numeric(
+        frame.get(
+            str(spec["source"]),
+            pd.Series(np.nan, index=frame.index),
+        ),
+        errors="coerce",
+    )
+    mask = values.notna()
+    if "min" in spec:
+        mask &= values.ge(float(spec["min"]))
+    if "max" in spec:
+        # Upper bounds are intentionally right-open so adjacent fixed buckets
+        # never overlap (e.g. 1.00 <= departure < 1.50).
+        mask &= values.lt(float(spec["max"]))
+    return mask.fillna(False)
+
+
+def _micro_reaction_cross_base_work(
+    retests_df,
+    side="ALL",
+    timeframe="ALL",
+):
+    """Return the REACTION universe to which cross filters are applied."""
+    if retests_df is None or retests_df.empty:
+        return pd.DataFrame()
+    required = {"status", "signal", "timeframe"}
+    if not required.issubset(retests_df.columns):
+        return pd.DataFrame()
+
+    work = retests_df.loc[
+        retests_df["status"].fillna("").astype(str).eq("REACTION")
+    ].copy()
+    if work.empty:
+        return work
+
+    side = str(side).upper()
+    if side in {"LONG", "SHORT"}:
+        work = work.loc[
+            work["signal"].fillna("").astype(str).str.upper().eq(side)
+        ].copy()
+
+    timeframe = str(timeframe)
+    if timeframe != "ALL":
+        work = work.loc[
+            work["timeframe"].fillna("").astype(str).eq(timeframe)
+        ].copy()
+
+    return work
+
+
+def _micro_reaction_execution_summary(execution, roundtrip_cost_pct=0.0):
+    """Summarize one chronological execution cohort in gross and net terms."""
+    empty = {
+        "Exec N": 0,
+        "TP first %": np.nan,
+        "SL+Ambig %": np.nan,
+        "Time exit %": np.nan,
+        "Gross win %": np.nan,
+        "Avg gross %": np.nan,
+        "Median gross %": np.nan,
+        "Gross PF": np.nan,
+        "Total gross %": np.nan,
+        "Avg net %": np.nan,
+        "Median net %": np.nan,
+        "Net PF": np.nan,
+        "Total net %": np.nan,
+        "Avg hit min": np.nan,
+    }
+    if execution is None or execution.empty:
+        return empty
+
+    gross = pd.to_numeric(execution.get("gross_pct"), errors="coerce")
+    valid = gross.notna()
+    if not valid.any():
+        return empty
+
+    execution = execution.loc[valid].copy()
+    gross = pd.to_numeric(execution["gross_pct"], errors="coerce")
+    net = gross - float(roundtrip_cost_pct)
+    reasons = execution["exit_reason"].astype(str)
+    hit_minutes = pd.to_numeric(
+        execution.get("hit_minutes", pd.Series(np.nan, index=execution.index)),
+        errors="coerce",
+    ).dropna()
+
+    gross_profits = float(gross.loc[gross.gt(0.0)].sum())
+    gross_losses = float(-gross.loc[gross.lt(0.0)].sum())
+    gross_pf = (
+        gross_profits / gross_losses
+        if gross_losses > 0
+        else (np.inf if gross_profits > 0 else np.nan)
+    )
+
+    net_profits = float(net.loc[net.gt(0.0)].sum())
+    net_losses = float(-net.loc[net.lt(0.0)].sum())
+    net_pf = (
+        net_profits / net_losses
+        if net_losses > 0
+        else (np.inf if net_profits > 0 else np.nan)
+    )
+
+    return {
+        "Exec N": int(len(execution)),
+        "TP first %": float(reasons.eq("TP").mean() * 100.0),
+        "SL+Ambig %": float(
+            reasons.isin(["SL", "SL_AMBIGUOUS"]).mean() * 100.0
+        ),
+        "Time exit %": float(reasons.eq("TIME_EXIT").mean() * 100.0),
+        "Gross win %": float(gross.gt(0.0).mean() * 100.0),
+        "Avg gross %": float(gross.mean()),
+        "Median gross %": float(gross.median()),
+        "Gross PF": float(gross_pf),
+        "Total gross %": float(gross.sum()),
+        "Avg net %": float(net.mean()),
+        "Median net %": float(net.median()),
+        "Net PF": float(net_pf),
+        "Total net %": float(net.sum()),
+        "Avg hit min": (
+            float(hit_minutes.mean()) if not hit_minutes.empty else np.nan
+        ),
+    }
+
+
+def filter_micro_reaction_driver_cross_events(
+    retests_df,
+    condition_keys,
+    side="ALL",
+    timeframe="ALL",
+):
+    """Return causal REACTION rows satisfying every requested cross condition."""
+    work = _micro_reaction_cross_base_work(
+        retests_df=retests_df,
+        side=side,
+        timeframe=timeframe,
+    )
+    if work.empty:
+        return work
+
+    if isinstance(condition_keys, str):
+        condition_keys = [
+            item for item in str(condition_keys).split("|") if item
+        ]
+    else:
+        condition_keys = list(condition_keys or [])
+
+    if not condition_keys:
+        return work.iloc[0:0].copy()
+
+    mask = pd.Series(True, index=work.index, dtype=bool)
+    for condition_key in condition_keys:
+        mask &= _micro_reaction_cross_condition_mask(work, condition_key)
+    return work.loc[mask].copy()
+
+
+def build_micro_reaction_driver_cross_analysis(
+    retests_df,
+    side="LONG",
+    timeframe="5m",
+    execution_horizon=5,
+    tp_pct=0.20,
+    sl_pct=0.15,
+    fee_per_side_pct=0.05,
+    slippage_per_side_pct=0.0,
+    max_depth=5,
+):
+    """Evaluate all broad 2→N driver crosses on the same causal universe.
+
+    The five component regions are intentionally broad and pre-declared from
+    the initial single-driver pass.  We enumerate their intersections rather
+    than searching arbitrary numeric thresholds.  Results remain exploratory:
+    overlapping rows are highly dependent and must later survive longer windows
+    and forward/stability tests.
+    """
+    from itertools import combinations
+
+    work = _micro_reaction_cross_base_work(
+        retests_df=retests_df,
+        side=side,
+        timeframe=timeframe,
+    )
+    if work.empty:
+        return pd.DataFrame()
+
+    execution_horizon = int(execution_horizon)
+    max_depth = max(2, min(int(max_depth), len(MICRO_REACTION_CROSS_CONDITIONS)))
+    roundtrip_cost_pct = 2.0 * (
+        float(fee_per_side_pct) + float(slippage_per_side_pct)
+    )
+
+    baseline_execution = _micro_reaction_driver_execution_rows(
+        group=work,
+        horizon=execution_horizon,
+        tp_pct=float(tp_pct),
+        sl_pct=float(sl_pct),
+    )
+    baseline = _micro_reaction_execution_summary(
+        baseline_execution,
+        roundtrip_cost_pct=roundtrip_cost_pct,
+    )
+
+    condition_keys = list(MICRO_REACTION_CROSS_CONDITIONS.keys())
+    rows = []
+    for depth in range(2, max_depth + 1):
+        for combo in combinations(condition_keys, depth):
+            group = filter_micro_reaction_driver_cross_events(
+                retests_df=work,
+                condition_keys=combo,
+                side="ALL",
+                timeframe="ALL",
+            )
+            if group.empty:
+                continue
+
+            execution = _micro_reaction_driver_execution_rows(
+                group=group,
+                horizon=execution_horizon,
+                tp_pct=float(tp_pct),
+                sl_pct=float(sl_pct),
+            )
+            summary = _micro_reaction_execution_summary(
+                execution,
+                roundtrip_cost_pct=roundtrip_cost_pct,
+            )
+            if int(summary.get("Exec N", 0)) <= 0:
+                continue
+
+            labels = [
+                str(MICRO_REACTION_CROSS_CONDITIONS[key]["label"])
+                for key in combo
+            ]
+            tiers = {
+                str(MICRO_REACTION_CROSS_CONDITIONS[key].get("tier", "PRIMARY"))
+                for key in combo
+            }
+            row = {
+                "Cross": " × ".join(labels),
+                "Condition keys": "|".join(combo),
+                "Depth": int(depth),
+                "Family": (
+                    "PRIMARY ONLY" if tiers == {"PRIMARY"} else "WITH CLOSE STRENGTH"
+                ),
+                "N": int(len(group)),
+                "Symbols": int(
+                    group.get("symbol", pd.Series(dtype="object"))
+                    .astype(str)
+                    .nunique()
+                ),
+                "Coverage %": float(len(group) / max(1, len(work)) * 100.0),
+                "Exec coverage %": float(
+                    int(summary["Exec N"])
+                    / max(1, int(baseline.get("Exec N", 0)))
+                    * 100.0
+                ),
+                "Roundtrip cost %": float(roundtrip_cost_pct),
+            }
+
+            for horizon in MICRO_REACTION_PRIMARY_HORIZONS:
+                complete = (
+                    group.get(
+                        f"reaction_entry_complete_{horizon}m",
+                        pd.Series(False, index=group.index),
+                    )
+                    .fillna(False)
+                    .astype(bool)
+                )
+                mfe = pd.to_numeric(
+                    group.get(
+                        f"reaction_entry_mfe_{horizon}m_pct",
+                        pd.Series(np.nan, index=group.index),
+                    ),
+                    errors="coerce",
+                )
+                mae = pd.to_numeric(
+                    group.get(
+                        f"reaction_entry_mae_{horizon}m_pct",
+                        pd.Series(np.nan, index=group.index),
+                    ),
+                    errors="coerce",
+                )
+                ret = pd.to_numeric(
+                    group.get(
+                        f"reaction_entry_return_{horizon}m_pct",
+                        pd.Series(np.nan, index=group.index),
+                    ),
+                    errors="coerce",
+                )
+                valid = complete & mfe.notna() & mae.notna() & ret.notna()
+                row[f"N {horizon}m"] = int(valid.sum())
+                row[f"MFE {horizon}m med %"] = (
+                    float(mfe.loc[valid].median()) if valid.any() else np.nan
+                )
+                row[f"MAE {horizon}m med %"] = (
+                    float(mae.loc[valid].median()) if valid.any() else np.nan
+                )
+                row[f"Return {horizon}m avg %"] = (
+                    float(ret.loc[valid].mean()) if valid.any() else np.nan
+                )
+
+            if (
+                pd.notna(row.get("MFE 5m med %"))
+                and pd.notna(row.get("MAE 5m med %"))
+            ):
+                row["MFE-MAE 5m med pp"] = float(
+                    row["MFE 5m med %"] - row["MAE 5m med %"]
+                )
+            else:
+                row["MFE-MAE 5m med pp"] = np.nan
+
+            row.update(summary)
+            row["Baseline N"] = int(baseline.get("Exec N", 0))
+            row["Baseline avg gross %"] = baseline.get("Avg gross %", np.nan)
+            row["Baseline Gross PF"] = baseline.get("Gross PF", np.nan)
+            row["Avg gross lift pp"] = (
+                float(summary["Avg gross %"] - baseline["Avg gross %"])
+                if pd.notna(summary.get("Avg gross %"))
+                and pd.notna(baseline.get("Avg gross %"))
+                else np.nan
+            )
+            row["TP first lift pp"] = (
+                float(summary["TP first %"] - baseline["TP first %"])
+                if pd.notna(summary.get("TP first %"))
+                and pd.notna(baseline.get("TP first %"))
+                else np.nan
+            )
+            row["SL+Ambig lift pp"] = (
+                float(summary["SL+Ambig %"] - baseline["SL+Ambig %"])
+                if pd.notna(summary.get("SL+Ambig %"))
+                and pd.notna(baseline.get("SL+Ambig %"))
+                else np.nan
+            )
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    integer_columns = {
+        "Depth", "N", "Symbols", "Exec N", "Baseline N",
+        "N 1m", "N 3m", "N 5m",
+    }
+    text_columns = {"Cross", "Condition keys", "Family"}
+    for column in result.columns:
+        if column in text_columns:
+            continue
+        if column in integer_columns:
+            result[column] = (
+                pd.to_numeric(result[column], errors="coerce")
+                .fillna(0)
+                .astype(int)
+            )
+        else:
+            result[column] = pd.to_numeric(
+                result[column], errors="coerce"
+            ).round(4)
+
+    return result.sort_values(
+        ["Avg gross %", "Gross PF", "Exec N"],
+        ascending=[False, False, False],
+        na_position="last",
+        kind="stable",
+    ).reset_index(drop=True)
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def scan_confirmed_swing_retests_all_symbols(
     symbols,
@@ -40224,6 +40635,326 @@ if selected_section == "micro_reaction":
                                     mime="text/csv",
                                     key="micro_reaction_driver_leaderboard_download",
                                 )
+
+                        st.markdown("##### Multi-driver hypothesis crosses")
+                        st.caption(
+                            "Tests every 2→5 way intersection among the broad regions that "
+                            "were worth keeping from the first driver pass: Departure "
+                            "1.00–1.50%, Relative volume <1x, Rejection wick ≥0.80, "
+                            "Confirm→Retest 30–60m, and the weaker secondary Close strength "
+                            "0.55–0.85 region. No numeric threshold is optimized here. Rows "
+                            "overlap heavily, so use them to discover a structural hypothesis, "
+                            "not as independent proof. Net columns use the fee/slippage inputs "
+                            "from the scalp matrix above."
+                        )
+
+                        cross_c1, cross_c2, cross_c3, cross_c4 = st.columns(4)
+                        with cross_c1:
+                            cross_min_n = st.number_input(
+                                "Cross min Exec N",
+                                min_value=1,
+                                value=10,
+                                step=5,
+                                key="micro_reaction_cross_min_n",
+                            )
+                        with cross_c2:
+                            cross_max_depth = st.selectbox(
+                                "Max cross depth",
+                                [2, 3, 4, 5],
+                                index=3,
+                                key="micro_reaction_cross_max_depth",
+                                help=(
+                                    "Depth 2 = pair, 3 = triple, etc. Higher depth is shown "
+                                    "only when enough complete executions survive."
+                                ),
+                            )
+                        with cross_c3:
+                            cross_family_filter = st.selectbox(
+                                "Cross family",
+                                ["ALL", "PRIMARY ONLY", "WITH CLOSE STRENGTH"],
+                                index=0,
+                                key="micro_reaction_cross_family",
+                            )
+                        with cross_c4:
+                            cross_sort = st.selectbox(
+                                "Rank crosses by",
+                                [
+                                    "Avg gross %",
+                                    "Avg gross lift pp",
+                                    "Gross PF",
+                                    "Avg net %",
+                                    "Net PF",
+                                    "Exec N",
+                                ],
+                                index=1,
+                                key="micro_reaction_cross_sort",
+                            )
+
+                        cross_table = build_micro_reaction_driver_cross_analysis(
+                            retests_df=stored_global_retests,
+                            side=str(driver_side),
+                            timeframe=str(driver_timeframe),
+                            execution_horizon=int(driver_horizon),
+                            tp_pct=float(driver_tp),
+                            sl_pct=float(driver_sl),
+                            fee_per_side_pct=float(scalp_fee_per_side),
+                            slippage_per_side_pct=float(scalp_slippage_per_side),
+                            max_depth=int(cross_max_depth),
+                        )
+
+                        if cross_table.empty:
+                            st.info(
+                                "No multi-driver cross has a complete chronological execution "
+                                "for the current side / TF / horizon / TP / SL selection."
+                            )
+                        else:
+                            cross_view = cross_table.loc[
+                                pd.to_numeric(
+                                    cross_table["Exec N"], errors="coerce"
+                                ).fillna(0).ge(int(cross_min_n))
+                            ].copy()
+                            if cross_family_filter != "ALL":
+                                cross_view = cross_view.loc[
+                                    cross_view["Family"].astype(str).eq(
+                                        str(cross_family_filter)
+                                    )
+                                ].copy()
+
+                            if not cross_view.empty:
+                                cross_view = cross_view.sort_values(
+                                    str(cross_sort),
+                                    ascending=False,
+                                    na_position="last",
+                                    kind="stable",
+                                ).reset_index(drop=True)
+
+                            baseline_exec_n = int(
+                                pd.to_numeric(
+                                    cross_table["Baseline N"], errors="coerce"
+                                ).dropna().iloc[0]
+                            )
+                            baseline_avg_gross = pd.to_numeric(
+                                cross_table["Baseline avg gross %"], errors="coerce"
+                            ).dropna()
+                            baseline_gross_pf = pd.to_numeric(
+                                cross_table["Baseline Gross PF"], errors="coerce"
+                            ).dropna()
+                            roundtrip_cost = pd.to_numeric(
+                                cross_table["Roundtrip cost %"], errors="coerce"
+                            ).dropna()
+
+                            b1, b2, b3, b4 = st.columns(4)
+                            b1.metric("Baseline Exec N", baseline_exec_n)
+                            b2.metric(
+                                "Baseline avg gross",
+                                (
+                                    f"{float(baseline_avg_gross.iloc[0]):+.4f}%"
+                                    if not baseline_avg_gross.empty
+                                    else "—"
+                                ),
+                            )
+                            b3.metric(
+                                "Baseline Gross PF",
+                                (
+                                    f"{float(baseline_gross_pf.iloc[0]):.2f}"
+                                    if not baseline_gross_pf.empty
+                                    else "—"
+                                ),
+                            )
+                            b4.metric(
+                                "Roundtrip cost",
+                                (
+                                    f"{float(roundtrip_cost.iloc[0]):.3f}%"
+                                    if not roundtrip_cost.empty
+                                    else "—"
+                                ),
+                            )
+
+                            cross_display_columns = [
+                                "Cross", "Depth", "Family", "N", "Symbols", "Exec N",
+                                "Coverage %", "Exec coverage %",
+                                "MFE 1m med %", "MAE 1m med %", "Return 1m avg %",
+                                "MFE 3m med %", "MAE 3m med %", "Return 3m avg %",
+                                "MFE 5m med %", "MAE 5m med %", "Return 5m avg %",
+                                "MFE-MAE 5m med pp",
+                                "TP first %", "SL+Ambig %", "Time exit %",
+                                "Avg gross %", "Gross PF", "Avg gross lift pp",
+                                "TP first lift pp", "SL+Ambig lift pp",
+                                "Avg net %", "Net PF", "Total net %",
+                            ]
+                            cross_display_columns = [
+                                column
+                                for column in cross_display_columns
+                                if column in cross_view.columns
+                            ]
+
+                            if cross_view.empty:
+                                st.warning(
+                                    "No cross reaches the current minimum N / family filter. "
+                                    "Lower Cross min Exec N only for exploration; do not treat "
+                                    "tiny intersections as evidence."
+                                )
+                            else:
+                                st.dataframe(
+                                    cross_view[cross_display_columns],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key="micro_reaction_driver_cross_table",
+                                )
+                                st.caption(
+                                    "Avg gross lift pp is the improvement over the unfiltered "
+                                    "REACTION baseline under the exact same side / TF / TP / SL / "
+                                    "horizon. A positive lift with N≈10 is only a lead; N≥30 across "
+                                    "many symbols is much more useful. Avg net and Net PF already "
+                                    "deduct the configured round-trip cost."
+                                )
+
+                                cross_csv_window = (
+                                    stored_global_config.get("window", "historical")
+                                    if isinstance(stored_global_config, dict)
+                                    else "historical"
+                                )
+                                st.download_button(
+                                    "Download full cross leaderboard CSV",
+                                    data=cross_table.to_csv(index=False).encode("utf-8"),
+                                    file_name=(
+                                        "micro_reaction_driver_crosses_"
+                                        f"{str(cross_csv_window).lower()}.csv"
+                                    ),
+                                    mime="text/csv",
+                                    key="micro_reaction_driver_cross_download",
+                                )
+
+                                st.markdown("###### Inspect one cross")
+                                selected_cross_name = st.selectbox(
+                                    "Cross to inspect",
+                                    cross_view["Cross"].astype(str).tolist(),
+                                    index=0,
+                                    key="micro_reaction_cross_inspect_name",
+                                )
+                                selected_cross_row = cross_view.loc[
+                                    cross_view["Cross"].astype(str).eq(
+                                        str(selected_cross_name)
+                                    )
+                                ].iloc[0]
+                                selected_condition_keys = str(
+                                    selected_cross_row["Condition keys"]
+                                )
+                                selected_cross_events = (
+                                    filter_micro_reaction_driver_cross_events(
+                                        retests_df=stored_global_retests,
+                                        condition_keys=selected_condition_keys,
+                                        side=str(driver_side),
+                                        timeframe=str(driver_timeframe),
+                                    )
+                                )
+
+                                inspect_c1, inspect_c2, inspect_c3, inspect_c4 = st.columns(4)
+                                inspect_c1.metric(
+                                    "Selected signals",
+                                    int(len(selected_cross_events)),
+                                )
+                                inspect_c2.metric(
+                                    "Selected Exec N",
+                                    int(selected_cross_row.get("Exec N", 0)),
+                                )
+                                inspect_c3.metric(
+                                    "Avg gross",
+                                    f"{float(selected_cross_row.get('Avg gross %', np.nan)):+.4f}%",
+                                )
+                                inspect_c4.metric(
+                                    "Gross PF",
+                                    f"{float(selected_cross_row.get('Gross PF', np.nan)):.2f}",
+                                )
+
+                                selected_signal_table = (
+                                    build_micro_reaction_historical_signal_table(
+                                        selected_cross_events
+                                    )
+                                )
+                                if not selected_signal_table.empty:
+                                    selected_signal_columns = [
+                                        "Symbol", "Side", "TF", "Detector",
+                                        "Reaction time", "Entry time", "Entry",
+                                        "MFE 1m %", "MAE 1m %", "Return 1m %",
+                                        "MFE 3m %", "MAE 3m %", "Return 3m %",
+                                        "MFE 5m %", "MAE 5m %", "Return 5m %",
+                                        "Departure %", "Confirm→Retest min",
+                                        "Relative volume 30", "Rejection wick share",
+                                        "Close strength",
+                                    ]
+                                    selected_signal_columns = [
+                                        column
+                                        for column in selected_signal_columns
+                                        if column in selected_signal_table.columns
+                                    ]
+                                    st.dataframe(
+                                        selected_signal_table[selected_signal_columns],
+                                        use_container_width=True,
+                                        hide_index=True,
+                                        key="micro_reaction_selected_cross_signals",
+                                    )
+                                    st.download_button(
+                                        "Download selected cross signals CSV",
+                                        data=selected_signal_table.to_csv(index=False).encode("utf-8"),
+                                        file_name="micro_reaction_selected_cross_signals.csv",
+                                        mime="text/csv",
+                                        key="micro_reaction_selected_cross_signals_download",
+                                    )
+
+                                selected_cross_matrix = (
+                                    build_micro_reaction_scalp_tp_sl_matrix(
+                                        selected_cross_events,
+                                        fee_per_side_pct=float(scalp_fee_per_side),
+                                        slippage_per_side_pct=float(
+                                            scalp_slippage_per_side
+                                        ),
+                                    )
+                                )
+                                if not selected_cross_matrix.empty:
+                                    selected_cross_matrix = selected_cross_matrix.loc[
+                                        selected_cross_matrix["Horizon"]
+                                        .astype(str)
+                                        .eq(str(driver_horizon_label))
+                                    ].copy()
+                                    if not selected_cross_matrix.empty:
+                                        selected_cross_matrix = (
+                                            selected_cross_matrix.sort_values(
+                                                ["Avg net %", "PF", "N"],
+                                                ascending=[False, False, False],
+                                                na_position="last",
+                                                kind="stable",
+                                            ).reset_index(drop=True)
+                                        )
+                                        st.markdown(
+                                            "###### Selected cross · full TP/SL grid"
+                                        )
+                                        st.caption(
+                                            "This reruns the complete scalp exit grid only on "
+                                            "the selected causal cross. It is the right place "
+                                            "to check whether the driver intersection merely "
+                                            "improves gross behavior or actually survives costs."
+                                        )
+                                        selected_matrix_columns = [
+                                            "TF", "Detector", "Side", "Horizon",
+                                            "TP %", "SL %", "N", "TP first %",
+                                            "SL+Ambig %", "Time exit %", "Avg gross %",
+                                            "Avg net %", "Median net %", "PF",
+                                            "Total net %", "Roundtrip cost %",
+                                        ]
+                                        selected_matrix_columns = [
+                                            column
+                                            for column in selected_matrix_columns
+                                            if column in selected_cross_matrix.columns
+                                        ]
+                                        st.dataframe(
+                                            selected_cross_matrix[
+                                                selected_matrix_columns
+                                            ].head(30),
+                                            use_container_width=True,
+                                            hide_index=True,
+                                            key="micro_reaction_selected_cross_matrix",
+                                        )
 
                         st.markdown("#### Follow-through context · 10m / 15m / 30m")
                         secondary_columns = [
