@@ -201,6 +201,12 @@ CANDIDATE_V2_PATH_STORE_FILE = (
 CANDIDATE_V2_MARKET_CONTEXT_FILE = (
     BASE_DIR / "reports" / "candidate_v2_analysis" / "market_context_4h.pkl"
 )
+# Causal 1h + 4h Market Flow transition snapshots. This is separate from the
+# existing 4h cross-sectional context so V2 can study market transitions
+# without changing the frozen REACTION universe or any V2 selection rule.
+CANDIDATE_V2_MARKET_TRANSITION_FILE = (
+    BASE_DIR / "reports" / "candidate_v2_analysis" / "market_transition_1h_4h.pkl"
+)
 CANDIDATE_V2_STRENGTH_THRESHOLDS = (
     0.00, 0.25, 0.50, 0.75, 1.00, 1.50,
 )
@@ -7579,14 +7585,254 @@ if trigger_tf in (None, "", "N/A"):
     trigger_tf = "30m"
 
     
+
+def render_current_market_flow_panel(
+    timeframe,
+    key_prefix,
+    show_sector=False,
+    heading_level="###",
+):
+    """Render one current Market Flow snapshot without assuming 4h fields."""
+    timeframe = str(timeframe).lower()
+    suffix = timeframe
+    title = f"🌊 Market Flow {timeframe}"
+    st.markdown(f"{heading_level} {title}")
+    st.caption(
+        "Lectura cross-sectional del mercado. 4h se usa como régimen más lento; "
+        "1h sirve como lectura más rápida de transición/expansión/contracción. "
+        "Es contexto de research, no una señal de entrada."
+    )
+
+    snapshot = market_flow_dashboard_service.get_snapshot(timeframe)
+    if snapshot is None:
+        st.warning(
+            f"Market Flow {timeframe} no disponible o no confiable. "
+            f"Motivo: {market_flow_dashboard_service.last_error}"
+        )
+        return
+
+    symbol_df = market_flow_dashboard_service.build_symbol_table(snapshot)
+    if symbol_df.empty:
+        st.warning(
+            f"El snapshot {timeframe} existe pero no contiene métricas válidas "
+            f"por símbolo. Motivo: {market_flow_dashboard_service.last_error}"
+        )
+        return
+
+    breadth_key = f"market_breadth_{suffix}"
+    btc_key = f"btc_return_pct_{suffix}"
+    return_key = f"return_pct_{suffix}"
+    return_rank_key = f"return_rank_pct_{suffix}"
+    relative_volume_key = f"relative_volume_{suffix}"
+    volume_rank_key = f"volume_rank_pct_{suffix}"
+
+    breadth = pd.to_numeric(snapshot.get(breadth_key), errors="coerce")
+    btc_return = pd.to_numeric(snapshot.get(btc_key), errors="coerce")
+    coverage = pd.to_numeric(snapshot.get("coverage_pct"), errors="coerce")
+    valid_universe = int(snapshot.get("valid_universe_size", len(symbol_df)) or 0)
+    configured_universe = int(
+        snapshot.get("configured_universe_size", valid_universe) or valid_universe
+    )
+    positive_symbols = int(snapshot.get("positive_symbols", 0) or 0)
+    age_seconds = pd.to_numeric(
+        snapshot.get("market_flow_age_seconds"), errors="coerce"
+    )
+    age_hours = float(age_seconds) / 3600 if pd.notna(age_seconds) else float("nan")
+    breadth_regime = (
+        market_flow_dashboard_service.classify_market_breadth(breadth)
+        if pd.notna(breadth)
+        else "Unknown"
+    )
+
+    close_timestamp = snapshot.get("market_flow_close_timestamp")
+    close_label = "Unknown"
+    if close_timestamp:
+        close_label = (
+            pd.to_datetime(close_timestamp, unit="ms", utc=True)
+            .tz_convert(TZ)
+            .strftime("%Y-%m-%d %H:%M")
+        )
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric(
+        f"Market Breadth {timeframe}",
+        f"{float(breadth):.2f}%" if pd.notna(breadth) else "—",
+    )
+    m2.metric("Market Regime", breadth_regime)
+    m3.metric("Positive Symbols", f"{positive_symbols} / {valid_universe}")
+    m4.metric(
+        f"BTC Return {timeframe}",
+        f"{float(btc_return):+.2f}%" if pd.notna(btc_return) else "—",
+    )
+    m5.metric(
+        "Coverage",
+        (
+            f"{float(coverage):.2f}% ({valid_universe}/{configured_universe})"
+            if pd.notna(coverage)
+            else f"— ({valid_universe}/{configured_universe})"
+        ),
+    )
+    m6.metric(
+        "Snapshot Age",
+        f"{age_hours:.2f}h" if pd.notna(age_hours) else "—",
+    )
+
+    if pd.notna(breadth):
+        if float(breadth) < 30:
+            st.error(
+                f"Debilidad amplia: menos del 30% del universo terminó positivo "
+                f"en la última ventana de {timeframe}."
+            )
+        elif float(breadth) < 50:
+            st.warning(
+                f"Mercado débil o mixto en {timeframe}: predominan símbolos "
+                "negativos, aunque existe participación alcista parcial."
+            )
+        elif float(breadth) < 70:
+            st.success(
+                f"Participación saludable en {timeframe}: la mayoría del universo "
+                "acompaña el movimiento."
+            )
+        elif float(breadth) < 85:
+            st.success(
+                f"Expansión amplia en {timeframe}: participación positiva fuerte "
+                "en gran parte del mercado."
+            )
+        else:
+            st.warning(
+                f"Participación extremadamente elevada en {timeframe}: puede ser "
+                "expansión fuerte o un estado sobreextendido."
+            )
+
+    st.caption(f"Snapshot correspondiente al cierre {close_label} ({TZ}).")
+
+    # Sector research remains 4h until the sector analyzer is generalized.
+    if show_sector:
+        sector_df = market_flow_dashboard_service.build_sector_table(snapshot)
+        if not sector_df.empty:
+            st.markdown(f"#### 🧭 Sector Rotation {timeframe}")
+            sector_return_key = f"sector_return_pct_{suffix}"
+            sector_rank_key = f"sector_return_rank_pct_{suffix}"
+            sector_breadth_key = f"sector_breadth_{suffix}"
+            sector_volume_key = f"sector_relative_volume_{suffix}"
+            sector_strength_key = f"sector_strength_vs_btc_{suffix}"
+            display_sector = sector_df.rename(columns={
+                "sector": "Sector",
+                "valid_symbols": "Symbols",
+                sector_return_key: f"Return {timeframe} %",
+                sector_rank_key: "Return Rank %",
+                sector_breadth_key: "Breadth %",
+                sector_volume_key: "Relative Volume",
+                sector_strength_key: "Strength vs BTC %",
+                "sector_flow_state": "Flow State",
+            })
+            cols = [
+                "Sector", "Symbols", f"Return {timeframe} %", "Return Rank %",
+                "Breadth %", "Relative Volume", "Strength vs BTC %", "Flow State",
+            ]
+            cols = [c for c in cols if c in display_sector.columns]
+            st.dataframe(
+                display_sector[cols],
+                use_container_width=True,
+                hide_index=True,
+                key=f"{key_prefix}_sector_table",
+            )
+        elif timeframe != "4h":
+            st.caption("Sector Rotation sigue siendo 4h; el Market Flow 1h es mercado/símbolo.")
+
+    st.markdown(f"#### Cross-sectional symbol explorer · {timeframe}")
+    group_counts = symbol_df.get("flow_group", pd.Series(dtype=str)).value_counts().to_dict()
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Confirmed Leadership", group_counts.get("Confirmed leadership", 0))
+    g2.metric(
+        "Strong / Low Volume Rank",
+        group_counts.get("Rise without volume confirmation", 0),
+    )
+    g3.metric("Emerging Activity", group_counts.get("Emerging activity", 0))
+    g4.metric("High-Volume Weakness", group_counts.get("High-volume weakness", 0))
+
+    flow_group_labels = {
+        "All symbols": None,
+        "Confirmed leadership": "Confirmed leadership",
+        "Strong return / low volume rank": "Rise without volume confirmation",
+        "Emerging activity": "Emerging activity",
+        "High-volume weakness": "High-volume weakness",
+        "Neutral / unclassified": "Neutral / unclassified",
+    }
+    f1, f2 = st.columns([2, 1])
+    with f1:
+        selected_label = st.selectbox(
+            "Flow group",
+            options=list(flow_group_labels),
+            key=f"{key_prefix}_group",
+        )
+    with f2:
+        search_symbol = st.text_input(
+            "Search symbol",
+            key=f"{key_prefix}_symbol",
+            placeholder="Example: BTCUSDT",
+        ).strip().upper()
+
+    filtered = symbol_df.copy()
+    selected_group = flow_group_labels[selected_label]
+    if selected_group is not None:
+        filtered = filtered.loc[
+            filtered["flow_group"].astype(str).eq(selected_group)
+        ].copy()
+    if search_symbol:
+        filtered = filtered.loc[
+            filtered["symbol"].astype(str).str.contains(
+                search_symbol,
+                case=False,
+                na=False,
+                regex=False,
+            )
+        ].copy()
+
+    filtered = filtered.sort_values(
+        [return_rank_key, volume_rank_key],
+        ascending=[False, False],
+    )
+    display = filtered.rename(columns={
+        "symbol": "Symbol",
+        return_key: f"Return {timeframe} %",
+        return_rank_key: "Return Rank %",
+        relative_volume_key: "Relative Volume",
+        volume_rank_key: "Volume Rank %",
+        "flow_group": "Flow Group",
+    })
+    display_columns = [
+        "Symbol",
+        f"Return {timeframe} %",
+        "Return Rank %",
+        "Relative Volume",
+        "Volume Rank %",
+        "Flow Group",
+    ]
+    display_columns = [c for c in display_columns if c in display.columns]
+    st.dataframe(
+        display[display_columns],
+        use_container_width=True,
+        hide_index=True,
+        key=f"{key_prefix}_symbol_table",
+    )
+    st.caption(f"Showing {len(filtered)} of {len(symbol_df)} valid symbols.")
+    st.download_button(
+        f"⬇️ Download current Market Flow {timeframe} snapshot",
+        data=display[display_columns].to_csv(index=False).encode("utf-8"),
+        file_name=f"market_flow_{timeframe}_{close_label[:10]}.csv",
+        mime="text/csv",
+        key=f"{key_prefix}_download",
+    )
+
 # =========================
 # LAZY DASHBOARD NAVIGATION
 # =========================
 
 DASHBOARD_SECTIONS = {
     "overview": "📊 Overview",
+    "market_flow": "🌊 Market Flow",
     "volume_exhaustion": "⚡ Volume Exhaustion",
-    "micro_reaction": "🧬 Micro REACTION",
     "reaction_swing_lab": "🧪 Reaction & Swing Lab",
     "swing_sweep_reclaim": "🧹 Swing Sweep → Reclaim",
     "geometry_scanner": "📐 Geometry Scanner",
@@ -7630,8 +7876,8 @@ if (
     and selected_section not in {
         "geometry_scanner",
         "volume_exhaustion",
-        "micro_reaction",
         "swing_sweep_reclaim",
+        "market_flow",
     }
 ):
     st.markdown("---")
@@ -8938,142 +9184,6 @@ def load_volume_exhaustion_research_candles(
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def load_micro_reaction_historical_1m_candles(
-    symbol,
-    required_bars,
-):
-    """Load enough CLOSED Binance Futures 1m candles for historical research.
-
-    Redis intentionally keeps a relatively short rolling history, which is
-    perfect for live scanning but cannot guarantee a full 1/2/3-day inspector.
-    Historical Micro REACTION therefore backfills public USD-M Futures klines
-    on demand. Requests are paginated backwards (max 1500 bars/request), cached,
-    deduplicated and restricted to closed candles only.
-    """
-    try:
-        required_bars = max(1, int(required_bars))
-    except (TypeError, ValueError):
-        return pd.DataFrame()
-
-    url = "https://fapi.binance.com/fapi/v1/klines"
-    now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
-    remaining = required_bars
-    end_time = None
-    frames = []
-    safety_calls = 0
-
-    while remaining > 0 and safety_calls < 10:
-        safety_calls += 1
-        batch_limit = min(1000, max(1, remaining + (1 if end_time is None else 0)))
-        params = {
-            "symbol": str(symbol).upper(),
-            "interval": "1m",
-            "limit": int(batch_limit),
-        }
-        if end_time is not None:
-            params["endTime"] = int(end_time)
-
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                timeout=8,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except Exception:
-            break
-
-        if not payload:
-            break
-
-        frame = pd.DataFrame(
-            payload,
-            columns=[
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "close_time",
-                "quote_volume",
-                "trades",
-                "taker_buy_base",
-                "taker_buy_quote",
-                "ignore",
-            ],
-        )
-
-        for column in [
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "close_time",
-        ]:
-            frame[column] = pd.to_numeric(
-                frame[column],
-                errors="coerce",
-            )
-
-        frame = frame.dropna(
-            subset=[
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "close_time",
-            ]
-        ).copy()
-
-        # Never let the currently forming 1m candle leak into research.
-        frame = frame.loc[
-            frame["close_time"] < now_ms
-        ].copy()
-
-        if frame.empty:
-            oldest_raw = pd.to_numeric(
-                pd.DataFrame(payload)[0],
-                errors="coerce",
-            ).dropna()
-            if oldest_raw.empty:
-                break
-            end_time = int(oldest_raw.min()) - 1
-            continue
-
-        frames.append(frame)
-        remaining = max(0, required_bars - sum(len(item) for item in frames))
-        oldest_open = int(frame["timestamp"].min())
-        next_end_time = oldest_open - 1
-        if end_time is not None and next_end_time >= end_time:
-            break
-        end_time = next_end_time
-
-        if len(payload) < batch_limit:
-            break
-
-    if not frames:
-        return pd.DataFrame()
-
-    result = pd.concat(frames, ignore_index=True)
-    result = (
-        result
-        .sort_values("timestamp")
-        .drop_duplicates(subset=["timestamp"], keep="last")
-        .tail(required_bars)
-        .reset_index(drop=True)
-    )
-
-    return result[
-        ["timestamp", "open", "high", "low", "close", "volume"]
-    ].copy()
-
-
-@st.cache_data(ttl=120, show_spinner=False)
 def build_volume_exhaustion_confirmation_study_all_symbols(
     symbols,
     candle_limit,
@@ -9449,22 +9559,6 @@ def _attach_confirmed_swing_reaction_run(retest, forward_cache):
 
 
 
-# Micro REACTION is a short-horizon execution study. These metrics are
-# measured from the actual hypothetical entry (next consecutive 1m open),
-# not from the REACTION candle close.
-MICRO_REACTION_RESEARCH_METRICS_VERSION = "scalp_entry_v2_first_touch"
-MICRO_REACTION_SCALP_HORIZONS = (1, 3, 5, 10, 15, 30)
-MICRO_REACTION_PRIMARY_HORIZONS = (1, 3, 5)
-MICRO_REACTION_SECONDARY_HORIZONS = (10, 15, 30)
-MICRO_REACTION_5M_HIT_THRESHOLDS = (0.10, 0.20, 0.30)
-
-# Chronological scalp execution research. These grids are intentionally small:
-# the hypothesis is a fast 1m/3m/5m trade, not a wide swing-position exit.
-MICRO_REACTION_SCALP_TP_GRID = (0.10, 0.15, 0.20, 0.25, 0.30)
-MICRO_REACTION_SCALP_SL_GRID = (0.10, 0.15, 0.20)
-MICRO_REACTION_SCALP_MATRIX_HORIZONS = (1, 3, 5)
-
-
 CONFIRMED_SWING_FIRST_TOUCH_TP_GRID = (
     0.25, 0.50, 0.75, 1.00, 1.50, 2.00,
 )
@@ -9501,27 +9595,8 @@ def _attach_confirmed_swing_order_recovery_analysis(
     retest = dict(retest)
 
     retest["first_touch_entry_price"] = np.nan
-    retest["first_touch_entry_timestamp"] = np.nan
-    retest["first_touch_entry_time"] = pd.NaT
     retest["first_touch_60m_complete"] = False
     retest["first_touch_60m_results"] = {}
-    # First TP/SL hit over the first five executable 1m candles. The payload is
-    # later sliced at 1m / 3m / 5m without rescanning price history.
-    retest["micro_reaction_scalp_path_results_5m"] = {}
-
-    # Short-horizon Micro REACTION metrics are measured from the executable
-    # next-1m-open entry. Keep them separate from reaction_mfe_* fields, whose
-    # historical semantics are based on the REACTION close.
-    for horizon_min in MICRO_REACTION_SCALP_HORIZONS:
-        retest[f"reaction_entry_mfe_{horizon_min}m_pct"] = np.nan
-        retest[f"reaction_entry_mae_{horizon_min}m_pct"] = np.nan
-        retest[f"reaction_entry_return_{horizon_min}m_pct"] = np.nan
-        retest[f"reaction_entry_complete_{horizon_min}m"] = False
-
-    for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
-        threshold_key = f"{float(threshold_pct):.2f}".replace(".", "_")
-        retest[f"reaction_entry_hit_plus_{threshold_key}_within_5m"] = False
-        retest[f"reaction_entry_hit_adverse_{threshold_key}_within_5m"] = False
 
     # Compact chronological research payload:
     # - one first-hit result per TP/SL pair, scanned up to 360m;
@@ -9585,13 +9660,6 @@ def _attach_confirmed_swing_order_recovery_analysis(
         return retest
 
     retest["first_touch_entry_price"] = entry_price
-    retest["first_touch_entry_timestamp"] = int(timestamps[start_idx])
-    retest["first_touch_entry_time"] = pd.to_datetime(
-        int(timestamps[start_idx]),
-        unit="ms",
-        utc=True,
-        errors="coerce",
-    ).tz_convert(TZ)
 
     # 60m TP/SL first-touch matrix.
     horizon_end = start_idx + 60 - 1
@@ -9678,143 +9746,6 @@ def _attach_confirmed_swing_order_recovery_analysis(
             len(timestamps) - int(start_idx),
         ),
     )
-
-    # ------------------------------------------------------------
-    # Micro REACTION scalp excursion from ACTUAL entry price.
-    # ------------------------------------------------------------
-    if status == "REACTION":
-        for horizon_min in MICRO_REACTION_SCALP_HORIZONS:
-            horizon_min = int(horizon_min)
-            if available_bars < horizon_min:
-                continue
-
-            horizon_idx = start_idx + horizon_min - 1
-            horizon_high = float(
-                np.max(highs[start_idx : horizon_idx + 1])
-            )
-            horizon_low = float(
-                np.min(lows[start_idx : horizon_idx + 1])
-            )
-            horizon_close = float(closes[horizon_idx])
-
-            if side == "LONG":
-                horizon_mfe = max(
-                    0.0,
-                    (horizon_high / entry_price - 1.0) * 100.0,
-                )
-                horizon_mae = max(
-                    0.0,
-                    (1.0 - horizon_low / entry_price) * 100.0,
-                )
-                horizon_return = (
-                    horizon_close / entry_price - 1.0
-                ) * 100.0
-            else:
-                horizon_mfe = max(
-                    0.0,
-                    (1.0 - horizon_low / entry_price) * 100.0,
-                )
-                horizon_mae = max(
-                    0.0,
-                    (horizon_high / entry_price - 1.0) * 100.0,
-                )
-                horizon_return = (
-                    1.0 - horizon_close / entry_price
-                ) * 100.0
-
-            retest[f"reaction_entry_mfe_{horizon_min}m_pct"] = float(
-                horizon_mfe
-            )
-            retest[f"reaction_entry_mae_{horizon_min}m_pct"] = float(
-                horizon_mae
-            )
-            retest[f"reaction_entry_return_{horizon_min}m_pct"] = float(
-                horizon_return
-            )
-            retest[f"reaction_entry_complete_{horizon_min}m"] = True
-
-        if bool(retest.get("reaction_entry_complete_5m", False)):
-            mfe_5m = float(retest["reaction_entry_mfe_5m_pct"])
-            mae_5m = float(retest["reaction_entry_mae_5m_pct"])
-            for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
-                threshold_key = (
-                    f"{float(threshold_pct):.2f}".replace(".", "_")
-                )
-                retest[
-                    f"reaction_entry_hit_plus_{threshold_key}_within_5m"
-                ] = bool(mfe_5m >= float(threshold_pct))
-                retest[
-                    f"reaction_entry_hit_adverse_{threshold_key}_within_5m"
-                ] = bool(mae_5m >= float(threshold_pct))
-
-        # ------------------------------------------------------------
-        # Chronological Micro REACTION TP-vs-SL first touch (max 5m).
-        # Same-candle TP+SL is conservatively treated as SL_AMBIGUOUS.
-        # ------------------------------------------------------------
-        scalp_scan_bars = min(
-            int(available_bars),
-            max(MICRO_REACTION_SCALP_MATRIX_HORIZONS),
-        )
-        if scalp_scan_bars > 0:
-            scalp_results = {}
-            for tp_pct in MICRO_REACTION_SCALP_TP_GRID:
-                for sl_pct in MICRO_REACTION_SCALP_SL_GRID:
-                    if side == "LONG":
-                        tp_price = entry_price * (
-                            1.0 + float(tp_pct) / 100.0
-                        )
-                        sl_price = entry_price * (
-                            1.0 - float(sl_pct) / 100.0
-                        )
-                    else:
-                        tp_price = entry_price * (
-                            1.0 - float(tp_pct) / 100.0
-                        )
-                        sl_price = entry_price * (
-                            1.0 + float(sl_pct) / 100.0
-                        )
-
-                    first_outcome = "NO_HIT"
-                    first_hit_bar = np.nan
-                    first_hit_minutes = np.nan
-
-                    for offset in range(scalp_scan_bars):
-                        idx = start_idx + offset
-                        high = float(highs[idx])
-                        low = float(lows[idx])
-
-                        if side == "LONG":
-                            tp_hit = high >= tp_price
-                            sl_hit = low <= sl_price
-                        else:
-                            tp_hit = low <= tp_price
-                            sl_hit = high >= sl_price
-
-                        if tp_hit and sl_hit:
-                            first_outcome = "SL_AMBIGUOUS"
-                            first_hit_bar = int(offset + 1)
-                            first_hit_minutes = float(offset)
-                            break
-                        if sl_hit:
-                            first_outcome = "SL"
-                            first_hit_bar = int(offset + 1)
-                            first_hit_minutes = float(offset)
-                            break
-                        if tp_hit:
-                            first_outcome = "TP"
-                            first_hit_bar = int(offset + 1)
-                            first_hit_minutes = float(offset)
-                            break
-
-                    scalp_results[
-                        _confirmed_swing_first_touch_key(tp_pct, sl_pct)
-                    ] = {
-                        "outcome": first_outcome,
-                        "hit_bar": first_hit_bar,
-                        "hit_minutes": first_hit_minutes,
-                    }
-
-            retest["micro_reaction_scalp_path_results_5m"] = scalp_results
 
     complete_horizons = []
     time_exit_returns = {}
@@ -10587,1856 +10518,6 @@ def build_confirmed_swing_retests_from_confirmation_study(
 
 
 
-def _resample_contiguous_1m_for_micro_swing(
-    one_minute,
-    timeframe,
-):
-    """Build closed micro-HTF candles from contiguous 1m history.
-
-    Historical Micro REACTION can have much deeper 1m retention than the
-    native Redis 5m list. For a 5m structural scan, reconstructing 5m candles
-    from the same contiguous 1m path keeps the visual window and the pivot
-    universe aligned instead of silently truncating history.
-    """
-    work = _prepare_confirmed_swing_retest_candles(one_minute)
-    if work.empty:
-        return pd.DataFrame()
-
-    timeframe_minutes = timeframe_to_minutes(str(timeframe))
-    if timeframe_minutes is None:
-        return pd.DataFrame()
-
-    timeframe_minutes = int(timeframe_minutes)
-    if timeframe_minutes <= 1:
-        return work.copy()
-
-    bucket_ms = timeframe_minutes * 60_000
-    work = work.copy()
-    work["_bucket_timestamp"] = (
-        work["timestamp"].astype("int64") // bucket_ms
-    ) * bucket_ms
-
-    aggregation = {
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "timestamp": ["count", "min", "max"],
-    }
-    if "volume" in work.columns:
-        aggregation["volume"] = "sum"
-
-    grouped = work.groupby(
-        "_bucket_timestamp",
-        sort=True,
-    ).agg(aggregation)
-
-    # Flatten the MultiIndex created by the timestamp diagnostics.
-    grouped.columns = [
-        "_".join(
-            str(part)
-            for part in column
-            if str(part)
-        ).strip("_")
-        if isinstance(column, tuple)
-        else str(column)
-        for column in grouped.columns
-    ]
-    grouped = grouped.reset_index()
-
-    expected_last_offset = (timeframe_minutes - 1) * 60_000
-    valid = (
-        pd.to_numeric(grouped["timestamp_count"], errors="coerce")
-        .eq(timeframe_minutes)
-        & pd.to_numeric(grouped["timestamp_min"], errors="coerce")
-        .eq(pd.to_numeric(grouped["_bucket_timestamp"], errors="coerce"))
-        & pd.to_numeric(grouped["timestamp_max"], errors="coerce")
-        .eq(
-            pd.to_numeric(
-                grouped["_bucket_timestamp"],
-                errors="coerce",
-            )
-            + expected_last_offset
-        )
-    )
-    grouped = grouped.loc[valid].copy()
-    if grouped.empty:
-        return pd.DataFrame()
-
-    result = pd.DataFrame({
-        "timestamp": pd.to_numeric(
-            grouped["_bucket_timestamp"],
-            errors="coerce",
-        ),
-        "open": pd.to_numeric(grouped["open_first"], errors="coerce"),
-        "high": pd.to_numeric(grouped["high_max"], errors="coerce"),
-        "low": pd.to_numeric(grouped["low_min"], errors="coerce"),
-        "close": pd.to_numeric(grouped["close_last"], errors="coerce"),
-    })
-    if "volume_sum" in grouped.columns:
-        result["volume"] = pd.to_numeric(
-            grouped["volume_sum"],
-            errors="coerce",
-        )
-
-    return (
-        result
-        .dropna(subset=["timestamp", "open", "high", "low", "close"])
-        .sort_values("timestamp")
-        .reset_index(drop=True)
-    )
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def build_micro_reaction_historical_retests(
-    one_minute,
-    swing_timeframes,
-    swing_detector_items,
-    min_swing_prominence_pct,
-    retest_tolerance_pct,
-    min_departure_pct,
-    max_age_minutes,
-):
-    """Reconstruct every causal Micro REACTION inside one visible 1m window.
-
-    This is intentionally separate from the lightweight all-symbol live scanner.
-    Historical overlay must use the exact 1m dataframe that is being plotted so
-    a 5,000-candle chart and its structural scan cannot silently diverge.
-    """
-    prepared = _prepare_confirmed_swing_retest_candles(one_minute)
-    diagnostics = {
-        "1m candles": int(len(prepared)),
-        "pivots": 0,
-        "confirmed": 0,
-        "eligible confirmations": 0,
-        "first touches": 0,
-        "REACTIONs": 0,
-        "failed": 0,
-        "indecisive": 0,
-    }
-
-    if prepared.empty:
-        return pd.DataFrame(), diagnostics
-
-    detector_windows = dict(swing_detector_items)
-    swing_timeframes = tuple(str(tf) for tf in swing_timeframes)
-    earliest_1m_ts = int(prepared["timestamp"].min())
-    latest_1m_ts = int(prepared["timestamp"].max())
-    forward_cache = _build_confirmed_swing_retest_forward_cache(prepared)
-    rows = []
-
-    for swing_timeframe in swing_timeframes:
-        detector_name = detector_windows.get(swing_timeframe, "5x5")
-        try:
-            swing_bars = int(str(detector_name).split("x")[0])
-        except (TypeError, ValueError):
-            swing_bars = 5
-
-        detector = SwingDetector(
-            left_bars=swing_bars,
-            right_bars=swing_bars,
-            min_prominence_pct=float(min_swing_prominence_pct),
-        )
-
-        if swing_timeframe == "1m":
-            timeframe_candles = prepared.copy()
-        elif swing_timeframe == "5m":
-            # For the long historical chart, derive 5m from the SAME 1m path.
-            # This removes any retention mismatch between Redis 1m and 5m lists.
-            timeframe_candles = _resample_contiguous_1m_for_micro_swing(
-                prepared,
-                "5m",
-            )
-        else:
-            timeframe_candles = pd.DataFrame()
-
-        if timeframe_candles is None or timeframe_candles.empty:
-            continue
-
-        points = detector.detect_all(
-            timeframe_candles.to_dict(orient="records")
-        )
-        diagnostics["pivots"] += int(len(points))
-
-        for point in points:
-            if point.pivot_timestamp is None:
-                continue
-
-            info = get_volume_exhaustion_swing_confirmation_info(
-                point=point,
-                timeframe_candles=timeframe_candles,
-                swing_timeframe=swing_timeframe,
-            )
-            if info is None:
-                continue
-            diagnostics["confirmed"] += 1
-
-            actionable_ts = int(info["actionable_timestamp"])
-            # Historical overlay owns exactly this plotted 1m window. If the
-            # confirmation becomes actionable outside it, the causal path cannot
-            # be reconstructed from the visible data and is intentionally skipped.
-            if actionable_ts < earliest_1m_ts or actionable_ts > latest_1m_ts:
-                continue
-            diagnostics["eligible confirmations"] += 1
-
-            signal_side = (
-                "SHORT"
-                if point.side == "HIGH"
-                else "LONG"
-                if point.side == "LOW"
-                else None
-            )
-            if signal_side is None:
-                continue
-
-            try:
-                prominence_pct = float(point.prominence_pct)
-            except (TypeError, ValueError):
-                prominence_pct = np.nan
-
-            swing_row = {
-                "timeframe": swing_timeframe,
-                "detector": detector_name,
-                "signal": signal_side,
-                "pivot_timestamp": int(point.pivot_timestamp),
-                "actionable_timestamp": actionable_ts,
-                "pivot_price": float(point.price),
-                "entry_price": float(info["confirmation_close"]),
-                "pivot_to_confirmation_pct": float(info["move_pct"]),
-                "prominence_pct": prominence_pct,
-            }
-
-            retest = _find_confirmed_swing_retest(
-                one_minute=prepared,
-                swing_row=swing_row,
-                retest_tolerance_pct=float(retest_tolerance_pct),
-                min_departure_pct=float(min_departure_pct),
-                max_age_minutes=int(max_age_minutes),
-            )
-            if retest is None:
-                continue
-
-            diagnostics["first touches"] += 1
-            status = str(retest.get("status", ""))
-            if status == "REACTION":
-                diagnostics["REACTIONs"] += 1
-            elif status == "TOUCH_FAILED":
-                diagnostics["failed"] += 1
-            elif status == "TOUCH_INDECISIVE":
-                diagnostics["indecisive"] += 1
-
-            retest["symbol"] = ""
-            retest["retest_age_min"] = max(
-                0.0,
-                (latest_1m_ts - int(retest["retest_timestamp"])) / 60_000.0,
-            )
-            retest = _attach_confirmed_swing_volume_context(
-                retest,
-                prepared,
-            )
-            retest = _attach_confirmed_swing_reaction_run(
-                retest,
-                forward_cache,
-            )
-            retest = _attach_confirmed_swing_order_recovery_analysis(
-                retest,
-                forward_cache,
-            )
-            rows.append(retest)
-
-    if not rows:
-        return pd.DataFrame(), diagnostics
-
-    result = pd.DataFrame(rows)
-    for source_col, target_col in [
-        ("pivot_timestamp", "pivot_time"),
-        ("actionable_timestamp", "confirmation_available"),
-        ("departure_timestamp", "departure_time"),
-        ("retest_timestamp", "retest_time"),
-    ]:
-        if source_col not in result.columns:
-            continue
-        result[target_col] = pd.to_datetime(
-            pd.to_numeric(result[source_col], errors="coerce"),
-            unit="ms",
-            utc=True,
-            errors="coerce",
-        ).dt.tz_convert(TZ)
-
-    return (
-        result.sort_values("retest_timestamp", ascending=False).reset_index(drop=True),
-        diagnostics,
-    )
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def scan_micro_reaction_historical_symbol_window(
-    symbol,
-    window_minutes,
-    swing_timeframes,
-    swing_detector_items,
-    min_swing_prominence_pct,
-    retest_tolerance_pct,
-    min_departure_pct,
-    max_age_minutes,
-    metrics_version=MICRO_REACTION_RESEARCH_METRICS_VERSION,
-):
-    """Build one symbol's historical Micro REACTION universe for a clock window.
-
-    The requested window is the RETEST/REACTION window. Extra 1m candles are
-    loaded to the left so pivots can confirm before the window and still retest
-    inside it. Forward MFE/MAE is right-censored naturally near the current edge;
-    horizon-complete flags remain the source of truth for summary Ns.
-    """
-    _ = str(metrics_version)
-
-    try:
-        window_minutes = max(1, int(window_minutes))
-        max_age_minutes = max(1, int(max_age_minutes))
-    except (TypeError, ValueError):
-        return pd.DataFrame(), {
-            "symbol": str(symbol),
-            "bars": 0,
-            "first touches": 0,
-            "REACTIONs": 0,
-            "error": "invalid_window",
-        }
-
-    detector_windows = dict(swing_detector_items)
-    detector_warmup_minutes = 0
-    for swing_timeframe in tuple(str(tf) for tf in swing_timeframes):
-        detector_name = detector_windows.get(swing_timeframe, "5x5")
-        try:
-            detector_bars = int(str(detector_name).split("x")[0])
-        except (TypeError, ValueError):
-            detector_bars = 5
-        detector_warmup_minutes = max(
-            detector_warmup_minutes,
-            int(
-                (2 * detector_bars + 2)
-                * timeframe_to_minutes(swing_timeframe)
-            ),
-        )
-
-    # Left context must cover a confirmation that predates the requested retest
-    # window by as much as max_age_minutes. Keep an extra hour for clean 5m
-    # resampling / detector warmup. 72h + normal parameters remains < 5k bars.
-    required_bars = int(
-        window_minutes
-        + max_age_minutes
-        + detector_warmup_minutes
-        + 60
-    )
-    required_bars = min(12000, max(300, required_bars))
-
-    one_minute = load_micro_reaction_historical_1m_candles(
-        symbol=str(symbol),
-        required_bars=int(required_bars),
-    )
-    prepared = _prepare_confirmed_swing_retest_candles(one_minute)
-
-    if prepared.empty:
-        return pd.DataFrame(), {
-            "symbol": str(symbol),
-            "bars": 0,
-            "first touches": 0,
-            "REACTIONs": 0,
-            "error": "no_history",
-        }
-
-    retests, diagnostics = build_micro_reaction_historical_retests(
-        one_minute=prepared,
-        swing_timeframes=tuple(str(tf) for tf in swing_timeframes),
-        swing_detector_items=tuple(swing_detector_items),
-        min_swing_prominence_pct=float(min_swing_prominence_pct),
-        retest_tolerance_pct=float(retest_tolerance_pct),
-        min_departure_pct=float(min_departure_pct),
-        max_age_minutes=int(max_age_minutes),
-    )
-
-    latest_ts = int(
-        pd.to_numeric(prepared["timestamp"], errors="coerce").dropna().max()
-    )
-    window_start_ts = latest_ts - int(window_minutes) * 60_000
-
-    diagnostics = dict(diagnostics or {})
-    diagnostics.update({
-        "symbol": str(symbol),
-        "bars": int(len(prepared)),
-        "window_start_timestamp": int(window_start_ts),
-        "window_end_timestamp": int(latest_ts),
-    })
-
-    if retests is None or retests.empty:
-        diagnostics["window first touches"] = 0
-        diagnostics["window REACTIONs"] = 0
-        return pd.DataFrame(), diagnostics
-
-    retest_ts = pd.to_numeric(
-        retests["retest_timestamp"],
-        errors="coerce",
-    )
-    window_retests = retests.loc[
-        retest_ts.ge(window_start_ts)
-        & retest_ts.le(latest_ts)
-    ].copy()
-
-    if window_retests.empty:
-        diagnostics["window first touches"] = 0
-        diagnostics["window REACTIONs"] = 0
-        return pd.DataFrame(), diagnostics
-
-    window_retests["symbol"] = str(symbol)
-    diagnostics["window first touches"] = int(len(window_retests))
-    diagnostics["window REACTIONs"] = int(
-        window_retests["status"].fillna("").astype(str).eq("REACTION").sum()
-    )
-
-    return (
-        window_retests
-        .sort_values("retest_timestamp", ascending=False)
-        .reset_index(drop=True),
-        diagnostics,
-    )
-
-
-def build_micro_reaction_historical_signal_summary(retests_df):
-    """Aggregate executable Micro REACTION scalp metrics by TF / detector / side.
-
-    Primary horizons are 1m/3m/5m from the next-1m-open entry. Longer 10m/15m/30m
-    values are retained only as follow-through context.
-    """
-    if retests_df is None or retests_df.empty:
-        return pd.DataFrame()
-
-    required = {"timeframe", "detector", "signal", "status"}
-    if not required.issubset(retests_df.columns):
-        return pd.DataFrame()
-
-    rows = []
-    for (timeframe, detector, side), group in retests_df.groupby(
-        ["timeframe", "detector", "signal"],
-        dropna=False,
-        sort=True,
-    ):
-        reactions = group.loc[
-            group["status"].fillna("").astype(str).eq("REACTION")
-        ].copy()
-
-        row = {
-            "TF": str(timeframe),
-            "Detector": str(detector),
-            "Side": str(side),
-            "First touches": int(len(group)),
-            "Signals": int(len(reactions)),
-            "Symbols": int(
-                reactions["symbol"].astype(str).nunique()
-                if "symbol" in reactions.columns and not reactions.empty
-                else 0
-            ),
-            "Reaction rate %": (
-                float(len(reactions)) / float(len(group)) * 100.0
-                if len(group)
-                else np.nan
-            ),
-        }
-
-        for horizon in MICRO_REACTION_SCALP_HORIZONS:
-            mfe_col = f"reaction_entry_mfe_{horizon}m_pct"
-            mae_col = f"reaction_entry_mae_{horizon}m_pct"
-            ret_col = f"reaction_entry_return_{horizon}m_pct"
-            complete_col = f"reaction_entry_complete_{horizon}m"
-
-            mfe = pd.to_numeric(
-                reactions.get(mfe_col, pd.Series(np.nan, index=reactions.index)),
-                errors="coerce",
-            )
-            mae = pd.to_numeric(
-                reactions.get(mae_col, pd.Series(np.nan, index=reactions.index)),
-                errors="coerce",
-            )
-            ret = pd.to_numeric(
-                reactions.get(ret_col, pd.Series(np.nan, index=reactions.index)),
-                errors="coerce",
-            )
-            complete = (
-                reactions.get(
-                    complete_col,
-                    pd.Series(False, index=reactions.index),
-                )
-                .fillna(False)
-                .astype(bool)
-            )
-            valid = complete & mfe.notna() & mae.notna() & ret.notna()
-
-            row[f"N {horizon}m"] = int(valid.sum())
-            row[f"MFE {horizon}m avg %"] = (
-                float(mfe.loc[valid].mean()) if valid.any() else np.nan
-            )
-            row[f"MFE {horizon}m med %"] = (
-                float(mfe.loc[valid].median()) if valid.any() else np.nan
-            )
-            row[f"MAE {horizon}m avg %"] = (
-                float(mae.loc[valid].mean()) if valid.any() else np.nan
-            )
-            row[f"MAE {horizon}m med %"] = (
-                float(mae.loc[valid].median()) if valid.any() else np.nan
-            )
-            row[f"Return {horizon}m avg %"] = (
-                float(ret.loc[valid].mean()) if valid.any() else np.nan
-            )
-            row[f"Return {horizon}m med %"] = (
-                float(ret.loc[valid].median()) if valid.any() else np.nan
-            )
-            row[f"Positive close {horizon}m %"] = (
-                float(ret.loc[valid].gt(0.0).mean() * 100.0)
-                if valid.any()
-                else np.nan
-            )
-
-        complete_5m = (
-            reactions.get(
-                "reaction_entry_complete_5m",
-                pd.Series(False, index=reactions.index),
-            )
-            .fillna(False)
-            .astype(bool)
-        )
-        mfe_5m = pd.to_numeric(
-            reactions.get(
-                "reaction_entry_mfe_5m_pct",
-                pd.Series(np.nan, index=reactions.index),
-            ),
-            errors="coerce",
-        )
-        mae_5m = pd.to_numeric(
-            reactions.get(
-                "reaction_entry_mae_5m_pct",
-                pd.Series(np.nan, index=reactions.index),
-            ),
-            errors="coerce",
-        )
-        valid_5m = complete_5m & mfe_5m.notna() & mae_5m.notna()
-
-        for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
-            label = f"{float(threshold_pct):.2f}%"
-            row[f"Hit +{label} ≤5m %"] = (
-                float(
-                    mfe_5m.loc[valid_5m]
-                    .ge(float(threshold_pct))
-                    .mean()
-                    * 100.0
-                )
-                if valid_5m.any()
-                else np.nan
-            )
-            row[f"Adverse {label} ≤5m %"] = (
-                float(
-                    mae_5m.loc[valid_5m]
-                    .ge(float(threshold_pct))
-                    .mean()
-                    * 100.0
-                )
-                if valid_5m.any()
-                else np.nan
-            )
-
-        rows.append(row)
-
-    result = pd.DataFrame(rows)
-    if result.empty:
-        return result
-
-    for column in result.columns:
-        if column in {"TF", "Detector", "Side"}:
-            continue
-        result[column] = pd.to_numeric(result[column], errors="coerce")
-        if "%" in column:
-            result[column] = result[column].round(4)
-
-    tf_order = {"1m": 0, "5m": 1}
-    side_order = {"LONG": 0, "SHORT": 1}
-    result["_tf"] = result["TF"].map(tf_order).fillna(99)
-    result["_side"] = result["Side"].map(side_order).fillna(99)
-    return (
-        result
-        .sort_values(["_tf", "Detector", "_side"], kind="stable")
-        .drop(columns=["_tf", "_side"])
-        .reset_index(drop=True)
-    )
-
-
-def build_micro_reaction_historical_signal_table(
-    retests_df,
-    good_mfe_5m_pct=0.20,
-    good_max_mae_5m_pct=0.15,
-    bad_max_mfe_5m_pct=0.10,
-    bad_min_mae_5m_pct=0.20,
-):
-    """Return one row per executable REACTION with 1m/3m/5m scalp outcomes."""
-    if retests_df is None or retests_df.empty:
-        return pd.DataFrame()
-
-    work = retests_df.loc[
-        retests_df["status"].fillna("").astype(str).eq("REACTION")
-    ].copy()
-    if work.empty:
-        return pd.DataFrame()
-
-    mfe5 = pd.to_numeric(
-        work.get("reaction_entry_mfe_5m_pct"),
-        errors="coerce",
-    )
-    mae5 = pd.to_numeric(
-        work.get("reaction_entry_mae_5m_pct"),
-        errors="coerce",
-    )
-    complete5 = (
-        work.get(
-            "reaction_entry_complete_5m",
-            pd.Series(False, index=work.index),
-        )
-        .fillna(False)
-        .astype(bool)
-    )
-
-    quality = pd.Series("PENDING", index=work.index, dtype="object")
-    valid = complete5 & mfe5.notna() & mae5.notna()
-    good = (
-        valid
-        & mfe5.ge(float(good_mfe_5m_pct))
-        & mae5.le(float(good_max_mae_5m_pct))
-    )
-    bad = (
-        valid
-        & (
-            mfe5.lt(float(bad_max_mfe_5m_pct))
-            | mae5.ge(float(bad_min_mae_5m_pct))
-        )
-    )
-    quality.loc[valid] = "MIXED"
-    quality.loc[bad] = "BAD"
-    quality.loc[good] = "GOOD"
-
-    ratio = mfe5 / mae5.replace(0.0, np.nan)
-    ratio = ratio.where(mae5.gt(0.0), np.inf)
-
-    signal_id = (
-        work["symbol"].astype(str)
-        + "|"
-        + work["timeframe"].astype(str)
-        + "|"
-        + work["signal"].astype(str)
-        + "|"
-        + pd.to_numeric(work["retest_timestamp"], errors="coerce")
-        .fillna(0)
-        .astype("int64")
-        .astype(str)
-    )
-
-    table = pd.DataFrame(index=work.index)
-    table["Signal ID"] = signal_id
-    table["Symbol"] = work["symbol"].astype(str)
-    table["Side"] = work["signal"].astype(str)
-    table["TF"] = work["timeframe"].astype(str)
-    table["Detector"] = work["detector"].astype(str)
-    table["Reaction time"] = work.get("retest_time")
-    table["Entry time"] = work.get("first_touch_entry_time")
-    table["Entry"] = pd.to_numeric(
-        work.get("first_touch_entry_price"), errors="coerce"
-    )
-    table["Quality 5m"] = quality
-
-    for horizon in MICRO_REACTION_SCALP_HORIZONS:
-        table[f"MFE {horizon}m %"] = pd.to_numeric(
-            work.get(f"reaction_entry_mfe_{horizon}m_pct"),
-            errors="coerce",
-        )
-        table[f"MAE {horizon}m %"] = pd.to_numeric(
-            work.get(f"reaction_entry_mae_{horizon}m_pct"),
-            errors="coerce",
-        )
-        table[f"Return {horizon}m %"] = pd.to_numeric(
-            work.get(f"reaction_entry_return_{horizon}m_pct"),
-            errors="coerce",
-        )
-        table[f"Complete {horizon}m"] = (
-            work.get(
-                f"reaction_entry_complete_{horizon}m",
-                pd.Series(False, index=work.index),
-            )
-            .fillna(False)
-            .astype(bool)
-        )
-
-    for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
-        label = f"{float(threshold_pct):.2f}%"
-        table[f"Hit +{label} ≤5m"] = (
-            complete5
-            & mfe5.notna()
-            & mfe5.ge(float(threshold_pct))
-        )
-        table[f"Adverse {label} ≤5m"] = (
-            complete5
-            & mae5.notna()
-            & mae5.ge(float(threshold_pct))
-        )
-
-    table["MFE/MAE ratio 5m"] = ratio
-    table["MFE-MAE 5m pp"] = mfe5 - mae5
-    table["Departure %"] = pd.to_numeric(
-        work.get("max_departure_pct"), errors="coerce"
-    )
-    table["Confirm→Retest min"] = pd.to_numeric(
-        work.get("confirmed_to_retest_min"), errors="coerce"
-    )
-    table["Retest distance %"] = pd.to_numeric(
-        work.get("retest_distance_pct"), errors="coerce"
-    )
-    table["Pivot→Confirmation %"] = pd.to_numeric(
-        work.get("pivot_to_confirmation_pct"), errors="coerce"
-    )
-    table["Penetration %"] = pd.to_numeric(
-        work.get("penetration_pct"), errors="coerce"
-    )
-    table["Close strength"] = pd.to_numeric(
-        work.get("reaction_close_strength"), errors="coerce"
-    )
-    table["Reaction range %"] = pd.to_numeric(
-        work.get("reaction_range_pct"), errors="coerce"
-    )
-    table["Reaction body %"] = pd.to_numeric(
-        work.get("reaction_body_pct"), errors="coerce"
-    )
-    body = pd.to_numeric(work.get("reaction_body_pct"), errors="coerce")
-    candle_range = pd.to_numeric(work.get("reaction_range_pct"), errors="coerce")
-    table["Body / range share"] = (
-        body / candle_range.replace(0.0, np.nan)
-    ).clip(lower=0.0, upper=1.0)
-    table["Relative volume 30"] = pd.to_numeric(
-        work.get("reaction_relative_volume_30"), errors="coerce"
-    )
-    table["Reaction / departure rel vol"] = pd.to_numeric(
-        work.get("reaction_vs_departure_rel_volume"), errors="coerce"
-    )
-    table["Rejection wick share"] = pd.to_numeric(
-        work.get("reaction_rejection_wick_share"), errors="coerce"
-    )
-
-    numeric_columns = [
-        column
-        for column in table.columns
-        if (
-            "%" in column
-            or " pp" in column
-            or column in {
-                "Entry",
-                "MFE/MAE ratio 5m",
-                "Confirm→Retest min",
-            }
-        )
-        and not column.startswith("Hit +")
-        and not column.startswith("Adverse ")
-    ]
-    for column in numeric_columns:
-        if column not in table.columns:
-            continue
-        table[column] = pd.to_numeric(table[column], errors="coerce")
-        table[column] = table[column].round(5)
-
-    return (
-        table
-        .sort_values("Reaction time", ascending=False, na_position="last")
-        .reset_index(drop=True)
-    )
-
-
-def build_micro_reaction_scalp_tp_sl_matrix(
-    retests_df,
-    fee_per_side_pct=0.05,
-    slippage_per_side_pct=0.0,
-):
-    """Chronological TP/SL matrix for executable Micro REACTION entries.
-
-    Every trade starts at the next consecutive 1m open after REACTION is known.
-    For a selected 1m/3m/5m horizon, TP/SL is honored only when its first hit
-    occurs inside that horizon; otherwise the trade exits at that horizon close.
-    Same-1m TP+SL ambiguity is conservatively scored as SL_AMBIGUOUS.
-    """
-    if retests_df is None or retests_df.empty:
-        return pd.DataFrame()
-
-    required = {"timeframe", "detector", "signal", "status"}
-    if not required.issubset(retests_df.columns):
-        return pd.DataFrame()
-
-    try:
-        fee_per_side_pct = max(0.0, float(fee_per_side_pct))
-        slippage_per_side_pct = max(0.0, float(slippage_per_side_pct))
-    except (TypeError, ValueError):
-        return pd.DataFrame()
-
-    roundtrip_cost_pct = 2.0 * (
-        fee_per_side_pct + slippage_per_side_pct
-    )
-
-    reactions = retests_df.loc[
-        retests_df["status"].fillna("").astype(str).eq("REACTION")
-    ].copy()
-    if reactions.empty:
-        return pd.DataFrame()
-
-    rows = []
-    grouped = reactions.groupby(
-        ["timeframe", "detector", "signal"],
-        dropna=False,
-        sort=True,
-    )
-
-    for (timeframe, detector, side), group in grouped:
-        for horizon in MICRO_REACTION_SCALP_MATRIX_HORIZONS:
-            horizon = int(horizon)
-            complete_col = f"reaction_entry_complete_{horizon}m"
-            return_col = f"reaction_entry_return_{horizon}m_pct"
-
-            complete = (
-                group.get(
-                    complete_col,
-                    pd.Series(False, index=group.index),
-                )
-                .fillna(False)
-                .astype(bool)
-            )
-            horizon_return = pd.to_numeric(
-                group.get(
-                    return_col,
-                    pd.Series(np.nan, index=group.index),
-                ),
-                errors="coerce",
-            )
-            eligible = group.loc[complete & horizon_return.notna()].copy()
-            if eligible.empty:
-                continue
-
-            for tp_pct in MICRO_REACTION_SCALP_TP_GRID:
-                for sl_pct in MICRO_REACTION_SCALP_SL_GRID:
-                    key = _confirmed_swing_first_touch_key(tp_pct, sl_pct)
-                    trade_rows = []
-
-                    for row_index, event in eligible.iterrows():
-                        path_map = event.get(
-                            "micro_reaction_scalp_path_results_5m",
-                            {},
-                        )
-                        if not isinstance(path_map, dict):
-                            continue
-
-                        path_result = path_map.get(key)
-                        if not isinstance(path_result, dict):
-                            continue
-
-                        first_outcome = str(
-                            path_result.get("outcome", "NO_HIT")
-                        )
-                        first_hit_bar = pd.to_numeric(
-                            path_result.get("hit_bar"),
-                            errors="coerce",
-                        )
-                        first_hit_minutes = pd.to_numeric(
-                            path_result.get("hit_minutes"),
-                            errors="coerce",
-                        )
-
-                        hit_inside_horizon = (
-                            first_outcome
-                            in {"TP", "SL", "SL_AMBIGUOUS"}
-                            and pd.notna(first_hit_bar)
-                            and int(first_hit_bar) <= horizon
-                        )
-
-                        if hit_inside_horizon:
-                            if first_outcome == "TP":
-                                gross_pct = float(tp_pct)
-                                exit_reason = "TP"
-                            elif first_outcome == "SL_AMBIGUOUS":
-                                gross_pct = -float(sl_pct)
-                                exit_reason = "SL_AMBIGUOUS"
-                            else:
-                                gross_pct = -float(sl_pct)
-                                exit_reason = "SL"
-                            hit_minutes = (
-                                float(first_hit_minutes)
-                                if pd.notna(first_hit_minutes)
-                                else np.nan
-                            )
-                        else:
-                            gross_pct = pd.to_numeric(
-                                event.get(return_col),
-                                errors="coerce",
-                            )
-                            if pd.isna(gross_pct):
-                                continue
-                            gross_pct = float(gross_pct)
-                            exit_reason = "TIME_EXIT"
-                            hit_minutes = np.nan
-
-                        net_pct = float(gross_pct) - roundtrip_cost_pct
-                        trade_rows.append({
-                            "exit_reason": exit_reason,
-                            "gross_pct": float(gross_pct),
-                            "net_pct": float(net_pct),
-                            "hit_minutes": hit_minutes,
-                        })
-
-                    if not trade_rows:
-                        continue
-
-                    trades = pd.DataFrame(trade_rows)
-                    net = pd.to_numeric(trades["net_pct"], errors="coerce").dropna()
-                    gross = pd.to_numeric(
-                        trades["gross_pct"], errors="coerce"
-                    ).dropna()
-                    if net.empty:
-                        continue
-
-                    profits = float(net.loc[net.gt(0.0)].sum())
-                    losses = float(-net.loc[net.lt(0.0)].sum())
-                    if losses > 0:
-                        profit_factor = profits / losses
-                    elif profits > 0:
-                        profit_factor = np.inf
-                    else:
-                        profit_factor = np.nan
-
-                    exit_reason = trades["exit_reason"].astype(str)
-                    hit_minutes = pd.to_numeric(
-                        trades["hit_minutes"], errors="coerce"
-                    ).dropna()
-                    n = int(len(trades))
-
-                    rows.append({
-                        "TF": str(timeframe),
-                        "Detector": str(detector),
-                        "Side": str(side),
-                        "Horizon": f"{horizon}m",
-                        "TP %": float(tp_pct),
-                        "SL %": float(sl_pct),
-                        "N": n,
-                        "TP first": int(exit_reason.eq("TP").sum()),
-                        "SL first": int(exit_reason.eq("SL").sum()),
-                        "Ambig→SL": int(exit_reason.eq("SL_AMBIGUOUS").sum()),
-                        "Time exit": int(exit_reason.eq("TIME_EXIT").sum()),
-                        "TP first %": float(exit_reason.eq("TP").mean() * 100.0),
-                        "SL+Ambig %": float(
-                            exit_reason.isin(["SL", "SL_AMBIGUOUS"]).mean()
-                            * 100.0
-                        ),
-                        "Time exit %": float(
-                            exit_reason.eq("TIME_EXIT").mean() * 100.0
-                        ),
-                        "Net win %": float(net.gt(0.0).mean() * 100.0),
-                        "Avg gross %": float(gross.mean()),
-                        "Avg net %": float(net.mean()),
-                        "Median net %": float(net.median()),
-                        "PF": float(profit_factor),
-                        "Total net %": float(net.sum()),
-                        "Avg hit min": (
-                            float(hit_minutes.mean())
-                            if not hit_minutes.empty
-                            else np.nan
-                        ),
-                        "Median hit min": (
-                            float(hit_minutes.median())
-                            if not hit_minutes.empty
-                            else np.nan
-                        ),
-                        "Roundtrip cost %": float(roundtrip_cost_pct),
-                    })
-
-    if not rows:
-        return pd.DataFrame()
-
-    result = pd.DataFrame(rows)
-    numeric_cols = [
-        "TP %", "SL %", "TP first %", "SL+Ambig %", "Time exit %",
-        "Net win %", "Avg gross %", "Avg net %", "Median net %",
-        "PF", "Total net %", "Avg hit min", "Median hit min",
-        "Roundtrip cost %",
-    ]
-    for column in numeric_cols:
-        if column in result.columns:
-            result[column] = pd.to_numeric(
-                result[column], errors="coerce"
-            ).round(4)
-
-    tf_order = {"1m": 0, "5m": 1}
-    side_order = {"LONG": 0, "SHORT": 1}
-    horizon_order = {"1m": 0, "3m": 1, "5m": 2}
-    result["_tf"] = result["TF"].map(tf_order).fillna(99)
-    result["_side"] = result["Side"].map(side_order).fillna(99)
-    result["_h"] = result["Horizon"].map(horizon_order).fillna(99)
-
-    return (
-        result
-        .sort_values(
-            ["_tf", "Detector", "_side", "_h", "TP %", "SL %"],
-            kind="stable",
-        )
-        .drop(columns=["_tf", "_side", "_h"])
-        .reset_index(drop=True)
-    )
-
-
-# Fixed, pre-declared buckets for exploratory Micro REACTION driver research.
-# Keeping these boundaries stable is intentional: the dashboard should reveal
-# broad robust regions, not optimize a threshold after looking at the outcome.
-MICRO_REACTION_DRIVER_SPECS = {
-    "Departure %": {
-        "source": "max_departure_pct",
-        "bins": (-np.inf, 0.30, 0.50, 0.75, 1.00, 1.50, np.inf),
-        "labels": ("<0.30", "0.30–0.50", "0.50–0.75", "0.75–1.00", "1.00–1.50", "≥1.50"),
-    },
-    "Confirm→Retest min": {
-        "source": "confirmed_to_retest_min",
-        "bins": (-np.inf, 10, 20, 30, 60, 90, 120, np.inf),
-        "labels": ("<10", "10–20", "20–30", "30–60", "60–90", "90–120", "≥120"),
-    },
-    "Penetration %": {
-        "source": "penetration_pct",
-        "bins": (-np.inf, 0.00, 0.025, 0.05, 0.075, 0.10, 0.15, np.inf),
-        "labels": ("<0", "0–0.025", "0.025–0.05", "0.05–0.075", "0.075–0.10", "0.10–0.15", "≥0.15"),
-    },
-    "Close strength": {
-        "source": "reaction_close_strength",
-        "bins": (-np.inf, 0.55, 0.65, 0.75, 0.85, 0.95, np.inf),
-        "labels": ("<0.55", "0.55–0.65", "0.65–0.75", "0.75–0.85", "0.85–0.95", "≥0.95"),
-    },
-    "Reaction range %": {
-        "source": "reaction_range_pct",
-        "bins": (-np.inf, 0.10, 0.20, 0.35, 0.50, 0.75, np.inf),
-        "labels": ("<0.10", "0.10–0.20", "0.20–0.35", "0.35–0.50", "0.50–0.75", "≥0.75"),
-    },
-    "Reaction body %": {
-        "source": "reaction_body_pct",
-        "bins": (-np.inf, 0.05, 0.10, 0.20, 0.35, 0.50, np.inf),
-        "labels": ("<0.05", "0.05–0.10", "0.10–0.20", "0.20–0.35", "0.35–0.50", "≥0.50"),
-    },
-    "Body / range share": {
-        "source": "__body_range_share__",
-        "bins": (-np.inf, 0.20, 0.40, 0.60, 0.80, np.inf),
-        "labels": ("<0.20", "0.20–0.40", "0.40–0.60", "0.60–0.80", "≥0.80"),
-    },
-    "Relative volume 30": {
-        "source": "reaction_relative_volume_30",
-        "bins": (-np.inf, 0.75, 1.00, 1.50, 2.00, 3.00, np.inf),
-        "labels": ("<0.75x", "0.75–1.00x", "1.00–1.50x", "1.50–2.00x", "2.00–3.00x", "≥3.00x"),
-    },
-    "Reaction / departure rel vol": {
-        "source": "reaction_vs_departure_rel_volume",
-        "bins": (-np.inf, 0.50, 0.75, 1.00, 1.50, 2.00, np.inf),
-        "labels": ("<0.50x", "0.50–0.75x", "0.75–1.00x", "1.00–1.50x", "1.50–2.00x", "≥2.00x"),
-    },
-    "Rejection wick share": {
-        "source": "reaction_rejection_wick_share",
-        "bins": (-np.inf, 0.10, 0.25, 0.40, 0.60, 0.80, np.inf),
-        "labels": ("<0.10", "0.10–0.25", "0.25–0.40", "0.40–0.60", "0.60–0.80", "≥0.80"),
-    },
-}
-
-
-def _micro_reaction_driver_values(reactions, driver_name):
-    """Return numeric causal values + fixed buckets for one driver."""
-    spec = MICRO_REACTION_DRIVER_SPECS.get(str(driver_name))
-    if spec is None:
-        return pd.Series(dtype="float64"), pd.Series(dtype="object")
-
-    source = str(spec["source"])
-    if source == "__body_range_share__":
-        body = pd.to_numeric(
-            reactions.get(
-                "reaction_body_pct",
-                pd.Series(np.nan, index=reactions.index),
-            ),
-            errors="coerce",
-        )
-        candle_range = pd.to_numeric(
-            reactions.get(
-                "reaction_range_pct",
-                pd.Series(np.nan, index=reactions.index),
-            ),
-            errors="coerce",
-        )
-        values = body / candle_range.replace(0.0, np.nan)
-        values = values.clip(lower=0.0, upper=1.0)
-    else:
-        values = pd.to_numeric(
-            reactions.get(
-                source,
-                pd.Series(np.nan, index=reactions.index),
-            ),
-            errors="coerce",
-        )
-
-    buckets = pd.cut(
-        values,
-        bins=list(spec["bins"]),
-        labels=list(spec["labels"]),
-        right=False,
-        include_lowest=True,
-        ordered=True,
-    )
-    return values, buckets
-
-
-def _micro_reaction_driver_execution_rows(
-    group,
-    horizon,
-    tp_pct,
-    sl_pct,
-):
-    """Return gross chronological execution rows for one driver bucket."""
-    horizon = int(horizon)
-    return_col = f"reaction_entry_return_{horizon}m_pct"
-    complete_col = f"reaction_entry_complete_{horizon}m"
-
-    complete = (
-        group.get(
-            complete_col,
-            pd.Series(False, index=group.index),
-        )
-        .fillna(False)
-        .astype(bool)
-    )
-    time_exit_return = pd.to_numeric(
-        group.get(
-            return_col,
-            pd.Series(np.nan, index=group.index),
-        ),
-        errors="coerce",
-    )
-    eligible = group.loc[complete & time_exit_return.notna()].copy()
-    if eligible.empty:
-        return pd.DataFrame()
-
-    key = _confirmed_swing_first_touch_key(tp_pct, sl_pct)
-    rows = []
-    for _, event in eligible.iterrows():
-        path_map = event.get("micro_reaction_scalp_path_results_5m", {})
-        if not isinstance(path_map, dict):
-            continue
-        result = path_map.get(key)
-        if not isinstance(result, dict):
-            continue
-
-        first_outcome = str(result.get("outcome", "NO_HIT"))
-        first_hit_bar = pd.to_numeric(result.get("hit_bar"), errors="coerce")
-        first_hit_minutes = pd.to_numeric(
-            result.get("hit_minutes"), errors="coerce"
-        )
-        hit_inside_horizon = (
-            first_outcome in {"TP", "SL", "SL_AMBIGUOUS"}
-            and pd.notna(first_hit_bar)
-            and int(first_hit_bar) <= horizon
-        )
-
-        if hit_inside_horizon:
-            if first_outcome == "TP":
-                gross_pct = float(tp_pct)
-                exit_reason = "TP"
-            elif first_outcome == "SL_AMBIGUOUS":
-                gross_pct = -float(sl_pct)
-                exit_reason = "SL_AMBIGUOUS"
-            else:
-                gross_pct = -float(sl_pct)
-                exit_reason = "SL"
-            hit_minutes = (
-                float(first_hit_minutes)
-                if pd.notna(first_hit_minutes)
-                else np.nan
-            )
-        else:
-            gross_pct = pd.to_numeric(event.get(return_col), errors="coerce")
-            if pd.isna(gross_pct):
-                continue
-            gross_pct = float(gross_pct)
-            exit_reason = "TIME_EXIT"
-            hit_minutes = np.nan
-
-        rows.append(
-            {
-                "exit_reason": exit_reason,
-                "gross_pct": float(gross_pct),
-                "hit_minutes": hit_minutes,
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-def build_micro_reaction_driver_bucket_analysis(
-    retests_df,
-    driver_name,
-    side="ALL",
-    timeframe="ALL",
-    execution_horizon=5,
-    tp_pct=0.20,
-    sl_pct=0.15,
-):
-    """Bucket causal entry-time drivers against short-horizon outcomes.
-
-    This intentionally reports GROSS execution performance. Driver discovery
-    comes before transaction-cost viability; costs are evaluated separately in
-    the chronological scalp matrix once a broad, stable causal region exists.
-    """
-    if retests_df is None or retests_df.empty:
-        return pd.DataFrame()
-    if str(driver_name) not in MICRO_REACTION_DRIVER_SPECS:
-        return pd.DataFrame()
-
-    required = {"status", "signal", "timeframe"}
-    if not required.issubset(retests_df.columns):
-        return pd.DataFrame()
-
-    work = retests_df.loc[
-        retests_df["status"].fillna("").astype(str).eq("REACTION")
-    ].copy()
-    if work.empty:
-        return pd.DataFrame()
-
-    side = str(side).upper()
-    if side in {"LONG", "SHORT"}:
-        work = work.loc[work["signal"].astype(str).str.upper().eq(side)].copy()
-
-    timeframe = str(timeframe)
-    if timeframe != "ALL":
-        work = work.loc[work["timeframe"].astype(str).eq(timeframe)].copy()
-
-    if work.empty:
-        return pd.DataFrame()
-
-    values, buckets = _micro_reaction_driver_values(work, driver_name)
-    work["_driver_value"] = values
-    work["_driver_bucket"] = buckets
-    work = work.loc[
-        work["_driver_value"].notna() & work["_driver_bucket"].notna()
-    ].copy()
-    if work.empty:
-        return pd.DataFrame()
-
-    rows = []
-    grouped = work.groupby(
-        "_driver_bucket",
-        observed=True,
-        sort=False,
-    )
-
-    for bucket, group in grouped:
-        row = {
-            "Driver": str(driver_name),
-            "Bucket": str(bucket),
-            "N": int(len(group)),
-            "Symbols": int(
-                group.get("symbol", pd.Series(dtype="object"))
-                .astype(str)
-                .nunique()
-            ),
-            "Driver avg": float(
-                pd.to_numeric(group["_driver_value"], errors="coerce").mean()
-            ),
-            "Driver med": float(
-                pd.to_numeric(group["_driver_value"], errors="coerce").median()
-            ),
-        }
-
-        for horizon in MICRO_REACTION_PRIMARY_HORIZONS:
-            complete = (
-                group.get(
-                    f"reaction_entry_complete_{horizon}m",
-                    pd.Series(False, index=group.index),
-                )
-                .fillna(False)
-                .astype(bool)
-            )
-            mfe = pd.to_numeric(
-                group.get(
-                    f"reaction_entry_mfe_{horizon}m_pct",
-                    pd.Series(np.nan, index=group.index),
-                ),
-                errors="coerce",
-            )
-            mae = pd.to_numeric(
-                group.get(
-                    f"reaction_entry_mae_{horizon}m_pct",
-                    pd.Series(np.nan, index=group.index),
-                ),
-                errors="coerce",
-            )
-            ret = pd.to_numeric(
-                group.get(
-                    f"reaction_entry_return_{horizon}m_pct",
-                    pd.Series(np.nan, index=group.index),
-                ),
-                errors="coerce",
-            )
-            valid = complete & mfe.notna() & mae.notna() & ret.notna()
-            row[f"N {horizon}m"] = int(valid.sum())
-            row[f"MFE {horizon}m avg %"] = (
-                float(mfe.loc[valid].mean()) if valid.any() else np.nan
-            )
-            row[f"MFE {horizon}m med %"] = (
-                float(mfe.loc[valid].median()) if valid.any() else np.nan
-            )
-            row[f"MAE {horizon}m avg %"] = (
-                float(mae.loc[valid].mean()) if valid.any() else np.nan
-            )
-            row[f"MAE {horizon}m med %"] = (
-                float(mae.loc[valid].median()) if valid.any() else np.nan
-            )
-            row[f"Return {horizon}m avg %"] = (
-                float(ret.loc[valid].mean()) if valid.any() else np.nan
-            )
-            row[f"Return {horizon}m med %"] = (
-                float(ret.loc[valid].median()) if valid.any() else np.nan
-            )
-
-        if (
-            pd.notna(row.get("MFE 5m med %"))
-            and pd.notna(row.get("MAE 5m med %"))
-        ):
-            row["MFE-MAE 5m med pp"] = float(
-                row["MFE 5m med %"] - row["MAE 5m med %"]
-            )
-        else:
-            row["MFE-MAE 5m med pp"] = np.nan
-
-        execution = _micro_reaction_driver_execution_rows(
-            group=group,
-            horizon=int(execution_horizon),
-            tp_pct=float(tp_pct),
-            sl_pct=float(sl_pct),
-        )
-        if execution.empty:
-            row.update(
-                {
-                    "Exec N": 0,
-                    "TP first %": np.nan,
-                    "SL+Ambig %": np.nan,
-                    "Time exit %": np.nan,
-                    "Gross win %": np.nan,
-                    "Avg gross %": np.nan,
-                    "Median gross %": np.nan,
-                    "Gross PF": np.nan,
-                    "Total gross %": np.nan,
-                    "Avg hit min": np.nan,
-                }
-            )
-        else:
-            gross = pd.to_numeric(execution["gross_pct"], errors="coerce").dropna()
-            reasons = execution["exit_reason"].astype(str)
-            hit_minutes = pd.to_numeric(
-                execution["hit_minutes"], errors="coerce"
-            ).dropna()
-            profits = float(gross.loc[gross.gt(0.0)].sum())
-            losses = float(-gross.loc[gross.lt(0.0)].sum())
-            gross_pf = (
-                profits / losses
-                if losses > 0
-                else (np.inf if profits > 0 else np.nan)
-            )
-            row.update(
-                {
-                    "Exec N": int(len(execution)),
-                    "TP first %": float(reasons.eq("TP").mean() * 100.0),
-                    "SL+Ambig %": float(
-                        reasons.isin(["SL", "SL_AMBIGUOUS"]).mean() * 100.0
-                    ),
-                    "Time exit %": float(
-                        reasons.eq("TIME_EXIT").mean() * 100.0
-                    ),
-                    "Gross win %": float(gross.gt(0.0).mean() * 100.0),
-                    "Avg gross %": float(gross.mean()),
-                    "Median gross %": float(gross.median()),
-                    "Gross PF": float(gross_pf),
-                    "Total gross %": float(gross.sum()),
-                    "Avg hit min": (
-                        float(hit_minutes.mean())
-                        if not hit_minutes.empty
-                        else np.nan
-                    ),
-                }
-            )
-
-        rows.append(row)
-
-    if not rows:
-        return pd.DataFrame()
-
-    result = pd.DataFrame(rows)
-    for column in result.columns:
-        if column in {"Driver", "Bucket"}:
-            continue
-        if column in {"N", "Symbols", "N 1m", "N 3m", "N 5m", "Exec N"}:
-            result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0).astype(int)
-        else:
-            result[column] = pd.to_numeric(result[column], errors="coerce").round(4)
-
-    return result.reset_index(drop=True)
-
-
-def build_micro_reaction_driver_leaderboard(
-    retests_df,
-    side="ALL",
-    timeframe="ALL",
-    execution_horizon=5,
-    tp_pct=0.20,
-    sl_pct=0.15,
-    min_n=30,
-):
-    """Combine every single-driver bucket into one exploratory leaderboard."""
-    frames = []
-    for driver_name in MICRO_REACTION_DRIVER_SPECS:
-        frame = build_micro_reaction_driver_bucket_analysis(
-            retests_df=retests_df,
-            driver_name=driver_name,
-            side=side,
-            timeframe=timeframe,
-            execution_horizon=execution_horizon,
-            tp_pct=tp_pct,
-            sl_pct=sl_pct,
-        )
-        if frame is None or frame.empty:
-            continue
-        frames.append(frame)
-
-    if not frames:
-        return pd.DataFrame()
-
-    result = pd.concat(frames, ignore_index=True, sort=False)
-    result = result.loc[
-        pd.to_numeric(result["Exec N"], errors="coerce").fillna(0).ge(int(min_n))
-    ].copy()
-    if result.empty:
-        return result
-
-    return result.sort_values(
-        ["Avg gross %", "Gross PF", "Exec N"],
-        ascending=[False, False, False],
-        na_position="last",
-        kind="stable",
-    ).reset_index(drop=True)
-
-
-# Broad, pre-declared causal regions selected from the first single-driver
-# Micro REACTION research pass.  The goal is to test whether independent
-# pieces of the same structural story reinforce each other without tuning an
-# exact threshold to every sample.  Every condition below is known by the
-# REACTION close, before the executable next-1m-open entry.
-MICRO_REACTION_CROSS_CONDITIONS = {
-    "departure_1_1_5": {
-        "label": "Departure 1.00–1.50%",
-        "source": "max_departure_pct",
-        "min": 1.00,
-        "max": 1.50,
-        "tier": "PRIMARY",
-    },
-    "rel_volume_lt_1": {
-        "label": "Rel vol <1.00x",
-        "source": "reaction_relative_volume_30",
-        "max": 1.00,
-        "tier": "PRIMARY",
-    },
-    "rejection_wick_ge_0_8": {
-        "label": "Rejection wick ≥0.80",
-        "source": "reaction_rejection_wick_share",
-        "min": 0.80,
-        "tier": "PRIMARY",
-    },
-    "confirm_retest_30_60": {
-        "label": "Confirm→Retest 30–60m",
-        "source": "confirmed_to_retest_min",
-        "min": 30.0,
-        "max": 60.0,
-        "tier": "PRIMARY",
-    },
-    "close_strength_0_55_0_85": {
-        "label": "Close strength 0.55–0.85",
-        "source": "reaction_close_strength",
-        "min": 0.55,
-        "max": 0.85,
-        "tier": "SECONDARY",
-    },
-}
-
-
-def _micro_reaction_cross_condition_mask(frame, condition_key):
-    """Return a causal boolean mask for one pre-declared cross condition."""
-    spec = MICRO_REACTION_CROSS_CONDITIONS.get(str(condition_key))
-    if spec is None or frame is None or frame.empty:
-        return pd.Series(False, index=getattr(frame, "index", None), dtype=bool)
-
-    values = pd.to_numeric(
-        frame.get(
-            str(spec["source"]),
-            pd.Series(np.nan, index=frame.index),
-        ),
-        errors="coerce",
-    )
-    mask = values.notna()
-    if "min" in spec:
-        mask &= values.ge(float(spec["min"]))
-    if "max" in spec:
-        # Upper bounds are intentionally right-open so adjacent fixed buckets
-        # never overlap (e.g. 1.00 <= departure < 1.50).
-        mask &= values.lt(float(spec["max"]))
-    return mask.fillna(False)
-
-
-def _micro_reaction_cross_base_work(
-    retests_df,
-    side="ALL",
-    timeframe="ALL",
-):
-    """Return the REACTION universe to which cross filters are applied."""
-    if retests_df is None or retests_df.empty:
-        return pd.DataFrame()
-    required = {"status", "signal", "timeframe"}
-    if not required.issubset(retests_df.columns):
-        return pd.DataFrame()
-
-    work = retests_df.loc[
-        retests_df["status"].fillna("").astype(str).eq("REACTION")
-    ].copy()
-    if work.empty:
-        return work
-
-    side = str(side).upper()
-    if side in {"LONG", "SHORT"}:
-        work = work.loc[
-            work["signal"].fillna("").astype(str).str.upper().eq(side)
-        ].copy()
-
-    timeframe = str(timeframe)
-    if timeframe != "ALL":
-        work = work.loc[
-            work["timeframe"].fillna("").astype(str).eq(timeframe)
-        ].copy()
-
-    return work
-
-
-def _micro_reaction_execution_summary(execution, roundtrip_cost_pct=0.0):
-    """Summarize one chronological execution cohort in gross and net terms."""
-    empty = {
-        "Exec N": 0,
-        "TP first %": np.nan,
-        "SL+Ambig %": np.nan,
-        "Time exit %": np.nan,
-        "Gross win %": np.nan,
-        "Avg gross %": np.nan,
-        "Median gross %": np.nan,
-        "Gross PF": np.nan,
-        "Total gross %": np.nan,
-        "Avg net %": np.nan,
-        "Median net %": np.nan,
-        "Net PF": np.nan,
-        "Total net %": np.nan,
-        "Avg hit min": np.nan,
-    }
-    if execution is None or execution.empty:
-        return empty
-
-    gross = pd.to_numeric(execution.get("gross_pct"), errors="coerce")
-    valid = gross.notna()
-    if not valid.any():
-        return empty
-
-    execution = execution.loc[valid].copy()
-    gross = pd.to_numeric(execution["gross_pct"], errors="coerce")
-    net = gross - float(roundtrip_cost_pct)
-    reasons = execution["exit_reason"].astype(str)
-    hit_minutes = pd.to_numeric(
-        execution.get("hit_minutes", pd.Series(np.nan, index=execution.index)),
-        errors="coerce",
-    ).dropna()
-
-    gross_profits = float(gross.loc[gross.gt(0.0)].sum())
-    gross_losses = float(-gross.loc[gross.lt(0.0)].sum())
-    gross_pf = (
-        gross_profits / gross_losses
-        if gross_losses > 0
-        else (np.inf if gross_profits > 0 else np.nan)
-    )
-
-    net_profits = float(net.loc[net.gt(0.0)].sum())
-    net_losses = float(-net.loc[net.lt(0.0)].sum())
-    net_pf = (
-        net_profits / net_losses
-        if net_losses > 0
-        else (np.inf if net_profits > 0 else np.nan)
-    )
-
-    return {
-        "Exec N": int(len(execution)),
-        "TP first %": float(reasons.eq("TP").mean() * 100.0),
-        "SL+Ambig %": float(
-            reasons.isin(["SL", "SL_AMBIGUOUS"]).mean() * 100.0
-        ),
-        "Time exit %": float(reasons.eq("TIME_EXIT").mean() * 100.0),
-        "Gross win %": float(gross.gt(0.0).mean() * 100.0),
-        "Avg gross %": float(gross.mean()),
-        "Median gross %": float(gross.median()),
-        "Gross PF": float(gross_pf),
-        "Total gross %": float(gross.sum()),
-        "Avg net %": float(net.mean()),
-        "Median net %": float(net.median()),
-        "Net PF": float(net_pf),
-        "Total net %": float(net.sum()),
-        "Avg hit min": (
-            float(hit_minutes.mean()) if not hit_minutes.empty else np.nan
-        ),
-    }
-
-
-def filter_micro_reaction_driver_cross_events(
-    retests_df,
-    condition_keys,
-    side="ALL",
-    timeframe="ALL",
-):
-    """Return causal REACTION rows satisfying every requested cross condition."""
-    work = _micro_reaction_cross_base_work(
-        retests_df=retests_df,
-        side=side,
-        timeframe=timeframe,
-    )
-    if work.empty:
-        return work
-
-    if isinstance(condition_keys, str):
-        condition_keys = [
-            item for item in str(condition_keys).split("|") if item
-        ]
-    else:
-        condition_keys = list(condition_keys or [])
-
-    if not condition_keys:
-        return work.iloc[0:0].copy()
-
-    mask = pd.Series(True, index=work.index, dtype=bool)
-    for condition_key in condition_keys:
-        mask &= _micro_reaction_cross_condition_mask(work, condition_key)
-    return work.loc[mask].copy()
-
-
-def build_micro_reaction_driver_cross_analysis(
-    retests_df,
-    side="LONG",
-    timeframe="5m",
-    execution_horizon=5,
-    tp_pct=0.20,
-    sl_pct=0.15,
-    fee_per_side_pct=0.05,
-    slippage_per_side_pct=0.0,
-    max_depth=5,
-):
-    """Evaluate all broad 2→N driver crosses on the same causal universe.
-
-    The five component regions are intentionally broad and pre-declared from
-    the initial single-driver pass.  We enumerate their intersections rather
-    than searching arbitrary numeric thresholds.  Results remain exploratory:
-    overlapping rows are highly dependent and must later survive longer windows
-    and forward/stability tests.
-    """
-    from itertools import combinations
-
-    work = _micro_reaction_cross_base_work(
-        retests_df=retests_df,
-        side=side,
-        timeframe=timeframe,
-    )
-    if work.empty:
-        return pd.DataFrame()
-
-    execution_horizon = int(execution_horizon)
-    max_depth = max(2, min(int(max_depth), len(MICRO_REACTION_CROSS_CONDITIONS)))
-    roundtrip_cost_pct = 2.0 * (
-        float(fee_per_side_pct) + float(slippage_per_side_pct)
-    )
-
-    baseline_execution = _micro_reaction_driver_execution_rows(
-        group=work,
-        horizon=execution_horizon,
-        tp_pct=float(tp_pct),
-        sl_pct=float(sl_pct),
-    )
-    baseline = _micro_reaction_execution_summary(
-        baseline_execution,
-        roundtrip_cost_pct=roundtrip_cost_pct,
-    )
-
-    condition_keys = list(MICRO_REACTION_CROSS_CONDITIONS.keys())
-    rows = []
-    for depth in range(2, max_depth + 1):
-        for combo in combinations(condition_keys, depth):
-            group = filter_micro_reaction_driver_cross_events(
-                retests_df=work,
-                condition_keys=combo,
-                side="ALL",
-                timeframe="ALL",
-            )
-            if group.empty:
-                continue
-
-            execution = _micro_reaction_driver_execution_rows(
-                group=group,
-                horizon=execution_horizon,
-                tp_pct=float(tp_pct),
-                sl_pct=float(sl_pct),
-            )
-            summary = _micro_reaction_execution_summary(
-                execution,
-                roundtrip_cost_pct=roundtrip_cost_pct,
-            )
-            if int(summary.get("Exec N", 0)) <= 0:
-                continue
-
-            labels = [
-                str(MICRO_REACTION_CROSS_CONDITIONS[key]["label"])
-                for key in combo
-            ]
-            tiers = {
-                str(MICRO_REACTION_CROSS_CONDITIONS[key].get("tier", "PRIMARY"))
-                for key in combo
-            }
-            row = {
-                "Cross": " × ".join(labels),
-                "Condition keys": "|".join(combo),
-                "Depth": int(depth),
-                "Family": (
-                    "PRIMARY ONLY" if tiers == {"PRIMARY"} else "WITH CLOSE STRENGTH"
-                ),
-                "N": int(len(group)),
-                "Symbols": int(
-                    group.get("symbol", pd.Series(dtype="object"))
-                    .astype(str)
-                    .nunique()
-                ),
-                "Coverage %": float(len(group) / max(1, len(work)) * 100.0),
-                "Exec coverage %": float(
-                    int(summary["Exec N"])
-                    / max(1, int(baseline.get("Exec N", 0)))
-                    * 100.0
-                ),
-                "Roundtrip cost %": float(roundtrip_cost_pct),
-            }
-
-            for horizon in MICRO_REACTION_PRIMARY_HORIZONS:
-                complete = (
-                    group.get(
-                        f"reaction_entry_complete_{horizon}m",
-                        pd.Series(False, index=group.index),
-                    )
-                    .fillna(False)
-                    .astype(bool)
-                )
-                mfe = pd.to_numeric(
-                    group.get(
-                        f"reaction_entry_mfe_{horizon}m_pct",
-                        pd.Series(np.nan, index=group.index),
-                    ),
-                    errors="coerce",
-                )
-                mae = pd.to_numeric(
-                    group.get(
-                        f"reaction_entry_mae_{horizon}m_pct",
-                        pd.Series(np.nan, index=group.index),
-                    ),
-                    errors="coerce",
-                )
-                ret = pd.to_numeric(
-                    group.get(
-                        f"reaction_entry_return_{horizon}m_pct",
-                        pd.Series(np.nan, index=group.index),
-                    ),
-                    errors="coerce",
-                )
-                valid = complete & mfe.notna() & mae.notna() & ret.notna()
-                row[f"N {horizon}m"] = int(valid.sum())
-                row[f"MFE {horizon}m med %"] = (
-                    float(mfe.loc[valid].median()) if valid.any() else np.nan
-                )
-                row[f"MAE {horizon}m med %"] = (
-                    float(mae.loc[valid].median()) if valid.any() else np.nan
-                )
-                row[f"Return {horizon}m avg %"] = (
-                    float(ret.loc[valid].mean()) if valid.any() else np.nan
-                )
-
-            if (
-                pd.notna(row.get("MFE 5m med %"))
-                and pd.notna(row.get("MAE 5m med %"))
-            ):
-                row["MFE-MAE 5m med pp"] = float(
-                    row["MFE 5m med %"] - row["MAE 5m med %"]
-                )
-            else:
-                row["MFE-MAE 5m med pp"] = np.nan
-
-            row.update(summary)
-            row["Baseline N"] = int(baseline.get("Exec N", 0))
-            row["Baseline avg gross %"] = baseline.get("Avg gross %", np.nan)
-            row["Baseline Gross PF"] = baseline.get("Gross PF", np.nan)
-            row["Avg gross lift pp"] = (
-                float(summary["Avg gross %"] - baseline["Avg gross %"])
-                if pd.notna(summary.get("Avg gross %"))
-                and pd.notna(baseline.get("Avg gross %"))
-                else np.nan
-            )
-            row["TP first lift pp"] = (
-                float(summary["TP first %"] - baseline["TP first %"])
-                if pd.notna(summary.get("TP first %"))
-                and pd.notna(baseline.get("TP first %"))
-                else np.nan
-            )
-            row["SL+Ambig lift pp"] = (
-                float(summary["SL+Ambig %"] - baseline["SL+Ambig %"])
-                if pd.notna(summary.get("SL+Ambig %"))
-                and pd.notna(baseline.get("SL+Ambig %"))
-                else np.nan
-            )
-            rows.append(row)
-
-    if not rows:
-        return pd.DataFrame()
-
-    result = pd.DataFrame(rows)
-    integer_columns = {
-        "Depth", "N", "Symbols", "Exec N", "Baseline N",
-        "N 1m", "N 3m", "N 5m",
-    }
-    text_columns = {"Cross", "Condition keys", "Family"}
-    for column in result.columns:
-        if column in text_columns:
-            continue
-        if column in integer_columns:
-            result[column] = (
-                pd.to_numeric(result[column], errors="coerce")
-                .fillna(0)
-                .astype(int)
-            )
-        else:
-            result[column] = pd.to_numeric(
-                result[column], errors="coerce"
-            ).round(4)
-
-    return result.sort_values(
-        ["Avg gross %", "Gross PF", "Exec N"],
-        ascending=[False, False, False],
-        na_position="last",
-        kind="stable",
-    ).reset_index(drop=True)
-
-
 @st.cache_data(ttl=120, show_spinner=False)
 def scan_confirmed_swing_retests_all_symbols(
     symbols,
@@ -12514,71 +10595,11 @@ def scan_confirmed_swing_retests_all_symbols(
             if swing_timeframe == "1m":
                 timeframe_candles = prepared
             else:
-                # Historical Micro REACTION can scan several thousand 1m minutes.
-                # A fixed 400-bar HTF fetch silently truncated 5m structure to
-                # ~33h even when the chart covered 75-83h. Request enough HTF
-                # candles to cover the same causal confirmation/retest window,
-                # plus detector warmup, while respecting the research cap.
-                timeframe_minutes = max(
-                    1,
-                    int(timeframe_to_minutes(swing_timeframe)),
-                )
-                required_history_minutes = int(
-                    max_retest_age_minutes
-                    + max_age_minutes
-                    + 120
-                )
-                required_timeframe_bars = int(
-                    np.ceil(
-                        required_history_minutes
-                        / float(timeframe_minutes)
-                    )
-                ) + int(2 * swing_bars + 20)
-                timeframe_limit = min(
-                    int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
-                    max(400, required_timeframe_bars),
-                )
                 timeframe_candles = load_volume_exhaustion_research_candles(
                     symbol=symbol,
                     timeframe=swing_timeframe,
-                    limit=int(timeframe_limit),
+                    limit=400,
                 )
-
-                # The native 5m Redis history may be shallower than the 1m
-                # research history (for example 400 5m candles vs 4,500+ 1m
-                # candles). In that case, rebuild 5m candles from the same
-                # contiguous 1m path so Historical overlay can actually scan
-                # the whole visible window.
-                if swing_timeframe == "5m":
-                    rebuilt_5m = _resample_contiguous_1m_for_micro_swing(
-                        prepared,
-                        "5m",
-                    )
-                    if not rebuilt_5m.empty:
-                        native_start = np.nan
-                        if (
-                            timeframe_candles is not None
-                            and not timeframe_candles.empty
-                            and "timestamp" in timeframe_candles.columns
-                        ):
-                            native_start = pd.to_numeric(
-                                timeframe_candles["timestamp"],
-                                errors="coerce",
-                            ).min()
-                        rebuilt_start = pd.to_numeric(
-                            rebuilt_5m["timestamp"],
-                            errors="coerce",
-                        ).min()
-                        if (
-                            timeframe_candles is None
-                            or timeframe_candles.empty
-                            or pd.isna(native_start)
-                            or (
-                                pd.notna(rebuilt_start)
-                                and float(rebuilt_start) < float(native_start)
-                            )
-                        ):
-                            timeframe_candles = rebuilt_5m
 
             if timeframe_candles is None or timeframe_candles.empty:
                 continue
@@ -19841,7 +17862,25 @@ def _candidate_v1_render_market_regime_analysis(
             "reaction_timestamp",
             "flow_candle_timestamp",
             "market_breadth_4h",
+            "prev_market_breadth_4h",
+            "breadth_delta_4h",
             "btc_return_pct_4h",
+            "prev_btc_return_pct_4h",
+            "btc_return_delta_4h",
+            "breadth_direction_4h",
+            "btc_breadth_divergence_4h",
+            "flow_1h_candle_timestamp",
+            "market_breadth_1h",
+            "prev_market_breadth_1h",
+            "breadth_delta_1h",
+            "positive_symbols_1h",
+            "positive_symbols_delta_1h",
+            "btc_return_pct_1h",
+            "prev_btc_return_pct_1h",
+            "btc_return_delta_1h",
+            "breadth_direction_1h",
+            "btc_breadth_divergence_1h",
+            "Market alignment 1h",
             "return_pct_4h",
             "symbol_strength_vs_btc_4h",
             "side_adjusted_strength_vs_btc_4h",
@@ -20672,6 +18711,363 @@ def _candidate_v2_path_store(candidate_rows, force=False):
     )
 
 
+def _candidate_v2_reaction_known_ts(frame):
+    """Return the first timestamp at which each REACTION is causally known."""
+    if frame is None or frame.empty:
+        return pd.Series(dtype="float64")
+    known = pd.to_numeric(
+        frame.get(
+            "candidate_v1_reaction_known_ts",
+            pd.Series(np.nan, index=frame.index),
+        ),
+        errors="coerce",
+    )
+    if "retest_timestamp" in frame.columns:
+        fallback = pd.to_numeric(
+            frame["retest_timestamp"],
+            errors="coerce",
+        ) + 60_000
+        known = known.fillna(fallback)
+    return known
+
+
+def _candidate_v2_closed_boundary_series(known_ts, timeframe):
+    interval_ms = 60 * 60 * 1000 if str(timeframe) == "1h" else 4 * 60 * 60 * 1000
+    numeric = pd.to_numeric(known_ts, errors="coerce")
+    boundary = (np.floor(numeric / interval_ms) * interval_ms) - interval_ms
+    return pd.Series(boundary, index=getattr(known_ts, "index", None))
+
+
+def _candidate_v2_normalize_candle_frame(candles):
+    if candles is None or candles.empty:
+        return pd.DataFrame(columns=["timestamp", "close"])
+    work = candles.copy()
+    if "timestamp" not in work.columns or "close" not in work.columns:
+        return pd.DataFrame(columns=["timestamp", "close"])
+    ts = pd.to_numeric(work["timestamp"], errors="coerce")
+    if ts.notna().sum() == 0:
+        dt = pd.to_datetime(work["timestamp"], utc=True, errors="coerce")
+        ts = pd.Series(
+            np.where(dt.notna(), dt.astype("int64") // 1_000_000, np.nan),
+            index=work.index,
+            dtype="float64",
+        )
+    close = pd.to_numeric(work["close"], errors="coerce")
+    result = pd.DataFrame({"timestamp": ts, "close": close}).dropna()
+    if result.empty:
+        return result
+    result["timestamp"] = result["timestamp"].astype("int64")
+    return (
+        result.sort_values("timestamp", kind="stable")
+        .drop_duplicates("timestamp", keep="last")
+        .reset_index(drop=True)
+    )
+
+
+def _candidate_v2_build_transition_rows_for_timeframe(
+    timeframe,
+    boundaries,
+):
+    """Cross-sectional causal Market Flow for requested closed candle boundaries."""
+    if not boundaries:
+        return pd.DataFrame()
+
+    interval_ms = 60 * 60 * 1000 if str(timeframe) == "1h" else 4 * 60 * 60 * 1000
+    boundaries = sorted({int(value) for value in boundaries if pd.notna(value)})
+    if not boundaries:
+        return pd.DataFrame()
+
+    wanted = set(boundaries)
+    wanted_with_prev = wanted | {int(value - interval_ms) for value in wanted}
+    by_boundary = {int(value): [] for value in wanted}
+    btc_returns = {}
+
+    universe = [str(symbol) for symbol in CANDIDATE_V1_MARKET_SYMBOLS]
+    for symbol in universe:
+        try:
+            candles = geometry_scanner_data_service.get_closed_candles(
+                symbol=symbol,
+                timeframe=str(timeframe),
+                limit=500,
+            )
+        except Exception:
+            continue
+        prepared = _candidate_v2_normalize_candle_frame(candles)
+        if prepared.empty:
+            continue
+        close_map = dict(zip(prepared["timestamp"], prepared["close"]))
+        for boundary in wanted:
+            close_now = close_map.get(int(boundary))
+            close_prev = close_map.get(int(boundary - interval_ms))
+            if close_now is None or close_prev in (None, 0):
+                continue
+            try:
+                ret = (float(close_now) / float(close_prev) - 1.0) * 100.0
+            except Exception:
+                continue
+            if not np.isfinite(ret):
+                continue
+            by_boundary[int(boundary)].append(float(ret))
+            if symbol == "BTCUSDT":
+                btc_returns[int(boundary)] = float(ret)
+
+    rows = []
+    universe_n = max(1, len(universe))
+    for boundary in boundaries:
+        returns = np.asarray(by_boundary.get(int(boundary), []), dtype=float)
+        returns = returns[np.isfinite(returns)]
+        valid_n = int(len(returns))
+        positive_n = int((returns > 0.0).sum()) if valid_n else 0
+        breadth = float(positive_n / valid_n * 100.0) if valid_n else np.nan
+        median_return = float(np.median(returns)) if valid_n else np.nan
+        rows.append({
+            "timeframe": str(timeframe),
+            "boundary_timestamp": int(boundary),
+            "market_breadth_pct": round(breadth, 4) if pd.notna(breadth) else np.nan,
+            "positive_symbols": positive_n,
+            "valid_symbols": valid_n,
+            "coverage_pct": round(valid_n / universe_n * 100.0, 4),
+            "btc_return_pct": round(float(btc_returns.get(int(boundary), np.nan)), 4)
+            if pd.notna(btc_returns.get(int(boundary), np.nan))
+            else np.nan,
+            "market_median_return_pct": round(median_return, 4)
+            if pd.notna(median_return)
+            else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_refresh_market_transition_store(candidate_rows, force=False):
+    """Persist causal 1h/4h market states needed by the current V2 universe."""
+    rows = _candidate_v2_prepare_generic_rows(candidate_rows)
+    if rows.empty:
+        return pd.DataFrame()
+
+    known = _candidate_v2_reaction_known_ts(rows)
+    requested = {}
+    for timeframe in ("1h", "4h"):
+        interval_ms = 60 * 60 * 1000 if timeframe == "1h" else 4 * 60 * 60 * 1000
+        current = _candidate_v2_closed_boundary_series(known, timeframe).dropna().astype("int64")
+        boundaries = set(current.tolist())
+        # Previous boundary is required to calculate transition deltas causally.
+        boundaries.update(int(value - interval_ms) for value in current.tolist())
+        requested[timeframe] = boundaries
+
+    stored = pd.DataFrame()
+    if CANDIDATE_V2_MARKET_TRANSITION_FILE.exists():
+        try:
+            stored = pd.read_pickle(CANDIDATE_V2_MARKET_TRANSITION_FILE)
+        except Exception:
+            stored = pd.DataFrame()
+    if stored is None:
+        stored = pd.DataFrame()
+
+    parts = []
+    if not stored.empty:
+        parts.append(stored.copy())
+
+    for timeframe in ("1h", "4h"):
+        need = set(requested.get(timeframe, set()))
+        if not force and not stored.empty and {"timeframe", "boundary_timestamp"}.issubset(stored.columns):
+            have = set(
+                pd.to_numeric(
+                    stored.loc[
+                        stored["timeframe"].astype(str).eq(timeframe),
+                        "boundary_timestamp",
+                    ],
+                    errors="coerce",
+                ).dropna().astype("int64").tolist()
+            )
+            need = need - have
+        if not need and not force:
+            continue
+        rebuild = requested.get(timeframe, set()) if force else need
+        fresh = _candidate_v2_build_transition_rows_for_timeframe(
+            timeframe,
+            rebuild,
+        )
+        if fresh is not None and not fresh.empty:
+            if force and parts:
+                # Replace only the requested boundaries; keep older persisted history.
+                cleaned = []
+                for part in parts:
+                    if part is None or part.empty:
+                        continue
+                    mask = ~(
+                        part.get("timeframe", pd.Series("", index=part.index)).astype(str).eq(timeframe)
+                        & pd.to_numeric(
+                            part.get("boundary_timestamp"),
+                            errors="coerce",
+                        ).isin(list(rebuild))
+                    )
+                    cleaned.append(part.loc[mask].copy())
+                parts = cleaned
+            parts.append(fresh)
+
+    if not parts:
+        return pd.DataFrame()
+    result = pd.concat(parts, ignore_index=True, sort=False)
+    if {"timeframe", "boundary_timestamp"}.issubset(result.columns):
+        result["boundary_timestamp"] = pd.to_numeric(
+            result["boundary_timestamp"], errors="coerce"
+        )
+        result = (
+            result.dropna(subset=["boundary_timestamp"])
+            .sort_values(["timeframe", "boundary_timestamp"], kind="stable")
+            .drop_duplicates(["timeframe", "boundary_timestamp"], keep="last")
+            .reset_index(drop=True)
+        )
+    try:
+        CANDIDATE_V2_MARKET_TRANSITION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CANDIDATE_V2_MARKET_TRANSITION_FILE.with_suffix(".tmp.pkl")
+        result.to_pickle(tmp)
+        tmp.replace(CANDIDATE_V2_MARKET_TRANSITION_FILE)
+    except Exception:
+        pass
+    return result
+
+
+def _candidate_v2_transition_direction(delta):
+    numeric = pd.to_numeric(delta, errors="coerce")
+    return pd.Series(
+        np.select(
+            [numeric.ge(5.0), numeric.le(-5.0)],
+            ["EXPANDING", "CONTRACTING"],
+            default="STABLE",
+        ),
+        index=getattr(delta, "index", None),
+    ).where(numeric.notna(), "UNKNOWN")
+
+
+def _candidate_v2_transition_divergence(btc_return, breadth_delta):
+    btc = pd.to_numeric(btc_return, errors="coerce")
+    delta = pd.to_numeric(breadth_delta, errors="coerce")
+    labels = np.select(
+        [
+            btc.gt(0.0) & delta.lt(0.0),
+            btc.lt(0.0) & delta.gt(0.0),
+            btc.gt(0.0) & delta.ge(0.0),
+            btc.lt(0.0) & delta.le(0.0),
+        ],
+        [
+            "BTC_UP_BREADTH_DOWN",
+            "BTC_DOWN_BREADTH_UP",
+            "BTC_UP_BREADTH_UP",
+            "BTC_DOWN_BREADTH_DOWN",
+        ],
+        default="MIXED_OR_FLAT",
+    )
+    result = pd.Series(labels, index=getattr(btc_return, "index", None))
+    return result.where(btc.notna() & delta.notna(), "UNKNOWN")
+
+
+def _candidate_v2_attach_market_transition_context(frame, force=False):
+    """Attach causal 1h flow plus 1h/4h transition deltas to V2 rows."""
+    if frame is None or frame.empty:
+        return frame
+    result = frame.copy()
+    store = _candidate_v2_refresh_market_transition_store(result, force=bool(force))
+    if store is None or store.empty:
+        return result
+
+    known = _candidate_v2_reaction_known_ts(result)
+    one_h_ms = 60 * 60 * 1000
+    four_h_ms = 4 * 60 * 60 * 1000
+    result["flow_1h_candle_timestamp"] = _candidate_v2_closed_boundary_series(known, "1h")
+    transition_4h = _candidate_v2_closed_boundary_series(known, "4h")
+
+    def lookup(tf, field, boundaries):
+        source = store.loc[
+            store["timeframe"].astype(str).eq(tf)
+        ].copy()
+        if source.empty or field not in source.columns:
+            return pd.Series(np.nan, index=result.index)
+        source["boundary_timestamp"] = pd.to_numeric(
+            source["boundary_timestamp"], errors="coerce"
+        )
+        mapper = source.dropna(subset=["boundary_timestamp"]).drop_duplicates(
+            "boundary_timestamp", keep="last"
+        ).set_index("boundary_timestamp")[field]
+        keys = pd.to_numeric(boundaries, errors="coerce")
+        return keys.map(mapper)
+
+    one_h_boundary = pd.to_numeric(result["flow_1h_candle_timestamp"], errors="coerce")
+    result["market_breadth_1h"] = lookup("1h", "market_breadth_pct", one_h_boundary)
+    result["positive_symbols_1h"] = lookup("1h", "positive_symbols", one_h_boundary)
+    result["market_coverage_1h"] = lookup("1h", "coverage_pct", one_h_boundary)
+    result["btc_return_pct_1h"] = lookup("1h", "btc_return_pct", one_h_boundary)
+    result["market_median_return_pct_1h"] = lookup(
+        "1h", "market_median_return_pct", one_h_boundary
+    )
+    prev_1h = one_h_boundary - one_h_ms
+    result["prev_market_breadth_1h"] = lookup("1h", "market_breadth_pct", prev_1h)
+    result["prev_positive_symbols_1h"] = lookup("1h", "positive_symbols", prev_1h)
+    result["prev_btc_return_pct_1h"] = lookup("1h", "btc_return_pct", prev_1h)
+    result["breadth_delta_1h"] = (
+        pd.to_numeric(result["market_breadth_1h"], errors="coerce")
+        - pd.to_numeric(result["prev_market_breadth_1h"], errors="coerce")
+    )
+    result["positive_symbols_delta_1h"] = (
+        pd.to_numeric(result["positive_symbols_1h"], errors="coerce")
+        - pd.to_numeric(result["prev_positive_symbols_1h"], errors="coerce")
+    )
+    result["btc_return_delta_1h"] = (
+        pd.to_numeric(result["btc_return_pct_1h"], errors="coerce")
+        - pd.to_numeric(result["prev_btc_return_pct_1h"], errors="coerce")
+    )
+    result["breadth_direction_1h"] = _candidate_v2_transition_direction(
+        result["breadth_delta_1h"]
+    )
+    result["btc_breadth_divergence_1h"] = _candidate_v2_transition_divergence(
+        result["btc_return_pct_1h"],
+        result["breadth_delta_1h"],
+    )
+
+    current_4h_boundary = pd.to_numeric(
+        result.get("flow_candle_timestamp", transition_4h), errors="coerce"
+    ).fillna(pd.to_numeric(transition_4h, errors="coerce"))
+    prev_4h = current_4h_boundary - four_h_ms
+    result["prev_market_breadth_4h"] = lookup("4h", "market_breadth_pct", prev_4h)
+    result["prev_positive_symbols_4h"] = lookup("4h", "positive_symbols", prev_4h)
+    result["prev_btc_return_pct_4h"] = lookup("4h", "btc_return_pct", prev_4h)
+    result["breadth_delta_4h"] = (
+        pd.to_numeric(result.get("market_breadth_4h"), errors="coerce")
+        - pd.to_numeric(result["prev_market_breadth_4h"], errors="coerce")
+    )
+    current_positive_4h = lookup("4h", "positive_symbols", current_4h_boundary)
+    result["positive_symbols_delta_4h"] = (
+        pd.to_numeric(current_positive_4h, errors="coerce")
+        - pd.to_numeric(result["prev_positive_symbols_4h"], errors="coerce")
+    )
+    result["btc_return_delta_4h"] = (
+        pd.to_numeric(result.get("btc_return_pct_4h"), errors="coerce")
+        - pd.to_numeric(result["prev_btc_return_pct_4h"], errors="coerce")
+    )
+    result["breadth_direction_4h"] = _candidate_v2_transition_direction(
+        result["breadth_delta_4h"]
+    )
+    result["btc_breadth_divergence_4h"] = _candidate_v2_transition_divergence(
+        result.get("btc_return_pct_4h"),
+        result["breadth_delta_4h"],
+    )
+
+    side = result.get("side", pd.Series("", index=result.index)).astype(str).str.upper()
+    breadth_1h = pd.to_numeric(result["market_breadth_1h"], errors="coerce")
+    btc_1h = pd.to_numeric(result["btc_return_pct_1h"], errors="coerce")
+    result["Market alignment 1h"] = np.select(
+        [
+            side.eq("LONG") & breadth_1h.ge(50.0) & btc_1h.ge(0.0),
+            side.eq("SHORT") & breadth_1h.lt(50.0) & btc_1h.lt(0.0),
+            side.eq("LONG") & breadth_1h.lt(50.0) & btc_1h.lt(0.0),
+            side.eq("SHORT") & breadth_1h.ge(50.0) & btc_1h.ge(0.0),
+        ],
+        ["TAILWIND", "TAILWIND", "HEADWIND", "HEADWIND"],
+        default="MIXED",
+    )
+    result.loc[breadth_1h.isna() | btc_1h.isna(), "Market alignment 1h"] = "UNKNOWN"
+    return result
+
+
 def _candidate_v2_build_market_context(candidate_rows, force=False):
     rows = _candidate_v2_prepare_generic_rows(candidate_rows)
     if rows.empty:
@@ -20728,6 +19124,12 @@ def _candidate_v2_build_market_context(candidate_rows, force=False):
         validate="many_to_one",
     )
     result = _candidate_v1_add_regime_labels(result)
+    # Add faster 1h Market Flow and state-transition features. These are
+    # research-only fields; they never participate in Candidate V2 identity.
+    result = _candidate_v2_attach_market_transition_context(
+        result,
+        force=bool(force),
+    )
     result["candidate_v2_event_key"] = result[
         "candidate_v1_event_key"
     ].astype(str)
@@ -20881,6 +19283,29 @@ def _candidate_v2_merge_execution_context(execution, context):
         "flow_close_timestamp",
         "market_breadth_4h",
         "btc_return_pct_4h",
+        "prev_market_breadth_4h",
+        "breadth_delta_4h",
+        "prev_positive_symbols_4h",
+        "positive_symbols_delta_4h",
+        "prev_btc_return_pct_4h",
+        "btc_return_delta_4h",
+        "breadth_direction_4h",
+        "btc_breadth_divergence_4h",
+        "flow_1h_candle_timestamp",
+        "market_breadth_1h",
+        "positive_symbols_1h",
+        "market_coverage_1h",
+        "btc_return_pct_1h",
+        "market_median_return_pct_1h",
+        "prev_market_breadth_1h",
+        "breadth_delta_1h",
+        "prev_positive_symbols_1h",
+        "positive_symbols_delta_1h",
+        "prev_btc_return_pct_1h",
+        "btc_return_delta_1h",
+        "breadth_direction_1h",
+        "btc_breadth_divergence_1h",
+        "Market alignment 1h",
         "return_pct_4h",
         "symbol_strength_vs_btc_4h",
         "side_adjusted_strength_vs_btc_4h",
@@ -21668,6 +20093,283 @@ def _candidate_v2_mature_snapshot_summary(selected_pair, min_maturity=80.0):
     return result.reset_index(drop=True)
 
 
+def _candidate_v2_selected_cell_anatomy(
+    selected_pair,
+    variant,
+    strong_threshold=0.50,
+):
+    """Explain where one selected TP/SL cell's PnL comes from."""
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+    mask = _candidate_v2_variant_mask(
+        selected_pair,
+        variant,
+        strong_threshold=strong_threshold,
+    )
+    source = selected_pair.loc[mask.fillna(False)].copy()
+    if source.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for side_name in ("TOTAL", "LONG", "SHORT"):
+        subset = source if side_name == "TOTAL" else source.loc[
+            source["side"].astype(str).str.upper().eq(side_name)
+        ].copy()
+        if subset.empty:
+            continue
+        ext = _candidate_v1_group_stats_extended(subset)
+        outcome = subset.get(
+            "Outcome", pd.Series("PENDING", index=subset.index)
+        ).fillna("PENDING").astype(str)
+        net = pd.to_numeric(subset.get("net_pnl_pct"), errors="coerce")
+        resolved_mask = outcome.ne("PENDING") & net.notna()
+        resolved = subset.loc[resolved_mask].copy()
+        ro = resolved.get(
+            "Outcome", pd.Series("", index=resolved.index)
+        ).astype(str)
+        rn = pd.to_numeric(resolved.get("net_pnl_pct"), errors="coerce")
+        tp_mask = ro.eq("TP")
+        sl_mask = ro.isin(["SL", "SL_AMBIGUOUS"])
+        time_mask = ro.eq("TIME_EXIT")
+        time_net = rn.loc[time_mask].dropna()
+        mae = pd.to_numeric(
+            resolved.get("mae_until_exit_pct"), errors="coerce"
+        ).dropna()
+
+        def avg_for(mask_value):
+            values = rn.loc[mask_value].dropna()
+            return round(float(values.mean()), 4) if len(values) else np.nan
+
+        rows.append({
+            "Side": side_name,
+            "Candidates": int(ext.get("Candidates", 0) or 0),
+            "Resolved": int(ext.get("Resolved", 0) or 0),
+            "Pending": int(ext.get("Pending", 0) or 0),
+            "TP": int(ext.get("TP", 0) or 0),
+            "SL": int(ext.get("SL", 0) or 0),
+            "Time exit": int(ext.get("Time exit", 0) or 0),
+            "TP rate %": round(float(tp_mask.mean() * 100.0), 2)
+            if len(resolved) else np.nan,
+            "Avg TP net %": avg_for(tp_mask),
+            "Avg SL net %": avg_for(sl_mask),
+            "Avg TIME_EXIT net %": avg_for(time_mask),
+            "TIME_EXIT +": int(time_net.gt(0).sum()),
+            "TIME_EXIT -": int(time_net.lt(0).sum()),
+            "Net pts": ext.get("Net pts", np.nan),
+            "Avg %": ext.get("Avg %", np.nan),
+            "PF": ext.get("PF", np.nan),
+            "WR %": ext.get("WR %", np.nan),
+            "Avg MFE %": ext.get("Avg MFE %", np.nan),
+            "Avg MAE %": ext.get("Avg MAE %", np.nan),
+            "Max MAE %": round(float(mae.max()), 4) if len(mae) else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_transition_performance_table(selected_pair, column):
+    if (
+        selected_pair is None
+        or selected_pair.empty
+        or column not in selected_pair.columns
+    ):
+        return pd.DataFrame()
+    rows = []
+    for side_name in ("LONG", "SHORT"):
+        side_frame = selected_pair.loc[
+            selected_pair["side"].astype(str).str.upper().eq(side_name)
+        ].copy()
+        if side_frame.empty:
+            continue
+        values = [
+            value for value in side_frame[column].dropna().astype(str).unique().tolist()
+            if value and value != "UNKNOWN"
+        ]
+        preferred = {
+            "breadth_direction_1h": ["EXPANDING", "STABLE", "CONTRACTING"],
+            "breadth_direction_4h": ["EXPANDING", "STABLE", "CONTRACTING"],
+            "btc_breadth_divergence_1h": [
+                "BTC_UP_BREADTH_UP",
+                "BTC_UP_BREADTH_DOWN",
+                "BTC_DOWN_BREADTH_UP",
+                "BTC_DOWN_BREADTH_DOWN",
+                "MIXED_OR_FLAT",
+            ],
+        }.get(column, values)
+        ordered = [value for value in preferred if value in values] + [
+            value for value in values if value not in preferred
+        ]
+        for value in ordered:
+            subset = side_frame.loc[
+                side_frame[column].astype(str).eq(str(value))
+            ].copy()
+            if subset.empty:
+                continue
+            ext = _candidate_v1_group_stats_extended(subset)
+            rows.append({
+                "Side": side_name,
+                "Transition": value,
+                **ext,
+            })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_4h_1h_alignment_table(selected_pair):
+    """Cross static 4h regime with the faster causal 1h regime at REACTION time."""
+    if (
+        selected_pair is None
+        or selected_pair.empty
+        or "Market alignment" not in selected_pair.columns
+        or "Market alignment 1h" not in selected_pair.columns
+    ):
+        return pd.DataFrame()
+    rows = []
+    for side_name in ("LONG", "SHORT"):
+        side_frame = selected_pair.loc[
+            selected_pair["side"].astype(str).str.upper().eq(side_name)
+        ].copy()
+        for state_4h in ("TAILWIND", "MIXED", "HEADWIND"):
+            for state_1h in ("TAILWIND", "MIXED", "HEADWIND"):
+                subset = side_frame.loc[
+                    side_frame["Market alignment"].astype(str).eq(state_4h)
+                    & side_frame["Market alignment 1h"].astype(str).eq(state_1h)
+                ].copy()
+                if subset.empty:
+                    continue
+                ext = _candidate_v1_group_stats_extended(subset)
+                rows.append({
+                    "Side": side_name,
+                    "Market 4h": state_4h,
+                    "Market 1h": state_1h,
+                    **ext,
+                })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_winning_losing_regimes(selected_pair, min_maturity=80.0):
+    """One row per mature 4h regime, enriched with faster 1h transition context."""
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame()
+    required = {"side", "flow_candle_timestamp", "Market alignment", "side_adjusted_strength_vs_btc_4h"}
+    if not required.issubset(selected_pair.columns):
+        return pd.DataFrame()
+
+    work = selected_pair.copy()
+    work["_flow_ts"] = pd.to_numeric(work["flow_candle_timestamp"], errors="coerce")
+    work["_strength"] = pd.to_numeric(
+        work["side_adjusted_strength_vs_btc_4h"], errors="coerce"
+    )
+    work = work.loc[work["_flow_ts"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    variant_defs = (
+        ("REACTION Base", lambda frame: pd.Series(True, index=frame.index)),
+        ("TAILWIND only", lambda frame: frame["Market alignment"].fillna("UNKNOWN").astype(str).eq("TAILWIND")),
+        ("Strength > 0 only", lambda frame: frame["_strength"].gt(0.0)),
+        ("TAILWIND + Strength > 0", lambda frame: frame["Market alignment"].fillna("UNKNOWN").astype(str).eq("TAILWIND") & frame["_strength"].gt(0.0)),
+    )
+
+    def median_num(frame, column):
+        if column not in frame.columns:
+            return np.nan
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        return round(float(values.median()), 4) if len(values) else np.nan
+
+    rows = []
+    for side_name in ("LONG", "SHORT"):
+        side_frame = work.loc[work["side"].astype(str).str.upper().eq(side_name)].copy()
+        for variant_name, mask_builder in variant_defs:
+            variant_frame = side_frame.loc[mask_builder(side_frame).fillna(False)].copy()
+            if variant_frame.empty:
+                continue
+            for flow_ts in sorted(variant_frame["_flow_ts"].dropna().unique()):
+                snapshot = variant_frame.loc[variant_frame["_flow_ts"].eq(float(flow_ts))].copy()
+                if snapshot.empty:
+                    continue
+                event_col = "candidate_v1_event_key" if "candidate_v1_event_key" in snapshot.columns else "candidate_v2_event_key"
+                n = int(snapshot[event_col].astype(str).nunique()) if event_col in snapshot.columns else int(len(snapshot))
+                ext = _candidate_v1_group_stats_extended(snapshot)
+                resolved = int(ext.get("Resolved", 0) or 0)
+                maturity = resolved / n * 100.0 if n else np.nan
+                if n <= 0 or pd.isna(maturity) or float(maturity) < float(min_maturity):
+                    continue
+                net = pd.to_numeric(pd.Series([ext.get("Net pts", np.nan)]), errors="coerce").iloc[0]
+                result_label = "WIN" if pd.notna(net) and float(net) > 0 else "LOSS" if pd.notna(net) and float(net) < 0 else "NEUTRAL"
+                one_h_dir = snapshot.get("breadth_direction_1h", pd.Series("UNKNOWN", index=snapshot.index)).astype(str)
+                divergence = snapshot.get("btc_breadth_divergence_1h", pd.Series("UNKNOWN", index=snapshot.index)).astype(str)
+                snapshot_label = (
+                    pd.to_datetime(float(flow_ts), unit="ms", utc=True, errors="coerce")
+                    .tz_convert(TZ)
+                    .strftime("%Y-%m-%d %H:%M")
+                )
+                rows.append({
+                    "Side": side_name,
+                    "Variant": variant_name,
+                    "4h snapshot": snapshot_label,
+                    "Result": result_label,
+                    "N": n,
+                    "Resolved": resolved,
+                    "Maturity %": round(float(maturity), 2),
+                    "Net pts": ext.get("Net pts", np.nan),
+                    "Avg %": ext.get("Avg %", np.nan),
+                    "PF": ext.get("PF", np.nan),
+                    "WR %": ext.get("WR %", np.nan),
+                    "Breadth 4h %": median_num(snapshot, "market_breadth_4h"),
+                    "Breadth delta 4h pp": median_num(snapshot, "breadth_delta_4h"),
+                    "BTC 4h %": median_num(snapshot, "btc_return_pct_4h"),
+                    "BTC delta 4h pp": median_num(snapshot, "btc_return_delta_4h"),
+                    "Median breadth 1h %": median_num(snapshot, "market_breadth_1h"),
+                    "Median breadth delta 1h pp": median_num(snapshot, "breadth_delta_1h"),
+                    "Median BTC 1h %": median_num(snapshot, "btc_return_pct_1h"),
+                    "Median BTC delta 1h pp": median_num(snapshot, "btc_return_delta_1h"),
+                    "1h contracting %": round(float(one_h_dir.eq("CONTRACTING").mean() * 100.0), 2) if len(one_h_dir) else np.nan,
+                    "BTC up / breadth down %": round(float(divergence.eq("BTC_UP_BREADTH_DOWN").mean() * 100.0), 2) if len(divergence) else np.nan,
+                    "Median strength %": median_num(snapshot, "side_adjusted_strength_vs_btc_4h"),
+                    "Median return rank %": median_num(snapshot, "return_rank_pct_4h"),
+                    "Median relative volume": median_num(snapshot, "relative_volume_4h"),
+                    "Avg MFE %": ext.get("Avg MFE %", np.nan),
+                    "Avg MAE %": ext.get("Avg MAE %", np.nan),
+                })
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_winning_losing_feature_summary(regime_rows):
+    if regime_rows is None or regime_rows.empty:
+        return pd.DataFrame()
+    numeric_cols = [
+        "Breadth 4h %",
+        "Breadth delta 4h pp",
+        "BTC 4h %",
+        "BTC delta 4h pp",
+        "Median breadth 1h %",
+        "Median breadth delta 1h pp",
+        "Median BTC 1h %",
+        "Median BTC delta 1h pp",
+        "1h contracting %",
+        "BTC up / breadth down %",
+        "Median strength %",
+        "Median return rank %",
+        "Median relative volume",
+    ]
+    rows = []
+    for (side, variant, result_label), group in regime_rows.groupby(
+        ["Side", "Variant", "Result"], sort=False
+    ):
+        row = {
+            "Side": side,
+            "Variant": variant,
+            "Regime result": result_label,
+            "Snapshots": int(len(group)),
+            "Median snapshot Net pts": round(float(pd.to_numeric(group["Net pts"], errors="coerce").median()), 4),
+            "Median snapshot Avg %": round(float(pd.to_numeric(group["Avg %"], errors="coerce").median()), 4),
+        }
+        for column in numeric_cols:
+            values = pd.to_numeric(group.get(column), errors="coerce").dropna()
+            row[column] = round(float(values.mean()), 4) if len(values) else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def _candidate_v2_render_matrix(summary, key_prefix, metric):
     if summary is None or summary.empty:
         st.info("No execution matrix is available for this V2 variant.")
@@ -21722,7 +20424,7 @@ def render_candidate_v2_research(retests_df):
         )
 
     force_market = st.button(
-        "🔄 Rebuild V2 causal 4h contexts",
+        "🔄 Rebuild V2 causal 4h + 1h transition contexts",
         key="candidate_v2_force_market",
         use_container_width=True,
     )
@@ -21774,6 +20476,22 @@ def render_candidate_v2_research(retests_df):
     st.caption(
         f"V2 universe frozen at {frozen_at}. Discovery membership is ID-based and "
         "threshold-agnostic; late backfills are FORWARD."
+    )
+    one_h_available = pd.to_numeric(
+        study.get("market_breadth_1h", pd.Series(np.nan, index=study.index)),
+        errors="coerce",
+    ).notna()
+    one_h_delta_available = pd.to_numeric(
+        study.get("breadth_delta_1h", pd.Series(np.nan, index=study.index)),
+        errors="coerce",
+    ).notna()
+    one_h_boundaries = pd.to_numeric(
+        study.get("flow_1h_candle_timestamp", pd.Series(np.nan, index=study.index)),
+        errors="coerce",
+    ).dropna().nunique()
+    st.caption(
+        f"1h transition context: {int((one_h_available & one_h_delta_available).sum())}/"
+        f"{len(study)} REACTIONs · {int(one_h_boundaries)} causal 1h boundaries."
     )
     if boundaries < 5:
         st.warning(
@@ -22033,6 +20751,39 @@ def render_candidate_v2_research(retests_df):
     if selected_pair.empty:
         return
 
+    st.markdown(
+        f"#### Selected-cell anatomy · {variant} · TP {float(selected_tp):g}% / "
+        f"SL {float(selected_sl):g}% / {snap_horizon}m"
+    )
+    st.caption(
+        "Breaks the selected matrix cell into TP, SL and TIME_EXIT outcomes. "
+        "This is the table to inspect when a cell such as TP 0.5% / SL 3% shows "
+        "a large Net pts value: it reveals whether the result comes from many "
+        "small TPs, rare full SLs, or positive/negative time exits."
+    )
+    cell_anatomy = _candidate_v2_selected_cell_anatomy(
+        selected_pair,
+        variant=variant,
+        strong_threshold=strong_threshold,
+    )
+    if not cell_anatomy.empty:
+        st.dataframe(
+            cell_anatomy,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_selected_cell_anatomy",
+        )
+        st.download_button(
+            "Download selected-cell anatomy CSV",
+            data=cell_anatomy.to_csv(index=False).encode("utf-8"),
+            file_name=(
+                f"candidate_v2_cell_anatomy_{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                f"tp{float(selected_tp):g}_sl{float(selected_sl):g}_{snap_horizon}m.csv"
+            ),
+            mime="text/csv",
+            key="candidate_v2_selected_cell_anatomy_download",
+        )
+
     st.markdown("#### 3. Permanent comparison · same execution pair")
     st.caption(
         "REACTION Base, frozen V1 drivers and the three V2 variants are compared "
@@ -22121,7 +20872,60 @@ def render_candidate_v2_research(retests_df):
             key="candidate_v2_market_increment",
         )
 
-    st.markdown("#### 6. Stability by causal 4h snapshot")
+    st.markdown("#### 6. Market Flow transition · causal 1h + 4h")
+    st.caption(
+        "The 4h Market Flow snapshot is still preserved, but V2 now also reconstructs "
+        "the latest fully closed 1h cross-sectional snapshot available when each "
+        "REACTION became known. Breadth deltas compare with the immediately previous "
+        "closed 1h/4h boundary. EXPANDING/CONTRACTING use ±5 percentage points only "
+        "as descriptive research labels; the continuous deltas are exported too."
+    )
+    transition_1h = _candidate_v2_transition_performance_table(
+        selected_pair,
+        "breadth_direction_1h",
+    )
+    if not transition_1h.empty:
+        st.markdown("###### Performance by 1h breadth transition")
+        st.dataframe(
+            transition_1h,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_transition_1h_performance",
+        )
+
+    divergence_1h = _candidate_v2_transition_performance_table(
+        selected_pair,
+        "btc_breadth_divergence_1h",
+    )
+    if not divergence_1h.empty:
+        st.markdown("###### BTC × breadth divergence · 1h")
+        st.caption(
+            "BTC_UP_BREADTH_DOWN is the exact condition we just observed: BTC can "
+            "remain positive while participation across the alt universe contracts."
+        )
+        st.dataframe(
+            divergence_1h,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_transition_1h_divergence",
+        )
+
+    alignment_cross = _candidate_v2_4h_1h_alignment_table(selected_pair)
+    if not alignment_cross.empty:
+        st.markdown("###### Static 4h Market Flow × faster 1h Market Flow")
+        st.caption(
+            "This is the transition view: for example, a 4h TAILWIND that has already "
+            "turned into a 1h HEADWIND can be separated from a 4h TAILWIND whose 1h "
+            "state still confirms it."
+        )
+        st.dataframe(
+            alignment_cross,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v2_market_alignment_4h_1h_cross",
+        )
+
+    st.markdown("#### 7. Stability by causal 4h snapshot")
     st.caption(
         "Each causal 4h boundary is evaluated independently with the exact same "
         "TP/SL, horizon and execution costs selected above. N is the number of "
@@ -22206,7 +21010,49 @@ def render_candidate_v2_research(retests_df):
                 key="candidate_v2_mature_snapshot_summary_download",
             )
 
-    st.markdown("#### 7. Full V2 causal journal")
+        st.markdown("##### Winning vs Losing 4h regimes · transition diagnostics")
+        st.caption(
+            "This directly compares mature positive and negative 4h regimes. "
+            "It keeps the static 4h state, then adds the faster causal 1h breadth/BTC "
+            "state, 1h and 4h deltas, divergence, strength, return rank and relative "
+            "volume. The goal is to explain why two apparently similar TAILWIND "
+            "snapshots can produce opposite execution results without changing V2."
+        )
+        regime_rows = _candidate_v2_winning_losing_regimes(
+            selected_pair,
+            min_maturity=80.0,
+        )
+        if regime_rows.empty:
+            st.info("No mature winning/losing regime comparison is available yet.")
+        else:
+            st.dataframe(
+                regime_rows,
+                use_container_width=True,
+                hide_index=True,
+                key="candidate_v2_winning_losing_regimes",
+            )
+            regime_summary = _candidate_v2_winning_losing_feature_summary(regime_rows)
+            if not regime_summary.empty:
+                st.markdown("###### WIN vs LOSS feature summary · each 4h snapshot weighted once")
+                st.dataframe(
+                    regime_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="candidate_v2_winning_losing_feature_summary",
+                )
+            st.download_button(
+                "Download V2 winning vs losing regimes CSV",
+                data=regime_rows.to_csv(index=False).encode("utf-8"),
+                file_name=(
+                    f"candidate_v2_winning_losing_regimes_"
+                    f"tp{float(selected_tp):g}_sl{float(selected_sl):g}_"
+                    f"{snap_horizon}m.csv"
+                ),
+                mime="text/csv",
+                key="candidate_v2_winning_losing_regimes_download",
+            )
+
+    st.markdown("#### 8. Full V2 causal journal")
     show_journal = st.toggle(
         "Show/export full V2 REACTION context",
         value=False,
@@ -28992,777 +27838,6 @@ def build_volume_exhaustion_chart(
     return fig
 
 
-def build_micro_reaction_chart(
-    candles,
-    symbol,
-    swing_points_by_timeframe=None,
-    swing_candles_by_timeframe=None,
-    confirmed_swing_retests=None,
-):
-    """1m execution view for causal 1m/5m swing REACTION research.
-
-    Reuses the proven pivot/confirmation/retest overlays from the old Volume
-    Exhaustion inspector, but removes the exhaustion event itself and adds the
-    two missing causal milestones: departure and hypothetical next-1m-open
-    entry. The X range remains owned by the visible 1m candles.
-    """
-    dummy_event = {
-        "symbol": str(symbol),
-        "candle_open_timestamp": None,
-        "close": None,
-        "potential_side": "NEUTRAL",
-    }
-
-    fig = build_volume_exhaustion_chart(
-        candles=candles,
-        event_row=dummy_event,
-        swing_points_by_timeframe=(
-            swing_points_by_timeframe or {}
-        ),
-        swing_candles_by_timeframe=(
-            swing_candles_by_timeframe or {}
-        ),
-        max_confirmation_move_pct=None,
-        confirmed_swing_retests=confirmed_swing_retests,
-    )
-
-    if (
-        confirmed_swing_retests is not None
-        and not confirmed_swing_retests.empty
-    ):
-        overlays = confirmed_swing_retests.copy()
-
-        # Departure is the first candle that satisfied the required move-away
-        # after the swing had already become actionable.
-        if {
-            "departure_timestamp",
-            "departure_price",
-            "signal",
-            "timeframe",
-            "detector",
-        }.issubset(overlays.columns):
-            departure_ts = pd.to_numeric(
-                overlays["departure_timestamp"],
-                errors="coerce",
-            )
-            departure_price = pd.to_numeric(
-                overlays["departure_price"],
-                errors="coerce",
-            )
-            valid_departure = (
-                departure_ts.notna()
-                & departure_price.notna()
-            )
-
-            if valid_departure.any():
-                departure_rows = overlays.loc[
-                    valid_departure
-                ].copy()
-                fig.add_trace(
-                    go.Scatter(
-                        x=pd.to_datetime(
-                            pd.to_numeric(
-                                departure_rows[
-                                    "departure_timestamp"
-                                ],
-                                errors="coerce",
-                            ),
-                            unit="ms",
-                            utc=True,
-                            errors="coerce",
-                        ).dt.tz_convert(TZ),
-                        y=pd.to_numeric(
-                            departure_rows["departure_price"],
-                            errors="coerce",
-                        ),
-                        mode="markers",
-                        marker={
-                            "size": 9,
-                            "symbol": "square-open",
-                        },
-                        name="Departure",
-                        customdata=departure_rows[
-                            [
-                                "signal",
-                                "timeframe",
-                                "detector",
-                                "swing_price",
-                                "max_departure_pct",
-                            ]
-                        ].to_numpy(),
-                        hovertemplate=(
-                            "<b>Departure</b><br>"
-                            "Time: %{x}<br>"
-                            "Price: %{y:.8f}<br>"
-                            "Side: %{customdata[0]}<br>"
-                            "Swing TF: %{customdata[1]}<br>"
-                            "Detector: %{customdata[2]}<br>"
-                            "Swing price: %{customdata[3]:.8f}<br>"
-                            "Max departure: %{customdata[4]:.4f}%"
-                            "<extra></extra>"
-                        ),
-                    )
-                )
-
-        # A REACTION is known only after its 1m candle closes. Entry is the
-        # next consecutive 1m open, exactly matching the existing execution
-        # research engine. Failed/indecisive first touches do not get entries.
-        if {
-            "status",
-            "first_touch_entry_timestamp",
-            "first_touch_entry_price",
-            "signal",
-            "timeframe",
-            "detector",
-            "retest_price",
-        }.issubset(overlays.columns):
-            entries = overlays.loc[
-                overlays["status"]
-                .fillna("")
-                .astype(str)
-                .eq("REACTION")
-            ].copy()
-            entry_ts = pd.to_numeric(
-                entries["first_touch_entry_timestamp"],
-                errors="coerce",
-            )
-            entry_price = pd.to_numeric(
-                entries["first_touch_entry_price"],
-                errors="coerce",
-            )
-            valid_entry = entry_ts.notna() & entry_price.notna()
-            entries = entries.loc[valid_entry].copy()
-
-            if not entries.empty:
-                fig.add_trace(
-                    go.Scatter(
-                        x=pd.to_datetime(
-                            pd.to_numeric(
-                                entries[
-                                    "first_touch_entry_timestamp"
-                                ],
-                                errors="coerce",
-                            ),
-                            unit="ms",
-                            utc=True,
-                            errors="coerce",
-                        ).dt.tz_convert(TZ),
-                        y=pd.to_numeric(
-                            entries["first_touch_entry_price"],
-                            errors="coerce",
-                        ),
-                        mode="markers",
-                        marker={
-                            "size": 13,
-                            "symbol": "star",
-                        },
-                        name="REACTION entry · next 1m open",
-                        customdata=entries[
-                            [
-                                "signal",
-                                "timeframe",
-                                "detector",
-                                "retest_price",
-                                "swing_price",
-                            ]
-                        ].to_numpy(),
-                        hovertemplate=(
-                            "<b>Hypothetical entry</b><br>"
-                            "Time: %{x}<br>"
-                            "Entry: %{y:.8f}<br>"
-                            "Side: %{customdata[0]}<br>"
-                            "Swing TF: %{customdata[1]}<br>"
-                            "Detector: %{customdata[2]}<br>"
-                            "Retest price: %{customdata[3]:.8f}<br>"
-                            "Swing price: %{customdata[4]:.8f}"
-                            "<extra></extra>"
-                        ),
-                    )
-                )
-
-    fig.update_layout(
-        title=(
-            f"{str(symbol)} · Micro REACTION · "
-            "1m execution view"
-        ),
-    )
-    return fig
-
-
-def build_micro_reaction_comparison_table(retests_df):
-    """Compare executable Micro REACTION scalp behavior by TF, detector and side."""
-    if retests_df is None or retests_df.empty:
-        return pd.DataFrame()
-
-    required = {"timeframe", "detector", "signal", "status"}
-    if not required.issubset(retests_df.columns):
-        return pd.DataFrame()
-
-    rows = []
-    for (timeframe, detector, side), group in retests_df.groupby(
-        ["timeframe", "detector", "signal"],
-        dropna=False,
-        sort=True,
-    ):
-        reactions = group.loc[
-            group["status"].fillna("").astype(str).eq("REACTION")
-        ].copy()
-
-        row = {
-            "TF": str(timeframe),
-            "Detector": str(detector),
-            "Side": str(side),
-            "First touches": int(len(group)),
-            "REACTION": int(len(reactions)),
-            "Reaction rate %": (
-                float(len(reactions)) / float(len(group)) * 100.0
-                if len(group)
-                else np.nan
-            ),
-        }
-
-        for horizon in MICRO_REACTION_PRIMARY_HORIZONS:
-            mfe = pd.to_numeric(
-                reactions.get(
-                    f"reaction_entry_mfe_{horizon}m_pct",
-                    pd.Series(np.nan, index=reactions.index),
-                ),
-                errors="coerce",
-            )
-            mae = pd.to_numeric(
-                reactions.get(
-                    f"reaction_entry_mae_{horizon}m_pct",
-                    pd.Series(np.nan, index=reactions.index),
-                ),
-                errors="coerce",
-            )
-            ret = pd.to_numeric(
-                reactions.get(
-                    f"reaction_entry_return_{horizon}m_pct",
-                    pd.Series(np.nan, index=reactions.index),
-                ),
-                errors="coerce",
-            )
-            complete = (
-                reactions.get(
-                    f"reaction_entry_complete_{horizon}m",
-                    pd.Series(False, index=reactions.index),
-                )
-                .fillna(False)
-                .astype(bool)
-            )
-            valid = complete & mfe.notna() & mae.notna() & ret.notna()
-
-            row[f"N {horizon}m"] = int(valid.sum())
-            row[f"MFE {horizon}m avg %"] = (
-                float(mfe.loc[valid].mean()) if valid.any() else np.nan
-            )
-            row[f"MFE {horizon}m med %"] = (
-                float(mfe.loc[valid].median()) if valid.any() else np.nan
-            )
-            row[f"MAE {horizon}m avg %"] = (
-                float(mae.loc[valid].mean()) if valid.any() else np.nan
-            )
-            row[f"MAE {horizon}m med %"] = (
-                float(mae.loc[valid].median()) if valid.any() else np.nan
-            )
-            row[f"Return {horizon}m avg %"] = (
-                float(ret.loc[valid].mean()) if valid.any() else np.nan
-            )
-
-        rows.append(row)
-
-    result = pd.DataFrame(rows)
-    if result.empty:
-        return result
-
-    for column in result.columns:
-        if column in {"TF", "Detector", "Side"}:
-            continue
-        result[column] = pd.to_numeric(result[column], errors="coerce")
-        if "%" in column:
-            result[column] = result[column].round(4)
-
-    tf_order = {"1m": 0, "5m": 1}
-    side_order = {"LONG": 0, "SHORT": 1}
-    result["_tf_order"] = result["TF"].map(tf_order).fillna(99)
-    result["_side_order"] = result["Side"].map(side_order).fillna(99)
-    return (
-        result
-        .sort_values(["_tf_order", "Detector", "_side_order"], kind="stable")
-        .drop(columns=["_tf_order", "_side_order"])
-        .reset_index(drop=True)
-    )
-
-
-def build_micro_reaction_historical_overlay_chart(
-    candles,
-    symbol,
-    retests_df,
-    chart_timeframe="1m",
-    show_structure=False,
-    show_outcome_labels=False,
-    outcome_horizon=5,
-):
-    """Historical chart with every visible causal Micro REACTION.
-
-    Detection/execution remains causal on the original 1m path. The chart can
-    render either 1m candles or a 5m aggregation of that same visible path, so
-    longer windows stay readable without changing the research definition.
-    """
-    if candles is None or candles.empty:
-        return go.Figure()
-
-    work = _prepare_confirmed_swing_retest_candles(candles)
-    if work.empty:
-        return go.Figure()
-
-    work["chart_time"] = pd.to_datetime(
-        pd.to_numeric(work["timestamp"], errors="coerce"),
-        unit="ms",
-        utc=True,
-        errors="coerce",
-    ).dt.tz_convert(TZ)
-    work = work.dropna(subset=["chart_time"]).copy()
-    if work.empty:
-        return go.Figure()
-
-    chart_tf_minutes = max(1, int(timeframe_to_minutes(chart_timeframe)))
-    visible_start_ms = int(work["timestamp"].min())
-    visible_end_ms = int(
-        work["timestamp"].max()
-        + chart_tf_minutes * 60_000
-        - 1
-    )
-    visible_start_time = work["chart_time"].iloc[0]
-    visible_end_time = work["chart_time"].iloc[-1]
-    visible_end_with_padding = visible_end_time + pd.Timedelta(
-        minutes=chart_tf_minutes
-    )
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=work["chart_time"],
-            open=work["open"],
-            high=work["high"],
-            low=work["low"],
-            close=work["close"],
-            name=str(chart_timeframe),
-        )
-    )
-
-    if retests_df is None or retests_df.empty:
-        reactions = pd.DataFrame()
-    else:
-        reactions = retests_df.copy()
-        if "status" in reactions.columns:
-            reactions = reactions.loc[
-                reactions["status"].fillna("").astype(str).eq("REACTION")
-            ].copy()
-        reaction_ts = pd.to_numeric(
-            reactions.get(
-                "retest_timestamp",
-                pd.Series(np.nan, index=reactions.index),
-            ),
-            errors="coerce",
-        )
-        reactions = reactions.loc[
-            reaction_ts.between(
-                visible_start_ms,
-                visible_end_ms,
-                inclusive="both",
-            )
-        ].copy()
-
-    horizon = int(outcome_horizon)
-    mfe_col = f"reaction_entry_mfe_{horizon}m_pct"
-    mae_col = f"reaction_entry_mae_{horizon}m_pct"
-
-    if not reactions.empty:
-        # Optional parent-structure markers. Only structures that actually led
-        # to a visible REACTION are drawn; unrelated pivots stay out of the
-        # 5,000-candle view.
-        if bool(show_structure):
-            structure_specs = [
-                (
-                    "Parent pivot",
-                    "pivot_timestamp",
-                    "swing_price",
-                    "triangle-up",
-                ),
-                (
-                    "Confirmation",
-                    "actionable_timestamp",
-                    "entry_price",
-                    "circle-open",
-                ),
-                (
-                    "Departure",
-                    "departure_timestamp",
-                    "departure_price",
-                    "square-open",
-                ),
-            ]
-            for label, ts_col, price_col, marker_symbol in structure_specs:
-                if ts_col not in reactions.columns or price_col not in reactions.columns:
-                    continue
-                ts_values = pd.to_numeric(reactions[ts_col], errors="coerce")
-                price_values = pd.to_numeric(reactions[price_col], errors="coerce")
-                valid = ts_values.notna() & price_values.notna()
-                if not valid.any():
-                    continue
-                rows = reactions.loc[valid].copy()
-                fig.add_trace(
-                    go.Scatter(
-                        x=pd.to_datetime(
-                            pd.to_numeric(rows[ts_col], errors="coerce"),
-                            unit="ms",
-                            utc=True,
-                            errors="coerce",
-                        ).dt.tz_convert(TZ),
-                        y=pd.to_numeric(rows[price_col], errors="coerce"),
-                        mode="markers",
-                        marker={"size": 7, "symbol": marker_symbol},
-                        name=label,
-                        customdata=rows[
-                            [column for column in ["signal", "timeframe", "detector"] if column in rows.columns]
-                        ].to_numpy(),
-                        hovertemplate=(
-                            f"<b>{label}</b><br>"
-                            "Time: %{x}<br>"
-                            "Price: %{y:.8f}"
-                            "<extra></extra>"
-                        ),
-                    )
-                )
-
-        for side in ("LONG", "SHORT"):
-            side_rows = reactions.loc[
-                reactions.get(
-                    "signal",
-                    pd.Series("", index=reactions.index),
-                ).fillna("").astype(str).eq(side)
-            ].copy()
-            if side_rows.empty:
-                continue
-
-            # REACTION marker at the causal first retest candle.
-            retest_time = pd.to_datetime(
-                pd.to_numeric(side_rows["retest_timestamp"], errors="coerce"),
-                unit="ms",
-                utc=True,
-                errors="coerce",
-            ).dt.tz_convert(TZ)
-            retest_price = pd.to_numeric(
-                side_rows.get(
-                    "retest_price",
-                    pd.Series(np.nan, index=side_rows.index),
-                ),
-                errors="coerce",
-            )
-
-            custom_columns = [
-                "timeframe",
-                "detector",
-                "swing_price",
-                "first_touch_entry_price",
-                "reaction_entry_mfe_1m_pct",
-                "reaction_entry_mae_1m_pct",
-                "reaction_entry_mfe_3m_pct",
-                "reaction_entry_mae_3m_pct",
-                "reaction_entry_mfe_5m_pct",
-                "reaction_entry_mae_5m_pct",
-            ]
-            for column in custom_columns:
-                if column not in side_rows.columns:
-                    side_rows[column] = np.nan
-
-            text_values = None
-            mode = "markers"
-            if bool(show_outcome_labels):
-                mfe_values = pd.to_numeric(
-                    side_rows.get(mfe_col),
-                    errors="coerce",
-                )
-                mae_values = pd.to_numeric(
-                    side_rows.get(mae_col),
-                    errors="coerce",
-                )
-                text_values = [
-                    (
-                        f"+{float(mfe):.2f}% / -{float(mae):.2f}%"
-                        if pd.notna(mfe) and pd.notna(mae)
-                        else "pending"
-                    )
-                    for mfe, mae in zip(mfe_values, mae_values)
-                ]
-                mode = "markers+text"
-
-            fig.add_trace(
-                go.Scatter(
-                    x=retest_time,
-                    y=retest_price,
-                    mode=mode,
-                    text=text_values,
-                    textposition="top center",
-                    marker={"size": 10, "symbol": "diamond"},
-                    name=f"REACTION {side}",
-                    customdata=side_rows[custom_columns].to_numpy(),
-                    hovertemplate=(
-                        f"<b>REACTION {side}</b><br>"
-                        "Time: %{x}<br>"
-                        "Retest: %{y:.8f}<br>"
-                        "TF: %{customdata[0]}<br>"
-                        "Detector: %{customdata[1]}<br>"
-                        "Swing: %{customdata[2]:.8f}<br>"
-                        "Next-open entry: %{customdata[3]:.8f}<br>"
-                        "Entry MFE/MAE 1m: +%{customdata[4]:.3f}% / -%{customdata[5]:.3f}%<br>"
-                        "Entry MFE/MAE 3m: +%{customdata[6]:.3f}% / -%{customdata[7]:.3f}%<br>"
-                        "Entry MFE/MAE 5m: +%{customdata[8]:.3f}% / -%{customdata[9]:.3f}%"
-                        "<extra></extra>"
-                    ),
-                )
-            )
-
-            # Entry marker is the next consecutive 1m open after REACTION close.
-            entry_ts = pd.to_numeric(
-                side_rows.get(
-                    "first_touch_entry_timestamp",
-                    pd.Series(np.nan, index=side_rows.index),
-                ),
-                errors="coerce",
-            )
-            entry_price = pd.to_numeric(
-                side_rows.get(
-                    "first_touch_entry_price",
-                    pd.Series(np.nan, index=side_rows.index),
-                ),
-                errors="coerce",
-            )
-            valid_entry = entry_ts.notna() & entry_price.notna()
-            if valid_entry.any():
-                entry_rows = side_rows.loc[valid_entry].copy()
-                fig.add_trace(
-                    go.Scatter(
-                        x=pd.to_datetime(
-                            pd.to_numeric(
-                                entry_rows["first_touch_entry_timestamp"],
-                                errors="coerce",
-                            ),
-                            unit="ms",
-                            utc=True,
-                            errors="coerce",
-                        ).dt.tz_convert(TZ),
-                        y=pd.to_numeric(
-                            entry_rows["first_touch_entry_price"],
-                            errors="coerce",
-                        ),
-                        mode="markers",
-                        marker={"size": 11, "symbol": "star"},
-                        name=f"Entry {side} · next 1m open",
-                        customdata=entry_rows[
-                            ["timeframe", "detector", "retest_price"]
-                        ].to_numpy(),
-                        hovertemplate=(
-                            f"<b>{side} entry</b><br>"
-                            "Time: %{x}<br>"
-                            "Entry: %{y:.8f}<br>"
-                            "TF: %{customdata[0]}<br>"
-                            "Detector: %{customdata[1]}<br>"
-                            "Retest: %{customdata[2]:.8f}"
-                            "<extra></extra>"
-                        ),
-                    )
-                )
-
-    fig.update_layout(
-        height=700,
-        margin={"l": 10, "r": 10, "t": 50, "b": 10},
-        xaxis_rangeslider_visible=False,
-        hovermode="x unified",
-        title=(
-            f"{str(symbol)} · Micro REACTION · {str(chart_timeframe)} · "
-            f"{len(reactions)} visible REACTION(s)"
-        ),
-    )
-    fig.update_xaxes(
-        range=[visible_start_time, visible_end_with_padding],
-        autorange=False,
-    )
-    return fig
-
-def build_micro_reaction_selected_event_chart(
-    candles,
-    event_row,
-):
-    """Focused 1m chart for one causal Micro REACTION sequence only.
-
-    The route is Pivot -> Confirmation -> Departure -> Retest -> Entry.
-    No other swing markers are drawn, so parentage is visually unambiguous.
-    """
-    if candles is None or candles.empty:
-        return go.Figure()
-
-    candles = _prepare_confirmed_swing_retest_candles(candles)
-    if candles.empty:
-        return go.Figure()
-
-    stages = [
-        (
-            "Pivot",
-            event_row.get("pivot_timestamp"),
-            event_row.get("swing_price"),
-            "triangle-up"
-            if str(event_row.get("signal", "")).upper() == "LONG"
-            else "triangle-down",
-        ),
-        (
-            "Confirmation",
-            event_row.get("actionable_timestamp"),
-            event_row.get("entry_price"),
-            "circle-open",
-        ),
-        (
-            "Departure",
-            event_row.get("departure_timestamp"),
-            event_row.get("departure_price"),
-            "square-open",
-        ),
-        (
-            "Retest",
-            event_row.get("retest_timestamp"),
-            event_row.get("retest_price"),
-            "diamond",
-        ),
-        (
-            "Entry",
-            event_row.get("first_touch_entry_timestamp"),
-            event_row.get("first_touch_entry_price"),
-            "star",
-        ),
-    ]
-
-    clean_stages = []
-    for label, timestamp, price, marker_symbol in stages:
-        timestamp = pd.to_numeric(timestamp, errors="coerce")
-        price = pd.to_numeric(price, errors="coerce")
-        if pd.isna(timestamp) or pd.isna(price):
-            continue
-        clean_stages.append(
-            (
-                str(label),
-                int(timestamp),
-                float(price),
-                str(marker_symbol),
-            )
-        )
-
-    if not clean_stages:
-        return go.Figure()
-
-    earliest_stage = min(stage[1] for stage in clean_stages)
-    latest_stage = max(stage[1] for stage in clean_stages)
-    visible_start = earliest_stage - 30 * 60_000
-    visible_end = latest_stage + 90 * 60_000
-
-    view = candles.loc[
-        pd.to_numeric(candles["timestamp"], errors="coerce")
-        .between(visible_start, visible_end, inclusive="both")
-    ].copy()
-    if view.empty:
-        view = candles.copy()
-
-    view["chart_time"] = pd.to_datetime(
-        pd.to_numeric(view["timestamp"], errors="coerce"),
-        unit="ms",
-        utc=True,
-        errors="coerce",
-    ).dt.tz_convert(TZ)
-    view = view.dropna(subset=["chart_time"]).copy()
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=view["chart_time"],
-            open=view["open"],
-            high=view["high"],
-            low=view["low"],
-            close=view["close"],
-            name="1m",
-        )
-    )
-
-    route_times = [
-        pd.to_datetime(ts, unit="ms", utc=True).tz_convert(TZ)
-        for _, ts, _, _ in clean_stages
-    ]
-    route_prices = [price for _, _, price, _ in clean_stages]
-    route_labels = [label for label, _, _, _ in clean_stages]
-
-    fig.add_trace(
-        go.Scatter(
-            x=route_times,
-            y=route_prices,
-            mode="lines",
-            name="Causal route",
-            hoverinfo="skip",
-        )
-    )
-
-    for label, timestamp, price, marker_symbol in clean_stages:
-        fig.add_trace(
-            go.Scatter(
-                x=[
-                    pd.to_datetime(
-                        timestamp,
-                        unit="ms",
-                        utc=True,
-                    ).tz_convert(TZ)
-                ],
-                y=[price],
-                mode="markers+text",
-                text=[label],
-                textposition="top center",
-                marker={
-                    "size": 13 if label != "Entry" else 16,
-                    "symbol": marker_symbol,
-                },
-                name=label,
-                hovertemplate=(
-                    f"<b>{label}</b><br>"
-                    "Time: %{x}<br>"
-                    "Price: %{y:.8f}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    swing_price = pd.to_numeric(
-        event_row.get("swing_price"),
-        errors="coerce",
-    )
-    if pd.notna(swing_price):
-        fig.add_hline(
-            y=float(swing_price),
-            line_dash="dot",
-            annotation_text="Confirmed swing level",
-            annotation_position="bottom right",
-        )
-
-    fig.update_layout(
-        height=620,
-        margin={"l": 10, "r": 10, "t": 50, "b": 10},
-        xaxis_rangeslider_visible=False,
-        hovermode="x unified",
-        title=(
-            f"{event_row.get('symbol', '')} · "
-            f"{event_row.get('timeframe', '')} "
-            f"{event_row.get('detector', '')} · "
-            f"{event_row.get('signal', '')} · focused causal sequence"
-        ),
-    )
-    return fig
 
 
 # ============================================================
@@ -39150,2316 +37225,6 @@ if selected_section == "volume_exhaustion":
     render_volume_exhaustion_live()
 
 
-if selected_section == "micro_reaction":
-    st.markdown("## 🧬 Micro REACTION")
-    st.caption(
-        "Causal swing-retest research on smaller structural timeframes. "
-        "Choose 1m, 5m or both; each timeframe can use 2x2, 3x3 or 5x5. "
-        "The chart shows pivot → confirmation → departure → first retest, "
-        "and a hypothetical entry only after a REACTION is known, at the "
-        "next consecutive 1m open."
-    )
-
-    events = load_volume_exhaustion_events()
-
-    configured_symbols = {
-        str(symbol)
-        for symbol in CANDIDATE_V1_MARKET_SYMBOLS
-        if str(symbol).strip()
-    }
-    event_symbols = set()
-    if (
-        events is not None
-        and not events.empty
-        and "symbol" in events.columns
-    ):
-        event_symbols = set(
-            events["symbol"]
-            .dropna()
-            .astype(str)
-            .tolist()
-        )
-
-    micro_symbols = tuple(
-        sorted(configured_symbols | event_symbols)
-    )
-
-    if not micro_symbols:
-        st.info(
-            "No symbol universe is available for Micro REACTION research."
-        )
-    else:
-        top_1, top_2, top_3 = st.columns([1.1, 1.4, 1.6])
-
-        with top_1:
-            micro_scope = st.selectbox(
-                "Scanner scope",
-                ["Selected symbol", "All symbols"],
-                index=0,
-                key="micro_reaction_scope",
-            )
-
-        with top_2:
-            default_symbol_index = (
-                list(micro_symbols).index("BTCUSDT")
-                if "BTCUSDT" in micro_symbols
-                else 0
-            )
-            selected_micro_symbol = st.selectbox(
-                "Symbol",
-                options=list(micro_symbols),
-                index=default_symbol_index,
-                key="micro_reaction_symbol",
-            )
-
-        with top_3:
-            micro_timeframes = st.multiselect(
-                "Structural timeframes",
-                options=["1m", "5m"],
-                default=["1m", "5m"],
-                key="micro_reaction_timeframes",
-            )
-
-        detector_1, detector_2, detector_3 = st.columns(3)
-        detector_options = ["2x2", "3x3", "5x5"]
-
-        with detector_1:
-            micro_detector_1m = st.selectbox(
-                "1m pivot detector",
-                detector_options,
-                index=2,
-                key="micro_reaction_detector_1m",
-            )
-
-        with detector_2:
-            micro_detector_5m = st.selectbox(
-                "5m pivot detector",
-                detector_options,
-                index=2,
-                key="micro_reaction_detector_5m",
-            )
-
-        with detector_3:
-            micro_prominence = st.number_input(
-                "Min swing prominence %",
-                min_value=0.0,
-                value=0.0,
-                step=0.05,
-                format="%.2f",
-                key="micro_reaction_prominence",
-            )
-
-        parameter_1, parameter_2, parameter_3 = st.columns(3)
-        with parameter_1:
-            micro_tolerance = st.number_input(
-                "Retest tolerance %",
-                min_value=0.0,
-                value=0.10,
-                step=0.01,
-                format="%.3f",
-                key="micro_reaction_tolerance",
-                help=(
-                    "Accepted band around the confirmed swing level for the "
-                    "first causal return."
-                ),
-            )
-
-        with parameter_2:
-            micro_departure = st.number_input(
-                "Min move-away before retest %",
-                min_value=0.0,
-                value=0.20,
-                step=0.05,
-                format="%.3f",
-                key="micro_reaction_departure",
-            )
-
-        with parameter_3:
-            micro_max_age = st.number_input(
-                "Max confirmation → retest (min)",
-                min_value=1,
-                max_value=2880,
-                value=120,
-                step=15,
-                key="micro_reaction_max_age",
-            )
-
-        view_1, view_2 = st.columns([1.2, 2.8])
-        with view_1:
-            micro_view_mode = st.radio(
-                "View mode",
-                [
-                    "Recent overlay",
-                    "Historical overlay",
-                    "Focused event",
-                ],
-                index=0,
-                key="micro_reaction_view_mode",
-            )
-
-        with view_2:
-            st.caption(
-                "Recent overlay keeps the original structural chart. Historical "
-                "overlay is optimized for long 1m windows and draws every visible "
-                "REACTION without rendering unrelated pivots. Focused event isolates "
-                "one causal Pivot → Confirmation → Departure → Retest → Entry route."
-            )
-
-        filter_1, filter_2, filter_3, filter_4 = st.columns(4)
-        with filter_1:
-            micro_recent_minutes = st.number_input(
-                "Max age since retest (min)",
-                min_value=1,
-                max_value=10080,
-                value=360,
-                step=30,
-                key="micro_reaction_recent_minutes",
-                disabled=(micro_view_mode == "Historical overlay"),
-                help=(
-                    "Used by Recent overlay / scanner views. Historical overlay "
-                    "uses the selected chart window instead."
-                ),
-            )
-
-        with filter_2:
-            micro_status_filter = st.selectbox(
-                "First-touch status",
-                [
-                    "REACTION only",
-                    "All first touches",
-                    "Failed only",
-                    "Indecisive only",
-                ],
-                index=0,
-                key="micro_reaction_status_filter",
-            )
-
-        with filter_3:
-            micro_side_filter = st.selectbox(
-                "Side",
-                ["ALL", "LONG", "SHORT"],
-                index=0,
-                key="micro_reaction_side_filter",
-            )
-
-        micro_chart_timeframe = "1m"
-        micro_chart_window_minutes = 1440
-        micro_chart_candles = 600
-
-        with filter_4:
-            if micro_view_mode == "Historical overlay":
-                micro_chart_timeframe = st.selectbox(
-                    "Chart timeframe",
-                    ["1m", "5m"],
-                    index=1,
-                    key="micro_reaction_historical_chart_timeframe",
-                    help=(
-                        "Visualization only. Micro REACTION detection and entry "
-                        "timing remain causal on the 1m path."
-                    ),
-                )
-            else:
-                micro_chart_candles = st.slider(
-                    "Visible 1m candles",
-                    min_value=120,
-                    max_value=2000,
-                    value=600,
-                    step=60,
-                    key="micro_reaction_recent_chart_candles",
-                )
-
-        micro_historical_show_structure = False
-        micro_historical_show_labels = False
-        micro_historical_outcome_horizon = 5
-        if micro_view_mode == "Historical overlay":
-            history_1, history_2, history_3, history_4 = st.columns(4)
-            with history_1:
-                historical_window_label = st.selectbox(
-                    "Chart window",
-                    ["6 hours", "12 hours", "1 day", "2 days", "3 days"],
-                    index=2,
-                    key="micro_reaction_historical_window",
-                )
-                micro_chart_window_minutes = {
-                    "6 hours": 360,
-                    "12 hours": 720,
-                    "1 day": 1440,
-                    "2 days": 2880,
-                    "3 days": 4320,
-                }[historical_window_label]
-                micro_chart_candles = int(micro_chart_window_minutes)
-            with history_2:
-                micro_historical_show_structure = st.checkbox(
-                    "Show parent structure markers",
-                    value=False,
-                    key="micro_reaction_historical_show_structure",
-                    help=(
-                        "Adds only the parent pivot, confirmation and departure "
-                        "for REACTIONs visible in the historical window."
-                    ),
-                )
-            with history_3:
-                micro_historical_show_labels = st.checkbox(
-                    "Show MFE / MAE labels",
-                    value=False,
-                    key="micro_reaction_historical_show_labels",
-                    help=(
-                        "Can get visually dense on large windows. MFE/MAE remain "
-                        "available in hover even when labels are hidden."
-                    ),
-                )
-            with history_4:
-                micro_historical_outcome_horizon = st.selectbox(
-                    "Label horizon",
-                    [1, 3, 5],
-                    index=2,
-                    format_func=lambda value: f"{value}m",
-                    key="micro_reaction_historical_outcome_horizon",
-                )
-
-        if not micro_timeframes:
-            st.info("Select at least one structural timeframe.")
-        else:
-            detector_windows = {}
-            if "1m" in micro_timeframes:
-                detector_windows["1m"] = str(micro_detector_1m)
-            if "5m" in micro_timeframes:
-                detector_windows["5m"] = str(micro_detector_5m)
-
-            # -------------------------------------------------
-            # Selected-symbol visual reconstruction / historical overlay.
-            # -------------------------------------------------
-            st.markdown("### Visual causal reconstruction")
-
-            if micro_view_mode == "Historical overlay":
-                st.caption(
-                    "Historical mode: choose a 1m or 5m chart and a fixed time "
-                    "window. Detection still runs causally on 1m; the chart "
-                    "timeframe changes only the visualization. Diamonds are "
-                    "REACTIONs and stars are next-1m-open hypothetical entries."
-                )
-            elif micro_view_mode == "Focused event":
-                st.caption(
-                    "Focused mode isolates one event so parentage is unambiguous: "
-                    "Pivot → Confirmation → Departure → Retest → Entry."
-                )
-            else:
-                st.caption(
-                    "Triangles = pivots · open circles = confirmation available · "
-                    "open squares = minimum departure reached · diamonds = first "
-                    "retest status · stars = hypothetical REACTION entry at the "
-                    "next 1m open."
-                )
-
-            if micro_view_mode == "Historical overlay":
-                # Load a causal 1m scan path with left-side warmup, then display
-                # exactly the requested clock window. A 5m chart is derived from
-                # the same visible 1m path so visualization cannot drift from the
-                # data used by the detector.
-                detector_warmup_minutes = 0
-                for micro_tf in micro_timeframes:
-                    detector_name = detector_windows.get(micro_tf, "5x5")
-                    try:
-                        detector_bars = int(str(detector_name).split("x")[0])
-                    except (TypeError, ValueError):
-                        detector_bars = 5
-                    detector_warmup_minutes = max(
-                        detector_warmup_minutes,
-                        int(detector_bars * 2 * timeframe_to_minutes(micro_tf)),
-                    )
-
-                historical_scan_limit = min(
-                    int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
-                    int(
-                        micro_chart_window_minutes
-                        + micro_max_age
-                        + detector_warmup_minutes
-                        + 60
-                    ),
-                )
-
-                # Historical overlay needs a real clock window, not whatever
-                # happens to remain in the short Redis rolling list. Backfill
-                # public Binance Futures 1m klines on demand; keep Redis as a
-                # fallback if the REST request is unavailable.
-                scan_1m_candles = load_micro_reaction_historical_1m_candles(
-                    symbol=str(selected_micro_symbol),
-                    required_bars=int(historical_scan_limit),
-                )
-                micro_historical_data_source = "Binance Futures REST"
-
-                if scan_1m_candles is None or scan_1m_candles.empty:
-                    scan_1m_candles = load_volume_exhaustion_research_candles(
-                        symbol=str(selected_micro_symbol),
-                        timeframe="1m",
-                        limit=int(historical_scan_limit),
-                    )
-                    micro_historical_data_source = "Redis retained history"
-
-                if scan_1m_candles is None or scan_1m_candles.empty:
-                    chart_candles = pd.DataFrame()
-                    visible_1m_candles = pd.DataFrame()
-                    micro_expected_chart_bars = 0
-                else:
-                    scan_1m_candles = _prepare_confirmed_swing_retest_candles(
-                        scan_1m_candles
-                    )
-
-                    # Build the DISPLAY from the requested number of timeframe
-                    # bars, not from a Redis/time cutoff that may contain less
-                    # history. For 1 day this is exactly 1440 x 1m or 288 x 5m
-                    # whenever Binance returned the full requested history.
-                    chart_tf_minutes = max(
-                        1,
-                        int(timeframe_to_minutes(micro_chart_timeframe)),
-                    )
-                    micro_expected_chart_bars = int(
-                        np.ceil(
-                            float(micro_chart_window_minutes)
-                            / float(chart_tf_minutes)
-                        )
-                    )
-
-                    if micro_chart_timeframe == "5m":
-                        all_chart_candles = (
-                            _resample_contiguous_1m_for_micro_swing(
-                                scan_1m_candles,
-                                "5m",
-                            )
-                        )
-                        chart_candles = all_chart_candles.tail(
-                            micro_expected_chart_bars
-                        ).copy()
-                    else:
-                        chart_candles = scan_1m_candles.tail(
-                            micro_expected_chart_bars
-                        ).copy()
-
-                    if chart_candles.empty:
-                        visible_1m_candles = pd.DataFrame()
-                    else:
-                        chart_start_ts = int(
-                            pd.to_numeric(
-                                chart_candles["timestamp"],
-                                errors="coerce",
-                            ).dropna().min()
-                        )
-                        chart_last_open_ts = int(
-                            pd.to_numeric(
-                                chart_candles["timestamp"],
-                                errors="coerce",
-                            ).dropna().max()
-                        )
-                        chart_end_exclusive_ts = (
-                            chart_last_open_ts
-                            + chart_tf_minutes * 60_000
-                        )
-                        visible_1m_candles = scan_1m_candles.loc[
-                            (
-                                pd.to_numeric(
-                                    scan_1m_candles["timestamp"],
-                                    errors="coerce",
-                                )
-                                >= chart_start_ts
-                            )
-                            & (
-                                pd.to_numeric(
-                                    scan_1m_candles["timestamp"],
-                                    errors="coerce",
-                                )
-                                < chart_end_exclusive_ts
-                            )
-                        ].copy()
-            else:
-                chart_candles = load_volume_exhaustion_research_candles(
-                    symbol=str(selected_micro_symbol),
-                    timeframe="1m",
-                    limit=int(micro_chart_candles),
-                )
-                visible_1m_candles = chart_candles
-
-            if chart_candles is None or chart_candles.empty:
-                st.warning(
-                    "No closed candles are available for the selected symbol/window."
-                )
-            else:
-                historical_scan_diagnostics = None
-                if micro_view_mode == "Historical overlay":
-                    with st.spinner(
-                        "Reconstructing causal Micro REACTIONs for the selected "
-                        f"{micro_chart_timeframe} / {historical_window_label} view..."
-                    ):
-                        chart_retests, historical_scan_diagnostics = (
-                            build_micro_reaction_historical_retests(
-                                one_minute=scan_1m_candles,
-                                swing_timeframes=tuple(micro_timeframes),
-                                swing_detector_items=tuple(
-                                    sorted(detector_windows.items())
-                                ),
-                                min_swing_prominence_pct=float(micro_prominence),
-                                retest_tolerance_pct=float(micro_tolerance),
-                                min_departure_pct=float(micro_departure),
-                                max_age_minutes=int(micro_max_age),
-                            )
-                        )
-                    if chart_retests is not None and not chart_retests.empty:
-                        chart_retests["symbol"] = str(selected_micro_symbol)
-                else:
-                    chart_scan_recent_minutes = max(
-                        int(micro_recent_minutes),
-                        int(micro_chart_candles),
-                    )
-                    chart_retests = (
-                        scan_confirmed_swing_retests_all_symbols(
-                            symbols=(str(selected_micro_symbol),),
-                            swing_timeframes=tuple(micro_timeframes),
-                            swing_detector_items=tuple(
-                                sorted(detector_windows.items())
-                            ),
-                            min_swing_prominence_pct=float(micro_prominence),
-                            retest_tolerance_pct=float(micro_tolerance),
-                            min_departure_pct=float(micro_departure),
-                            max_age_minutes=int(micro_max_age),
-                            max_retest_age_minutes=int(chart_scan_recent_minutes),
-                        )
-                    )
-
-                visible_start_ms = int(
-                    pd.to_numeric(
-                        chart_candles["timestamp"],
-                        errors="coerce",
-                    ).dropna().min()
-                )
-                chart_tf_minutes_for_range = max(
-                    1,
-                    int(timeframe_to_minutes(micro_chart_timeframe)),
-                )
-                visible_end_ms = int(
-                    pd.to_numeric(
-                        chart_candles["timestamp"],
-                        errors="coerce",
-                    ).dropna().max()
-                    + chart_tf_minutes_for_range * 60_000
-                    - 1
-                )
-
-                chart_view = chart_retests.copy()
-                raw_visible_retests = pd.DataFrame()
-                if not chart_view.empty:
-                    retest_ts = pd.to_numeric(
-                        chart_view["retest_timestamp"],
-                        errors="coerce",
-                    )
-                    chart_view = chart_view.loc[
-                        retest_ts.between(
-                            visible_start_ms,
-                            visible_end_ms,
-                            inclusive="both",
-                        )
-                    ].copy()
-                    # Preserve the pre-filter visible population so Historical
-                    # overlay can explain a blank chart (no REACTION vs no scan).
-                    raw_visible_retests = chart_view.copy()
-
-                    if micro_status_filter == "REACTION only":
-                        chart_view = chart_view.loc[
-                            chart_view["status"].astype(str).eq("REACTION")
-                        ].copy()
-                    elif micro_status_filter == "Failed only":
-                        chart_view = chart_view.loc[
-                            chart_view["status"].astype(str).eq("TOUCH_FAILED")
-                        ].copy()
-                    elif micro_status_filter == "Indecisive only":
-                        chart_view = chart_view.loc[
-                            chart_view["status"].astype(str).eq("TOUCH_INDECISIVE")
-                        ].copy()
-
-                    if micro_side_filter != "ALL":
-                        chart_view = chart_view.loc[
-                            chart_view["signal"].astype(str).eq(micro_side_filter)
-                        ].copy()
-
-                if micro_view_mode == "Historical overlay":
-                    # Historical overlay is deliberately REACTION-only even when
-                    # the table filter is broader. Failed/indecisive first touches
-                    # remain available in the scanner below.
-                    historical_view = chart_view.copy()
-                    if not historical_view.empty:
-                        historical_view = historical_view.loc[
-                            historical_view["status"].astype(str).eq("REACTION")
-                        ].copy()
-
-                    # Make an empty historical chart diagnosable. The raw visible
-                    # population is counted before status filtering; this tells us
-                    # whether the scanner found first touches but none qualified as
-                    # REACTION, versus finding no causal retests at all.
-                    raw_for_side = raw_visible_retests.copy()
-                    if (
-                        not raw_for_side.empty
-                        and micro_side_filter != "ALL"
-                    ):
-                        raw_for_side = raw_for_side.loc[
-                            raw_for_side["signal"].astype(str).eq(
-                                micro_side_filter
-                            )
-                        ].copy()
-
-                    if raw_for_side.empty:
-                        historical_first_touches = 0
-                        historical_reactions = 0
-                        historical_failed = 0
-                        historical_indecisive = 0
-                    else:
-                        raw_status = raw_for_side["status"].astype(str)
-                        historical_first_touches = int(len(raw_for_side))
-                        historical_reactions = int(raw_status.eq("REACTION").sum())
-                        historical_failed = int(raw_status.eq("TOUCH_FAILED").sum())
-                        historical_indecisive = int(
-                            raw_status.eq("TOUCH_INDECISIVE").sum()
-                        )
-
-                    diag_1, diag_2, diag_3, diag_4 = st.columns(4)
-                    diag_1.metric(
-                        "Visible first touches",
-                        historical_first_touches,
-                    )
-                    diag_2.metric(
-                        "Visible REACTIONs",
-                        historical_reactions,
-                    )
-                    diag_3.metric(
-                        "Failed touches",
-                        historical_failed,
-                    )
-                    diag_4.metric(
-                        "Indecisive touches",
-                        historical_indecisive,
-                    )
-
-                    if isinstance(historical_scan_diagnostics, dict):
-                        stage_1, stage_2, stage_3 = st.columns(3)
-                        stage_1.metric(
-                            "Pivots detected",
-                            int(historical_scan_diagnostics.get("pivots", 0)),
-                        )
-                        stage_2.metric(
-                            "Confirmed in window",
-                            int(
-                                historical_scan_diagnostics.get(
-                                    "eligible confirmations",
-                                    0,
-                                )
-                            ),
-                        )
-                        stage_3.metric(
-                            "Reached first touch",
-                            int(
-                                historical_scan_diagnostics.get(
-                                    "first touches",
-                                    0,
-                                )
-                            ),
-                        )
-                        st.caption(
-                            "Historical diagnostics use the causal 1m scan path "
-                            "behind the selected chart window. If pivots are high but first touches are low, "
-                            "the departure/retest rules are filtering them; if "
-                            "first touches are high but REACTIONs are low, the "
-                            "reaction-candle condition is the filter."
-                        )
-
-                    st.caption(
-                        f"Rendering {len(chart_candles):,} / "
-                        f"{int(micro_expected_chart_bars):,} expected × "
-                        f"{micro_chart_timeframe} candles for "
-                        f"{historical_window_label}. Historical source: "
-                        f"{micro_historical_data_source}. Detection used "
-                        f"{len(scan_1m_candles):,} causal 1m candles including "
-                        "left-side warmup for pivot confirmation and retests."
-                    )
-
-                    if (
-                        int(micro_expected_chart_bars) > 0
-                        and len(chart_candles) < int(micro_expected_chart_bars)
-                    ):
-                        st.warning(
-                            "The selected historical source returned only "
-                            f"{len(chart_candles):,} of "
-                            f"{int(micro_expected_chart_bars):,} requested "
-                            f"{micro_chart_timeframe} candles. The chart below "
-                            "therefore does NOT cover the full selected window."
-                        )
-
-                    historical_fig = build_micro_reaction_historical_overlay_chart(
-                        candles=chart_candles,
-                        symbol=str(selected_micro_symbol),
-                        retests_df=historical_view,
-                        chart_timeframe=str(micro_chart_timeframe),
-                        show_structure=bool(micro_historical_show_structure),
-                        show_outcome_labels=bool(micro_historical_show_labels),
-                        outcome_horizon=int(micro_historical_outcome_horizon),
-                    )
-                    st.plotly_chart(
-                        historical_fig,
-                        use_container_width=True,
-                        key="micro_reaction_historical_chart",
-                        config={
-                            "displaylogo": False,
-                            "scrollZoom": True,
-                        },
-                    )
-
-                    if (
-                        micro_view_mode == "Historical overlay"
-                        and int(historical_scan_limit)
-                        >= int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT)
-                    ):
-                        st.caption(
-                            "Left-edge note: the requested chart plus causal warmup "
-                            "reached the retained 1m research limit. Very old parent "
-                            "structures can therefore be censored at the far left edge."
-                        )
-
-                    if historical_view.empty:
-                        if historical_first_touches > 0:
-                            st.info(
-                                "The scanner found causal first touches in this "
-                                "historical window, but none qualify as REACTION "
-                                "with the current structural rules/side filter. "
-                                "The counters above show whether they failed or "
-                                "were indecisive."
-                            )
-                        else:
-                            st.info(
-                                "No causal first touch was reconstructed inside "
-                                "this visible historical window. If this is a 5m "
-                                "study, the scanner now requests enough 5m history "
-                                "to cover the full retained 1m window; if this stays "
-                                "at zero, the current pivot/departure/retest rules "
-                                "simply did not produce an event for this symbol."
-                            )
-                    else:
-                        st.markdown("#### Visible historical REACTIONs")
-                        historical_columns = [
-                            "timeframe",
-                            "detector",
-                            "signal",
-                            "retest_time",
-                            "first_touch_entry_time",
-                            "first_touch_entry_price",
-                            "reaction_entry_mfe_1m_pct",
-                            "reaction_entry_mae_1m_pct",
-                            "reaction_entry_return_1m_pct",
-                            "reaction_entry_mfe_3m_pct",
-                            "reaction_entry_mae_3m_pct",
-                            "reaction_entry_return_3m_pct",
-                            "reaction_entry_mfe_5m_pct",
-                            "reaction_entry_mae_5m_pct",
-                            "reaction_entry_return_5m_pct",
-                        ]
-                        historical_columns = [
-                            column
-                            for column in historical_columns
-                            if column in historical_view.columns
-                        ]
-                        historical_display = historical_view[
-                            historical_columns
-                        ].copy()
-                        for column in historical_display.columns:
-                            if column.endswith("_pct") or column == "first_touch_entry_price":
-                                historical_display[column] = pd.to_numeric(
-                                    historical_display[column],
-                                    errors="coerce",
-                                ).round(5)
-                        st.dataframe(
-                            historical_display,
-                            use_container_width=True,
-                            hide_index=True,
-                            key="micro_reaction_historical_visible_table",
-                        )
-
-                elif micro_view_mode == "Focused event":
-                    if chart_view.empty:
-                        st.info(
-                            "No Micro REACTION first touch matches the current "
-                            "symbol/window/filters."
-                        )
-                    else:
-                        focused_labels = []
-                        focused_lookup = {}
-                        for focused_index, focused_row in chart_view.iterrows():
-                            focused_time = focused_row.get("retest_time")
-                            try:
-                                focused_time_text = pd.Timestamp(
-                                    focused_time
-                                ).strftime("%Y-%m-%d %H:%M")
-                            except Exception:
-                                focused_time_text = str(focused_time)
-                            focused_label = (
-                                f"{focused_row.get('timeframe', '—')} "
-                                f"{focused_row.get('detector', '—')} · "
-                                f"{focused_row.get('signal', '—')} · "
-                                f"{focused_row.get('status', '—')} · "
-                                f"{focused_time_text}"
-                            )
-                            focused_labels.append(focused_label)
-                            focused_lookup[focused_label] = focused_index
-
-                        focused_selected_label = st.selectbox(
-                            "Focused event",
-                            focused_labels,
-                            index=0,
-                            key="micro_reaction_top_focused_event",
-                        )
-                        focused_row = chart_view.loc[
-                            focused_lookup[focused_selected_label]
-                        ]
-                        focused_fig = build_micro_reaction_selected_event_chart(
-                            candles=chart_candles,
-                            event_row=focused_row,
-                        )
-                        st.plotly_chart(
-                            focused_fig,
-                            use_container_width=True,
-                            key="micro_reaction_top_focused_chart",
-                            config={
-                                "displaylogo": False,
-                                "scrollZoom": True,
-                            },
-                        )
-
-                else:
-                    swing_points_by_timeframe = {}
-                    swing_candles_by_timeframe = {}
-
-                    for micro_tf in micro_timeframes:
-                        detector_name = detector_windows.get(micro_tf, "5x5")
-                        try:
-                            detector_bars = int(str(detector_name).split("x")[0])
-                        except (TypeError, ValueError):
-                            detector_bars = 5
-
-                        detector = SwingDetector(
-                            left_bars=detector_bars,
-                            right_bars=detector_bars,
-                            min_prominence_pct=float(micro_prominence),
-                        )
-
-                        if micro_tf == "1m":
-                            timeframe_candles = chart_candles.copy()
-                        else:
-                            tf_limit = min(
-                                400,
-                                max(
-                                    120,
-                                    int(np.ceil(float(micro_chart_candles) / 5.0)) + 40,
-                                ),
-                            )
-                            timeframe_candles = load_volume_exhaustion_research_candles(
-                                symbol=str(selected_micro_symbol),
-                                timeframe=micro_tf,
-                                limit=tf_limit,
-                            )
-
-                        if timeframe_candles is None or timeframe_candles.empty:
-                            continue
-
-                        swing_candles_by_timeframe[micro_tf] = timeframe_candles
-                        swing_points_by_timeframe[micro_tf] = detector.detect_all(
-                            timeframe_candles.to_dict(orient="records")
-                        )
-
-                    micro_fig = build_micro_reaction_chart(
-                        candles=chart_candles,
-                        symbol=str(selected_micro_symbol),
-                        swing_points_by_timeframe=swing_points_by_timeframe,
-                        swing_candles_by_timeframe=swing_candles_by_timeframe,
-                        confirmed_swing_retests=chart_view,
-                    )
-                    st.plotly_chart(
-                        micro_fig,
-                        use_container_width=True,
-                        key="micro_reaction_main_chart",
-                        config={
-                            "displaylogo": False,
-                            "scrollZoom": True,
-                        },
-                    )
-
-                # Quick counts for the exact visible selected-symbol universe.
-                q1, q2, q3, q4, q5 = st.columns(5)
-                q1.metric("Visible first retests", int(len(chart_view)))
-                q2.metric(
-                    "REACTION",
-                    int(
-                        chart_view["status"].astype(str).eq("REACTION").sum()
-                    )
-                    if not chart_view.empty
-                    else 0,
-                )
-                q3.metric(
-                    "Failed",
-                    int(
-                        chart_view["status"].astype(str).eq("TOUCH_FAILED").sum()
-                    )
-                    if not chart_view.empty
-                    else 0,
-                )
-                q4.metric(
-                    "1m",
-                    int(chart_view["timeframe"].astype(str).eq("1m").sum())
-                    if not chart_view.empty
-                    else 0,
-                )
-                q5.metric(
-                    "5m",
-                    int(chart_view["timeframe"].astype(str).eq("5m").sum())
-                    if not chart_view.empty
-                    else 0,
-                )
-
-            # -------------------------------------------------
-            # Historical all-symbol signal table.
-            # -------------------------------------------------
-            if micro_scope == "All symbols":
-                st.markdown("---")
-                st.markdown("### All Symbols · historical Micro REACTION signals")
-                st.caption(
-                    "Builds a causal 24h / 48h / 72h research table from Binance "
-                    "Futures 1m history for every configured symbol. The first run "
-                    "can take a while because history is downloaded symbol by symbol; "
-                    "identical symbol/parameter windows are cached for 15 minutes. "
-                    "Only REACTION rows become signal entries. Primary scalp outcomes "
-                    "are measured from the executable next-1m-open entry at 1m / 3m / 5m; "
-                    "10m / 15m / 30m are follow-through context. Recent signals without "
-                    "a complete selected horizon remain PENDING rather than being dropped."
-                )
-
-                global_1, global_2, global_3, global_4 = st.columns(4)
-                with global_1:
-                    global_window_label = st.selectbox(
-                        "Historical signal window",
-                        ["24h", "48h", "72h"],
-                        index=0,
-                        key="micro_reaction_global_window",
-                    )
-                    global_window_minutes = {
-                        "24h": 1440,
-                        "48h": 2880,
-                        "72h": 4320,
-                    }[global_window_label]
-
-                with global_2:
-                    global_good_mfe = st.number_input(
-                        "GOOD · min MFE 5m %",
-                        min_value=0.0,
-                        value=0.20,
-                        step=0.05,
-                        format="%.2f",
-                        key="micro_reaction_global_good_mfe_5m",
-                    )
-
-                with global_3:
-                    global_good_mae = st.number_input(
-                        "GOOD · max MAE 5m %",
-                        min_value=0.0,
-                        value=0.15,
-                        step=0.05,
-                        format="%.2f",
-                        key="micro_reaction_global_good_mae_5m",
-                    )
-
-                with global_4:
-                    global_quality_filter = st.selectbox(
-                        "Quality filter",
-                        ["ALL", "GOOD", "MIXED", "BAD", "PENDING"],
-                        index=0,
-                        key="micro_reaction_global_quality_filter",
-                    )
-
-                bad_1, bad_2, run_col = st.columns([1, 1, 1.4])
-                with bad_1:
-                    global_bad_mfe = st.number_input(
-                        "BAD · max MFE 5m %",
-                        min_value=0.0,
-                        value=0.10,
-                        step=0.05,
-                        format="%.2f",
-                        key="micro_reaction_global_bad_mfe_5m",
-                    )
-                with bad_2:
-                    global_bad_mae = st.number_input(
-                        "BAD · min MAE 5m %",
-                        min_value=0.0,
-                        value=0.20,
-                        step=0.05,
-                        format="%.2f",
-                        key="micro_reaction_global_bad_mae_5m",
-                    )
-                with run_col:
-                    st.caption(
-                        "GOOD/BAD use the 5-minute executable-entry outcome only and "
-                        "are exploratory labels; they never alter signal detection. "
-                        "Summary statistics always use the full causal REACTION universe."
-                    )
-                    run_global_scan = st.button(
-                        f"Build {global_window_label} all-symbol signal table",
-                        type="primary",
-                        use_container_width=True,
-                        key="micro_reaction_global_run",
-                    )
-
-                current_global_config = {
-                    "window": str(global_window_label),
-                    "timeframes": tuple(str(tf) for tf in micro_timeframes),
-                    "detectors": tuple(sorted(detector_windows.items())),
-                    "prominence": float(micro_prominence),
-                    "tolerance": float(micro_tolerance),
-                    "departure": float(micro_departure),
-                    "max_age": int(micro_max_age),
-                    "metrics_version": MICRO_REACTION_RESEARCH_METRICS_VERSION,
-                }
-
-                if run_global_scan:
-                    global_frames = []
-                    global_diagnostics = []
-                    progress = st.progress(0)
-                    progress_text = st.empty()
-                    symbol_count = max(1, len(micro_symbols))
-
-                    for symbol_index, global_symbol in enumerate(micro_symbols):
-                        progress_text.caption(
-                            f"Historical Micro REACTION scan · {symbol_index + 1}/"
-                            f"{len(micro_symbols)} · {global_symbol}"
-                        )
-                        try:
-                            symbol_retests, symbol_diag = (
-                                scan_micro_reaction_historical_symbol_window(
-                                    symbol=str(global_symbol),
-                                    window_minutes=int(global_window_minutes),
-                                    swing_timeframes=tuple(micro_timeframes),
-                                    swing_detector_items=tuple(
-                                        sorted(detector_windows.items())
-                                    ),
-                                    min_swing_prominence_pct=float(micro_prominence),
-                                    retest_tolerance_pct=float(micro_tolerance),
-                                    min_departure_pct=float(micro_departure),
-                                    max_age_minutes=int(micro_max_age),
-                                    metrics_version=(
-                                        MICRO_REACTION_RESEARCH_METRICS_VERSION
-                                    ),
-                                )
-                            )
-                        except Exception as exc:
-                            symbol_retests = pd.DataFrame()
-                            symbol_diag = {
-                                "symbol": str(global_symbol),
-                                "error": str(exc),
-                                "window first touches": 0,
-                                "window REACTIONs": 0,
-                            }
-
-                        if symbol_retests is not None and not symbol_retests.empty:
-                            global_frames.append(symbol_retests)
-                        global_diagnostics.append(dict(symbol_diag or {}))
-
-                        progress.progress(
-                            min(100, int((symbol_index + 1) / symbol_count * 100))
-                        )
-                        # Keep the public REST scan polite enough that a fresh
-                        # 300-symbol build is less likely to burst Binance limits.
-                        if (symbol_index + 1) % 5 == 0:
-                            time.sleep(0.20)
-
-                    progress.empty()
-                    progress_text.empty()
-
-                    historical_all_retests = (
-                        pd.concat(global_frames, ignore_index=True)
-                        if global_frames
-                        else pd.DataFrame()
-                    )
-                    st.session_state[
-                        "micro_reaction_global_historical_retests"
-                    ] = historical_all_retests
-                    st.session_state[
-                        "micro_reaction_global_historical_diagnostics"
-                    ] = pd.DataFrame(global_diagnostics)
-                    st.session_state[
-                        "micro_reaction_global_historical_config"
-                    ] = current_global_config
-
-                stored_global_retests = st.session_state.get(
-                    "micro_reaction_global_historical_retests",
-                    pd.DataFrame(),
-                )
-                stored_global_config = st.session_state.get(
-                    "micro_reaction_global_historical_config"
-                )
-                stored_global_diag = st.session_state.get(
-                    "micro_reaction_global_historical_diagnostics",
-                    pd.DataFrame(),
-                )
-
-                if stored_global_config is not None and (
-                    stored_global_config != current_global_config
-                ):
-                    st.warning(
-                        "The table below was built with different structural "
-                        "parameters/window. Press Build again to refresh it."
-                    )
-
-                if stored_global_retests is None or stored_global_retests.empty:
-                    st.info(
-                        "Press Build to create the historical all-symbol signal table."
-                    )
-                else:
-                    global_summary = build_micro_reaction_historical_signal_summary(
-                        stored_global_retests
-                    )
-                    global_signals = build_micro_reaction_historical_signal_table(
-                        stored_global_retests,
-                        good_mfe_5m_pct=float(global_good_mfe),
-                        good_max_mae_5m_pct=float(global_good_mae),
-                        bad_max_mfe_5m_pct=float(global_bad_mfe),
-                        bad_min_mae_5m_pct=float(global_bad_mae),
-                    )
-
-                    total_reactions = int(len(global_signals))
-                    complete_5 = int(
-                        global_signals.get(
-                            "Complete 5m",
-                            pd.Series(False, index=global_signals.index),
-                        ).fillna(False).astype(bool).sum()
-                    ) if not global_signals.empty else 0
-                    quality_counts = (
-                        global_signals["Quality 5m"].value_counts()
-                        if not global_signals.empty
-                        else pd.Series(dtype="int64")
-                    )
-
-                    g1, g2, g3, g4, g5 = st.columns(5)
-                    g1.metric("Signals", total_reactions)
-                    g2.metric("5m complete", complete_5)
-                    g3.metric("GOOD 5m", int(quality_counts.get("GOOD", 0)))
-                    g4.metric("BAD 5m", int(quality_counts.get("BAD", 0)))
-                    g5.metric(
-                        "Symbols with signals",
-                        int(global_signals["Symbol"].nunique())
-                        if not global_signals.empty
-                        else 0,
-                    )
-
-                    if not global_summary.empty:
-                        st.markdown("#### Scalp summary · 1m / 3m / 5m")
-                        st.caption(
-                            "All excursion/return metrics below start at the actual "
-                            "next-1m-open hypothetical entry. Average and median are "
-                            "shown together because micro-cap outliers can distort means."
-                        )
-                        primary_columns = [
-                            "TF", "Detector", "Side", "First touches", "Signals",
-                            "Symbols", "Reaction rate %",
-                        ]
-                        for horizon in MICRO_REACTION_PRIMARY_HORIZONS:
-                            primary_columns.extend([
-                                f"N {horizon}m",
-                                f"MFE {horizon}m avg %",
-                                f"MFE {horizon}m med %",
-                                f"MAE {horizon}m avg %",
-                                f"MAE {horizon}m med %",
-                                f"Return {horizon}m avg %",
-                                f"Return {horizon}m med %",
-                                f"Positive close {horizon}m %",
-                            ])
-                        for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
-                            threshold_label = f"{float(threshold_pct):.2f}%"
-                            primary_columns.extend([
-                                f"Hit +{threshold_label} ≤5m %",
-                                f"Adverse {threshold_label} ≤5m %",
-                            ])
-                        primary_columns = [
-                            column for column in primary_columns
-                            if column in global_summary.columns
-                        ]
-                        st.dataframe(
-                            global_summary[primary_columns],
-                            use_container_width=True,
-                            hide_index=True,
-                            key="micro_reaction_global_scalp_summary_table",
-                        )
-                        st.caption(
-                            "Hit +X% ≤5m and Adverse X% ≤5m are independent reach "
-                            "rates. A signal can count in both if both excursions occur. "
-                            "The matrix below resolves the actual chronological first touch."
-                        )
-
-                        st.markdown("#### Chronological scalp TP / SL matrix")
-                        st.caption(
-                            "Every scenario starts at the executable next-1m-open entry. "
-                            "Within the selected 1m / 3m / 5m horizon, whichever TP or SL "
-                            "is touched first wins. If both are touched inside the same 1m "
-                            "candle, the result is conservatively SL_AMBIGUOUS. If neither "
-                            "is touched, the trade exits at the horizon close. Fees and "
-                            "slippage are deducted on both entry and exit."
-                        )
-
-                        matrix_c1, matrix_c2, matrix_c3, matrix_c4 = st.columns(4)
-                        with matrix_c1:
-                            scalp_fee_per_side = st.number_input(
-                                "Fee per side %",
-                                min_value=0.0,
-                                value=0.05,
-                                step=0.01,
-                                format="%.3f",
-                                key="micro_reaction_scalp_matrix_fee",
-                            )
-                        with matrix_c2:
-                            scalp_slippage_per_side = st.number_input(
-                                "Slippage per side %",
-                                min_value=0.0,
-                                value=0.00,
-                                step=0.01,
-                                format="%.3f",
-                                key="micro_reaction_scalp_matrix_slippage",
-                            )
-                        with matrix_c3:
-                            scalp_matrix_horizon = st.selectbox(
-                                "Matrix horizon",
-                                ["1m", "3m", "5m"],
-                                index=2,
-                                key="micro_reaction_scalp_matrix_horizon",
-                            )
-                        with matrix_c4:
-                            scalp_matrix_side = st.selectbox(
-                                "Matrix side",
-                                ["ALL", "LONG", "SHORT"],
-                                index=0,
-                                key="micro_reaction_scalp_matrix_side",
-                            )
-
-                        matrix_sort = st.selectbox(
-                            "Rank scenarios by",
-                            ["Avg net %", "PF", "Net win %", "Total net %"],
-                            index=0,
-                            key="micro_reaction_scalp_matrix_sort",
-                        )
-
-                        scalp_matrix = build_micro_reaction_scalp_tp_sl_matrix(
-                            stored_global_retests,
-                            fee_per_side_pct=float(scalp_fee_per_side),
-                            slippage_per_side_pct=float(scalp_slippage_per_side),
-                        )
-
-                        if scalp_matrix.empty:
-                            st.info(
-                                "No chronological scalp matrix payload is available yet. "
-                                "Press Build again after this update so the historical "
-                                "REACTION paths are regenerated with first-touch data."
-                            )
-                        else:
-                            scalp_matrix_view = scalp_matrix.loc[
-                                scalp_matrix["Horizon"].astype(str).eq(
-                                    str(scalp_matrix_horizon)
-                                )
-                            ].copy()
-                            if scalp_matrix_side != "ALL":
-                                scalp_matrix_view = scalp_matrix_view.loc[
-                                    scalp_matrix_view["Side"].astype(str).eq(
-                                        str(scalp_matrix_side)
-                                    )
-                                ].copy()
-
-                            if not scalp_matrix_view.empty:
-                                scalp_matrix_view = scalp_matrix_view.sort_values(
-                                    matrix_sort,
-                                    ascending=False,
-                                    na_position="last",
-                                    kind="stable",
-                                ).reset_index(drop=True)
-
-                                matrix_display_columns = [
-                                    "TF", "Detector", "Side", "Horizon",
-                                    "TP %", "SL %", "N",
-                                    "TP first", "SL first", "Ambig→SL", "Time exit",
-                                    "TP first %", "SL+Ambig %", "Time exit %",
-                                    "Net win %", "Avg gross %", "Avg net %",
-                                    "Median net %", "PF", "Total net %",
-                                    "Avg hit min", "Median hit min",
-                                    "Roundtrip cost %",
-                                ]
-                                matrix_display_columns = [
-                                    column
-                                    for column in matrix_display_columns
-                                    if column in scalp_matrix_view.columns
-                                ]
-                                st.dataframe(
-                                    scalp_matrix_view[matrix_display_columns],
-                                    use_container_width=True,
-                                    hide_index=True,
-                                    key="micro_reaction_scalp_tp_sl_matrix_table",
-                                )
-                                st.caption(
-                                    "Hit minute 0 means TP/SL occurred during the entry "
-                                    "1m candle. Net win % and PF use net returns after the "
-                                    "configured round-trip costs; TP first % is structural "
-                                    "first-touch frequency and can differ from Net win %."
-                                )
-
-                                matrix_csv_window = (
-                                    stored_global_config.get("window", "historical")
-                                    if isinstance(stored_global_config, dict)
-                                    else "historical"
-                                )
-                                st.download_button(
-                                    "Download full scalp TP/SL matrix CSV",
-                                    data=scalp_matrix.to_csv(index=False).encode("utf-8"),
-                                    file_name=(
-                                        "micro_reaction_scalp_tp_sl_matrix_"
-                                        f"{str(matrix_csv_window).lower()}.csv"
-                                    ),
-                                    mime="text/csv",
-                                    key="micro_reaction_scalp_matrix_download",
-                                )
-
-                        st.markdown("#### Micro REACTION Driver Analyzer")
-                        st.caption(
-                            "Exploratory causal bucket analysis: every driver is known by "
-                            "the REACTION close, before the next-1m-open entry. Buckets are "
-                            "fixed in code so we can look for broad stable regions instead "
-                            "of tuning an exact threshold to this sample. Read LONG and SHORT "
-                            "separately before combining them. Execution columns below are "
-                            "GROSS on purpose; once a causal bucket survives more data, rerun "
-                            "its economics with fees/slippage in the TP/SL matrix above."
-                        )
-
-                        driver_c1, driver_c2, driver_c3, driver_c4 = st.columns(4)
-                        with driver_c1:
-                            driver_name = st.selectbox(
-                                "Driver",
-                                list(MICRO_REACTION_DRIVER_SPECS.keys()),
-                                index=0,
-                                key="micro_reaction_driver_name",
-                            )
-                        with driver_c2:
-                            driver_side = st.selectbox(
-                                "Driver side",
-                                ["LONG", "SHORT", "ALL"],
-                                index=0,
-                                key="micro_reaction_driver_side",
-                            )
-                        with driver_c3:
-                            stored_tf_values = []
-                            if (
-                                isinstance(stored_global_retests, pd.DataFrame)
-                                and not stored_global_retests.empty
-                                and "timeframe" in stored_global_retests.columns
-                            ):
-                                stored_tf_values = sorted(
-                                    {
-                                        str(value)
-                                        for value in stored_global_retests["timeframe"]
-                                        .dropna()
-                                        .astype(str)
-                                        .tolist()
-                                    },
-                                    key=lambda value: {"1m": 0, "5m": 1}.get(value, 99),
-                                )
-                            driver_timeframe = st.selectbox(
-                                "Driver TF",
-                                ["ALL"] + stored_tf_values,
-                                index=(
-                                    (["ALL"] + stored_tf_values).index("5m")
-                                    if "5m" in stored_tf_values
-                                    else 0
-                                ),
-                                key="micro_reaction_driver_timeframe",
-                            )
-                        with driver_c4:
-                            driver_min_n = st.number_input(
-                                "Min bucket N",
-                                min_value=1,
-                                value=30,
-                                step=10,
-                                key="micro_reaction_driver_min_n",
-                            )
-
-                        exec_c1, exec_c2, exec_c3 = st.columns(3)
-                        with exec_c1:
-                            driver_horizon_label = st.selectbox(
-                                "Driver execution horizon",
-                                ["1m", "3m", "5m"],
-                                index=2,
-                                key="micro_reaction_driver_horizon",
-                            )
-                            driver_horizon = int(
-                                str(driver_horizon_label).replace("m", "")
-                            )
-                        with exec_c2:
-                            driver_tp = st.selectbox(
-                                "Driver test TP %",
-                                list(MICRO_REACTION_SCALP_TP_GRID),
-                                index=list(MICRO_REACTION_SCALP_TP_GRID).index(0.20),
-                                format_func=lambda value: f"{float(value):.2f}%",
-                                key="micro_reaction_driver_tp",
-                            )
-                        with exec_c3:
-                            driver_sl = st.selectbox(
-                                "Driver test SL %",
-                                list(MICRO_REACTION_SCALP_SL_GRID),
-                                index=list(MICRO_REACTION_SCALP_SL_GRID).index(0.15),
-                                format_func=lambda value: f"{float(value):.2f}%",
-                                key="micro_reaction_driver_sl",
-                            )
-
-                        driver_table = build_micro_reaction_driver_bucket_analysis(
-                            retests_df=stored_global_retests,
-                            driver_name=str(driver_name),
-                            side=str(driver_side),
-                            timeframe=str(driver_timeframe),
-                            execution_horizon=int(driver_horizon),
-                            tp_pct=float(driver_tp),
-                            sl_pct=float(driver_sl),
-                        )
-
-                        if driver_table.empty:
-                            st.info(
-                                "No usable driver rows are available for this selection. "
-                                "If the chronological payload is missing, rebuild the "
-                                "historical all-symbol table once."
-                            )
-                        else:
-                            driver_table_view = driver_table.loc[
-                                pd.to_numeric(
-                                    driver_table["Exec N"], errors="coerce"
-                                ).fillna(0).ge(int(driver_min_n))
-                            ].copy()
-
-                            driver_display_columns = [
-                                "Bucket", "N", "Symbols", "Driver avg", "Driver med",
-                                "N 1m", "MFE 1m avg %", "MFE 1m med %",
-                                "MAE 1m avg %", "MAE 1m med %", "Return 1m avg %",
-                                "N 3m", "MFE 3m avg %", "MFE 3m med %",
-                                "MAE 3m avg %", "MAE 3m med %", "Return 3m avg %",
-                                "N 5m", "MFE 5m avg %", "MFE 5m med %",
-                                "MAE 5m avg %", "MAE 5m med %", "Return 5m avg %",
-                                "MFE-MAE 5m med pp",
-                                "Exec N", "TP first %", "SL+Ambig %", "Time exit %",
-                                "Gross win %", "Avg gross %", "Median gross %",
-                                "Gross PF", "Total gross %", "Avg hit min",
-                            ]
-                            driver_display_columns = [
-                                column
-                                for column in driver_display_columns
-                                if column in driver_table_view.columns
-                            ]
-
-                            st.markdown(
-                                f"##### {driver_name} · {driver_side} · "
-                                f"{driver_timeframe} · TP {float(driver_tp):.2f}% / "
-                                f"SL {float(driver_sl):.2f}% · {driver_horizon}m"
-                            )
-                            if driver_table_view.empty:
-                                st.warning(
-                                    f"All {driver_name} buckets are below the current "
-                                    f"minimum execution sample N={int(driver_min_n)}."
-                                )
-                            else:
-                                st.dataframe(
-                                    driver_table_view[driver_display_columns],
-                                    use_container_width=True,
-                                    hide_index=True,
-                                    key="micro_reaction_driver_bucket_table",
-                                )
-
-                            st.caption(
-                                "TP first / SL+Ambig / Time exit use the same conservative "
-                                "chronological 1m path as the scalp matrix. Same-candle TP+SL "
-                                "counts as SL_AMBIGUOUS. Avg gross and Gross PF have no fees; "
-                                "they are for finding causal separation, not declaring a strategy."
-                            )
-
-                            st.markdown("##### Single-driver bucket leaderboard")
-                            st.caption(
-                                "Ranks every fixed one-variable bucket under the exact same "
-                                "side/TF/TP/SL/horizon. These rows overlap and are not independent; "
-                                "use this only to decide which drivers deserve a forward/stability test."
-                            )
-                            driver_leaderboard = build_micro_reaction_driver_leaderboard(
-                                retests_df=stored_global_retests,
-                                side=str(driver_side),
-                                timeframe=str(driver_timeframe),
-                                execution_horizon=int(driver_horizon),
-                                tp_pct=float(driver_tp),
-                                sl_pct=float(driver_sl),
-                                min_n=int(driver_min_n),
-                            )
-
-                            if driver_leaderboard.empty:
-                                st.info(
-                                    "No driver bucket reaches the current minimum N."
-                                )
-                            else:
-                                leaderboard_columns = [
-                                    "Driver", "Bucket", "N", "Symbols", "Exec N",
-                                    "MFE 5m med %", "MAE 5m med %",
-                                    "MFE-MAE 5m med pp", "Return 5m avg %",
-                                    "TP first %", "SL+Ambig %", "Time exit %",
-                                    "Gross win %", "Avg gross %", "Gross PF",
-                                    "Total gross %",
-                                ]
-                                leaderboard_columns = [
-                                    column
-                                    for column in leaderboard_columns
-                                    if column in driver_leaderboard.columns
-                                ]
-                                st.dataframe(
-                                    driver_leaderboard[leaderboard_columns].head(50),
-                                    use_container_width=True,
-                                    hide_index=True,
-                                    key="micro_reaction_driver_leaderboard",
-                                )
-
-                                driver_csv_window = (
-                                    stored_global_config.get("window", "historical")
-                                    if isinstance(stored_global_config, dict)
-                                    else "historical"
-                                )
-                                st.download_button(
-                                    "Download driver leaderboard CSV",
-                                    data=driver_leaderboard.to_csv(index=False).encode("utf-8"),
-                                    file_name=(
-                                        "micro_reaction_driver_leaderboard_"
-                                        f"{str(driver_csv_window).lower()}.csv"
-                                    ),
-                                    mime="text/csv",
-                                    key="micro_reaction_driver_leaderboard_download",
-                                )
-
-                        st.markdown("##### Multi-driver hypothesis crosses")
-                        st.caption(
-                            "Tests every 2→5 way intersection among the broad regions that "
-                            "were worth keeping from the first driver pass: Departure "
-                            "1.00–1.50%, Relative volume <1x, Rejection wick ≥0.80, "
-                            "Confirm→Retest 30–60m, and the weaker secondary Close strength "
-                            "0.55–0.85 region. No numeric threshold is optimized here. Rows "
-                            "overlap heavily, so use them to discover a structural hypothesis, "
-                            "not as independent proof. Net columns use the fee/slippage inputs "
-                            "from the scalp matrix above."
-                        )
-
-                        cross_c1, cross_c2, cross_c3, cross_c4 = st.columns(4)
-                        with cross_c1:
-                            cross_min_n = st.number_input(
-                                "Cross min Exec N",
-                                min_value=1,
-                                value=10,
-                                step=5,
-                                key="micro_reaction_cross_min_n",
-                            )
-                        with cross_c2:
-                            cross_max_depth = st.selectbox(
-                                "Max cross depth",
-                                [2, 3, 4, 5],
-                                index=3,
-                                key="micro_reaction_cross_max_depth",
-                                help=(
-                                    "Depth 2 = pair, 3 = triple, etc. Higher depth is shown "
-                                    "only when enough complete executions survive."
-                                ),
-                            )
-                        with cross_c3:
-                            cross_family_filter = st.selectbox(
-                                "Cross family",
-                                ["ALL", "PRIMARY ONLY", "WITH CLOSE STRENGTH"],
-                                index=0,
-                                key="micro_reaction_cross_family",
-                            )
-                        with cross_c4:
-                            cross_sort = st.selectbox(
-                                "Rank crosses by",
-                                [
-                                    "Avg gross %",
-                                    "Avg gross lift pp",
-                                    "Gross PF",
-                                    "Avg net %",
-                                    "Net PF",
-                                    "Exec N",
-                                ],
-                                index=1,
-                                key="micro_reaction_cross_sort",
-                            )
-
-                        cross_table = build_micro_reaction_driver_cross_analysis(
-                            retests_df=stored_global_retests,
-                            side=str(driver_side),
-                            timeframe=str(driver_timeframe),
-                            execution_horizon=int(driver_horizon),
-                            tp_pct=float(driver_tp),
-                            sl_pct=float(driver_sl),
-                            fee_per_side_pct=float(scalp_fee_per_side),
-                            slippage_per_side_pct=float(scalp_slippage_per_side),
-                            max_depth=int(cross_max_depth),
-                        )
-
-                        if cross_table.empty:
-                            st.info(
-                                "No multi-driver cross has a complete chronological execution "
-                                "for the current side / TF / horizon / TP / SL selection."
-                            )
-                        else:
-                            cross_view = cross_table.loc[
-                                pd.to_numeric(
-                                    cross_table["Exec N"], errors="coerce"
-                                ).fillna(0).ge(int(cross_min_n))
-                            ].copy()
-                            if cross_family_filter != "ALL":
-                                cross_view = cross_view.loc[
-                                    cross_view["Family"].astype(str).eq(
-                                        str(cross_family_filter)
-                                    )
-                                ].copy()
-
-                            if not cross_view.empty:
-                                cross_view = cross_view.sort_values(
-                                    str(cross_sort),
-                                    ascending=False,
-                                    na_position="last",
-                                    kind="stable",
-                                ).reset_index(drop=True)
-
-                            baseline_exec_n = int(
-                                pd.to_numeric(
-                                    cross_table["Baseline N"], errors="coerce"
-                                ).dropna().iloc[0]
-                            )
-                            baseline_avg_gross = pd.to_numeric(
-                                cross_table["Baseline avg gross %"], errors="coerce"
-                            ).dropna()
-                            baseline_gross_pf = pd.to_numeric(
-                                cross_table["Baseline Gross PF"], errors="coerce"
-                            ).dropna()
-                            roundtrip_cost = pd.to_numeric(
-                                cross_table["Roundtrip cost %"], errors="coerce"
-                            ).dropna()
-
-                            b1, b2, b3, b4 = st.columns(4)
-                            b1.metric("Baseline Exec N", baseline_exec_n)
-                            b2.metric(
-                                "Baseline avg gross",
-                                (
-                                    f"{float(baseline_avg_gross.iloc[0]):+.4f}%"
-                                    if not baseline_avg_gross.empty
-                                    else "—"
-                                ),
-                            )
-                            b3.metric(
-                                "Baseline Gross PF",
-                                (
-                                    f"{float(baseline_gross_pf.iloc[0]):.2f}"
-                                    if not baseline_gross_pf.empty
-                                    else "—"
-                                ),
-                            )
-                            b4.metric(
-                                "Roundtrip cost",
-                                (
-                                    f"{float(roundtrip_cost.iloc[0]):.3f}%"
-                                    if not roundtrip_cost.empty
-                                    else "—"
-                                ),
-                            )
-
-                            cross_display_columns = [
-                                "Cross", "Depth", "Family", "N", "Symbols", "Exec N",
-                                "Coverage %", "Exec coverage %",
-                                "MFE 1m med %", "MAE 1m med %", "Return 1m avg %",
-                                "MFE 3m med %", "MAE 3m med %", "Return 3m avg %",
-                                "MFE 5m med %", "MAE 5m med %", "Return 5m avg %",
-                                "MFE-MAE 5m med pp",
-                                "TP first %", "SL+Ambig %", "Time exit %",
-                                "Avg gross %", "Gross PF", "Avg gross lift pp",
-                                "TP first lift pp", "SL+Ambig lift pp",
-                                "Avg net %", "Net PF", "Total net %",
-                            ]
-                            cross_display_columns = [
-                                column
-                                for column in cross_display_columns
-                                if column in cross_view.columns
-                            ]
-
-                            if cross_view.empty:
-                                st.warning(
-                                    "No cross reaches the current minimum N / family filter. "
-                                    "Lower Cross min Exec N only for exploration; do not treat "
-                                    "tiny intersections as evidence."
-                                )
-                            else:
-                                st.dataframe(
-                                    cross_view[cross_display_columns],
-                                    use_container_width=True,
-                                    hide_index=True,
-                                    key="micro_reaction_driver_cross_table",
-                                )
-                                st.caption(
-                                    "Avg gross lift pp is the improvement over the unfiltered "
-                                    "REACTION baseline under the exact same side / TF / TP / SL / "
-                                    "horizon. A positive lift with N≈10 is only a lead; N≥30 across "
-                                    "many symbols is much more useful. Avg net and Net PF already "
-                                    "deduct the configured round-trip cost."
-                                )
-
-                                cross_csv_window = (
-                                    stored_global_config.get("window", "historical")
-                                    if isinstance(stored_global_config, dict)
-                                    else "historical"
-                                )
-                                st.download_button(
-                                    "Download full cross leaderboard CSV",
-                                    data=cross_table.to_csv(index=False).encode("utf-8"),
-                                    file_name=(
-                                        "micro_reaction_driver_crosses_"
-                                        f"{str(cross_csv_window).lower()}.csv"
-                                    ),
-                                    mime="text/csv",
-                                    key="micro_reaction_driver_cross_download",
-                                )
-
-                                st.markdown("###### Inspect one cross")
-                                selected_cross_name = st.selectbox(
-                                    "Cross to inspect",
-                                    cross_view["Cross"].astype(str).tolist(),
-                                    index=0,
-                                    key="micro_reaction_cross_inspect_name",
-                                )
-                                selected_cross_row = cross_view.loc[
-                                    cross_view["Cross"].astype(str).eq(
-                                        str(selected_cross_name)
-                                    )
-                                ].iloc[0]
-                                selected_condition_keys = str(
-                                    selected_cross_row["Condition keys"]
-                                )
-                                selected_cross_events = (
-                                    filter_micro_reaction_driver_cross_events(
-                                        retests_df=stored_global_retests,
-                                        condition_keys=selected_condition_keys,
-                                        side=str(driver_side),
-                                        timeframe=str(driver_timeframe),
-                                    )
-                                )
-
-                                inspect_c1, inspect_c2, inspect_c3, inspect_c4 = st.columns(4)
-                                inspect_c1.metric(
-                                    "Selected signals",
-                                    int(len(selected_cross_events)),
-                                )
-                                inspect_c2.metric(
-                                    "Selected Exec N",
-                                    int(selected_cross_row.get("Exec N", 0)),
-                                )
-                                inspect_c3.metric(
-                                    "Avg gross",
-                                    f"{float(selected_cross_row.get('Avg gross %', np.nan)):+.4f}%",
-                                )
-                                inspect_c4.metric(
-                                    "Gross PF",
-                                    f"{float(selected_cross_row.get('Gross PF', np.nan)):.2f}",
-                                )
-
-                                selected_signal_table = (
-                                    build_micro_reaction_historical_signal_table(
-                                        selected_cross_events
-                                    )
-                                )
-                                if not selected_signal_table.empty:
-                                    selected_signal_columns = [
-                                        "Symbol", "Side", "TF", "Detector",
-                                        "Reaction time", "Entry time", "Entry",
-                                        "MFE 1m %", "MAE 1m %", "Return 1m %",
-                                        "MFE 3m %", "MAE 3m %", "Return 3m %",
-                                        "MFE 5m %", "MAE 5m %", "Return 5m %",
-                                        "Departure %", "Confirm→Retest min",
-                                        "Relative volume 30", "Rejection wick share",
-                                        "Close strength",
-                                    ]
-                                    selected_signal_columns = [
-                                        column
-                                        for column in selected_signal_columns
-                                        if column in selected_signal_table.columns
-                                    ]
-                                    st.dataframe(
-                                        selected_signal_table[selected_signal_columns],
-                                        use_container_width=True,
-                                        hide_index=True,
-                                        key="micro_reaction_selected_cross_signals",
-                                    )
-                                    st.download_button(
-                                        "Download selected cross signals CSV",
-                                        data=selected_signal_table.to_csv(index=False).encode("utf-8"),
-                                        file_name="micro_reaction_selected_cross_signals.csv",
-                                        mime="text/csv",
-                                        key="micro_reaction_selected_cross_signals_download",
-                                    )
-
-                                selected_cross_matrix = (
-                                    build_micro_reaction_scalp_tp_sl_matrix(
-                                        selected_cross_events,
-                                        fee_per_side_pct=float(scalp_fee_per_side),
-                                        slippage_per_side_pct=float(
-                                            scalp_slippage_per_side
-                                        ),
-                                    )
-                                )
-                                if not selected_cross_matrix.empty:
-                                    selected_cross_matrix = selected_cross_matrix.loc[
-                                        selected_cross_matrix["Horizon"]
-                                        .astype(str)
-                                        .eq(str(driver_horizon_label))
-                                    ].copy()
-                                    if not selected_cross_matrix.empty:
-                                        selected_cross_matrix = (
-                                            selected_cross_matrix.sort_values(
-                                                ["Avg net %", "PF", "N"],
-                                                ascending=[False, False, False],
-                                                na_position="last",
-                                                kind="stable",
-                                            ).reset_index(drop=True)
-                                        )
-                                        st.markdown(
-                                            "###### Selected cross · full TP/SL grid"
-                                        )
-                                        st.caption(
-                                            "This reruns the complete scalp exit grid only on "
-                                            "the selected causal cross. It is the right place "
-                                            "to check whether the driver intersection merely "
-                                            "improves gross behavior or actually survives costs."
-                                        )
-                                        selected_matrix_columns = [
-                                            "TF", "Detector", "Side", "Horizon",
-                                            "TP %", "SL %", "N", "TP first %",
-                                            "SL+Ambig %", "Time exit %", "Avg gross %",
-                                            "Avg net %", "Median net %", "PF",
-                                            "Total net %", "Roundtrip cost %",
-                                        ]
-                                        selected_matrix_columns = [
-                                            column
-                                            for column in selected_matrix_columns
-                                            if column in selected_cross_matrix.columns
-                                        ]
-                                        st.dataframe(
-                                            selected_cross_matrix[
-                                                selected_matrix_columns
-                                            ].head(30),
-                                            use_container_width=True,
-                                            hide_index=True,
-                                            key="micro_reaction_selected_cross_matrix",
-                                        )
-
-                        st.markdown("#### Follow-through context · 10m / 15m / 30m")
-                        secondary_columns = [
-                            "TF", "Detector", "Side", "Signals",
-                        ]
-                        for horizon in MICRO_REACTION_SECONDARY_HORIZONS:
-                            secondary_columns.extend([
-                                f"N {horizon}m",
-                                f"MFE {horizon}m med %",
-                                f"MAE {horizon}m med %",
-                                f"Return {horizon}m med %",
-                                f"Positive close {horizon}m %",
-                            ])
-                        secondary_columns = [
-                            column for column in secondary_columns
-                            if column in global_summary.columns
-                        ]
-                        st.dataframe(
-                            global_summary[secondary_columns],
-                            use_container_width=True,
-                            hide_index=True,
-                            key="micro_reaction_global_followthrough_summary_table",
-                        )
-
-                    signal_view = global_signals.copy()
-                    if (
-                        global_quality_filter != "ALL"
-                        and not signal_view.empty
-                    ):
-                        signal_view = signal_view.loc[
-                            signal_view["Quality 5m"].astype(str).eq(
-                                global_quality_filter
-                            )
-                        ].copy()
-
-                    st.markdown("#### Every historical Micro REACTION signal")
-                    st.caption(
-                        "One row = one causal REACTION entry at the next 1m open. "
-                        "Primary MFE/MAE/Return are measured from the executable "
-                        "next-1m-open entry at 1m / 3m / 5m. MAE is a positive adverse-"
-                        "excursion magnitude. PENDING means the 5m quality horizon is "
-                        "not complete yet; 10m / 15m / 30m remain follow-through context."
-                    )
-                    st.dataframe(
-                        signal_view,
-                        use_container_width=True,
-                        hide_index=True,
-                        key="micro_reaction_global_signal_table",
-                    )
-
-                    csv_window = (
-                        stored_global_config.get("window", "historical")
-                        if isinstance(stored_global_config, dict)
-                        else "historical"
-                    )
-                    st.download_button(
-                        "Download all Micro REACTION signals CSV",
-                        data=global_signals.to_csv(index=False).encode("utf-8"),
-                        file_name=(
-                            "micro_reaction_all_symbols_"
-                            f"{str(csv_window).lower()}_signals.csv"
-                        ),
-                        mime="text/csv",
-                        key="micro_reaction_global_signal_download",
-                    )
-
-                    if (
-                        isinstance(stored_global_diag, pd.DataFrame)
-                        and not stored_global_diag.empty
-                    ):
-                        scanned_symbols = int(
-                            stored_global_diag.get(
-                                "symbol",
-                                pd.Series(dtype="object"),
-                            ).nunique()
-                        )
-                        no_history = int(
-                            stored_global_diag.get(
-                                "error",
-                                pd.Series(dtype="object"),
-                            ).fillna("").eq("no_history").sum()
-                        )
-                        st.caption(
-                            f"Historical scan diagnostics: {scanned_symbols} symbols "
-                            f"processed · {no_history} without usable 1m history."
-                        )
-
-            # -------------------------------------------------
-            # Scanner / event table.
-            # -------------------------------------------------
-            st.markdown("---")
-            st.markdown(
-                "### Recent Micro REACTION scanner"
-                if micro_scope == "All symbols"
-                else "### Micro REACTION scanner"
-            )
-
-            scanner_symbols = (
-                (str(selected_micro_symbol),)
-                if micro_scope == "Selected symbol"
-                else micro_symbols
-            )
-
-            if micro_scope == "All symbols":
-                st.caption(
-                    "All-symbol mode can be CPU-heavy. The existing scanner is "
-                    "cached for 120 seconds for identical parameters."
-                )
-
-            with st.spinner(
-                "Scanning "
-                f"{', '.join(micro_timeframes)} confirmed-swing retests "
-                f"across {len(scanner_symbols)} symbol(s)..."
-            ):
-                micro_retests_df = (
-                    scan_confirmed_swing_retests_all_symbols(
-                        symbols=scanner_symbols,
-                        swing_timeframes=tuple(
-                            micro_timeframes
-                        ),
-                        swing_detector_items=tuple(
-                            sorted(detector_windows.items())
-                        ),
-                        min_swing_prominence_pct=float(
-                            micro_prominence
-                        ),
-                        retest_tolerance_pct=float(
-                            micro_tolerance
-                        ),
-                        min_departure_pct=float(
-                            micro_departure
-                        ),
-                        max_age_minutes=int(
-                            micro_max_age
-                        ),
-                        max_retest_age_minutes=int(
-                            micro_recent_minutes
-                        ),
-                    )
-                )
-
-            # -------------------------------------------------
-            # Clean baseline comparison: REACTION behavior by TF / side.
-            # Uses the complete scanner universe before UI status/side filters.
-            # -------------------------------------------------
-            comparison_table = build_micro_reaction_comparison_table(
-                micro_retests_df
-            )
-            if not comparison_table.empty:
-                st.markdown("### Baseline comparison · timeframe × side")
-                st.caption(
-                    "First touches are the denominator. Scalp MFE/MAE/Return use "
-                    "only causal REACTION entries and start at the executable next-"
-                    "1m-open price. The primary comparison is 1m / 3m / 5m before "
-                    "optimizing any TP/SL rule."
-                )
-                st.dataframe(
-                    comparison_table,
-                    use_container_width=True,
-                    hide_index=True,
-                    key="micro_reaction_baseline_comparison",
-                )
-
-                five_minute_comparison = comparison_table.loc[
-                    comparison_table["TF"].astype(str).eq("5m")
-                ].copy()
-                if not five_minute_comparison.empty:
-                    st.markdown("#### 5m focus · LONG vs SHORT")
-                    st.dataframe(
-                        five_minute_comparison,
-                        use_container_width=True,
-                        hide_index=True,
-                        key="micro_reaction_5m_side_comparison",
-                    )
-
-            scanner_view = micro_retests_df.copy()
-            if not scanner_view.empty:
-                if micro_status_filter == "REACTION only":
-                    scanner_view = scanner_view.loc[
-                        scanner_view["status"]
-                        .astype(str)
-                        .eq("REACTION")
-                    ].copy()
-                elif micro_status_filter == "Failed only":
-                    scanner_view = scanner_view.loc[
-                        scanner_view["status"]
-                        .astype(str)
-                        .eq("TOUCH_FAILED")
-                    ].copy()
-                elif micro_status_filter == "Indecisive only":
-                    scanner_view = scanner_view.loc[
-                        scanner_view["status"]
-                        .astype(str)
-                        .eq("TOUCH_INDECISIVE")
-                    ].copy()
-
-                if micro_side_filter != "ALL":
-                    scanner_view = scanner_view.loc[
-                        scanner_view["signal"]
-                        .astype(str)
-                        .eq(micro_side_filter)
-                    ].copy()
-
-            if scanner_view.empty:
-                st.info(
-                    "No Micro REACTION first touches match the current filters."
-                )
-            else:
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Rows", int(len(scanner_view)))
-                m2.metric(
-                    "REACTION",
-                    int(
-                        scanner_view["status"]
-                        .astype(str)
-                        .eq("REACTION")
-                        .sum()
-                    ),
-                )
-                m3.metric(
-                    "LONG",
-                    int(
-                        scanner_view["signal"]
-                        .astype(str)
-                        .eq("LONG")
-                        .sum()
-                    ),
-                )
-                m4.metric(
-                    "SHORT",
-                    int(
-                        scanner_view["signal"]
-                        .astype(str)
-                        .eq("SHORT")
-                        .sum()
-                    ),
-                )
-                m5.metric(
-                    "Symbols",
-                    int(
-                        scanner_view["symbol"]
-                        .astype(str)
-                        .nunique()
-                    ),
-                )
-
-                display_columns = [
-                    "symbol",
-                    "timeframe",
-                    "detector",
-                    "signal",
-                    "status",
-                    "swing_price",
-                    "pivot_time",
-                    "confirmation_available",
-                    "departure_time",
-                    "retest_time",
-                    "first_touch_entry_time",
-                    "first_touch_entry_price",
-                    "max_departure_pct",
-                    "confirmed_to_retest_min",
-                    "retest_distance_pct",
-                    "penetration_pct",
-                    "reaction_entry_mfe_1m_pct",
-                    "reaction_entry_mae_1m_pct",
-                    "reaction_entry_return_1m_pct",
-                    "reaction_entry_mfe_3m_pct",
-                    "reaction_entry_mae_3m_pct",
-                    "reaction_entry_return_3m_pct",
-                    "reaction_entry_mfe_5m_pct",
-                    "reaction_entry_mae_5m_pct",
-                    "reaction_entry_return_5m_pct",
-                ]
-                display_columns = [
-                    column
-                    for column in display_columns
-                    if column in scanner_view.columns
-                ]
-
-                display = scanner_view[
-                    display_columns
-                ].copy()
-
-                numeric_display_columns = [
-                    "swing_price",
-                    "first_touch_entry_price",
-                    "max_departure_pct",
-                    "confirmed_to_retest_min",
-                    "retest_distance_pct",
-                    "penetration_pct",
-                    "reaction_entry_mfe_1m_pct",
-                    "reaction_entry_mae_1m_pct",
-                    "reaction_entry_return_1m_pct",
-                    "reaction_entry_mfe_3m_pct",
-                    "reaction_entry_mae_3m_pct",
-                    "reaction_entry_return_3m_pct",
-                    "reaction_entry_mfe_5m_pct",
-                    "reaction_entry_mae_5m_pct",
-                    "reaction_entry_return_5m_pct",
-                ]
-                for column in numeric_display_columns:
-                    if column in display.columns:
-                        display[column] = pd.to_numeric(
-                            display[column],
-                            errors="coerce",
-                        ).round(5)
-
-                st.dataframe(
-                    display,
-                    use_container_width=True,
-                    hide_index=True,
-                    key="micro_reaction_scanner_table",
-                )
-
-                # ---------------------------------------------
-                # One-event causal timeline inspector.
-                # ---------------------------------------------
-                st.markdown("### Inspect one Micro REACTION")
-                labels = []
-                label_to_index = {}
-                for row_index, row in scanner_view.iterrows():
-                    retest_time = row.get("retest_time")
-                    if pd.notna(retest_time):
-                        try:
-                            time_text = pd.Timestamp(
-                                retest_time
-                            ).strftime("%Y-%m-%d %H:%M")
-                        except Exception:
-                            time_text = str(retest_time)
-                    else:
-                        time_text = str(
-                            row.get("retest_timestamp", row_index)
-                        )
-
-                    label = (
-                        f"{row.get('symbol', '—')} · "
-                        f"{row.get('timeframe', '—')} "
-                        f"{row.get('detector', '—')} · "
-                        f"{row.get('signal', '—')} · "
-                        f"{row.get('status', '—')} · "
-                        f"{time_text}"
-                    )
-                    labels.append(label)
-                    label_to_index[label] = row_index
-
-                selected_micro_label = st.selectbox(
-                    "Micro REACTION event",
-                    options=labels,
-                    key="micro_reaction_event_select",
-                )
-                selected_micro_row = scanner_view.loc[
-                    label_to_index[selected_micro_label]
-                ]
-
-                # Focused chart for exactly one structural event. This avoids
-                # confusing parent pivots when the general chart has many swings.
-                selected_retest_age = pd.to_numeric(
-                    selected_micro_row.get("retest_age_min"),
-                    errors="coerce",
-                )
-                selected_pivot_span = pd.to_numeric(
-                    selected_micro_row.get("pivot_to_retest_min"),
-                    errors="coerce",
-                )
-                selected_fetch_limit = max(
-                    int(micro_chart_candles),
-                    240,
-                )
-                if pd.notna(selected_retest_age):
-                    selected_fetch_limit = max(
-                        selected_fetch_limit,
-                        int(np.ceil(float(selected_retest_age))) + 180,
-                    )
-                if pd.notna(selected_pivot_span):
-                    selected_fetch_limit = max(
-                        selected_fetch_limit,
-                        int(np.ceil(float(selected_pivot_span))) + 180,
-                    )
-                selected_fetch_limit = min(
-                    int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
-                    int(selected_fetch_limit),
-                )
-
-                selected_event_candles = (
-                    load_volume_exhaustion_research_candles(
-                        symbol=str(selected_micro_row.get("symbol", "")),
-                        timeframe="1m",
-                        limit=int(selected_fetch_limit),
-                    )
-                )
-
-                if (
-                    selected_event_candles is None
-                    or selected_event_candles.empty
-                ):
-                    st.warning(
-                        "No 1m candles are available for the selected event."
-                    )
-                else:
-                    focused_fig = build_micro_reaction_selected_event_chart(
-                        candles=selected_event_candles,
-                        event_row=selected_micro_row,
-                    )
-                    if len(focused_fig.data):
-                        st.plotly_chart(
-                            focused_fig,
-                            use_container_width=True,
-                            key="micro_reaction_selected_event_chart",
-                            config={
-                                "displaylogo": False,
-                                "scrollZoom": True,
-                            },
-                        )
-                    else:
-                        st.info(
-                            "The selected event is outside the currently "
-                            "available 1m history."
-                        )
-
-                selected_metrics = st.columns(6)
-                for metric_index, (metric_label, metric_column) in enumerate([
-                    ("MFE 1m", "reaction_entry_mfe_1m_pct"),
-                    ("MAE 1m", "reaction_entry_mae_1m_pct"),
-                    ("MFE 3m", "reaction_entry_mfe_3m_pct"),
-                    ("MAE 3m", "reaction_entry_mae_3m_pct"),
-                    ("MFE 5m", "reaction_entry_mfe_5m_pct"),
-                    ("MAE 5m", "reaction_entry_mae_5m_pct"),
-                ]):
-                    metric_value = pd.to_numeric(
-                        selected_micro_row.get(metric_column),
-                        errors="coerce",
-                    )
-                    selected_metrics[metric_index].metric(
-                        metric_label,
-                        f"{float(metric_value):.3f}%"
-                        if pd.notna(metric_value)
-                        else "—",
-                    )
-
-                timeline_rows = [
-                    {
-                        "Stage": "Pivot",
-                        "Time": selected_micro_row.get(
-                            "pivot_time"
-                        ),
-                        "Price": selected_micro_row.get(
-                            "swing_price"
-                        ),
-                    },
-                    {
-                        "Stage": "Confirmation available",
-                        "Time": selected_micro_row.get(
-                            "confirmation_available"
-                        ),
-                        "Price": selected_micro_row.get(
-                            "entry_price"
-                        ),
-                    },
-                    {
-                        "Stage": "Departure",
-                        "Time": selected_micro_row.get(
-                            "departure_time"
-                        ),
-                        "Price": selected_micro_row.get(
-                            "departure_price"
-                        ),
-                    },
-                    {
-                        "Stage": "First retest",
-                        "Time": selected_micro_row.get(
-                            "retest_time"
-                        ),
-                        "Price": selected_micro_row.get(
-                            "retest_price"
-                        ),
-                    },
-                    {
-                        "Stage": "Hypothetical entry",
-                        "Time": selected_micro_row.get(
-                            "first_touch_entry_time"
-                        ),
-                        "Price": selected_micro_row.get(
-                            "first_touch_entry_price"
-                        ),
-                    },
-                ]
-                timeline_df = pd.DataFrame(timeline_rows)
-                timeline_df["Price"] = pd.to_numeric(
-                    timeline_df["Price"],
-                    errors="coerce",
-                ).round(8)
-                st.dataframe(
-                    timeline_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    key="micro_reaction_timeline_table",
-                )
-
-                st.caption(
-                    "The entry row is populated only when the next consecutive "
-                    "1m candle exists. It is not the retest close and does not "
-                    "use intrabar hindsight."
-                )
-
-
 if selected_section == "reaction_swing_lab":
     st.markdown(
         "## 🧪 Reaction & Swing Lab"
@@ -44222,6 +39987,27 @@ if selected_section == "geometry_scanner":
                         ),
                     })
 
+if selected_section == "market_flow":
+    st.markdown("## 🌊 Market Flow")
+    st.caption(
+        "4h muestra el régimen cross-sectional más lento. 1h se muestra debajo "
+        "para observar transiciones rápidas de breadth/BTC sin reemplazar 4h."
+    )
+    render_current_market_flow_panel(
+        "4h",
+        key_prefix="market_flow_tab_4h",
+        show_sector=True,
+        heading_level="###",
+    )
+    st.markdown("---")
+    render_current_market_flow_panel(
+        "1h",
+        key_prefix="market_flow_tab_1h",
+        show_sector=False,
+        heading_level="###",
+    )
+
+
 if selected_section == "overview":
 # =========================
 # QUICK METRICS
@@ -45060,6 +40846,17 @@ if selected_section == "overview":
                 mime="text/csv",
                 key="download_market_flow_snapshot",
             )
+
+    # ==========================================
+    # MARKET FLOW 1H · faster transition view
+    # ==========================================
+    st.markdown("---")
+    render_current_market_flow_panel(
+        "1h",
+        key_prefix="overview_market_flow_1h",
+        show_sector=False,
+        heading_level="###",
+    )
 
     overview_metrics = calculate_metrics(df_view.to_dict("records"))
 

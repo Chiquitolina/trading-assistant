@@ -83,15 +83,12 @@ from engine.live.ws.ws_client import WSClient
 
 
 
-MARKET_FLOW_TIMEFRAME = "4h"
+MARKET_FLOW_TIMEFRAMES = ("1h", "4h")
 
-
-
-MARKET_FLOW_TIMEFRAME_MS = (
-
-    4 * 60 * 60 * 1000
-
-)
+MARKET_FLOW_TIMEFRAME_MS = {
+    "1h": 1 * 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+}
 
 PRODUCER_LOCK_STARTUP_WAIT_SECONDS = (
     PRODUCER_LOCK_TTL_SECONDS + 15
@@ -209,11 +206,15 @@ class MarketDataService:
 
 
 
+        # Batches and last-published timestamps are independent per Market
+        # Flow timeframe so a 1h close can never suppress a 4h close (or vice
+        # versa) when both share the same candle-open timestamp.
         self.market_flow_batches = {}
 
-
-
-        self.last_market_flow_timestamp = None
+        self.last_market_flow_timestamp = {
+            timeframe: None
+            for timeframe in MARKET_FLOW_TIMEFRAMES
+        }
 
 
 
@@ -811,456 +812,168 @@ class MarketDataService:
 
 
     def _enrich_market_flow_snapshot(
-
         self,
-
         snapshot,
-
+        timeframe=None,
     ):
+        timeframe = str(
+            timeframe
+            or snapshot.get("timeframe")
+            or ""
+        ).lower()
 
-        if (
-
-            self.market_sector_flow_analyzer
-
-            is None
-
-        ):
-
-            enriched_snapshot = dict(
-
-                snapshot
-
+        if timeframe != "4h":
+            enriched_snapshot = dict(snapshot)
+            enriched_snapshot["sector_context_available"] = False
+            enriched_snapshot["sector_context_error"] = (
+                "sector_context_only_supported_for_4h"
             )
-
-
-
-            enriched_snapshot[
-
-                "sector_context_available"
-
-            ] = False
-
-
-
-            enriched_snapshot[
-
-                "sector_context_error"
-
-            ] = (
-
-                self.market_sector_catalog_error
-
-                or "sector_analyzer_unavailable"
-
-            )
-
-
-
             return enriched_snapshot
 
-
+        if self.market_sector_flow_analyzer is None:
+            enriched_snapshot = dict(snapshot)
+            enriched_snapshot["sector_context_available"] = False
+            enriched_snapshot["sector_context_error"] = (
+                self.market_sector_catalog_error
+                or "sector_analyzer_unavailable"
+            )
+            return enriched_snapshot
 
         try:
-
             enriched_snapshot = (
-
                 self.market_sector_flow_analyzer
-
-                .enrich_snapshot(
-
-                    snapshot
-
-                )
-
+                .enrich_snapshot(snapshot)
             )
-
-
-
         except Exception as exc:
-
-            error = (
-
-                f"{type(exc).__name__}:"
-
-                f"{exc}"
-
-            )
-
-
-
+            error = f"{type(exc).__name__}:{exc}"
             print(
-
                 "[MARKET SECTORS] "
-
                 "snapshot enrichment failed "
-
                 f"error={error}"
-
             )
-
-
-
-            enriched_snapshot = dict(
-
-                snapshot
-
-            )
-
-
-
-            enriched_snapshot[
-
-                "sector_context_available"
-
-            ] = False
-
-
-
-            enriched_snapshot[
-
-                "sector_context_error"
-
-            ] = error
-
-
-
+            enriched_snapshot = dict(snapshot)
+            enriched_snapshot["sector_context_available"] = False
+            enriched_snapshot["sector_context_error"] = error
             return enriched_snapshot
 
-
-
-        enriched_snapshot[
-
-            "sector_context_error"
-
-        ] = None
-
-
-
+        enriched_snapshot["sector_context_error"] = None
         print(
-
             "[MARKET SECTORS] "
-
             "snapshot enriched "
-
-            f"timestamp="
-
-            f"{enriched_snapshot.get('candle_timestamp')} "
-
-            f"sectors="
-
-            f"{enriched_snapshot.get('sector_count')} "
-
-            f"excluded="
-
-            f"{len(enriched_snapshot.get('excluded_sectors', {}))}"
-
+            f"timestamp={enriched_snapshot.get('candle_timestamp')} "
+            f"sectors={enriched_snapshot.get('sector_count')} "
+            f"excluded={len(enriched_snapshot.get('excluded_sectors', {}))}"
         )
-
-
-
         return enriched_snapshot
 
-
-
-    def _publish_initial_market_flow(
-
-        self,
-
-    ):
-
-        print(
-
-            "[MARKET FLOW] "
-
-            "building initial snapshot"
-
-        )
-
-
-
-        raw_btc_history = (
-
-            self.publisher.redis.lrange(
-
-                history_key(
-
-                    "BTCUSDT",
-
-                    MARKET_FLOW_TIMEFRAME,
-
-                ),
-
-                -3,
-
-                -1,
-
+    def _publish_initial_market_flow(self):
+        for timeframe in MARKET_FLOW_TIMEFRAMES:
+            self._publish_initial_market_flow_for_timeframe(
+                timeframe
             )
 
+    def _publish_initial_market_flow_for_timeframe(
+        self,
+        timeframe,
+    ):
+        print(
+            "[MARKET FLOW] "
+            f"building initial snapshot tf={timeframe}"
         )
 
-
+        raw_btc_history = self.publisher.redis.lrange(
+            history_key("BTCUSDT", timeframe),
+            -3,
+            -1,
+        )
 
         if not raw_btc_history:
-
             print(
-
                 "[MARKET FLOW] "
-
                 "initial snapshot skipped: "
-
-                "BTC 4h history unavailable"
-
+                f"BTC {timeframe} history unavailable"
             )
-
             return
 
-
-
-        now_ms = int(
-
-            time.time() * 1000
-
-        )
-
-
-
+        now_ms = int(time.time() * 1000)
+        timeframe_ms = self._timeframe_ms(timeframe)
         candle_timestamp = None
 
-
-
-        for raw_candle in reversed(
-
-            raw_btc_history
-
-        ):
-
+        for raw_candle in reversed(raw_btc_history):
             try:
-
-                candle = json.loads(
-
-                    raw_candle
-
-                )
-
-
-
-                candidate_timestamp = int(
-
-                    candle["timestamp"]
-
-                )
-
-
-
+                candle = json.loads(raw_candle)
+                candidate_timestamp = int(candle["timestamp"])
             except (
-
                 KeyError,
-
                 TypeError,
-
                 ValueError,
-
                 json.JSONDecodeError,
-
             ):
-
                 continue
 
-
-
             candidate_close_timestamp = (
-
-                candidate_timestamp
-
-                + MARKET_FLOW_TIMEFRAME_MS
-
+                candidate_timestamp + timeframe_ms
             )
-
-
-
-            if (
-
-                candidate_close_timestamp
-
-                <= now_ms
-
-            ):
-
-                candle_timestamp = (
-
-                    candidate_timestamp
-
-                )
-
+            if candidate_close_timestamp <= now_ms:
+                candle_timestamp = candidate_timestamp
                 break
 
-
-
         if candle_timestamp is None:
-
             print(
-
                 "[MARKET FLOW] "
-
                 "initial snapshot skipped: "
-
-                "no fully closed BTC 4h candle"
-
+                f"no fully closed BTC {timeframe} candle"
             )
-
             return
-
-
 
         try:
-
-            snapshot = (
-
-                self.market_flow_analyzer.calculate(
-
-                    symbols=self.symbols,
-
-                    timeframe=(
-
-                        MARKET_FLOW_TIMEFRAME
-
-                    ),
-
-                    candle_timestamp=(
-
-                        candle_timestamp
-
-                    ),
-
-                )
-
+            snapshot = self.market_flow_analyzer.calculate(
+                symbols=self.symbols,
+                timeframe=timeframe,
+                candle_timestamp=candle_timestamp,
             )
-
-
-
         except Exception as exc:
-
             print(
-
                 "[MARKET FLOW] "
-
                 "initial calculation failed "
-
-                f"error={exc}"
-
+                f"tf={timeframe} error={exc}"
             )
-
             return
 
-
-
-        coverage_pct = float(
-
-            snapshot.get(
-
-                "coverage_pct",
-
-                0.0,
-
-            )
-
-        )
-
-
-
-        if (
-
-            coverage_pct
-
-            < MARKET_FLOW_MIN_COVERAGE_PCT
-
-        ):
-
+        coverage_pct = float(snapshot.get("coverage_pct", 0.0))
+        if coverage_pct < MARKET_FLOW_MIN_COVERAGE_PCT:
             print(
-
                 "[MARKET FLOW] "
-
                 "initial snapshot rejected "
-
+                f"tf={timeframe} "
                 f"timestamp={candle_timestamp} "
-
                 f"coverage={coverage_pct:.2f}% "
-
-                f"minimum="
-
-                f"{MARKET_FLOW_MIN_COVERAGE_PCT:.2f}%"
-
+                f"minimum={MARKET_FLOW_MIN_COVERAGE_PCT:.2f}%"
             )
-
             return
 
-
-
-        snapshot = (
-
-            self._enrich_market_flow_snapshot(
-
-                snapshot
-
-            )
-
+        snapshot = self._enrich_market_flow_snapshot(
+            snapshot,
+            timeframe=timeframe,
         )
-
-
-
-        publication = (
-
-            self.publisher
-
-            .publish_market_flow_snapshot(
-
-                timeframe=(
-
-                    MARKET_FLOW_TIMEFRAME
-
-                ),
-
-                snapshot=snapshot,
-
-            )
-
+        publication = self.publisher.publish_market_flow_snapshot(
+            timeframe=timeframe,
+            snapshot=snapshot,
         )
+        self.last_market_flow_timestamp[timeframe] = candle_timestamp
 
-
-
-        self.last_market_flow_timestamp = (
-
-            candle_timestamp
-
-        )
-
-
-
+        breadth_key = f"market_breadth_{timeframe}"
         print(
-
             "[MARKET FLOW] "
-
             "initial snapshot published "
-
+            f"tf={timeframe} "
             f"key={publication['key']} "
-
             f"timestamp={candle_timestamp} "
-
-            f"valid="
-
-            f"{snapshot['valid_universe_size']}/"
-
+            f"valid={snapshot['valid_universe_size']}/"
             f"{snapshot['configured_universe_size']} "
-
             f"coverage={coverage_pct:.2f}% "
-
-            f"breadth="
-
-            f"{snapshot['market_breadth_4h']}"
-
+            f"breadth={snapshot.get(breadth_key)}"
         )
-
-
 
     def _begin_bootstrap_ws_buffering(self):
         with self.bootstrap_lock:
@@ -1738,15 +1451,11 @@ class MarketDataService:
 
             # El general recovery también debe
             # alimentar el batch de Market Flow.
-            if (
-                timeframe
-                == MARKET_FLOW_TIMEFRAME
-            ):
+            if timeframe in MARKET_FLOW_TIMEFRAMES:
                 self._register_market_flow_close(
                     symbol=symbol,
-                    candle_timestamp=(
-                        candle_timestamp
-                    ),
+                    timeframe=timeframe,
+                    candle_timestamp=candle_timestamp,
                 )
 
         print(
@@ -2172,52 +1881,30 @@ class MarketDataService:
         message,
         publish_price=True,
     ):
-        result = (
-            self.publisher.publish_ws_message(
-                message,
-                publish_price=publish_price,
-            )
+        result = self.publisher.publish_ws_message(
+            message,
+            publish_price=publish_price,
         )
-
         if not isinstance(result, dict):
             return result
-
-        if (
-            result.get("type")
-            != "closed_candle"
-        ):
+        if result.get("type") != "closed_candle":
             return result
 
-        timeframe = result.get(
-            "timeframe"
-        )
-
-        if (
-            timeframe
-            != MARKET_FLOW_TIMEFRAME
-        ):
+        timeframe = result.get("timeframe")
+        if timeframe not in MARKET_FLOW_TIMEFRAMES:
             return result
 
         symbol = result.get("symbol")
-        candle_timestamp = result.get(
-            "timestamp"
-        )
-
-        if (
-            not symbol
-            or candle_timestamp is None
-        ):
+        candle_timestamp = result.get("timestamp")
+        if not symbol or candle_timestamp is None:
             return result
 
         self._register_market_flow_close(
             symbol=symbol,
-            candle_timestamp=(
-                candle_timestamp
-            ),
+            timeframe=timeframe,
+            candle_timestamp=candle_timestamp,
         )
-
         return result
-
 
     def _flush_bootstrap_ws_buffer(self):
         if self.history_cutoff_ms is None:
@@ -2343,793 +2030,258 @@ class MarketDataService:
 
 
     def _register_market_flow_close(
-
         self,
-
         symbol,
-
+        timeframe,
         candle_timestamp,
-
     ):
+        timeframe = str(timeframe)
+        if timeframe not in MARKET_FLOW_TIMEFRAMES:
+            return
 
-        candle_timestamp = int(
-
-            candle_timestamp
-
-        )
-
-
-
+        candle_timestamp = int(candle_timestamp)
         now = time.monotonic()
-
-
+        batch_key = (timeframe, candle_timestamp)
 
         with self.market_flow_lock:
-
-            batch = (
-
-                self.market_flow_batches.setdefault(
-
-                    candle_timestamp,
-
-                    {
-
-                        "symbols": set(),
-
-                        "first_seen_at": now,
-
-                        "last_seen_at": now,
-
-                    },
-
-                )
-
+            batch = self.market_flow_batches.setdefault(
+                batch_key,
+                {
+                    "timeframe": timeframe,
+                    "candle_timestamp": candle_timestamp,
+                    "symbols": set(),
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                },
             )
-
-
-
-            batch["symbols"].add(
-
-                symbol
-
-            )
-
-
-
+            batch["symbols"].add(symbol)
             batch["last_seen_at"] = now
 
-
-
     def _repair_market_flow_candles(
-
         self,
-
+        timeframe,
         candle_timestamp,
-
         missing_symbols,
-
     ):
-
-        candle_timestamp = int(
-
-            candle_timestamp
-
-        )
-
-
-
-        missing_symbols = sorted(
-
-            set(missing_symbols)
-
-        )
-
-
-
+        timeframe = str(timeframe)
+        candle_timestamp = int(candle_timestamp)
+        missing_symbols = sorted(set(missing_symbols))
         recovered_symbols = []
-
         failed_symbols = {}
 
-
-
         print(
-
             "[MARKET FLOW REPAIR] "
-
-            f"starting timestamp={candle_timestamp} "
-
+            f"starting tf={timeframe} "
+            f"timestamp={candle_timestamp} "
             f"missing={len(missing_symbols)}"
-
         )
-
-
 
         for symbol in missing_symbols:
-
             if not self.running:
-
-                failed_symbols[symbol] = (
-
-                    "service_stopping"
-
-                )
-
+                failed_symbols[symbol] = "service_stopping"
                 continue
-
-
 
             candle = None
-
             last_error = None
-
-
-
             for attempt in range(1, 4):
-
                 try:
-
-                    candle = (
-
-                        fetch_closed_futures_candle(
-
-                            symbol=symbol,
-
-                            timeframe=(
-
-                                MARKET_FLOW_TIMEFRAME
-
-                            ),
-
-                            candle_timestamp=(
-
-                                candle_timestamp
-
-                            ),
-
-                        )
-
+                    candle = fetch_closed_futures_candle(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        candle_timestamp=candle_timestamp,
                     )
-
-
-
                     if candle is None:
-
-                        last_error = (
-
-                            "candle_unavailable"
-
-                        )
-
+                        last_error = "candle_unavailable"
                     else:
-
                         break
-
-
-
                 except Exception as exc:
-
                     last_error = str(exc)
 
-
-
-                if attempt < 3:
-
-                    if self.stop_event.wait(1):
-
-                        last_error = (
-
-                            "service_stopping"
-
-                        )
-
-                        break
-
-
-
-            if candle is None:
-
-                failed_symbols[symbol] = (
-
-                    last_error
-
-                    or "candle_unavailable"
-
-                )
-
-
-
-                print(
-
-                    "[MARKET FLOW REPAIR] "
-
-                    f"failed symbol={symbol} "
-
-                    f"timestamp={candle_timestamp} "
-
-                    f"error={failed_symbols[symbol]}"
-
-                )
-
-
-
-                continue
-
-
-
-            try:
-
-                publication = (
-
-                    self.publisher
-
-                    .publish_recovered_candle(
-
-                        symbol=symbol,
-
-                        timeframe=(
-
-                            MARKET_FLOW_TIMEFRAME
-
-                        ),
-
-                        candle=candle,
-
-                    )
-
-                )
-
-
-
-            except Exception as exc:
-
-                failed_symbols[symbol] = (
-
-                    f"publish_failed:{exc}"
-
-                )
-
-
-
-                print(
-
-                    "[MARKET FLOW REPAIR] "
-
-                    f"failed symbol={symbol} "
-
-                    f"timestamp={candle_timestamp} "
-
-                    f"error={failed_symbols[symbol]}"
-
-                )
-
-
-
-                continue
-
-
-
-            recovered_symbols.append(
-
-                symbol
-
-            )
-
-
-
-            if (
-
-                int(publication["timestamp"])
-
-                != candle_timestamp
-
-            ):
-
-                failed_symbols[symbol] = (
-
-                    "published_timestamp_mismatch"
-
-                )
-
-
-
-                recovered_symbols.remove(
-
-                    symbol
-
-                )
-
-
-
-        print(
-
-            "[MARKET FLOW REPAIR] "
-
-            f"completed timestamp={candle_timestamp} "
-
-            f"requested={len(missing_symbols)} "
-
-            f"recovered={len(recovered_symbols)} "
-
-            f"failed={len(failed_symbols)}"
-
-        )
-
-
-
-        return {
-
-            "requested": len(missing_symbols),
-
-            "recovered": len(recovered_symbols),
-
-            "failed": len(failed_symbols),
-
-            "recovered_symbols": (
-
-                recovered_symbols
-
-            ),
-
-            "failed_symbols": (
-
-                failed_symbols
-
-            ),
-
-        }
-
-
-
-    def _maybe_publish_market_flow(
-
-        self,
-
-    ):
-
-        now = time.monotonic()
-
-
-
-        expected_symbols = len(
-
-            set(self.symbols)
-
-        )
-
-
-
-        batch_to_process = None
-
-
-
-        with self.market_flow_lock:
-
-            for candle_timestamp in sorted(
-
-                self.market_flow_batches
-
-            ):
-
-                batch = (
-
-                    self.market_flow_batches[
-
-                        candle_timestamp
-
-                    ]
-
-                )
-
-
-
-                received_symbols = len(
-
-                    batch["symbols"]
-
-                )
-
-
-
-                age_seconds = (
-
-                    now
-
-                    - batch["first_seen_at"]
-
-                )
-
-
-
-                quiet_seconds = (
-
-                    now
-
-                    - batch["last_seen_at"]
-
-                )
-
-
-
-                complete = (
-
-                    received_symbols
-
-                    >= expected_symbols
-
-                )
-
-
-
-                settled = (
-
-                    age_seconds
-
-                    >= MARKET_FLOW_SETTLE_SECONDS
-
-                    and quiet_seconds >= 3
-
-                )
-
-
-
-                timed_out = (
-
-                    age_seconds
-
-                    >= MARKET_FLOW_MAX_WAIT_SECONDS
-
-                )
-
-
-
-                if (
-
-                    complete
-
-                    or settled
-
-                    or timed_out
-
-                ):
-
-                    batch_to_process = {
-
-                        "candle_timestamp": (
-
-                            candle_timestamp
-
-                        ),
-
-                        "received_symbols": (
-
-                            received_symbols
-
-                        ),
-
-                        "expected_symbols": (
-
-                            expected_symbols
-
-                        ),
-
-                        "age_seconds": (
-
-                            age_seconds
-
-                        ),
-
-                    }
-
-
-
-                    del self.market_flow_batches[
-
-                        candle_timestamp
-
-                    ]
-
-
-
+                if attempt < 3 and self.stop_event.wait(1):
+                    last_error = "service_stopping"
                     break
 
+            if candle is None:
+                failed_symbols[symbol] = last_error or "candle_unavailable"
+                print(
+                    "[MARKET FLOW REPAIR] "
+                    f"failed tf={timeframe} "
+                    f"symbol={symbol} "
+                    f"timestamp={candle_timestamp} "
+                    f"error={failed_symbols[symbol]}"
+                )
+                continue
 
+            try:
+                publication = self.publisher.publish_recovered_candle(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    candle=candle,
+                )
+            except Exception as exc:
+                failed_symbols[symbol] = f"publish_failed:{exc}"
+                print(
+                    "[MARKET FLOW REPAIR] "
+                    f"failed tf={timeframe} "
+                    f"symbol={symbol} "
+                    f"timestamp={candle_timestamp} "
+                    f"error={failed_symbols[symbol]}"
+                )
+                continue
+
+            recovered_symbols.append(symbol)
+            if int(publication["timestamp"]) != candle_timestamp:
+                failed_symbols[symbol] = "published_timestamp_mismatch"
+                recovered_symbols.remove(symbol)
+
+        print(
+            "[MARKET FLOW REPAIR] "
+            f"completed tf={timeframe} "
+            f"timestamp={candle_timestamp} "
+            f"requested={len(missing_symbols)} "
+            f"recovered={len(recovered_symbols)} "
+            f"failed={len(failed_symbols)}"
+        )
+
+        return {
+            "requested": len(missing_symbols),
+            "recovered": len(recovered_symbols),
+            "failed": len(failed_symbols),
+            "recovered_symbols": recovered_symbols,
+            "failed_symbols": failed_symbols,
+        }
+
+    def _maybe_publish_market_flow(self):
+        now = time.monotonic()
+        expected_symbols = len(set(self.symbols))
+        batch_to_process = None
+        selected_key = None
+
+        with self.market_flow_lock:
+            # Sort primarily by candle timestamp, then timeframe. If 1h and 4h
+            # close together they are processed independently on consecutive
+            # loop iterations.
+            for batch_key in sorted(
+                self.market_flow_batches,
+                key=lambda item: (item[1], item[0]),
+            ):
+                batch = self.market_flow_batches[batch_key]
+                received_symbols = len(batch["symbols"])
+                age_seconds = now - batch["first_seen_at"]
+                quiet_seconds = now - batch["last_seen_at"]
+                complete = received_symbols >= expected_symbols
+                settled = (
+                    age_seconds >= MARKET_FLOW_SETTLE_SECONDS
+                    and quiet_seconds >= 3
+                )
+                timed_out = age_seconds >= MARKET_FLOW_MAX_WAIT_SECONDS
+
+                if complete or settled or timed_out:
+                    selected_key = batch_key
+                    batch_to_process = {
+                        "timeframe": batch["timeframe"],
+                        "candle_timestamp": batch["candle_timestamp"],
+                        "received_symbols": received_symbols,
+                        "expected_symbols": expected_symbols,
+                        "age_seconds": age_seconds,
+                    }
+                    del self.market_flow_batches[batch_key]
+                    break
 
         if batch_to_process is None:
-
             return
 
+        timeframe = batch_to_process["timeframe"]
+        candle_timestamp = batch_to_process["candle_timestamp"]
 
-
-        candle_timestamp = (
-
-            batch_to_process[
-
-                "candle_timestamp"
-
-            ]
-
-        )
-
-
-
-        if (
-
-            self.last_market_flow_timestamp
-
-            == candle_timestamp
-
-        ):
-
+        if self.last_market_flow_timestamp.get(timeframe) == candle_timestamp:
             return
-
-
 
         print(
-
             "[MARKET FLOW] "
-
-            f"calculating tf="
-
-            f"{MARKET_FLOW_TIMEFRAME} "
-
+            f"calculating tf={timeframe} "
             f"timestamp={candle_timestamp} "
-
-            f"received="
-
-            f"{batch_to_process['received_symbols']}/"
-
+            f"received={batch_to_process['received_symbols']}/"
             f"{batch_to_process['expected_symbols']} "
-
-            f"waited="
-
-            f"{batch_to_process['age_seconds']:.1f}s"
-
+            f"waited={batch_to_process['age_seconds']:.1f}s"
         )
-
-
 
         try:
-
-            snapshot = (
-
-                self.market_flow_analyzer.calculate(
-
-                    symbols=self.symbols,
-
-                    timeframe=(
-
-                        MARKET_FLOW_TIMEFRAME
-
-                    ),
-
-                    candle_timestamp=(
-
-                        candle_timestamp
-
-                    ),
-
-                )
-
+            snapshot = self.market_flow_analyzer.calculate(
+                symbols=self.symbols,
+                timeframe=timeframe,
+                candle_timestamp=candle_timestamp,
             )
-
-
-
         except Exception as exc:
-
             print(
-
-                "[MARKET FLOW] "
-
-                f"calculation failed "
-
+                "[MARKET FLOW] calculation failed "
+                f"tf={timeframe} "
                 f"timestamp={candle_timestamp} "
-
                 f"error={exc}"
-
             )
-
             return
-
-
 
         missing_symbols = [
-
             symbol
-
-            for symbol, reason
-
-            in snapshot.get(
-
-                "excluded_symbols",
-
-                {},
-
-            ).items()
-
+            for symbol, reason in snapshot.get("excluded_symbols", {}).items()
             if reason == "missing_batch_candle"
-
         ]
 
-
-
         if missing_symbols:
-
-            repair_result = (
-
-                self._repair_market_flow_candles(
-
-                    candle_timestamp=(
-
-                        candle_timestamp
-
-                    ),
-
-                    missing_symbols=(
-
-                        missing_symbols
-
-                    ),
-
-                )
-
+            repair_result = self._repair_market_flow_candles(
+                timeframe=timeframe,
+                candle_timestamp=candle_timestamp,
+                missing_symbols=missing_symbols,
             )
-
-
-
             if repair_result["recovered"] > 0:
-
                 try:
-
-                    snapshot = (
-
-                        self.market_flow_analyzer
-
-                        .calculate(
-
-                            symbols=self.symbols,
-
-                            timeframe=(
-
-                                MARKET_FLOW_TIMEFRAME
-
-                            ),
-
-                            candle_timestamp=(
-
-                                candle_timestamp
-
-                            ),
-
-                        )
-
+                    snapshot = self.market_flow_analyzer.calculate(
+                        symbols=self.symbols,
+                        timeframe=timeframe,
+                        candle_timestamp=candle_timestamp,
                     )
-
-
-
                 except Exception as exc:
-
                     print(
-
-                        "[MARKET FLOW] "
-
-                        "recalculation failed "
-
+                        "[MARKET FLOW] recalculation failed "
+                        f"tf={timeframe} "
                         f"timestamp={candle_timestamp} "
-
                         f"error={exc}"
-
                     )
-
                     return
 
-
-
-        coverage_pct = float(
-
-            snapshot.get(
-
-                "coverage_pct",
-
-                0.0,
-
-            )
-
-        )
-
-
-
-        if (
-
-            coverage_pct
-
-            < MARKET_FLOW_MIN_COVERAGE_PCT
-
-        ):
-
+        coverage_pct = float(snapshot.get("coverage_pct", 0.0))
+        if coverage_pct < MARKET_FLOW_MIN_COVERAGE_PCT:
             print(
-
-                "[MARKET FLOW] "
-
-                "snapshot rejected "
-
+                "[MARKET FLOW] snapshot rejected "
+                f"tf={timeframe} "
                 f"timestamp={candle_timestamp} "
-
                 f"coverage={coverage_pct:.2f}% "
-
-                f"minimum="
-
-                f"{MARKET_FLOW_MIN_COVERAGE_PCT:.2f}%"
-
+                f"minimum={MARKET_FLOW_MIN_COVERAGE_PCT:.2f}%"
             )
-
             return
 
-
-
-        snapshot = (
-
-            self._enrich_market_flow_snapshot(
-
-                snapshot
-
-            )
-
+        snapshot = self._enrich_market_flow_snapshot(
+            snapshot,
+            timeframe=timeframe,
         )
-
-
-
-        publication = (
-
-            self.publisher
-
-            .publish_market_flow_snapshot(
-
-                timeframe=(
-
-                    MARKET_FLOW_TIMEFRAME
-
-                ),
-
-                snapshot=snapshot,
-
-            )
-
+        publication = self.publisher.publish_market_flow_snapshot(
+            timeframe=timeframe,
+            snapshot=snapshot,
         )
+        self.last_market_flow_timestamp[timeframe] = candle_timestamp
 
-
-
-        self.last_market_flow_timestamp = (
-
-            candle_timestamp
-
-        )
-
-
-
+        breadth_key = f"market_breadth_{timeframe}"
         print(
-
-            "[MARKET FLOW] "
-
-            "published "
-
+            "[MARKET FLOW] published "
+            f"tf={timeframe} "
             f"key={publication['key']} "
-
             f"timestamp={candle_timestamp} "
-
-            f"valid="
-
-            f"{snapshot['valid_universe_size']}/"
-
+            f"valid={snapshot['valid_universe_size']}/"
             f"{snapshot['configured_universe_size']} "
-
             f"coverage={coverage_pct:.2f}% "
-
-            f"breadth="
-
-            f"{snapshot['market_breadth_4h']}"
-
+            f"breadth={snapshot.get(breadth_key)}"
         )
-                
+
     def _check_closed_candle_integrity(self):
         if (
             not self.running
@@ -3580,6 +2732,7 @@ class MarketDataService:
             ),
 
             "timeframes": self.timeframes,
+            "market_flow_timeframes": list(MARKET_FLOW_TIMEFRAMES),
 
             "history_cutoff_ms": (
 
