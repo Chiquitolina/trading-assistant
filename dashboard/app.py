@@ -11296,6 +11296,32 @@ def build_micro_reaction_historical_signal_table(
     table["Pivot→Confirmation %"] = pd.to_numeric(
         work.get("pivot_to_confirmation_pct"), errors="coerce"
     )
+    table["Penetration %"] = pd.to_numeric(
+        work.get("penetration_pct"), errors="coerce"
+    )
+    table["Close strength"] = pd.to_numeric(
+        work.get("reaction_close_strength"), errors="coerce"
+    )
+    table["Reaction range %"] = pd.to_numeric(
+        work.get("reaction_range_pct"), errors="coerce"
+    )
+    table["Reaction body %"] = pd.to_numeric(
+        work.get("reaction_body_pct"), errors="coerce"
+    )
+    body = pd.to_numeric(work.get("reaction_body_pct"), errors="coerce")
+    candle_range = pd.to_numeric(work.get("reaction_range_pct"), errors="coerce")
+    table["Body / range share"] = (
+        body / candle_range.replace(0.0, np.nan)
+    ).clip(lower=0.0, upper=1.0)
+    table["Relative volume 30"] = pd.to_numeric(
+        work.get("reaction_relative_volume_30"), errors="coerce"
+    )
+    table["Reaction / departure rel vol"] = pd.to_numeric(
+        work.get("reaction_vs_departure_rel_volume"), errors="coerce"
+    )
+    table["Rejection wick share"] = pd.to_numeric(
+        work.get("reaction_rejection_wick_share"), errors="coerce"
+    )
 
     numeric_columns = [
         column
@@ -11559,6 +11585,445 @@ def build_micro_reaction_scalp_tp_sl_matrix(
         .drop(columns=["_tf", "_side", "_h"])
         .reset_index(drop=True)
     )
+
+
+# Fixed, pre-declared buckets for exploratory Micro REACTION driver research.
+# Keeping these boundaries stable is intentional: the dashboard should reveal
+# broad robust regions, not optimize a threshold after looking at the outcome.
+MICRO_REACTION_DRIVER_SPECS = {
+    "Departure %": {
+        "source": "max_departure_pct",
+        "bins": (-np.inf, 0.30, 0.50, 0.75, 1.00, 1.50, np.inf),
+        "labels": ("<0.30", "0.30–0.50", "0.50–0.75", "0.75–1.00", "1.00–1.50", "≥1.50"),
+    },
+    "Confirm→Retest min": {
+        "source": "confirmed_to_retest_min",
+        "bins": (-np.inf, 10, 20, 30, 60, 90, 120, np.inf),
+        "labels": ("<10", "10–20", "20–30", "30–60", "60–90", "90–120", "≥120"),
+    },
+    "Penetration %": {
+        "source": "penetration_pct",
+        "bins": (-np.inf, 0.00, 0.025, 0.05, 0.075, 0.10, 0.15, np.inf),
+        "labels": ("<0", "0–0.025", "0.025–0.05", "0.05–0.075", "0.075–0.10", "0.10–0.15", "≥0.15"),
+    },
+    "Close strength": {
+        "source": "reaction_close_strength",
+        "bins": (-np.inf, 0.55, 0.65, 0.75, 0.85, 0.95, np.inf),
+        "labels": ("<0.55", "0.55–0.65", "0.65–0.75", "0.75–0.85", "0.85–0.95", "≥0.95"),
+    },
+    "Reaction range %": {
+        "source": "reaction_range_pct",
+        "bins": (-np.inf, 0.10, 0.20, 0.35, 0.50, 0.75, np.inf),
+        "labels": ("<0.10", "0.10–0.20", "0.20–0.35", "0.35–0.50", "0.50–0.75", "≥0.75"),
+    },
+    "Reaction body %": {
+        "source": "reaction_body_pct",
+        "bins": (-np.inf, 0.05, 0.10, 0.20, 0.35, 0.50, np.inf),
+        "labels": ("<0.05", "0.05–0.10", "0.10–0.20", "0.20–0.35", "0.35–0.50", "≥0.50"),
+    },
+    "Body / range share": {
+        "source": "__body_range_share__",
+        "bins": (-np.inf, 0.20, 0.40, 0.60, 0.80, np.inf),
+        "labels": ("<0.20", "0.20–0.40", "0.40–0.60", "0.60–0.80", "≥0.80"),
+    },
+    "Relative volume 30": {
+        "source": "reaction_relative_volume_30",
+        "bins": (-np.inf, 0.75, 1.00, 1.50, 2.00, 3.00, np.inf),
+        "labels": ("<0.75x", "0.75–1.00x", "1.00–1.50x", "1.50–2.00x", "2.00–3.00x", "≥3.00x"),
+    },
+    "Reaction / departure rel vol": {
+        "source": "reaction_vs_departure_rel_volume",
+        "bins": (-np.inf, 0.50, 0.75, 1.00, 1.50, 2.00, np.inf),
+        "labels": ("<0.50x", "0.50–0.75x", "0.75–1.00x", "1.00–1.50x", "1.50–2.00x", "≥2.00x"),
+    },
+    "Rejection wick share": {
+        "source": "reaction_rejection_wick_share",
+        "bins": (-np.inf, 0.10, 0.25, 0.40, 0.60, 0.80, np.inf),
+        "labels": ("<0.10", "0.10–0.25", "0.25–0.40", "0.40–0.60", "0.60–0.80", "≥0.80"),
+    },
+}
+
+
+def _micro_reaction_driver_values(reactions, driver_name):
+    """Return numeric causal values + fixed buckets for one driver."""
+    spec = MICRO_REACTION_DRIVER_SPECS.get(str(driver_name))
+    if spec is None:
+        return pd.Series(dtype="float64"), pd.Series(dtype="object")
+
+    source = str(spec["source"])
+    if source == "__body_range_share__":
+        body = pd.to_numeric(
+            reactions.get(
+                "reaction_body_pct",
+                pd.Series(np.nan, index=reactions.index),
+            ),
+            errors="coerce",
+        )
+        candle_range = pd.to_numeric(
+            reactions.get(
+                "reaction_range_pct",
+                pd.Series(np.nan, index=reactions.index),
+            ),
+            errors="coerce",
+        )
+        values = body / candle_range.replace(0.0, np.nan)
+        values = values.clip(lower=0.0, upper=1.0)
+    else:
+        values = pd.to_numeric(
+            reactions.get(
+                source,
+                pd.Series(np.nan, index=reactions.index),
+            ),
+            errors="coerce",
+        )
+
+    buckets = pd.cut(
+        values,
+        bins=list(spec["bins"]),
+        labels=list(spec["labels"]),
+        right=False,
+        include_lowest=True,
+        ordered=True,
+    )
+    return values, buckets
+
+
+def _micro_reaction_driver_execution_rows(
+    group,
+    horizon,
+    tp_pct,
+    sl_pct,
+):
+    """Return gross chronological execution rows for one driver bucket."""
+    horizon = int(horizon)
+    return_col = f"reaction_entry_return_{horizon}m_pct"
+    complete_col = f"reaction_entry_complete_{horizon}m"
+
+    complete = (
+        group.get(
+            complete_col,
+            pd.Series(False, index=group.index),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    time_exit_return = pd.to_numeric(
+        group.get(
+            return_col,
+            pd.Series(np.nan, index=group.index),
+        ),
+        errors="coerce",
+    )
+    eligible = group.loc[complete & time_exit_return.notna()].copy()
+    if eligible.empty:
+        return pd.DataFrame()
+
+    key = _confirmed_swing_first_touch_key(tp_pct, sl_pct)
+    rows = []
+    for _, event in eligible.iterrows():
+        path_map = event.get("micro_reaction_scalp_path_results_5m", {})
+        if not isinstance(path_map, dict):
+            continue
+        result = path_map.get(key)
+        if not isinstance(result, dict):
+            continue
+
+        first_outcome = str(result.get("outcome", "NO_HIT"))
+        first_hit_bar = pd.to_numeric(result.get("hit_bar"), errors="coerce")
+        first_hit_minutes = pd.to_numeric(
+            result.get("hit_minutes"), errors="coerce"
+        )
+        hit_inside_horizon = (
+            first_outcome in {"TP", "SL", "SL_AMBIGUOUS"}
+            and pd.notna(first_hit_bar)
+            and int(first_hit_bar) <= horizon
+        )
+
+        if hit_inside_horizon:
+            if first_outcome == "TP":
+                gross_pct = float(tp_pct)
+                exit_reason = "TP"
+            elif first_outcome == "SL_AMBIGUOUS":
+                gross_pct = -float(sl_pct)
+                exit_reason = "SL_AMBIGUOUS"
+            else:
+                gross_pct = -float(sl_pct)
+                exit_reason = "SL"
+            hit_minutes = (
+                float(first_hit_minutes)
+                if pd.notna(first_hit_minutes)
+                else np.nan
+            )
+        else:
+            gross_pct = pd.to_numeric(event.get(return_col), errors="coerce")
+            if pd.isna(gross_pct):
+                continue
+            gross_pct = float(gross_pct)
+            exit_reason = "TIME_EXIT"
+            hit_minutes = np.nan
+
+        rows.append(
+            {
+                "exit_reason": exit_reason,
+                "gross_pct": float(gross_pct),
+                "hit_minutes": hit_minutes,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def build_micro_reaction_driver_bucket_analysis(
+    retests_df,
+    driver_name,
+    side="ALL",
+    timeframe="ALL",
+    execution_horizon=5,
+    tp_pct=0.20,
+    sl_pct=0.15,
+):
+    """Bucket causal entry-time drivers against short-horizon outcomes.
+
+    This intentionally reports GROSS execution performance. Driver discovery
+    comes before transaction-cost viability; costs are evaluated separately in
+    the chronological scalp matrix once a broad, stable causal region exists.
+    """
+    if retests_df is None or retests_df.empty:
+        return pd.DataFrame()
+    if str(driver_name) not in MICRO_REACTION_DRIVER_SPECS:
+        return pd.DataFrame()
+
+    required = {"status", "signal", "timeframe"}
+    if not required.issubset(retests_df.columns):
+        return pd.DataFrame()
+
+    work = retests_df.loc[
+        retests_df["status"].fillna("").astype(str).eq("REACTION")
+    ].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    side = str(side).upper()
+    if side in {"LONG", "SHORT"}:
+        work = work.loc[work["signal"].astype(str).str.upper().eq(side)].copy()
+
+    timeframe = str(timeframe)
+    if timeframe != "ALL":
+        work = work.loc[work["timeframe"].astype(str).eq(timeframe)].copy()
+
+    if work.empty:
+        return pd.DataFrame()
+
+    values, buckets = _micro_reaction_driver_values(work, driver_name)
+    work["_driver_value"] = values
+    work["_driver_bucket"] = buckets
+    work = work.loc[
+        work["_driver_value"].notna() & work["_driver_bucket"].notna()
+    ].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    rows = []
+    grouped = work.groupby(
+        "_driver_bucket",
+        observed=True,
+        sort=False,
+    )
+
+    for bucket, group in grouped:
+        row = {
+            "Driver": str(driver_name),
+            "Bucket": str(bucket),
+            "N": int(len(group)),
+            "Symbols": int(
+                group.get("symbol", pd.Series(dtype="object"))
+                .astype(str)
+                .nunique()
+            ),
+            "Driver avg": float(
+                pd.to_numeric(group["_driver_value"], errors="coerce").mean()
+            ),
+            "Driver med": float(
+                pd.to_numeric(group["_driver_value"], errors="coerce").median()
+            ),
+        }
+
+        for horizon in MICRO_REACTION_PRIMARY_HORIZONS:
+            complete = (
+                group.get(
+                    f"reaction_entry_complete_{horizon}m",
+                    pd.Series(False, index=group.index),
+                )
+                .fillna(False)
+                .astype(bool)
+            )
+            mfe = pd.to_numeric(
+                group.get(
+                    f"reaction_entry_mfe_{horizon}m_pct",
+                    pd.Series(np.nan, index=group.index),
+                ),
+                errors="coerce",
+            )
+            mae = pd.to_numeric(
+                group.get(
+                    f"reaction_entry_mae_{horizon}m_pct",
+                    pd.Series(np.nan, index=group.index),
+                ),
+                errors="coerce",
+            )
+            ret = pd.to_numeric(
+                group.get(
+                    f"reaction_entry_return_{horizon}m_pct",
+                    pd.Series(np.nan, index=group.index),
+                ),
+                errors="coerce",
+            )
+            valid = complete & mfe.notna() & mae.notna() & ret.notna()
+            row[f"N {horizon}m"] = int(valid.sum())
+            row[f"MFE {horizon}m avg %"] = (
+                float(mfe.loc[valid].mean()) if valid.any() else np.nan
+            )
+            row[f"MFE {horizon}m med %"] = (
+                float(mfe.loc[valid].median()) if valid.any() else np.nan
+            )
+            row[f"MAE {horizon}m avg %"] = (
+                float(mae.loc[valid].mean()) if valid.any() else np.nan
+            )
+            row[f"MAE {horizon}m med %"] = (
+                float(mae.loc[valid].median()) if valid.any() else np.nan
+            )
+            row[f"Return {horizon}m avg %"] = (
+                float(ret.loc[valid].mean()) if valid.any() else np.nan
+            )
+            row[f"Return {horizon}m med %"] = (
+                float(ret.loc[valid].median()) if valid.any() else np.nan
+            )
+
+        if (
+            pd.notna(row.get("MFE 5m med %"))
+            and pd.notna(row.get("MAE 5m med %"))
+        ):
+            row["MFE-MAE 5m med pp"] = float(
+                row["MFE 5m med %"] - row["MAE 5m med %"]
+            )
+        else:
+            row["MFE-MAE 5m med pp"] = np.nan
+
+        execution = _micro_reaction_driver_execution_rows(
+            group=group,
+            horizon=int(execution_horizon),
+            tp_pct=float(tp_pct),
+            sl_pct=float(sl_pct),
+        )
+        if execution.empty:
+            row.update(
+                {
+                    "Exec N": 0,
+                    "TP first %": np.nan,
+                    "SL+Ambig %": np.nan,
+                    "Time exit %": np.nan,
+                    "Gross win %": np.nan,
+                    "Avg gross %": np.nan,
+                    "Median gross %": np.nan,
+                    "Gross PF": np.nan,
+                    "Total gross %": np.nan,
+                    "Avg hit min": np.nan,
+                }
+            )
+        else:
+            gross = pd.to_numeric(execution["gross_pct"], errors="coerce").dropna()
+            reasons = execution["exit_reason"].astype(str)
+            hit_minutes = pd.to_numeric(
+                execution["hit_minutes"], errors="coerce"
+            ).dropna()
+            profits = float(gross.loc[gross.gt(0.0)].sum())
+            losses = float(-gross.loc[gross.lt(0.0)].sum())
+            gross_pf = (
+                profits / losses
+                if losses > 0
+                else (np.inf if profits > 0 else np.nan)
+            )
+            row.update(
+                {
+                    "Exec N": int(len(execution)),
+                    "TP first %": float(reasons.eq("TP").mean() * 100.0),
+                    "SL+Ambig %": float(
+                        reasons.isin(["SL", "SL_AMBIGUOUS"]).mean() * 100.0
+                    ),
+                    "Time exit %": float(
+                        reasons.eq("TIME_EXIT").mean() * 100.0
+                    ),
+                    "Gross win %": float(gross.gt(0.0).mean() * 100.0),
+                    "Avg gross %": float(gross.mean()),
+                    "Median gross %": float(gross.median()),
+                    "Gross PF": float(gross_pf),
+                    "Total gross %": float(gross.sum()),
+                    "Avg hit min": (
+                        float(hit_minutes.mean())
+                        if not hit_minutes.empty
+                        else np.nan
+                    ),
+                }
+            )
+
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    for column in result.columns:
+        if column in {"Driver", "Bucket"}:
+            continue
+        if column in {"N", "Symbols", "N 1m", "N 3m", "N 5m", "Exec N"}:
+            result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0).astype(int)
+        else:
+            result[column] = pd.to_numeric(result[column], errors="coerce").round(4)
+
+    return result.reset_index(drop=True)
+
+
+def build_micro_reaction_driver_leaderboard(
+    retests_df,
+    side="ALL",
+    timeframe="ALL",
+    execution_horizon=5,
+    tp_pct=0.20,
+    sl_pct=0.15,
+    min_n=30,
+):
+    """Combine every single-driver bucket into one exploratory leaderboard."""
+    frames = []
+    for driver_name in MICRO_REACTION_DRIVER_SPECS:
+        frame = build_micro_reaction_driver_bucket_analysis(
+            retests_df=retests_df,
+            driver_name=driver_name,
+            side=side,
+            timeframe=timeframe,
+            execution_horizon=execution_horizon,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+        )
+        if frame is None or frame.empty:
+            continue
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = pd.concat(frames, ignore_index=True, sort=False)
+    result = result.loc[
+        pd.to_numeric(result["Exec N"], errors="coerce").fillna(0).ge(int(min_n))
+    ].copy()
+    if result.empty:
+        return result
+
+    return result.sort_values(
+        ["Avg gross %", "Gross PF", "Exec N"],
+        ascending=[False, False, False],
+        na_position="last",
+        kind="stable",
+    ).reset_index(drop=True)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -39544,6 +40009,220 @@ if selected_section == "micro_reaction":
                                     ),
                                     mime="text/csv",
                                     key="micro_reaction_scalp_matrix_download",
+                                )
+
+                        st.markdown("#### Micro REACTION Driver Analyzer")
+                        st.caption(
+                            "Exploratory causal bucket analysis: every driver is known by "
+                            "the REACTION close, before the next-1m-open entry. Buckets are "
+                            "fixed in code so we can look for broad stable regions instead "
+                            "of tuning an exact threshold to this sample. Read LONG and SHORT "
+                            "separately before combining them. Execution columns below are "
+                            "GROSS on purpose; once a causal bucket survives more data, rerun "
+                            "its economics with fees/slippage in the TP/SL matrix above."
+                        )
+
+                        driver_c1, driver_c2, driver_c3, driver_c4 = st.columns(4)
+                        with driver_c1:
+                            driver_name = st.selectbox(
+                                "Driver",
+                                list(MICRO_REACTION_DRIVER_SPECS.keys()),
+                                index=0,
+                                key="micro_reaction_driver_name",
+                            )
+                        with driver_c2:
+                            driver_side = st.selectbox(
+                                "Driver side",
+                                ["LONG", "SHORT", "ALL"],
+                                index=0,
+                                key="micro_reaction_driver_side",
+                            )
+                        with driver_c3:
+                            stored_tf_values = []
+                            if (
+                                isinstance(stored_global_retests, pd.DataFrame)
+                                and not stored_global_retests.empty
+                                and "timeframe" in stored_global_retests.columns
+                            ):
+                                stored_tf_values = sorted(
+                                    {
+                                        str(value)
+                                        for value in stored_global_retests["timeframe"]
+                                        .dropna()
+                                        .astype(str)
+                                        .tolist()
+                                    },
+                                    key=lambda value: {"1m": 0, "5m": 1}.get(value, 99),
+                                )
+                            driver_timeframe = st.selectbox(
+                                "Driver TF",
+                                ["ALL"] + stored_tf_values,
+                                index=(
+                                    (["ALL"] + stored_tf_values).index("5m")
+                                    if "5m" in stored_tf_values
+                                    else 0
+                                ),
+                                key="micro_reaction_driver_timeframe",
+                            )
+                        with driver_c4:
+                            driver_min_n = st.number_input(
+                                "Min bucket N",
+                                min_value=1,
+                                value=30,
+                                step=10,
+                                key="micro_reaction_driver_min_n",
+                            )
+
+                        exec_c1, exec_c2, exec_c3 = st.columns(3)
+                        with exec_c1:
+                            driver_horizon_label = st.selectbox(
+                                "Driver execution horizon",
+                                ["1m", "3m", "5m"],
+                                index=2,
+                                key="micro_reaction_driver_horizon",
+                            )
+                            driver_horizon = int(
+                                str(driver_horizon_label).replace("m", "")
+                            )
+                        with exec_c2:
+                            driver_tp = st.selectbox(
+                                "Driver test TP %",
+                                list(MICRO_REACTION_SCALP_TP_GRID),
+                                index=list(MICRO_REACTION_SCALP_TP_GRID).index(0.20),
+                                format_func=lambda value: f"{float(value):.2f}%",
+                                key="micro_reaction_driver_tp",
+                            )
+                        with exec_c3:
+                            driver_sl = st.selectbox(
+                                "Driver test SL %",
+                                list(MICRO_REACTION_SCALP_SL_GRID),
+                                index=list(MICRO_REACTION_SCALP_SL_GRID).index(0.15),
+                                format_func=lambda value: f"{float(value):.2f}%",
+                                key="micro_reaction_driver_sl",
+                            )
+
+                        driver_table = build_micro_reaction_driver_bucket_analysis(
+                            retests_df=stored_global_retests,
+                            driver_name=str(driver_name),
+                            side=str(driver_side),
+                            timeframe=str(driver_timeframe),
+                            execution_horizon=int(driver_horizon),
+                            tp_pct=float(driver_tp),
+                            sl_pct=float(driver_sl),
+                        )
+
+                        if driver_table.empty:
+                            st.info(
+                                "No usable driver rows are available for this selection. "
+                                "If the chronological payload is missing, rebuild the "
+                                "historical all-symbol table once."
+                            )
+                        else:
+                            driver_table_view = driver_table.loc[
+                                pd.to_numeric(
+                                    driver_table["Exec N"], errors="coerce"
+                                ).fillna(0).ge(int(driver_min_n))
+                            ].copy()
+
+                            driver_display_columns = [
+                                "Bucket", "N", "Symbols", "Driver avg", "Driver med",
+                                "N 1m", "MFE 1m avg %", "MFE 1m med %",
+                                "MAE 1m avg %", "MAE 1m med %", "Return 1m avg %",
+                                "N 3m", "MFE 3m avg %", "MFE 3m med %",
+                                "MAE 3m avg %", "MAE 3m med %", "Return 3m avg %",
+                                "N 5m", "MFE 5m avg %", "MFE 5m med %",
+                                "MAE 5m avg %", "MAE 5m med %", "Return 5m avg %",
+                                "MFE-MAE 5m med pp",
+                                "Exec N", "TP first %", "SL+Ambig %", "Time exit %",
+                                "Gross win %", "Avg gross %", "Median gross %",
+                                "Gross PF", "Total gross %", "Avg hit min",
+                            ]
+                            driver_display_columns = [
+                                column
+                                for column in driver_display_columns
+                                if column in driver_table_view.columns
+                            ]
+
+                            st.markdown(
+                                f"##### {driver_name} · {driver_side} · "
+                                f"{driver_timeframe} · TP {float(driver_tp):.2f}% / "
+                                f"SL {float(driver_sl):.2f}% · {driver_horizon}m"
+                            )
+                            if driver_table_view.empty:
+                                st.warning(
+                                    f"All {driver_name} buckets are below the current "
+                                    f"minimum execution sample N={int(driver_min_n)}."
+                                )
+                            else:
+                                st.dataframe(
+                                    driver_table_view[driver_display_columns],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key="micro_reaction_driver_bucket_table",
+                                )
+
+                            st.caption(
+                                "TP first / SL+Ambig / Time exit use the same conservative "
+                                "chronological 1m path as the scalp matrix. Same-candle TP+SL "
+                                "counts as SL_AMBIGUOUS. Avg gross and Gross PF have no fees; "
+                                "they are for finding causal separation, not declaring a strategy."
+                            )
+
+                            st.markdown("##### Single-driver bucket leaderboard")
+                            st.caption(
+                                "Ranks every fixed one-variable bucket under the exact same "
+                                "side/TF/TP/SL/horizon. These rows overlap and are not independent; "
+                                "use this only to decide which drivers deserve a forward/stability test."
+                            )
+                            driver_leaderboard = build_micro_reaction_driver_leaderboard(
+                                retests_df=stored_global_retests,
+                                side=str(driver_side),
+                                timeframe=str(driver_timeframe),
+                                execution_horizon=int(driver_horizon),
+                                tp_pct=float(driver_tp),
+                                sl_pct=float(driver_sl),
+                                min_n=int(driver_min_n),
+                            )
+
+                            if driver_leaderboard.empty:
+                                st.info(
+                                    "No driver bucket reaches the current minimum N."
+                                )
+                            else:
+                                leaderboard_columns = [
+                                    "Driver", "Bucket", "N", "Symbols", "Exec N",
+                                    "MFE 5m med %", "MAE 5m med %",
+                                    "MFE-MAE 5m med pp", "Return 5m avg %",
+                                    "TP first %", "SL+Ambig %", "Time exit %",
+                                    "Gross win %", "Avg gross %", "Gross PF",
+                                    "Total gross %",
+                                ]
+                                leaderboard_columns = [
+                                    column
+                                    for column in leaderboard_columns
+                                    if column in driver_leaderboard.columns
+                                ]
+                                st.dataframe(
+                                    driver_leaderboard[leaderboard_columns].head(50),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key="micro_reaction_driver_leaderboard",
+                                )
+
+                                driver_csv_window = (
+                                    stored_global_config.get("window", "historical")
+                                    if isinstance(stored_global_config, dict)
+                                    else "historical"
+                                )
+                                st.download_button(
+                                    "Download driver leaderboard CSV",
+                                    data=driver_leaderboard.to_csv(index=False).encode("utf-8"),
+                                    file_name=(
+                                        "micro_reaction_driver_leaderboard_"
+                                        f"{str(driver_csv_window).lower()}.csv"
+                                    ),
+                                    mime="text/csv",
+                                    key="micro_reaction_driver_leaderboard_download",
                                 )
 
                         st.markdown("#### Follow-through context · 10m / 15m / 30m")
