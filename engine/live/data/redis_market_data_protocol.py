@@ -39,6 +39,28 @@ REPLAY_PROVIDER_APPLIED_KEY = (
 # Último snapshot cross-sectional del mercado
 MARKET_FLOW_KEY_PREFIX = f"{KEY_PREFIX}:market-flow"
 
+# =========================================================
+# MICRO FLOW
+# =========================================================
+# El productor central NO persiste cada aggTrade individual. Los agrupa en
+# segundos completos por símbolo y publica un stream liviano que puede ser
+# consumido por procesos de research independientes.
+MICRO_FLOW_SECONDS_STREAM = (
+    f"{KEY_PREFIX}:micro-flow:seconds"
+)
+MICRO_FLOW_SECONDS_STREAM_MAXLEN = 300_000
+
+MICRO_FLOW_COLLECTOR_STATUS_KEY = (
+    f"{KEY_PREFIX}:micro-flow:collector-status"
+)
+MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY = (
+    f"{KEY_PREFIX}:micro-flow:collector-heartbeat"
+)
+MICRO_FLOW_COLLECTOR_CURSOR_KEY = (
+    f"{KEY_PREFIX}:micro-flow:collector-cursor"
+)
+MICRO_FLOW_COLLECTOR_HEARTBEAT_TTL_SECONDS = 15
+
 HISTORY_MAXLEN = 400
 CLOSED_STREAM_MAXLEN = 200_000
 
@@ -66,6 +88,7 @@ def normalize_timeframe(timeframe: str) -> str:
 
     return timeframe.lower()
 
+
 def closed_published_key(
     timeframe: str,
     candle_timestamp: int,
@@ -77,6 +100,7 @@ def closed_published_key(
         f"{KEY_PREFIX}:closed-published:"
         f"{timeframe}:{candle_timestamp}"
     )
+
 
 def history_key(symbol: str, timeframe: str) -> str:
     symbol = normalize_symbol(symbol)
@@ -96,7 +120,8 @@ def last_closed_key(symbol: str, timeframe: str) -> str:
         f"{KEY_PREFIX}:last-closed:"
         f"{symbol}:{timeframe}"
     )
-    
+
+
 def market_flow_key(timeframe: str) -> str:
     timeframe = normalize_timeframe(timeframe)
 
@@ -116,7 +141,8 @@ def consumer_cursor_key(
         f"{KEY_PREFIX}:consumer-cursor:"
         f"{consumer_name}"
     )
-    
+
+
 def replay_engine_processed_key(
     consumer_name: str,
 ) -> str:
@@ -127,7 +153,8 @@ def replay_engine_processed_key(
         f"{KEY_PREFIX}:replay:engine-processed:"
         f"{consumer_name}"
     )
-    
+
+
 def replay_provider_applied_key(
     consumer_name: str,
 ) -> str:

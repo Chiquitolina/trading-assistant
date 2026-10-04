@@ -12,6 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import requests
+import redis
 import plotly.graph_objects as go
 
 import numpy as np
@@ -88,6 +89,11 @@ from dashboard.analytics.candidate_v1_market_regime import (
 from config.strategies.v1 import SYMBOLS as CANDIDATE_V1_MARKET_SYMBOLS
 from config.market_sectors import MIN_SECTOR_SYMBOLS as CANDIDATE_V1_MIN_SECTOR_SYMBOLS
 from engine.live.data.market_sector_catalog import MarketSectorCatalog
+from engine.live.data.redis_market_data_protocol import (
+    MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY,
+    MICRO_FLOW_COLLECTOR_STATUS_KEY,
+    MICRO_FLOW_SECONDS_STREAM,
+)
 
 # Candidate monitor functions intentionally are NOT decorated with st.fragment.
 # They render inside render_volume_exhaustion_live(), which is already a fragment.
@@ -37345,6 +37351,55 @@ def load_micro_flow_persisted_events():
         modified_ns,
     ).copy()
 
+
+def load_micro_flow_persisted_snapshots():
+    modified_ns = get_file_modified_ns(MICRO_FLOW_SNAPSHOTS_FILE)
+    if modified_ns is None:
+        return pd.DataFrame()
+    return load_csv_cached(
+        MICRO_FLOW_SNAPSHOTS_FILE,
+        modified_ns,
+    ).copy()
+
+
+@st.cache_data(ttl=2, show_spinner=False)
+def load_micro_flow_collector_status():
+    try:
+        client = redis.Redis(
+            host=DASHBOARD_REDIS_HOST,
+            port=DASHBOARD_REDIS_PORT,
+            db=DASHBOARD_REDIS_DB,
+            decode_responses=True,
+        )
+        heartbeat = bool(
+            client.exists(
+                MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY
+            )
+        )
+        raw_status = client.get(
+            MICRO_FLOW_COLLECTOR_STATUS_KEY
+        )
+        stream_len = int(
+            client.xlen(MICRO_FLOW_SECONDS_STREAM)
+        )
+        status = (
+            json.loads(raw_status)
+            if raw_status
+            else {}
+        )
+        if not isinstance(status, dict):
+            status = {}
+        status["heartbeat_alive"] = heartbeat
+        status["stream_len"] = stream_len
+        status["error"] = None
+        return status
+    except Exception as exc:
+        return {
+            "heartbeat_alive": False,
+            "stream_len": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
 # ==========================================
 # MICRO REACTION RESEARCH HELPERS
 # ==========================================
@@ -41260,39 +41315,170 @@ if selected_section == "micro_flow":
     with collector_tab:
         st.markdown("### Persistent all-symbol collector")
         st.caption(
-            "This is the path for the real continuously-active research engine: "
-            "one central WebSocket consumer collects aggTrades for the market, "
-            "writes causal 1-second snapshots/events, and this tab analyzes the "
-            "persisted universe without hammering Binance REST on every rerun."
+            "The central Market Data producer aggregates executed aggTrades "
+            "to completed 1-second states. A separate research collector "
+            "builds causal 1/3/5/15s features and completes 1m/3m/5m outcomes."
         )
+
+        collector_status = load_micro_flow_collector_status()
+        status_cols = st.columns(5)
+        status_cols[0].metric(
+            "Collector",
+            "ONLINE"
+            if collector_status.get("heartbeat_alive")
+            else "OFFLINE",
+        )
+        status_cols[1].metric(
+            "Stream states",
+            f"{int(collector_status.get('stream_len') or 0):,}",
+        )
+        status_cols[2].metric(
+            "Symbols seen",
+            f"{int(collector_status.get('symbols_seen') or 0):,}",
+        )
+        status_cols[3].metric(
+            "Events created",
+            f"{int(collector_status.get('events_created') or 0):,}",
+        )
+        status_cols[4].metric(
+            "Completed",
+            f"{int(collector_status.get('events_completed') or 0):,}",
+        )
+
+        if collector_status.get("error"):
+            st.warning(
+                "Collector status unavailable: "
+                f"{collector_status['error']}"
+            )
+        elif collector_status:
+            st.caption(
+                "Pending "
+                f"{int(collector_status.get('pending_events') or 0):,} · "
+                "Warm symbols "
+                f"{int(collector_status.get('symbols_warm') or 0):,} · "
+                "Large gaps "
+                f"{int(collector_status.get('large_gaps') or 0):,} · "
+                "Invalidated "
+                f"{int(collector_status.get('events_invalidated') or 0):,}"
+            )
+
+        persisted_snapshots = load_micro_flow_persisted_snapshots()
         persisted_events = load_micro_flow_persisted_events()
+
         if persisted_events.empty:
             st.info(
-                "No `micro_flow_events.csv` exists yet. The dashboard bootstrap "
-                "above is ready, but the all-symbol continuous collector still "
-                "needs to be wired into the central Market Data producer."
+                "No completed `micro_flow_events.csv` events exist yet. "
+                "New candidates need up to 5 minutes before their full "
+                "1m/3m/5m outcome row can be finalized."
             )
-            st.markdown(
-                "**Collector target:** aggTrades → 1s state → 1/3/5/15s flow "
-                "windows → BTC context → event/state persistence → 1m/3m/5m outcomes."
-            )
+            if not persisted_snapshots.empty:
+                st.success(
+                    "Candidate snapshots already collected: "
+                    f"{len(persisted_snapshots):,}"
+                )
+                snapshot_columns = [
+                    column
+                    for column in [
+                        "event_time_utc",
+                        "symbol",
+                        "event_type",
+                        "side",
+                        "flow_imbalance_5s",
+                        "return_5s_pct",
+                        "relative_activity_5s",
+                        "residual_vs_btc_5s_pct",
+                    ]
+                    if column in persisted_snapshots.columns
+                ]
+                st.dataframe(
+                    persisted_snapshots[snapshot_columns].tail(500),
+                    use_container_width=True,
+                    hide_index=True,
+                    key="micro_flow_persisted_snapshots",
+                )
         else:
             st.success(
-                f"Persistent collector events loaded: {len(persisted_events):,}"
+                f"Persistent completed events loaded: {len(persisted_events):,}"
             )
+
+            persisted_summary = build_micro_flow_event_summary(
+                persisted_events,
+                fee_per_side_pct=float(fee_per_side),
+            )
+            if not persisted_summary.empty:
+                st.markdown("#### Persistent outcome summary")
+                st.dataframe(
+                    persisted_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="micro_flow_persisted_summary",
+                )
+
+            filter_cols = st.columns(3)
+            event_options = ["ALL"] + sorted(
+                persisted_events.get(
+                    "event_type",
+                    pd.Series(dtype=str),
+                ).dropna().astype(str).unique().tolist()
+            )
+            side_options = ["ALL", "LONG", "SHORT"]
+            symbol_options = ["ALL"] + sorted(
+                persisted_events.get(
+                    "symbol",
+                    pd.Series(dtype=str),
+                ).dropna().astype(str).unique().tolist()
+            )
+
+            with filter_cols[0]:
+                persisted_event_filter = st.selectbox(
+                    "Persistent event",
+                    event_options,
+                    key="micro_flow_persisted_event_filter",
+                )
+            with filter_cols[1]:
+                persisted_side_filter = st.selectbox(
+                    "Persistent side",
+                    side_options,
+                    key="micro_flow_persisted_side_filter",
+                )
+            with filter_cols[2]:
+                persisted_symbol_filter = st.selectbox(
+                    "Persistent symbol",
+                    symbol_options,
+                    key="micro_flow_persisted_symbol_filter",
+                )
+
+            filtered_persisted = persisted_events.copy()
+            if persisted_event_filter != "ALL":
+                filtered_persisted = filtered_persisted[
+                    filtered_persisted["event_type"].astype(str)
+                    == persisted_event_filter
+                ]
+            if persisted_side_filter != "ALL":
+                filtered_persisted = filtered_persisted[
+                    filtered_persisted["side"].astype(str)
+                    == persisted_side_filter
+                ]
+            if persisted_symbol_filter != "ALL":
+                filtered_persisted = filtered_persisted[
+                    filtered_persisted["symbol"].astype(str)
+                    == persisted_symbol_filter
+                ]
+
             st.dataframe(
-                persisted_events.tail(500),
+                filtered_persisted.tail(1000),
                 use_container_width=True,
                 hide_index=True,
                 key="micro_flow_persisted_events",
             )
             st.download_button(
                 "⬇️ Download persistent Micro Flow events",
-                data=persisted_events.to_csv(index=False).encode("utf-8"),
+                data=filtered_persisted.to_csv(index=False).encode("utf-8"),
                 file_name="micro_flow_events.csv",
                 mime="text/csv",
                 key="micro_flow_persisted_download",
             )
+
 
 
 if selected_section == "micro_reaction":

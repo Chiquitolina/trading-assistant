@@ -12,6 +12,8 @@ import time
 
 import uuid
 
+from collections import deque
+
 
 
 from config.strategies.v1 import SYMBOLS
@@ -77,6 +79,10 @@ from engine.live.data.market_sector_flow_analyzer import (
 
 from engine.live.ws.ws_client import WSClient
 
+from engine.live.research.micro_flow_second_aggregator import (
+    MicroFlowSecondAggregator,
+)
+
 
 
 
@@ -140,6 +146,8 @@ class MarketDataService:
 
         stale_after=90,
 
+        enable_micro_flow=True,
+
     ):
 
         mode_config = MODE_CONFIG["compression"]
@@ -165,6 +173,27 @@ class MarketDataService:
             db=redis_db,
 
         )
+
+        # Micro Flow research is intentionally isolated from the normal candle
+        # publishing path. WS callbacks only aggregate/enqueue locally; Redis
+        # writes happen from the service loop so high aggTrade traffic cannot
+        # block candle callbacks.
+        self.enable_micro_flow = bool(enable_micro_flow)
+        self.micro_flow_aggregator = (
+            MicroFlowSecondAggregator(
+                finalize_grace_ms=750,
+            )
+            if self.enable_micro_flow
+            else None
+        )
+        self.micro_flow_queue_lock = threading.Lock()
+        self.micro_flow_publish_queue = deque(
+            maxlen=200_000
+        )
+        self.micro_flow_queue_dropped = 0
+        self.micro_flow_seconds_published = 0
+        self.micro_flow_publish_errors = 0
+        self.micro_flow_last_published_at_ms = None
 
 
 
@@ -421,6 +450,8 @@ class MarketDataService:
                         self.phase = "CONNECTING_WS"
                         
                 self._check_closed_candle_integrity()
+
+                self._flush_micro_flow_seconds()
 
 
                 self.publisher.report_closed_candle_coverage(
@@ -2014,7 +2045,109 @@ class MarketDataService:
         }
 
 
+    def _enqueue_micro_flow_seconds(
+        self,
+        states,
+    ):
+        if not states:
+            return 0
+
+        queued = 0
+        with self.micro_flow_queue_lock:
+            for state in states:
+                if (
+                    self.micro_flow_publish_queue.maxlen
+                    is not None
+                    and len(self.micro_flow_publish_queue)
+                    >= self.micro_flow_publish_queue.maxlen
+                ):
+                    self.micro_flow_queue_dropped += 1
+                    continue
+
+                self.micro_flow_publish_queue.append(
+                    state
+                )
+                queued += 1
+
+        return queued
+
+
+    def _drain_micro_flow_queue(
+        self,
+        max_items=5000,
+    ):
+        batch = []
+        with self.micro_flow_queue_lock:
+            while (
+                self.micro_flow_publish_queue
+                and len(batch) < int(max_items)
+            ):
+                batch.append(
+                    self.micro_flow_publish_queue.popleft()
+                )
+        return batch
+
+
+    def _flush_micro_flow_seconds(self):
+        if (
+            not self.enable_micro_flow
+            or self.micro_flow_aggregator is None
+        ):
+            return
+
+        now_ms = int(time.time() * 1000)
+        ready = self.micro_flow_aggregator.flush_ready(
+            now_ms
+        )
+        self._enqueue_micro_flow_seconds(ready)
+
+        batch = self._drain_micro_flow_queue(
+            max_items=5000
+        )
+        if not batch:
+            return
+
+        try:
+            published = (
+                self.publisher.publish_micro_flow_seconds(
+                    batch
+                )
+            )
+            self.micro_flow_seconds_published += int(
+                published
+            )
+            self.micro_flow_last_published_at_ms = now_ms
+
+        except Exception as exc:
+            # Micro Flow is research-only. A temporary problem in this path
+            # must not take down the canonical candle producer. Requeue the
+            # batch when possible and expose the error in status/logs.
+            self.micro_flow_publish_errors += 1
+            self._enqueue_micro_flow_seconds(batch)
+            print(
+                "[MICRO FLOW] publish error "
+                f"error={type(exc).__name__}:{exc}"
+            )
+
+
     def _on_ws_message(self, message):
+        if (
+            self.enable_micro_flow
+            and self.micro_flow_aggregator is not None
+            and self.micro_flow_aggregator.is_agg_trade_message(
+                message
+            )
+        ):
+            ready = (
+                self.micro_flow_aggregator
+                .ingest_ws_message(message)
+            )
+            self._enqueue_micro_flow_seconds(ready)
+            return {
+                "type": "agg_trade",
+                "queued_seconds": len(ready),
+            }
+
         buffered = (
             self._buffer_closed_ws_message_if_needed(
                 message
@@ -2553,6 +2686,10 @@ class MarketDataService:
 
             stale_after=self.stale_after,
 
+            include_agg_trades=(
+                self.enable_micro_flow
+            ),
+
         )
 
 
@@ -2733,6 +2870,27 @@ class MarketDataService:
 
             "timeframes": self.timeframes,
             "market_flow_timeframes": list(MARKET_FLOW_TIMEFRAMES),
+            "micro_flow_enabled": self.enable_micro_flow,
+            "micro_flow_seconds_published": (
+                self.micro_flow_seconds_published
+            ),
+            "micro_flow_queue_depth": (
+                len(self.micro_flow_publish_queue)
+            ),
+            "micro_flow_queue_dropped": (
+                self.micro_flow_queue_dropped
+            ),
+            "micro_flow_publish_errors": (
+                self.micro_flow_publish_errors
+            ),
+            "micro_flow_last_published_at_ms": (
+                self.micro_flow_last_published_at_ms
+            ),
+            "micro_flow_aggregator": (
+                self.micro_flow_aggregator.diagnostics()
+                if self.micro_flow_aggregator is not None
+                else None
+            ),
 
             "history_cutoff_ms": (
 
@@ -2988,6 +3146,19 @@ def parse_args():
 
     )
 
+    parser.add_argument(
+
+        "--disable-micro-flow",
+
+        action="store_true",
+
+        help=(
+            "Do not subscribe to aggTrade streams or publish "
+            "Micro Flow second states."
+        ),
+
+    )
+
 
 
     return parser.parse_args()
@@ -3009,6 +3180,10 @@ def main():
         redis_port=args.redis_port,
 
         redis_db=args.redis_db,
+
+        enable_micro_flow=(
+            not args.disable_micro_flow
+        ),
 
     )
 
