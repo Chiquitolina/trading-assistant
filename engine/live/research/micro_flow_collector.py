@@ -24,6 +24,31 @@ from engine.live.data.redis_market_data_protocol import (
 SCHEMA_VERSION = 2
 WINDOWS_SECONDS = (1, 3, 5, 15)
 OUTCOME_HORIZONS_MINUTES = (1, 3, 5)
+FIRST_TOUCH_THRESHOLDS_PCT = (0.10, 0.15, 0.20, 0.30)
+FIRST_TOUCH_SCHEMA_VERSION = 1
+
+
+def _first_touch_tag(value):
+    return f"{int(round(float(value) * 100)):03d}"
+
+
+FIRST_TOUCH_COLUMNS = [
+    "schema_version",
+    "event_id",
+    "timestamp",
+    "event_time_utc",
+    "symbol",
+    "event_type",
+    "side",
+    "entry_timestamp",
+    "entry_time_utc",
+]
+for _threshold in FIRST_TOUCH_THRESHOLDS_PCT:
+    _tag = _first_touch_tag(_threshold)
+    FIRST_TOUCH_COLUMNS.extend([
+        f"tp_{_tag}_timestamp",
+        f"sl_{_tag}_timestamp",
+    ])
 
 
 BASE_EVENT_COLUMNS = [
@@ -103,6 +128,7 @@ class MicroFlowCollector:
         redis_db=0,
         snapshots_path="micro_flow_snapshots.csv",
         events_path="micro_flow_events.csv",
+        first_touch_path="micro_flow_first_touch.csv",
         flow_threshold=0.55,
         min_relative_activity=1.50,
         min_momentum_return_pct=0.04,
@@ -122,6 +148,7 @@ class MicroFlowCollector:
 
         self.snapshots_path = Path(snapshots_path)
         self.events_path = Path(events_path)
+        self.first_touch_path = Path(first_touch_path)
 
         self.flow_threshold = float(flow_threshold)
         self.min_relative_activity = float(min_relative_activity)
@@ -251,6 +278,7 @@ class MicroFlowCollector:
         row["completed_at_utc"] = self._iso_utc(
             int(time.time() * 1000)
         )
+        event_written = False
         try:
             self._append_csv(
                 self.events_path,
@@ -258,10 +286,48 @@ class MicroFlowCollector:
                 row,
             )
             self.events_completed += 1
+            event_written = True
         except Exception as exc:
             self.csv_errors += 1
             print(
                 "[MICRO FLOW COLLECTOR] event write error "
+                f"error={type(exc).__name__}:{exc}"
+            )
+
+        if event_written:
+            self._write_first_touch_event(event)
+
+    def _write_first_touch_event(self, event):
+        row = {
+            "schema_version": FIRST_TOUCH_SCHEMA_VERSION,
+            "event_id": event.get("event_id"),
+            "timestamp": event.get("timestamp"),
+            "event_time_utc": event.get("event_time_utc"),
+            "symbol": event.get("symbol"),
+            "event_type": event.get("event_type"),
+            "side": event.get("side"),
+            "entry_timestamp": event.get("entry_timestamp"),
+            "entry_time_utc": event.get("entry_time_utc"),
+        }
+
+        tp_touches = event.get("_tp_first_touch_ms", {}) or {}
+        sl_touches = event.get("_sl_first_touch_ms", {}) or {}
+
+        for threshold in FIRST_TOUCH_THRESHOLDS_PCT:
+            tag = _first_touch_tag(threshold)
+            row[f"tp_{tag}_timestamp"] = tp_touches.get(tag)
+            row[f"sl_{tag}_timestamp"] = sl_touches.get(tag)
+
+        try:
+            self._append_csv(
+                self.first_touch_path,
+                FIRST_TOUCH_COLUMNS,
+                row,
+            )
+        except Exception as exc:
+            self.csv_errors += 1
+            print(
+                "[MICRO FLOW COLLECTOR] first-touch write error "
                 f"error={type(exc).__name__}:{exc}"
             )
 
@@ -624,6 +690,8 @@ class MicroFlowCollector:
             "entry_synthetic": None,
             "_max_high": None,
             "_min_low": None,
+            "_tp_first_touch_ms": {},
+            "_sl_first_touch_ms": {},
         }
 
         for key in BASE_EVENT_COLUMNS:
@@ -706,6 +774,43 @@ class MicroFlowCollector:
         event[f"mae_{horizon_min}m_pct"] = mae
         event[f"return_{horizon_min}m_pct"] = ret
 
+    def _update_first_touch(self, event, bar):
+        entry = event.get("entry_price")
+        if entry is None:
+            return
+
+        entry = float(entry)
+        if entry <= 0:
+            return
+
+        timestamp = int(bar["timestamp"])
+        high = float(bar["high"])
+        low = float(bar["low"])
+
+        if event["side"] == "LONG":
+            favorable = max(0.0, (high / entry - 1.0) * 100.0)
+            adverse = max(0.0, (1.0 - low / entry) * 100.0)
+        else:
+            favorable = max(0.0, (1.0 - low / entry) * 100.0)
+            adverse = max(0.0, (high / entry - 1.0) * 100.0)
+
+        tp_touches = event.setdefault("_tp_first_touch_ms", {})
+        sl_touches = event.setdefault("_sl_first_touch_ms", {})
+
+        for threshold in FIRST_TOUCH_THRESHOLDS_PCT:
+            tag = _first_touch_tag(threshold)
+            if (
+                tp_touches.get(tag) is None
+                and favorable >= float(threshold)
+            ):
+                tp_touches[tag] = timestamp
+
+            if (
+                sl_touches.get(tag) is None
+                and adverse >= float(threshold)
+            ):
+                sl_touches[tag] = timestamp
+
     def _update_pending_events(self, bar):
         symbol = str(bar["symbol"]).upper()
         timestamp = int(bar["timestamp"])
@@ -745,6 +850,8 @@ class MicroFlowCollector:
             if timestamp < entry_ts:
                 keep.append(event)
                 continue
+
+            self._update_first_touch(event, bar)
 
             max_end_ts = event_ts + 5 * 60 * 1000
             if timestamp <= max_end_ts:
@@ -900,6 +1007,8 @@ class MicroFlowCollector:
             ),
             "pending_events": pending_count,
             "csv_errors": self.csv_errors,
+            "first_touch_schema_version": FIRST_TOUCH_SCHEMA_VERSION,
+            "first_touch_path": str(self.first_touch_path),
             "last_message_timestamp": self.last_message_timestamp,
             "updated_at": int(time.time() * 1000),
             "started_at": self.started_at_ms,
@@ -965,7 +1074,8 @@ class MicroFlowCollector:
             f"stream={MICRO_FLOW_SECONDS_STREAM} "
             f"cursor={self.cursor} "
             f"snapshots={self.snapshots_path} "
-            f"events={self.events_path}"
+            f"events={self.events_path} "
+            f"first_touch={self.first_touch_path}"
         )
 
         try:
@@ -1063,6 +1173,13 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--first-touch-path",
+        default=os.getenv(
+            "MICRO_FLOW_FIRST_TOUCH_PATH",
+            "micro_flow_first_touch.csv",
+        ),
+    )
+    parser.add_argument(
         "--flow-threshold",
         type=float,
         default=float(os.getenv("MICRO_FLOW_FLOW_THRESHOLD", "0.55")),
@@ -1103,6 +1220,7 @@ def main():
         redis_db=args.redis_db,
         snapshots_path=args.snapshots_path,
         events_path=args.events_path,
+        first_touch_path=args.first_touch_path,
         flow_threshold=args.flow_threshold,
         min_relative_activity=args.min_relative_activity,
         min_momentum_return_pct=args.min_momentum_return_pct,

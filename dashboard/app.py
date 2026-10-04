@@ -154,6 +154,10 @@ MICRO_FLOW_SNAPSHOTS_FILE = (
 MICRO_FLOW_EVENTS_FILE = (
     BASE_DIR / "micro_flow_events.csv"
 )
+MICRO_FLOW_FIRST_TOUCH_FILE = (
+    BASE_DIR / "micro_flow_first_touch.csv"
+)
+MICRO_FLOW_FIRST_TOUCH_THRESHOLDS_PCT = (0.10, 0.15, 0.20, 0.30)
 MICRO_FLOW_AGGTRADES_URL = (
     "https://fapi.binance.com/fapi/v1/aggTrades"
 )
@@ -37621,6 +37625,403 @@ def load_micro_flow_persisted_snapshots():
     ).copy()
 
 
+def load_micro_flow_first_touch():
+    modified_ns = get_file_modified_ns(MICRO_FLOW_FIRST_TOUCH_FILE)
+    if modified_ns is None:
+        return pd.DataFrame()
+    return load_csv_cached(
+        MICRO_FLOW_FIRST_TOUCH_FILE,
+        modified_ns,
+    ).copy()
+
+
+def _micro_flow_profit_factor(values):
+    series = pd.to_numeric(
+        pd.Series(values),
+        errors="coerce",
+    ).dropna()
+    if series.empty:
+        return np.nan
+    gains = float(series[series > 0].sum())
+    losses = float(-series[series < 0].sum())
+    if losses <= 0:
+        return np.inf if gains > 0 else np.nan
+    return gains / losses
+
+
+def _micro_flow_complete_events(events, horizon):
+    if events is None or events.empty:
+        return pd.DataFrame()
+    complete_col = f"complete_{int(horizon)}m"
+    if complete_col not in events.columns:
+        return pd.DataFrame()
+    values = events[complete_col]
+    if values.dtype == bool:
+        mask = values.fillna(False)
+    else:
+        mask = (
+            values.astype(str)
+            .str.strip()
+            .str.lower()
+            .isin({"true", "1", "yes"})
+        )
+    return events[mask].copy()
+
+
+def build_micro_flow_horizon_metrics(
+    events,
+    horizon,
+    fee_per_side_pct=0.05,
+):
+    frame = _micro_flow_complete_events(events, horizon)
+    if frame.empty:
+        return {}
+
+    return_col = f"return_{int(horizon)}m_pct"
+    mfe_col = f"mfe_{int(horizon)}m_pct"
+    mae_col = f"mae_{int(horizon)}m_pct"
+    gross = pd.to_numeric(frame.get(return_col), errors="coerce")
+    mfe = pd.to_numeric(frame.get(mfe_col), errors="coerce")
+    mae = pd.to_numeric(frame.get(mae_col), errors="coerce")
+    valid = gross.notna()
+    gross = gross[valid]
+    if gross.empty:
+        return {}
+
+    roundtrip_cost = 2.0 * float(fee_per_side_pct)
+    net = gross - roundtrip_cost
+
+    return {
+        "n": int(len(gross)),
+        "gross_avg": float(gross.mean()),
+        "gross_median": float(gross.median()),
+        "net_avg": float(net.mean()),
+        "net_median": float(net.median()),
+        "net_win_rate": float((net > 0).mean() * 100.0),
+        "gross_win_rate": float((gross > 0).mean() * 100.0),
+        "mfe_avg": float(mfe.mean()) if mfe.notna().any() else np.nan,
+        "mfe_median": float(mfe.median()) if mfe.notna().any() else np.nan,
+        "mae_avg": float(mae.mean()) if mae.notna().any() else np.nan,
+        "mae_median": float(mae.median()) if mae.notna().any() else np.nan,
+        "pf_net": _micro_flow_profit_factor(net),
+    }
+
+
+def build_micro_flow_hit_rate_table(
+    events,
+    horizon,
+    fee_per_side_pct=0.05,
+    thresholds=(0.10, 0.15, 0.20, 0.30),
+):
+    frame = _micro_flow_complete_events(events, horizon)
+    if frame.empty:
+        return pd.DataFrame()
+
+    mfe = pd.to_numeric(
+        frame.get(f"mfe_{int(horizon)}m_pct"),
+        errors="coerce",
+    )
+    mae = pd.to_numeric(
+        frame.get(f"mae_{int(horizon)}m_pct"),
+        errors="coerce",
+    )
+    gross = pd.to_numeric(
+        frame.get(f"return_{int(horizon)}m_pct"),
+        errors="coerce",
+    )
+    roundtrip_cost = 2.0 * float(fee_per_side_pct)
+    net = gross - roundtrip_cost
+
+    rows = []
+    for threshold in thresholds:
+        rows.append({
+            "Threshold %": float(threshold),
+            "N": int(gross.notna().sum()),
+            "MFE hit %": float((mfe >= threshold).mean() * 100.0),
+            "MAE hit %": float((mae >= threshold).mean() * 100.0),
+            "Final gross ≥ threshold %": float(
+                (gross >= threshold).mean() * 100.0
+            ),
+            "Final net > 0 %": float((net > 0).mean() * 100.0),
+        })
+    return pd.DataFrame(rows)
+
+
+_MICRO_FLOW_DRIVER_SPECS = {
+    "Flow magnitude 5s": {
+        "column": "flow_imbalance_5s",
+        "transform": "abs",
+        "bins": [-np.inf, 0.55, 0.70, 0.80, 0.90, np.inf],
+        "labels": ["<0.55", "0.55–0.70", "0.70–0.80", "0.80–0.90", "≥0.90"],
+    },
+    "Flow magnitude 15s": {
+        "column": "flow_imbalance_15s",
+        "transform": "abs",
+        "bins": [-np.inf, 0.25, 0.50, 0.70, 0.85, np.inf],
+        "labels": ["<0.25", "0.25–0.50", "0.50–0.70", "0.70–0.85", "≥0.85"],
+    },
+    "Relative activity 5s": {
+        "column": "relative_activity_5s",
+        "transform": "raw",
+        "bins": [-np.inf, 1.5, 2.0, 3.0, 5.0, 10.0, np.inf],
+        "labels": ["<1.5x", "1.5–2x", "2–3x", "3–5x", "5–10x", "≥10x"],
+    },
+    "Trade acceleration 5s": {
+        "column": "trade_acceleration_5s",
+        "transform": "raw",
+        "bins": [-np.inf, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, np.inf],
+        "labels": ["<1x", "1–1.5x", "1.5–2x", "2–3x", "3–5x", "5–10x", "≥10x"],
+    },
+    "Return magnitude 5s %": {
+        "column": "return_5s_pct",
+        "transform": "abs",
+        "bins": [-np.inf, 0.02, 0.04, 0.08, 0.15, 0.30, np.inf],
+        "labels": ["<0.02", "0.02–0.04", "0.04–0.08", "0.08–0.15", "0.15–0.30", "≥0.30"],
+    },
+    "Directional BTC residual 5s %": {
+        "column": "residual_vs_btc_5s_pct",
+        "transform": "directional",
+        "bins": [-np.inf, -0.20, -0.10, -0.05, 0.0, 0.05, 0.10, 0.20, np.inf],
+        "labels": ["<-0.20", "-0.20–-0.10", "-0.10–-0.05", "-0.05–0", "0–0.05", "0.05–0.10", "0.10–0.20", "≥0.20"],
+    },
+    "Price efficiency 5s": {
+        "column": "price_efficiency_5s",
+        "transform": "raw",
+        "bins": [-np.inf, 0.02, 0.04, 0.08, 0.15, 0.30, np.inf],
+        "labels": ["<0.02", "0.02–0.04", "0.04–0.08", "0.08–0.15", "0.15–0.30", "≥0.30"],
+    },
+    "Directional flow delta 1s vs 5s": {
+        "column": "flow_delta_1_vs_5",
+        "transform": "directional",
+        "bins": [-np.inf, -0.50, -0.25, -0.10, 0.0, 0.10, 0.25, 0.50, np.inf],
+        "labels": ["<-0.50", "-0.50–-0.25", "-0.25–-0.10", "-0.10–0", "0–0.10", "0.10–0.25", "0.25–0.50", "≥0.50"],
+    },
+}
+
+
+def _micro_flow_driver_bucket(frame, driver_name):
+    spec = _MICRO_FLOW_DRIVER_SPECS.get(driver_name)
+    if spec is None or spec["column"] not in frame.columns:
+        return pd.Series(index=frame.index, dtype="object")
+
+    values = pd.to_numeric(frame[spec["column"]], errors="coerce")
+    transform = spec.get("transform")
+    if transform == "abs":
+        values = values.abs()
+    elif transform == "directional":
+        direction = np.where(
+            frame.get("side", pd.Series(index=frame.index, dtype=str))
+            .astype(str)
+            .str.upper()
+            .eq("LONG"),
+            1.0,
+            -1.0,
+        )
+        values = values * direction
+
+    return pd.cut(
+        values,
+        bins=spec["bins"],
+        labels=spec["labels"],
+        include_lowest=True,
+        ordered=True,
+    )
+
+
+def build_micro_flow_driver_bucket_table(
+    events,
+    horizon,
+    driver_name,
+    fee_per_side_pct=0.05,
+    min_n=5,
+):
+    frame = _micro_flow_complete_events(events, horizon)
+    if frame.empty:
+        return pd.DataFrame()
+
+    frame = frame.copy()
+    frame["Driver bucket"] = _micro_flow_driver_bucket(
+        frame,
+        driver_name,
+    )
+    gross_col = f"return_{int(horizon)}m_pct"
+    mfe_col = f"mfe_{int(horizon)}m_pct"
+    mae_col = f"mae_{int(horizon)}m_pct"
+    roundtrip_cost = 2.0 * float(fee_per_side_pct)
+
+    rows = []
+    for bucket, group in frame.groupby(
+        "Driver bucket",
+        observed=True,
+        sort=False,
+    ):
+        gross = pd.to_numeric(group[gross_col], errors="coerce").dropna()
+        if len(gross) < int(min_n):
+            continue
+        net = gross - roundtrip_cost
+        mfe = pd.to_numeric(group[mfe_col], errors="coerce")
+        mae = pd.to_numeric(group[mae_col], errors="coerce")
+        rows.append({
+            "Driver": driver_name,
+            "Bucket": str(bucket),
+            "N": int(len(gross)),
+            "Gross avg %": float(gross.mean()),
+            "Gross med %": float(gross.median()),
+            "Net avg %": float(net.mean()),
+            "Net med %": float(net.median()),
+            "Net win %": float((net > 0).mean() * 100.0),
+            "PF net": _micro_flow_profit_factor(net),
+            "MFE avg %": float(mfe.mean()),
+            "MAE avg %": float(mae.mean()),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_micro_flow_driver_cross_table(
+    events,
+    horizon,
+    driver_a,
+    driver_b,
+    fee_per_side_pct=0.05,
+    min_n=5,
+):
+    frame = _micro_flow_complete_events(events, horizon)
+    if frame.empty or driver_a == driver_b:
+        return pd.DataFrame()
+
+    frame = frame.copy()
+    frame["Driver A bucket"] = _micro_flow_driver_bucket(frame, driver_a)
+    frame["Driver B bucket"] = _micro_flow_driver_bucket(frame, driver_b)
+    gross_col = f"return_{int(horizon)}m_pct"
+    roundtrip_cost = 2.0 * float(fee_per_side_pct)
+
+    rows = []
+    grouped = frame.groupby(
+        ["Driver A bucket", "Driver B bucket"],
+        observed=True,
+        sort=False,
+    )
+    for (bucket_a, bucket_b), group in grouped:
+        gross = pd.to_numeric(group[gross_col], errors="coerce").dropna()
+        if len(gross) < int(min_n):
+            continue
+        net = gross - roundtrip_cost
+        rows.append({
+            driver_a: str(bucket_a),
+            driver_b: str(bucket_b),
+            "N": int(len(gross)),
+            "Net avg %": float(net.mean()),
+            "Net med %": float(net.median()),
+            "Net win %": float((net > 0).mean() * 100.0),
+            "PF net": _micro_flow_profit_factor(net),
+        })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(
+        ["Net avg %", "N"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
+
+
+def _micro_flow_first_touch_tag(value):
+    return f"{int(round(float(value) * 100)):03d}"
+
+
+def build_micro_flow_first_touch_matrix(
+    events,
+    first_touch,
+    horizon,
+    fee_per_side_pct=0.05,
+    thresholds=MICRO_FLOW_FIRST_TOUCH_THRESHOLDS_PCT,
+):
+    if (
+        events is None
+        or events.empty
+        or first_touch is None
+        or first_touch.empty
+        or "event_id" not in events.columns
+        or "event_id" not in first_touch.columns
+    ):
+        return pd.DataFrame(), 0
+
+    frame = _micro_flow_complete_events(events, horizon)
+    if frame.empty:
+        return pd.DataFrame(), 0
+
+    touch_columns = ["event_id"]
+    for threshold in thresholds:
+        tag = _micro_flow_first_touch_tag(threshold)
+        touch_columns.extend([
+            f"tp_{tag}_timestamp",
+            f"sl_{tag}_timestamp",
+        ])
+    touch_columns = [
+        column for column in touch_columns
+        if column in first_touch.columns
+    ]
+    merged = frame.merge(
+        first_touch[touch_columns].drop_duplicates("event_id", keep="last"),
+        on="event_id",
+        how="inner",
+    )
+    if merged.empty:
+        return pd.DataFrame(), 0
+
+    signal_ts = pd.to_numeric(merged["timestamp"], errors="coerce")
+    horizon_end = signal_ts + int(horizon) * 60 * 1000
+    time_exit_return = pd.to_numeric(
+        merged[f"return_{int(horizon)}m_pct"],
+        errors="coerce",
+    )
+    roundtrip_cost = 2.0 * float(fee_per_side_pct)
+    rows = []
+
+    for tp in thresholds:
+        tp_col = f"tp_{_micro_flow_first_touch_tag(tp)}_timestamp"
+        if tp_col not in merged.columns:
+            continue
+        tp_ts = pd.to_numeric(merged[tp_col], errors="coerce")
+        for sl in thresholds:
+            sl_col = f"sl_{_micro_flow_first_touch_tag(sl)}_timestamp"
+            if sl_col not in merged.columns:
+                continue
+            sl_ts = pd.to_numeric(merged[sl_col], errors="coerce")
+
+            tp_valid = tp_ts.notna() & (tp_ts <= horizon_end)
+            sl_valid = sl_ts.notna() & (sl_ts <= horizon_end)
+            tie = tp_valid & sl_valid & (tp_ts == sl_ts)
+            tp_first = tp_valid & (~sl_valid | (tp_ts < sl_ts))
+            # Conservative: if TP and SL first appear inside the same 1-second
+            # bucket we count it as SL because intrasecond ordering is unknown.
+            sl_first = sl_valid & (~tp_valid | (sl_ts <= tp_ts))
+            time_exit = ~(tp_first | sl_first)
+
+            gross = pd.Series(np.nan, index=merged.index, dtype=float)
+            gross.loc[tp_first] = float(tp)
+            gross.loc[sl_first] = -float(sl)
+            gross.loc[time_exit] = time_exit_return.loc[time_exit]
+            gross = gross.dropna()
+            if gross.empty:
+                continue
+            net = gross - roundtrip_cost
+
+            rows.append({
+                "TP %": float(tp),
+                "SL %": float(sl),
+                "N": int(len(gross)),
+                "TP first %": float(tp_first.mean() * 100.0),
+                "SL first %": float(sl_first.mean() * 100.0),
+                "Same-second tie %": float(tie.mean() * 100.0),
+                "Time exit %": float(time_exit.mean() * 100.0),
+                "Gross avg %": float(gross.mean()),
+                "Net avg %": float(net.mean()),
+                "Net win %": float((net > 0).mean() * 100.0),
+                "PF net": _micro_flow_profit_factor(net),
+            })
+
+    return pd.DataFrame(rows), int(len(merged))
+
+
 @st.cache_data(ttl=2, show_spinner=False)
 def load_micro_flow_collector_status():
     try:
@@ -41683,6 +42084,327 @@ if selected_section == "micro_flow":
                     key="micro_flow_persisted_summary",
                 )
 
+            st.markdown("### Event Performance Analyzer")
+            st.caption(
+                "Completed-event research only. Positive returns are already "
+                "side-adjusted (favorable for LONG/SHORT). Net metrics subtract "
+                "the configured round-trip research cost. Thresholds here do "
+                "not change the live collector."
+            )
+
+            analyzer_top = st.columns([1.4, 1.0, 1.1, 1.1])
+            analyzer_event_options = ["ALL"] + sorted(
+                persisted_events.get(
+                    "event_type",
+                    pd.Series(dtype=str),
+                ).dropna().astype(str).unique().tolist()
+            )
+            default_analyzer_event = (
+                analyzer_event_options.index("MOMENTUM_SHORT")
+                if "MOMENTUM_SHORT" in analyzer_event_options
+                else 0
+            )
+            analyzer_symbol_options = ["ALL"] + sorted(
+                persisted_events.get(
+                    "symbol",
+                    pd.Series(dtype=str),
+                ).dropna().astype(str).unique().tolist()
+            )
+
+            with analyzer_top[0]:
+                analyzer_event = st.selectbox(
+                    "Analyze event",
+                    analyzer_event_options,
+                    index=default_analyzer_event,
+                    key="micro_flow_analyzer_event",
+                )
+            with analyzer_top[1]:
+                analyzer_horizon = st.selectbox(
+                    "Outcome horizon",
+                    [1, 3, 5],
+                    index=2,
+                    format_func=lambda value: f"{value}m",
+                    key="micro_flow_analyzer_horizon",
+                )
+            with analyzer_top[2]:
+                analyzer_symbol = st.selectbox(
+                    "Analyze symbol",
+                    analyzer_symbol_options,
+                    key="micro_flow_analyzer_symbol",
+                )
+            with analyzer_top[3]:
+                collector_fee_per_side = st.number_input(
+                    "Analyzer fee / side %",
+                    min_value=0.0,
+                    max_value=0.5,
+                    value=float(fee_per_side),
+                    step=0.01,
+                    format="%.3f",
+                    key="micro_flow_analyzer_fee",
+                )
+
+            analyzer_events = persisted_events.copy()
+            if analyzer_event != "ALL":
+                analyzer_events = analyzer_events[
+                    analyzer_events["event_type"].astype(str)
+                    == analyzer_event
+                ]
+            if analyzer_symbol != "ALL":
+                analyzer_events = analyzer_events[
+                    analyzer_events["symbol"].astype(str)
+                    == analyzer_symbol
+                ]
+
+            analyzer_metrics = build_micro_flow_horizon_metrics(
+                analyzer_events,
+                int(analyzer_horizon),
+                fee_per_side_pct=float(collector_fee_per_side),
+            )
+
+            if not analyzer_metrics:
+                st.info(
+                    "No completed events match this analyzer selection yet."
+                )
+            else:
+                metric_row_1 = st.columns(6)
+                metric_row_1[0].metric(
+                    "N",
+                    f"{int(analyzer_metrics['n']):,}",
+                )
+                metric_row_1[1].metric(
+                    "Gross avg",
+                    f"{analyzer_metrics['gross_avg']:+.3f}%",
+                )
+                metric_row_1[2].metric(
+                    "Net avg",
+                    f"{analyzer_metrics['net_avg']:+.3f}%",
+                )
+                metric_row_1[3].metric(
+                    "Net median",
+                    f"{analyzer_metrics['net_median']:+.3f}%",
+                )
+                metric_row_1[4].metric(
+                    "Net win rate",
+                    f"{analyzer_metrics['net_win_rate']:.1f}%",
+                )
+                pf_net = analyzer_metrics.get("pf_net")
+                pf_text = (
+                    "∞"
+                    if pf_net is not None and np.isinf(pf_net)
+                    else (
+                        f"{pf_net:.2f}"
+                        if pf_net is not None and pd.notna(pf_net)
+                        else "—"
+                    )
+                )
+                metric_row_1[5].metric("PF net", pf_text)
+
+                metric_row_2 = st.columns(4)
+                metric_row_2[0].metric(
+                    "MFE avg / med",
+                    f"{analyzer_metrics['mfe_avg']:.3f}% / "
+                    f"{analyzer_metrics['mfe_median']:.3f}%",
+                )
+                metric_row_2[1].metric(
+                    "MAE avg / med",
+                    f"{analyzer_metrics['mae_avg']:.3f}% / "
+                    f"{analyzer_metrics['mae_median']:.3f}%",
+                )
+                metric_row_2[2].metric(
+                    "Gross median",
+                    f"{analyzer_metrics['gross_median']:+.3f}%",
+                )
+                metric_row_2[3].metric(
+                    "Round trip cost",
+                    f"{2.0 * float(collector_fee_per_side):.3f}%",
+                )
+
+                completed_analysis = _micro_flow_complete_events(
+                    analyzer_events,
+                    int(analyzer_horizon),
+                )
+                return_col = f"return_{int(analyzer_horizon)}m_pct"
+                gross_distribution = pd.to_numeric(
+                    completed_analysis.get(return_col),
+                    errors="coerce",
+                ).dropna()
+                net_distribution = (
+                    gross_distribution
+                    - 2.0 * float(collector_fee_per_side)
+                )
+
+                distribution_fig = go.Figure()
+                distribution_fig.add_trace(
+                    go.Histogram(
+                        x=net_distribution,
+                        nbinsx=45,
+                        name="Net return",
+                    )
+                )
+                distribution_fig.add_vline(
+                    x=0.0,
+                    line_width=1,
+                )
+                distribution_fig.update_layout(
+                    title=(
+                        f"Net {int(analyzer_horizon)}m return distribution · "
+                        f"{analyzer_event}"
+                    ),
+                    xaxis_title="Net return %",
+                    yaxis_title="Events",
+                    height=360,
+                    margin={"l": 30, "r": 20, "t": 55, "b": 35},
+                )
+                st.plotly_chart(
+                    distribution_fig,
+                    use_container_width=True,
+                    key="micro_flow_analyzer_distribution",
+                )
+
+                st.markdown("#### Hit-rate diagnostics")
+                hit_rates = build_micro_flow_hit_rate_table(
+                    analyzer_events,
+                    int(analyzer_horizon),
+                    fee_per_side_pct=float(collector_fee_per_side),
+                )
+                if not hit_rates.empty:
+                    st.dataframe(
+                        hit_rates,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_flow_hit_rates",
+                    )
+
+                st.markdown("#### Chronological TP / SL first-touch matrix")
+                first_touch = load_micro_flow_first_touch()
+                first_touch_matrix, first_touch_n = (
+                    build_micro_flow_first_touch_matrix(
+                        analyzer_events,
+                        first_touch,
+                        int(analyzer_horizon),
+                        fee_per_side_pct=float(collector_fee_per_side),
+                    )
+                )
+                if first_touch_matrix.empty:
+                    st.info(
+                        "Exact first-touch ordering is not available for the "
+                        "legacy completed rows. The updated collector writes "
+                        "`micro_flow_first_touch.csv`; new completed events will "
+                        "populate this matrix automatically. Same-second TP+SL "
+                        "touches are counted conservatively as SL."
+                    )
+                else:
+                    st.caption(
+                        f"Exact causal first-touch sample: {first_touch_n:,} "
+                        "completed events with 1-second touch timestamps. "
+                        "If TP and SL first appear in the same one-second bucket, "
+                        "the result is conservatively classified as SL."
+                    )
+                    st.dataframe(
+                        first_touch_matrix.sort_values(
+                            ["PF net", "Net avg %"],
+                            ascending=[False, False],
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_flow_first_touch_matrix",
+                    )
+
+                st.markdown("#### Driver Analyzer")
+                driver_controls = st.columns([1.6, 1.0])
+                driver_names = list(_MICRO_FLOW_DRIVER_SPECS)
+                with driver_controls[0]:
+                    analyzer_driver = st.selectbox(
+                        "Driver",
+                        driver_names,
+                        index=(
+                            driver_names.index("Relative activity 5s")
+                            if "Relative activity 5s" in driver_names
+                            else 0
+                        ),
+                        key="micro_flow_driver",
+                    )
+                with driver_controls[1]:
+                    analyzer_min_bucket_n = st.number_input(
+                        "Min N / bucket",
+                        min_value=2,
+                        max_value=500,
+                        value=10,
+                        step=1,
+                        key="micro_flow_driver_min_n",
+                    )
+
+                driver_table = build_micro_flow_driver_bucket_table(
+                    analyzer_events,
+                    int(analyzer_horizon),
+                    analyzer_driver,
+                    fee_per_side_pct=float(collector_fee_per_side),
+                    min_n=int(analyzer_min_bucket_n),
+                )
+                if driver_table.empty:
+                    st.info(
+                        "Not enough completed events for these driver buckets."
+                    )
+                else:
+                    st.dataframe(
+                        driver_table,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_flow_driver_table",
+                    )
+
+                with st.expander(
+                    "Multi-driver cross analyzer",
+                    expanded=False,
+                ):
+                    cross_controls = st.columns(2)
+                    with cross_controls[0]:
+                        cross_driver_a = st.selectbox(
+                            "Driver A",
+                            driver_names,
+                            index=(
+                                driver_names.index("Flow magnitude 5s")
+                                if "Flow magnitude 5s" in driver_names
+                                else 0
+                            ),
+                            key="micro_flow_cross_driver_a",
+                        )
+                    with cross_controls[1]:
+                        default_b = (
+                            driver_names.index("Relative activity 5s")
+                            if "Relative activity 5s" in driver_names
+                            else min(1, len(driver_names) - 1)
+                        )
+                        cross_driver_b = st.selectbox(
+                            "Driver B",
+                            driver_names,
+                            index=default_b,
+                            key="micro_flow_cross_driver_b",
+                        )
+
+                    cross_table = build_micro_flow_driver_cross_table(
+                        analyzer_events,
+                        int(analyzer_horizon),
+                        cross_driver_a,
+                        cross_driver_b,
+                        fee_per_side_pct=float(collector_fee_per_side),
+                        min_n=int(analyzer_min_bucket_n),
+                    )
+                    if cross_driver_a == cross_driver_b:
+                        st.info("Choose two different drivers.")
+                    elif cross_table.empty:
+                        st.info(
+                            "No cross buckets meet the minimum sample size yet."
+                        )
+                    else:
+                        st.dataframe(
+                            cross_table,
+                            use_container_width=True,
+                            hide_index=True,
+                            key="micro_flow_driver_cross_table",
+                        )
+
+            st.markdown("#### Completed event rows")
             filter_cols = st.columns(3)
             event_options = ["ALL"] + sorted(
                 persisted_events.get(
