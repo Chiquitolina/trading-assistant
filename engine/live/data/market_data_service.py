@@ -147,6 +147,8 @@ class MarketDataService:
         stale_after=90,
 
         enable_micro_flow=True,
+        micro_flow_chunk_size=25,
+        micro_flow_stale_after=45,
 
     ):
 
@@ -179,6 +181,8 @@ class MarketDataService:
         # writes happen from the service loop so high aggTrade traffic cannot
         # block candle callbacks.
         self.enable_micro_flow = bool(enable_micro_flow)
+        self.micro_flow_chunk_size = max(1, int(micro_flow_chunk_size))
+        self.micro_flow_stale_after = max(10, int(micro_flow_stale_after))
         self.micro_flow_aggregator = (
             MicroFlowSecondAggregator(
                 finalize_grace_ms=750,
@@ -257,10 +261,13 @@ class MarketDataService:
 
 
 
+        # Core candle feed and experimental aggTrade feed are intentionally
+        # separate failure domains. A Micro Flow reconnect must never stop the
+        # kline sockets used by trading/recovery.
         self.ws = None
-
         self.ws_thread = None
-
+        self.micro_flow_ws = None
+        self.micro_flow_ws_thread = None
         self.heartbeat_thread = None
 
 
@@ -285,6 +292,13 @@ class MarketDataService:
         self.ws_disconnect_detected_at_ms = None
         self.ws_recovery_in_progress = False
         self.ws_connecting_since_monotonic = None
+        self.micro_flow_ws_was_connected = False
+        self.micro_flow_ws_disconnect_detected_at_ms = None
+        self.micro_flow_transport_gap_open = False
+        self.micro_flow_transport_gap_started_at_ms = None
+        self.micro_flow_transport_gap_count = 0
+        self.micro_flow_transport_gap_last_duration_ms = None
+        self.micro_flow_messages_dropped_during_gap = 0
         self.closed_integrity_last_check_monotonic = 0.0
 
 
@@ -316,7 +330,13 @@ class MarketDataService:
 
         self.stop_event.clear()
 
-
+        # A producer restart is itself a discontinuity for aggTrade research.
+        # Mark a new transport epoch immediately so the collector invalidates
+        # pre-restart rolling windows while the canonical history bootstraps.
+        if self.enable_micro_flow:
+            self._open_micro_flow_transport_gap(
+                int(time.time() * 1000)
+            )
 
         self._start_heartbeat()
 
@@ -366,6 +386,21 @@ class MarketDataService:
             self._flush_bootstrap_ws_buffer()
 
             self._publish_initial_market_flow()
+
+            # Start the high-volume aggTrade feed only after the canonical
+            # candle bootstrap is complete. Its lifecycle is independent from
+            # the core kline WS so research traffic cannot take trading data
+            # down with it.
+            if self.enable_micro_flow:
+                self._start_micro_flow_websocket()
+                self.micro_flow_ws_was_connected = bool(
+                    self.micro_flow_ws
+                    and self.micro_flow_ws.is_connected
+                )
+                if self.micro_flow_ws_was_connected:
+                    self._close_micro_flow_transport_gap(
+                        int(time.time() * 1000)
+                    )
 
 
 
@@ -438,6 +473,8 @@ class MarketDataService:
                             ),
                         )
                         
+                self._check_micro_flow_ws_transport(now_ms)
+
                 self._check_ws_connection_watchdog()
 
                 if not self.ws_recovery_in_progress:
@@ -485,24 +522,21 @@ class MarketDataService:
 
 
         if self.ws is not None:
-
             self.ws.stop()
 
+        if self.micro_flow_ws is not None:
+            self.micro_flow_ws.stop()
 
-
-        if (
-
-            self.ws_thread
-
-            and self.ws_thread.is_alive()
-
-            and self.ws_thread is not threading.current_thread()
-
+        for thread in (
+            self.ws_thread,
+            self.micro_flow_ws_thread,
         ):
-
-            self.ws_thread.join(timeout=5)
-
-
+            if (
+                thread
+                and thread.is_alive()
+                and thread is not threading.current_thread()
+            ):
+                thread.join(timeout=5)
 
         self.phase = "STOPPED"
 
@@ -2131,23 +2165,7 @@ class MarketDataService:
 
 
     def _on_ws_message(self, message):
-        if (
-            self.enable_micro_flow
-            and self.micro_flow_aggregator is not None
-            and self.micro_flow_aggregator.is_agg_trade_message(
-                message
-            )
-        ):
-            ready = (
-                self.micro_flow_aggregator
-                .ingest_ws_message(message)
-            )
-            self._enqueue_micro_flow_seconds(ready)
-            return {
-                "type": "agg_trade",
-                "queued_seconds": len(ready),
-            }
-
+        """Canonical kline callback. Never handles aggTrade research traffic."""
         buffered = (
             self._buffer_closed_ws_message_if_needed(
                 message
@@ -2160,6 +2178,39 @@ class MarketDataService:
         return self._process_ws_message(
             message
         )
+
+
+    def _on_micro_flow_ws_message(self, message):
+        """Experimental aggTrade callback isolated from the candle WS."""
+        if (
+            not self.enable_micro_flow
+            or self.micro_flow_aggregator is None
+        ):
+            return None
+
+        if not self.micro_flow_aggregator.is_agg_trade_message(
+            message
+        ):
+            return None
+
+        # During a transport discontinuity we intentionally discard residual
+        # callbacks from sockets that are being torn down. The collector sees
+        # explicit gap markers and re-warms after reconnect.
+        if self.micro_flow_transport_gap_open:
+            self.micro_flow_messages_dropped_during_gap += 1
+            return {
+                "type": "agg_trade_dropped_transport_gap"
+            }
+
+        ready = (
+            self.micro_flow_aggregator
+            .ingest_ws_message(message)
+        )
+        self._enqueue_micro_flow_seconds(ready)
+        return {
+            "type": "agg_trade",
+            "queued_seconds": len(ready),
+        }
 
 
     def _register_market_flow_close(
@@ -2609,6 +2660,140 @@ class MarketDataService:
 
             self._write_status()
 
+    def _publish_micro_flow_transport_marker(
+        self,
+        event_type,
+        timestamp_ms,
+        **metadata,
+    ):
+        if not self.enable_micro_flow:
+            return None
+
+        try:
+            return self.publisher.publish_micro_flow_transport_event(
+                event_type=event_type,
+                timestamp_ms=int(timestamp_ms),
+                service_id=self.service_id,
+                **metadata,
+            )
+        except Exception as exc:
+            self.micro_flow_publish_errors += 1
+            print(
+                "[MICRO FLOW TRANSPORT] marker publish error "
+                f"event={event_type} "
+                f"error={type(exc).__name__}:{exc}"
+            )
+            return None
+
+
+    def _open_micro_flow_transport_gap(self, detected_at_ms):
+        detected_at_ms = int(detected_at_ms)
+        if self.micro_flow_transport_gap_open:
+            return False
+
+        # Publish already-completed seconds first so the gap marker becomes a
+        # strict epoch boundary in Redis stream order.
+        self._flush_micro_flow_seconds()
+
+        discarded = 0
+        if self.micro_flow_aggregator is not None:
+            discarded = (
+                self.micro_flow_aggregator
+                .reset_transport_state()
+            )
+
+        self.micro_flow_transport_gap_open = True
+        self.micro_flow_transport_gap_started_at_ms = detected_at_ms
+        self.micro_flow_transport_gap_count += 1
+
+        self._publish_micro_flow_transport_marker(
+            "transport_gap_start",
+            detected_at_ms,
+            discarded_active_buckets=int(discarded),
+        )
+
+        print(
+            "[MICRO FLOW TRANSPORT] gap opened "
+            f"at={detected_at_ms} "
+            f"discarded_active_buckets={discarded}"
+        )
+        return True
+
+
+    def _close_micro_flow_transport_gap(
+        self,
+        reconnected_at_ms,
+    ):
+        reconnected_at_ms = int(reconnected_at_ms)
+        started_at_ms = self.micro_flow_transport_gap_started_at_ms
+
+        discarded = 0
+        if self.micro_flow_aggregator is not None:
+            discarded = (
+                self.micro_flow_aggregator
+                .reset_transport_state()
+            )
+
+        duration_ms = (
+            max(0, reconnected_at_ms - int(started_at_ms))
+            if started_at_ms is not None
+            else None
+        )
+        self.micro_flow_transport_gap_last_duration_ms = duration_ms
+
+        self._publish_micro_flow_transport_marker(
+            "transport_gap_end",
+            reconnected_at_ms,
+            gap_started_at_ms=started_at_ms,
+            gap_duration_ms=duration_ms,
+            discarded_active_buckets=int(discarded),
+        )
+
+        self.micro_flow_transport_gap_open = False
+        self.micro_flow_transport_gap_started_at_ms = None
+
+        print(
+            "[MICRO FLOW TRANSPORT] gap closed "
+            f"at={reconnected_at_ms} "
+            f"duration_ms={duration_ms} "
+            f"discarded_active_buckets={discarded}"
+        )
+
+
+    def _check_micro_flow_ws_transport(self, now_ms):
+        if (
+            not self.enable_micro_flow
+            or self.micro_flow_ws is None
+        ):
+            return
+
+        connected = bool(
+            self.micro_flow_ws.is_connected
+        )
+
+        if connected:
+            if not self.micro_flow_ws_was_connected:
+                self.micro_flow_ws_was_connected = True
+
+                if (
+                    self.micro_flow_transport_gap_open
+                    or self.micro_flow_ws_disconnect_detected_at_ms
+                    is not None
+                ):
+                    self._close_micro_flow_transport_gap(
+                        now_ms
+                    )
+                    self.micro_flow_ws_disconnect_detected_at_ms = None
+            return
+
+        if self.micro_flow_ws_was_connected:
+            self.micro_flow_ws_was_connected = False
+            self.micro_flow_ws_disconnect_detected_at_ms = int(now_ms)
+            self._open_micro_flow_transport_gap(
+                now_ms
+            )
+
+
     def _check_ws_connection_watchdog(self):
         connected = bool(
             self.ws
@@ -2673,45 +2858,59 @@ class MarketDataService:
 
 
     def _start_websocket(self):
-
+        # Core feed: klines only. Keep the original conservative reconnect
+        # policy because REST candle repair can bridge outages safely.
         self.ws = WSClient(
-
             self._on_ws_message,
-
             timeframes=self.timeframes,
-
             symbols=self.symbols,
-
             chunk_size=self.chunk_size,
-
             stale_after=self.stale_after,
-
-            include_agg_trades=(
-                self.enable_micro_flow
-            ),
-
+            include_agg_trades=False,
+            client_name="core",
+            min_reconnect_interval=60,
+            reconnect_delay_floor=30,
+            reconnect_delay_cap=120,
+            enable_coverage_audit=True,
         )
-
-
 
         self.ws.start()
 
-
-
         self.ws_thread = threading.Thread(
-
             target=self.ws.run,
-
             daemon=True,
-
-            name="market-data-service-ws",
-
+            name="market-data-service-ws-core",
         )
-
-
-
         self.ws_thread.start()
 
+
+    def _start_micro_flow_websocket(self):
+        if not self.enable_micro_flow:
+            return
+
+        self.micro_flow_ws = WSClient(
+            self._on_micro_flow_ws_message,
+            timeframes=(),
+            symbols=self.symbols,
+            chunk_size=self.micro_flow_chunk_size,
+            stale_after=self.micro_flow_stale_after,
+            include_agg_trades=True,
+            client_name="micro-flow",
+            # aggTrade cannot be reconstructed losslessly, so reconnect faster
+            # than the core candle feed while still avoiding reconnect storms.
+            min_reconnect_interval=15,
+            reconnect_delay_floor=5,
+            reconnect_delay_cap=60,
+            enable_coverage_audit=False,
+        )
+
+        self.micro_flow_ws.start()
+        self.micro_flow_ws_thread = threading.Thread(
+            target=self.micro_flow_ws.run,
+            daemon=True,
+            name="market-data-service-ws-micro-flow",
+        )
+        self.micro_flow_ws_thread.start()
 
 
     def _start_heartbeat(self):
@@ -2816,12 +3015,34 @@ class MarketDataService:
 
             "running": self.running,
 
+            # Backward-compatible alias: ws_connected always means the
+            # canonical kline transport, never the experimental aggTrade feed.
             "ws_connected": bool(
-
                 self.ws
-
                 and self.ws.is_connected
-
+            ),
+            "core_ws_connected": bool(
+                self.ws
+                and self.ws.is_connected
+            ),
+            "micro_flow_ws_connected": bool(
+                self.micro_flow_ws
+                and self.micro_flow_ws.is_connected
+            ),
+            "micro_flow_transport_gap_open": bool(
+                self.micro_flow_transport_gap_open
+            ),
+            "micro_flow_transport_gap_started_at_ms": (
+                self.micro_flow_transport_gap_started_at_ms
+            ),
+            "micro_flow_transport_gap_count": int(
+                self.micro_flow_transport_gap_count
+            ),
+            "micro_flow_transport_gap_last_duration_ms": (
+                self.micro_flow_transport_gap_last_duration_ms
+            ),
+            "micro_flow_messages_dropped_during_gap": int(
+                self.micro_flow_messages_dropped_during_gap
             ),
 
             "symbols": len(self.symbols),

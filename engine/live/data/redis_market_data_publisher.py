@@ -25,6 +25,7 @@ from engine.live.data.redis_market_data_protocol import (
     MICRO_FLOW_SECONDS_STREAM,
 
     MICRO_FLOW_SECONDS_STREAM_MAXLEN,
+    MICRO_FLOW_TRANSPORT_STATE_KEY,
 
     closed_published_key,
 
@@ -2286,6 +2287,45 @@ class RedisMarketDataPublisher:
 
         )
 
+
+
+    def publish_micro_flow_transport_event(
+        self,
+        event_type: str,
+        timestamp_ms: int,
+        **metadata,
+    ):
+        event_type = str(event_type or "").strip().lower()
+        if event_type not in {
+            "transport_gap_start",
+            "transport_gap_end",
+        }:
+            raise ValueError(
+                "invalid Micro Flow transport event: "
+                f"{event_type!r}"
+            )
+
+        payload = {
+            "type": "micro_flow_transport",
+            "event": event_type,
+            "timestamp": int(timestamp_ms),
+        }
+        payload.update(metadata)
+
+        serialized = self._serialize(payload)
+        pipeline = self.redis.pipeline(transaction=False)
+        pipeline.xadd(
+            MICRO_FLOW_SECONDS_STREAM,
+            {"payload": serialized},
+            maxlen=MICRO_FLOW_SECONDS_STREAM_MAXLEN,
+            approximate=True,
+        )
+        pipeline.set(
+            MICRO_FLOW_TRANSPORT_STATE_KEY,
+            serialized,
+        )
+        result = pipeline.execute()
+        return result[0] if result else None
 
 
     def publish_ws_message(

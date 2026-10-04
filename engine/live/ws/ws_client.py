@@ -40,6 +40,11 @@ class WSClient:
         stale_after=60,
         chunk_size=25,
         include_agg_trades=False,
+        client_name="core",
+        min_reconnect_interval=60,
+        reconnect_delay_floor=30,
+        reconnect_delay_cap=120,
+        enable_coverage_audit=True,
     ):
 
         self.on_message = on_message
@@ -53,6 +58,14 @@ class WSClient:
         self.chunk_size = chunk_size
 
         self.include_agg_trades = bool(include_agg_trades)
+        self.client_name = str(client_name or "ws")
+        self.min_reconnect_interval = max(0, int(min_reconnect_interval))
+        self.reconnect_delay_floor = max(1, int(reconnect_delay_floor))
+        self.reconnect_delay_cap = max(
+            self.reconnect_delay_floor,
+            int(reconnect_delay_cap),
+        )
+        self.enable_coverage_audit = bool(enable_coverage_audit)
 
 
 
@@ -78,7 +91,6 @@ class WSClient:
 
         self._last_reconnect = 0
 
-        self.min_reconnect_interval = 60
 
 
 
@@ -129,6 +141,9 @@ class WSClient:
         self._callback_slow_100ms = 0
 
         self._last_callback_stats_log = time.time()
+        self._last_error_signature = None
+        self._last_error_log_at = 0.0
+        self._suppressed_error_count = 0
 
 
 
@@ -200,7 +215,7 @@ class WSClient:
 
         except Exception as e:
 
-            print(f"\033[94m[WS CLIENT]\033[0m ❌ Initial connect failed: {e}")
+            print(f"\033[94m[WS CLIENT:{self.client_name}]\033[0m ❌ Initial connect failed: {e}")
 
             self.is_connected = False
 
@@ -218,7 +233,8 @@ class WSClient:
 
 
 
-                self._report_closed_candle_coverage()
+                if self.enable_coverage_audit:
+                    self._report_closed_candle_coverage()
 
 
 
@@ -252,7 +268,7 @@ class WSClient:
 
                         print(
 
-                            f"\033[94m[WS HEALTH]\033[0m "
+                            f"\033[94m[WS HEALTH:{self.client_name}]\033[0m "
 
                             f"group={group_id} "
 
@@ -280,7 +296,7 @@ class WSClient:
 
                             print(
 
-                                f"\033[91m[WS CLIENT]\033[0m "
+                                f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
 
                                 f"❌ Dead WS groups detected: "
 
@@ -320,7 +336,7 @@ class WSClient:
 
                     print(
 
-                        f"\033[94m[WS CLIENT]\033[0m "
+                        f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
 
                         f"⚠️ WS handshake timeout: "
 
@@ -342,7 +358,7 @@ class WSClient:
 
                         print(
 
-                            f"\033[94m[WS CLIENT]\033[0m ⚠️ WS stale detected: "
+                            f"\033[94m[WS CLIENT:{self.client_name}]\033[0m ⚠️ WS stale detected: "
 
                             f"no messages for {now - self.last_message_at:.1f}s"
 
@@ -360,7 +376,7 @@ class WSClient:
 
             except Exception as e:
 
-                print(f"\033[94m[WS CLIENT]\033[0m ❌ WS loop error: {e}")
+                print(f"\033[94m[WS CLIENT:{self.client_name}]\033[0m ❌ WS loop error: {e}")
 
                 self.is_connected = False
 
@@ -388,7 +404,7 @@ class WSClient:
 
     def _connect(self):
 
-        print("\n\033[94m[WS CLIENT]\033[0m 🔌 Connecting WS...")
+        print(f"\n\033[94m[WS CLIENT:{self.client_name}]\033[0m 🔌 Connecting WS...")
 
 
 
@@ -416,7 +432,7 @@ class WSClient:
 
             print(
 
-                "\033[94m[WS CLIENT]\033[0m "
+                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
 
                 "⚠️ Existing TWM found, stopping before reconnect"
 
@@ -547,23 +563,14 @@ class WSClient:
 
 
                 print(
-
-                    f"\033[94m[WS CLIENT]\033[0m "
-
+                    f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
                     f"📡 WS group {group_id}: "
-
                     f"symbols={len(group_symbols)} "
-
                     f"streams={len(streams)} "
-
                     f"kline_streams={kline_stream_count} "
-
                     f"agg_trade_streams={agg_trade_stream_count} "
-
-                    f"socket_key={socket_key} "
-
-                    f"list={','.join(group_symbols)}"
-
+                    f"first={group_symbols[0] if group_symbols else '-'} "
+                    f"last={group_symbols[-1] if group_symbols else '-'}"
                 )
 
 
@@ -578,7 +585,7 @@ class WSClient:
 
             print(
 
-                f"\033[94m[WS CLIENT]\033[0m "
+                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
 
                 f"⏳ Waiting for all {len(self._group_symbols)} WS groups..."
 
@@ -645,6 +652,7 @@ class WSClient:
 
 
             self._connected_at = time.time()
+            self.is_connected = True
 
 
 
@@ -656,7 +664,7 @@ class WSClient:
 
             print(
 
-                f"\n\033[94m[WS CLIENT]\033[0m "
+                f"\n\033[94m[WS CLIENT:{self.client_name}]\033[0m "
 
                 f"✅ WS ready "
 
@@ -1039,21 +1047,35 @@ class WSClient:
         try:
 
             if isinstance(msg, dict) and msg.get("e") == "error":
-
-                print(
-
-                    f"\033[94m[WS CLIENT]\033[0m "
-
-                    f"⚠️ WS error: {msg}"
-
+                now = time.time()
+                signature = (
+                    str(msg.get("type") or "error"),
+                    str(msg.get("m") or ""),
+                )
+                should_log = (
+                    signature != self._last_error_signature
+                    or now - self._last_error_log_at >= 5.0
                 )
 
-
+                if should_log:
+                    suppressed = self._suppressed_error_count
+                    suffix = (
+                        f" suppressed={suppressed}"
+                        if suppressed
+                        else ""
+                    )
+                    print(
+                        f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
+                        f"⚠️ WS error: {msg}{suffix}"
+                    )
+                    self._last_error_signature = signature
+                    self._last_error_log_at = now
+                    self._suppressed_error_count = 0
+                else:
+                    self._suppressed_error_count += 1
 
                 self.is_connected = False
-
                 self._is_reconnecting = True
-
                 return
 
 
@@ -1076,8 +1098,9 @@ class WSClient:
 
             self.last_message_at = now
 
-            self.is_connected = True
-
+            # Connection health is promoted only after every multiplex group
+            # has produced at least one message. During reconnect, the first
+            # group may receive data while later groups are still starting.
             self.connect_started_at = 0.0
 
             self.handshake_failures = 0
@@ -1092,7 +1115,7 @@ class WSClient:
 
                 print(
 
-                    "\033[94m[WS CLIENT]\033[0m "
+                    f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
 
                     "✅ First WebSocket message received"
 
@@ -1104,13 +1127,10 @@ class WSClient:
 
 
 
-            self._register_closed_candle_coverage(
-
-                msg
-
-            )
-
-
+            if self.enable_coverage_audit:
+                self._register_closed_candle_coverage(
+                    msg
+                )
 
             self.on_message(msg)
 
@@ -1174,7 +1194,7 @@ class WSClient:
 
                 print(
 
-                    f"\033[94m[WS CALLBACK]\033[0m "
+                    f"\033[94m[WS CALLBACK:{self.client_name}]\033[0m "
 
                     f"samples={self._callback_samples} "
 
@@ -1212,7 +1232,7 @@ class WSClient:
 
             print(
 
-                f"\033[94m[WS CLIENT]\033[0m "
+                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
 
                 f"❌ Callback error: {e}"
 
@@ -1260,7 +1280,7 @@ class WSClient:
 
 
 
-            print("\033[94m[WS CLIENT]\033[0m 🔄 Starting reconnect...")
+            print(f"\033[94m[WS CLIENT:{self.client_name}]\033[0m 🔄 Starting reconnect...")
 
 
 
@@ -1278,7 +1298,7 @@ class WSClient:
 
                 print(
 
-                    "\033[91m[WS CLIENT]\033[0m "
+                    f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
 
                     "❌ Reconnect aborted: previous WS manager is still alive"
 
@@ -1296,15 +1316,21 @@ class WSClient:
 
 
 
-            delay = min(2 ** min(self.retries, 6), 120)
+            delay = min(
+                2 ** min(self.retries, 6),
+                self.reconnect_delay_cap,
+            )
 
-            delay = max(delay, 30)
+            delay = max(
+                delay,
+                self.reconnect_delay_floor,
+            )
 
 
 
             print(
 
-                f"\033[94m[WS CLIENT]\033[0m 🔄 Reconnecting in {delay}s..."
+                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m 🔄 Reconnecting in {delay}s..."
 
             )
 
@@ -1328,7 +1354,7 @@ class WSClient:
 
             except Exception as e:
 
-                print(f"\033[94m[WS CLIENT]\033[0m ❌ Reconnect failed: {e}")
+                print(f"\033[94m[WS CLIENT:{self.client_name}]\033[0m ❌ Reconnect failed: {e}")
 
 
 
@@ -1338,7 +1364,7 @@ class WSClient:
 
                 if self.handshake_failures >= 5:
 
-                    print("\033[94m[WS CLIENT]\033[0m ❌ Too many failures, backing off hard")
+                    print(f"\033[94m[WS CLIENT:{self.client_name}]\033[0m ❌ Too many failures, backing off hard")
 
                     time.sleep(30)
 
@@ -1368,7 +1394,7 @@ class WSClient:
 
             print(
 
-                "\033[94m[WS CLIENT]\033[0m "
+                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
 
                 "🛑 Stopping WS manager..."
 
@@ -1390,7 +1416,7 @@ class WSClient:
 
                 print(
 
-                    "\033[91m[WS CLIENT]\033[0m "
+                    f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
 
                     "❌ WS manager did not stop within 15s"
 
@@ -1406,7 +1432,7 @@ class WSClient:
 
             print(
 
-                "\033[94m[WS CLIENT]\033[0m "
+                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
 
                 "✅ WS manager stopped"
 
@@ -1422,7 +1448,7 @@ class WSClient:
 
             print(
 
-                f"\033[91m[WS CLIENT]\033[0m "
+                f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
 
                 f"❌ Stop error: {e}"
 

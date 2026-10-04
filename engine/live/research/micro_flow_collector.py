@@ -17,6 +17,7 @@ from engine.live.data.redis_market_data_protocol import (
     MICRO_FLOW_COLLECTOR_HEARTBEAT_TTL_SECONDS,
     MICRO_FLOW_COLLECTOR_STATUS_KEY,
     MICRO_FLOW_SECONDS_STREAM,
+    MICRO_FLOW_TRANSPORT_STATE_KEY,
 )
 
 
@@ -153,6 +154,14 @@ class MicroFlowCollector:
         self.events_invalidated = 0
         self.synthetic_event_candidates_skipped = 0
         self.synthetic_entry_invalidations = 0
+        self.transport_gap_open = False
+        self.transport_gaps = 0
+        self.transport_markers = 0
+        self.transport_gap_seconds_skipped = 0
+        self.transport_events_invalidated = 0
+        self.transport_last_gap_started_at_ms = None
+        self.transport_last_gap_ended_at_ms = None
+        self.transport_last_gap_duration_ms = None
         self.csv_errors = 0
         self.last_message_timestamp = None
         self.started_at_ms = int(time.time() * 1000)
@@ -306,6 +315,102 @@ class MicroFlowCollector:
         self.features[symbol].clear()
         pending = self.pending_events.pop(symbol, [])
         self.events_invalidated += len(pending)
+
+    def _reset_all_after_transport_gap(self):
+        invalidated = sum(
+            len(items)
+            for items in self.pending_events.values()
+        )
+        self.transport_events_invalidated += invalidated
+        self.events_invalidated += invalidated
+
+        self.bars.clear()
+        self.features.clear()
+        self.last_timestamp.clear()
+        self.last_event_timestamp.clear()
+        self.pending_events.clear()
+        self.btc_features.clear()
+        self.btc_feature_order.clear()
+        return invalidated
+
+    def _load_transport_state(self):
+        raw = self.redis.get(
+            MICRO_FLOW_TRANSPORT_STATE_KEY
+        )
+        if not raw:
+            return
+
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        if payload.get("type") != "micro_flow_transport":
+            return
+
+        event = str(payload.get("event") or "")
+        if event == "transport_gap_start":
+            self.transport_gap_open = True
+            self.transport_last_gap_started_at_ms = int(
+                payload.get("timestamp") or 0
+            ) or None
+        elif event == "transport_gap_end":
+            self.transport_gap_open = False
+            self.transport_last_gap_ended_at_ms = int(
+                payload.get("timestamp") or 0
+            ) or None
+            duration = payload.get("gap_duration_ms")
+            if duration is not None:
+                try:
+                    self.transport_last_gap_duration_ms = int(duration)
+                except (TypeError, ValueError):
+                    pass
+
+    def _handle_transport_marker(self, payload):
+        event = str(payload.get("event") or "").strip().lower()
+        timestamp = int(payload.get("timestamp") or 0)
+        self.transport_markers += 1
+
+        if event == "transport_gap_start":
+            self.transport_gap_open = True
+            self.transport_gaps += 1
+            self.transport_last_gap_started_at_ms = timestamp or None
+            invalidated = self._reset_all_after_transport_gap()
+            print(
+                "[MICRO FLOW COLLECTOR] transport gap start "
+                f"timestamp={timestamp} invalidated={invalidated}"
+            )
+            return True
+
+        if event == "transport_gap_end":
+            invalidated = self._reset_all_after_transport_gap()
+            self.transport_gap_open = False
+            self.transport_last_gap_ended_at_ms = timestamp or None
+
+            duration = payload.get("gap_duration_ms")
+            if duration is None and self.transport_last_gap_started_at_ms:
+                duration = max(
+                    0,
+                    timestamp - self.transport_last_gap_started_at_ms,
+                )
+            if duration is not None:
+                try:
+                    self.transport_last_gap_duration_ms = int(duration)
+                except (TypeError, ValueError):
+                    self.transport_last_gap_duration_ms = None
+
+            print(
+                "[MICRO FLOW COLLECTOR] transport gap end "
+                f"timestamp={timestamp} "
+                f"duration_ms={self.transport_last_gap_duration_ms} "
+                f"invalidated={invalidated}"
+            )
+            return True
+
+        return False
 
     def _window(self, symbol, seconds):
         history = self.bars[symbol]
@@ -775,6 +880,24 @@ class MicroFlowCollector:
             "synthetic_entry_invalidations": (
                 self.synthetic_entry_invalidations
             ),
+            "transport_gap_open": bool(self.transport_gap_open),
+            "transport_gaps": int(self.transport_gaps),
+            "transport_markers": int(self.transport_markers),
+            "transport_gap_seconds_skipped": int(
+                self.transport_gap_seconds_skipped
+            ),
+            "transport_events_invalidated": int(
+                self.transport_events_invalidated
+            ),
+            "transport_last_gap_started_at_ms": (
+                self.transport_last_gap_started_at_ms
+            ),
+            "transport_last_gap_ended_at_ms": (
+                self.transport_last_gap_ended_at_ms
+            ),
+            "transport_last_gap_duration_ms": (
+                self.transport_last_gap_duration_ms
+            ),
             "pending_events": pending_count,
             "csv_errors": self.csv_errors,
             "last_message_timestamp": self.last_message_timestamp,
@@ -784,6 +907,7 @@ class MicroFlowCollector:
                 "event_requires_real_second": True,
                 "entry_requires_immediate_next_real_second": True,
                 "synthetic_seconds_allowed_in_rolling_windows": True,
+                "transport_gap_resets_all_windows": True,
             },
             "thresholds": {
                 "flow_threshold": self.flow_threshold,
@@ -833,6 +957,7 @@ class MicroFlowCollector:
             raise RuntimeError("Redis connection failed")
 
         self._load_cursor()
+        self._load_transport_state()
         self.running = True
 
         print(
@@ -869,6 +994,21 @@ class MicroFlowCollector:
                             payload = json.loads(raw_payload)
                         except (TypeError, ValueError, json.JSONDecodeError):
                             self.invalid_payloads += 1
+                            continue
+
+                        if (
+                            isinstance(payload, dict)
+                            and payload.get("type")
+                            == "micro_flow_transport"
+                        ):
+                            self._handle_transport_marker(payload)
+                            continue
+
+                        if self.transport_gap_open:
+                            # Never interpret missing transport as zero trading.
+                            # Ignore any residual/reordered second states until
+                            # the explicit gap-end marker arrives.
+                            self.transport_gap_seconds_skipped += 1
                             continue
 
                         bar = self._normalize_real_bar(payload)

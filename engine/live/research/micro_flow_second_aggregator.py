@@ -21,6 +21,8 @@ class MicroFlowSecondAggregator:
         self.seconds_finalized = 0
         self.late_trades_dropped = 0
         self.invalid_messages = 0
+        self.transport_resets = 0
+        self.buckets_discarded_on_reset = 0
 
     @staticmethod
     def _unwrap(message):
@@ -32,6 +34,23 @@ class MicroFlowSecondAggregator:
     def is_agg_trade_message(cls, message):
         payload = cls._unwrap(message)
         return isinstance(payload, dict) and payload.get("e") == "aggTrade"
+
+
+    def reset_transport_state(self):
+        """Drop in-flight buckets after a transport discontinuity.
+
+        aggTrade gaps cannot be reconstructed losslessly from the candle feed.
+        When the micro-flow websocket disconnects, keeping pre-gap buckets would
+        mix two transport epochs and make rolling flow windows look continuous
+        when they are not. The service calls this on disconnect/reconnect.
+        """
+        with self._lock:
+            discarded = len(self._current)
+            self._current.clear()
+            self._last_finalized_second.clear()
+            self.transport_resets += 1
+            self.buckets_discarded_on_reset += discarded
+            return discarded
 
     @staticmethod
     def _new_bucket(
@@ -237,6 +256,10 @@ class MicroFlowSecondAggregator:
                 "seconds_finalized": int(self.seconds_finalized),
                 "late_trades_dropped": int(self.late_trades_dropped),
                 "invalid_messages": int(self.invalid_messages),
+                "transport_resets": int(self.transport_resets),
+                "buckets_discarded_on_reset": int(
+                    self.buckets_discarded_on_reset
+                ),
                 "active_symbol_buckets": int(len(self._current)),
                 "finalize_grace_ms": int(self.finalize_grace_ms),
             }

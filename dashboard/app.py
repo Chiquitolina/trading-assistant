@@ -116,6 +116,21 @@ MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY = getattr(
     "MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY",
     f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:collector-heartbeat",
 )
+MARKET_DATA_STATUS_KEY = getattr(
+    _redis_md_protocol,
+    "STATUS_KEY",
+    f"{_MICRO_FLOW_KEY_PREFIX}:status",
+)
+MARKET_DATA_HEARTBEAT_KEY = getattr(
+    _redis_md_protocol,
+    "HEARTBEAT_KEY",
+    f"{_MICRO_FLOW_KEY_PREFIX}:heartbeat",
+)
+MICRO_FLOW_TRANSPORT_STATE_KEY = getattr(
+    _redis_md_protocol,
+    "MICRO_FLOW_TRANSPORT_STATE_KEY",
+    f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:transport-state",
+)
 
 # Candidate monitor functions intentionally are NOT decorated with st.fragment.
 # They render inside render_volume_exhaustion_live(), which is already a fragment.
@@ -6177,6 +6192,49 @@ def render_status_dot(label: str, is_online: bool):
     )
 
 
+def render_pipeline_state(label: str, state: str):
+    state = str(state or "UNKNOWN").upper()
+    palette = {
+        "ONLINE": ("#00c853", "ONLINE"),
+        "RECOVERING": ("#ffab00", "RECOVERING"),
+        "DEGRADED": ("#ffab00", "DEGRADED"),
+        "OFFLINE": ("#ff5252", "OFFLINE"),
+        "DISABLED": ("#9e9e9e", "DISABLED"),
+    }
+    color, text = palette.get(
+        state,
+        ("#9e9e9e", state),
+    )
+    st.markdown(
+        f"""
+        <div style="
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            border: 1px solid rgba(128,128,128,0.25);
+            border-radius: 10px;
+            margin-bottom: 6px;
+            min-height: 78px;
+        ">
+            <div style="
+                width: 14px;
+                height: 14px;
+                border-radius: 50%;
+                background-color: {color};
+                box-shadow: 0 0 8px {color};
+                flex-shrink: 0;
+            "></div>
+            <div>
+                <div style="font-size: 0.85rem; opacity: 0.8;">{label}</div>
+                <div style="font-weight: 700; font-size: 1rem;">{text}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_signal_text(signal: str, trend: str, direction: str, momentum: str, reason: str):
     signal = str(signal or "N/A").upper().strip()
 
@@ -6678,6 +6736,107 @@ def load_status():
     except Exception as e:
         status["error"] = str(e)
         return status
+
+
+@st.cache_data(ttl=2, show_spinner=False)
+def load_market_data_pipeline_health():
+    result = {
+        "state": "OFFLINE",
+        "phase": "UNKNOWN",
+        "running": False,
+        "core_ws_connected": False,
+        "redis_heartbeat": False,
+        "micro_flow_enabled": False,
+        "micro_flow_ws_connected": False,
+        "micro_flow_transport_gap_open": False,
+        "micro_flow_collector_online": False,
+        "micro_flow_collector_gap_open": False,
+        "error": None,
+    }
+
+    try:
+        client = redis.Redis(
+            host=DASHBOARD_REDIS_HOST,
+            port=DASHBOARD_REDIS_PORT,
+            db=DASHBOARD_REDIS_DB,
+            decode_responses=True,
+        )
+
+        result["redis_heartbeat"] = bool(
+            client.exists(MARKET_DATA_HEARTBEAT_KEY)
+        )
+
+        raw_status = client.get(MARKET_DATA_STATUS_KEY)
+        producer = json.loads(raw_status) if raw_status else {}
+        if not isinstance(producer, dict):
+            producer = {}
+
+        result["phase"] = str(
+            producer.get("phase") or "UNKNOWN"
+        ).upper()
+        result["running"] = bool(producer.get("running"))
+        result["core_ws_connected"] = bool(
+            producer.get(
+                "core_ws_connected",
+                producer.get("ws_connected", False),
+            )
+        )
+        result["micro_flow_enabled"] = bool(
+            producer.get("micro_flow_enabled", False)
+        )
+        result["micro_flow_ws_connected"] = bool(
+            producer.get("micro_flow_ws_connected", False)
+        )
+        result["micro_flow_transport_gap_open"] = bool(
+            producer.get("micro_flow_transport_gap_open", False)
+        )
+        result["micro_flow_transport_gap_count"] = int(
+            producer.get("micro_flow_transport_gap_count", 0) or 0
+        )
+        result["micro_flow_last_gap_duration_ms"] = (
+            producer.get("micro_flow_transport_gap_last_duration_ms")
+        )
+
+        collector_heartbeat = bool(
+            client.exists(MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY)
+        )
+        raw_collector = client.get(
+            MICRO_FLOW_COLLECTOR_STATUS_KEY
+        )
+        collector = (
+            json.loads(raw_collector)
+            if raw_collector
+            else {}
+        )
+        if not isinstance(collector, dict):
+            collector = {}
+
+        result["micro_flow_collector_online"] = bool(
+            collector_heartbeat
+            and collector.get("running", False)
+        )
+        result["micro_flow_collector_gap_open"] = bool(
+            collector.get("transport_gap_open", False)
+        )
+
+        if (
+            result["redis_heartbeat"]
+            and result["running"]
+            and result["core_ws_connected"]
+            and result["phase"] == "READY"
+            and not bool(producer.get("bootstrap_buffering", False))
+        ):
+            result["state"] = "ONLINE"
+        elif result["redis_heartbeat"] and result["running"]:
+            result["state"] = "RECOVERING"
+        else:
+            result["state"] = "OFFLINE"
+
+        return result
+
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
 
 
 # =========================
@@ -7329,6 +7488,7 @@ if save_description:
 @st.fragment(run_every="5s")
 def render_live_system_status():
     status = load_status()
+    market_health = load_market_data_pipeline_health()
 
     engine_online = status["engine_online"]
     ws_online = status["ws_online"]
@@ -7382,9 +7542,9 @@ def render_live_system_status():
             )
 
         with c2:
-            render_status_dot(
-                "WS",
-                ws_online,
+            render_pipeline_state(
+                "MARKET DATA",
+                market_health.get("state", "OFFLINE"),
             )
 
         c3.metric(
@@ -7434,6 +7594,83 @@ def render_live_system_status():
             
         with c11:
             st.metric("SYMBOL", symbol_from_status)
+
+        # =========================
+        # MARKET DATA PIPELINE HEALTH
+        # =========================
+        health_cols = st.columns(5)
+
+        with health_cols[0]:
+            render_pipeline_state(
+                "Core Kline WS",
+                "ONLINE"
+                if market_health.get("core_ws_connected")
+                else (
+                    "RECOVERING"
+                    if market_health.get("running")
+                    else "OFFLINE"
+                ),
+            )
+
+        with health_cols[1]:
+            render_pipeline_state(
+                "Redis heartbeat",
+                "ONLINE"
+                if market_health.get("redis_heartbeat")
+                else "OFFLINE",
+            )
+
+        with health_cols[2]:
+            render_pipeline_state(
+                "Strategy feed",
+                "ONLINE" if ws_online else (
+                    "RECOVERING"
+                    if market_health.get("redis_heartbeat")
+                    else "OFFLINE"
+                ),
+            )
+
+        with health_cols[3]:
+            if not market_health.get("micro_flow_enabled"):
+                micro_ws_state = "DISABLED"
+            elif market_health.get("micro_flow_transport_gap_open"):
+                micro_ws_state = "RECOVERING"
+            elif market_health.get("micro_flow_ws_connected"):
+                micro_ws_state = "ONLINE"
+            else:
+                micro_ws_state = "OFFLINE"
+            render_pipeline_state(
+                "Micro Flow WS",
+                micro_ws_state,
+            )
+
+        with health_cols[4]:
+            collector_state = (
+                "DEGRADED"
+                if market_health.get("micro_flow_collector_gap_open")
+                else (
+                    "ONLINE"
+                    if market_health.get("micro_flow_collector_online")
+                    else "OFFLINE"
+                )
+            )
+            render_pipeline_state(
+                "Micro Flow collector",
+                collector_state,
+            )
+
+        st.caption(
+            "Market Data phase: "
+            f"{market_health.get('phase', 'UNKNOWN')} · "
+            "Micro Flow transport gaps: "
+            f"{int(market_health.get('micro_flow_transport_gap_count', 0) or 0):,}"
+        )
+
+        if market_health.get("error"):
+            st.warning(
+                "Market Data health unavailable: "
+                f"{market_health['error']}"
+            )
 
         # =========================
         # ENGINE HEALTH
@@ -41381,8 +41618,18 @@ if selected_section == "micro_flow":
                 "Large gaps "
                 f"{int(collector_status.get('large_gaps') or 0):,} · "
                 "Invalidated "
-                f"{int(collector_status.get('events_invalidated') or 0):,}"
+                f"{int(collector_status.get('events_invalidated') or 0):,} · "
+                "Transport gaps "
+                f"{int(collector_status.get('transport_gaps') or 0):,} · "
+                "Gap skipped states "
+                f"{int(collector_status.get('transport_gap_seconds_skipped') or 0):,}"
             )
+            if collector_status.get("transport_gap_open"):
+                st.warning(
+                    "Micro Flow transport gap is OPEN. New second states are "
+                    "ignored until the aggTrade websocket reconnects and the "
+                    "collector re-warms."
+                )
 
         persisted_snapshots = load_micro_flow_persisted_snapshots()
         persisted_events = load_micro_flow_persisted_events()
