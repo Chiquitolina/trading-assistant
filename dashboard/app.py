@@ -10281,6 +10281,106 @@ def build_confirmed_swing_retests_from_confirmation_study(
 
 
 
+def _resample_contiguous_1m_for_micro_swing(
+    one_minute,
+    timeframe,
+):
+    """Build closed micro-HTF candles from contiguous 1m history.
+
+    Historical Micro REACTION can have much deeper 1m retention than the
+    native Redis 5m list. For a 5m structural scan, reconstructing 5m candles
+    from the same contiguous 1m path keeps the visual window and the pivot
+    universe aligned instead of silently truncating history.
+    """
+    work = _prepare_confirmed_swing_retest_candles(one_minute)
+    if work.empty:
+        return pd.DataFrame()
+
+    timeframe_minutes = timeframe_to_minutes(str(timeframe))
+    if timeframe_minutes is None:
+        return pd.DataFrame()
+
+    timeframe_minutes = int(timeframe_minutes)
+    if timeframe_minutes <= 1:
+        return work.copy()
+
+    bucket_ms = timeframe_minutes * 60_000
+    work = work.copy()
+    work["_bucket_timestamp"] = (
+        work["timestamp"].astype("int64") // bucket_ms
+    ) * bucket_ms
+
+    aggregation = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "timestamp": ["count", "min", "max"],
+    }
+    if "volume" in work.columns:
+        aggregation["volume"] = "sum"
+
+    grouped = work.groupby(
+        "_bucket_timestamp",
+        sort=True,
+    ).agg(aggregation)
+
+    # Flatten the MultiIndex created by the timestamp diagnostics.
+    grouped.columns = [
+        "_".join(
+            str(part)
+            for part in column
+            if str(part)
+        ).strip("_")
+        if isinstance(column, tuple)
+        else str(column)
+        for column in grouped.columns
+    ]
+    grouped = grouped.reset_index()
+
+    expected_last_offset = (timeframe_minutes - 1) * 60_000
+    valid = (
+        pd.to_numeric(grouped["timestamp_count"], errors="coerce")
+        .eq(timeframe_minutes)
+        & pd.to_numeric(grouped["timestamp_min"], errors="coerce")
+        .eq(pd.to_numeric(grouped["_bucket_timestamp"], errors="coerce"))
+        & pd.to_numeric(grouped["timestamp_max"], errors="coerce")
+        .eq(
+            pd.to_numeric(
+                grouped["_bucket_timestamp"],
+                errors="coerce",
+            )
+            + expected_last_offset
+        )
+    )
+    grouped = grouped.loc[valid].copy()
+    if grouped.empty:
+        return pd.DataFrame()
+
+    result = pd.DataFrame({
+        "timestamp": pd.to_numeric(
+            grouped["_bucket_timestamp"],
+            errors="coerce",
+        ),
+        "open": pd.to_numeric(grouped["open_first"], errors="coerce"),
+        "high": pd.to_numeric(grouped["high_max"], errors="coerce"),
+        "low": pd.to_numeric(grouped["low_min"], errors="coerce"),
+        "close": pd.to_numeric(grouped["close_last"], errors="coerce"),
+    })
+    if "volume_sum" in grouped.columns:
+        result["volume"] = pd.to_numeric(
+            grouped["volume_sum"],
+            errors="coerce",
+        )
+
+    return (
+        result
+        .dropna(subset=["timestamp", "open", "high", "low", "close"])
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def scan_confirmed_swing_retests_all_symbols(
     symbols,
@@ -10358,11 +10458,71 @@ def scan_confirmed_swing_retests_all_symbols(
             if swing_timeframe == "1m":
                 timeframe_candles = prepared
             else:
+                # Historical Micro REACTION can scan several thousand 1m minutes.
+                # A fixed 400-bar HTF fetch silently truncated 5m structure to
+                # ~33h even when the chart covered 75-83h. Request enough HTF
+                # candles to cover the same causal confirmation/retest window,
+                # plus detector warmup, while respecting the research cap.
+                timeframe_minutes = max(
+                    1,
+                    int(timeframe_to_minutes(swing_timeframe)),
+                )
+                required_history_minutes = int(
+                    max_retest_age_minutes
+                    + max_age_minutes
+                    + 120
+                )
+                required_timeframe_bars = int(
+                    np.ceil(
+                        required_history_minutes
+                        / float(timeframe_minutes)
+                    )
+                ) + int(2 * swing_bars + 20)
+                timeframe_limit = min(
+                    int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
+                    max(400, required_timeframe_bars),
+                )
                 timeframe_candles = load_volume_exhaustion_research_candles(
                     symbol=symbol,
                     timeframe=swing_timeframe,
-                    limit=400,
+                    limit=int(timeframe_limit),
                 )
+
+                # The native 5m Redis history may be shallower than the 1m
+                # research history (for example 400 5m candles vs 4,500+ 1m
+                # candles). In that case, rebuild 5m candles from the same
+                # contiguous 1m path so Historical overlay can actually scan
+                # the whole visible window.
+                if swing_timeframe == "5m":
+                    rebuilt_5m = _resample_contiguous_1m_for_micro_swing(
+                        prepared,
+                        "5m",
+                    )
+                    if not rebuilt_5m.empty:
+                        native_start = np.nan
+                        if (
+                            timeframe_candles is not None
+                            and not timeframe_candles.empty
+                            and "timestamp" in timeframe_candles.columns
+                        ):
+                            native_start = pd.to_numeric(
+                                timeframe_candles["timestamp"],
+                                errors="coerce",
+                            ).min()
+                        rebuilt_start = pd.to_numeric(
+                            rebuilt_5m["timestamp"],
+                            errors="coerce",
+                        ).min()
+                        if (
+                            timeframe_candles is None
+                            or timeframe_candles.empty
+                            or pd.isna(native_start)
+                            or (
+                                pd.notna(rebuilt_start)
+                                and float(rebuilt_start) < float(native_start)
+                            )
+                        ):
+                            timeframe_candles = rebuilt_5m
 
             if timeframe_candles is None or timeframe_candles.empty:
                 continue
@@ -37103,6 +37263,12 @@ if selected_section == "micro_reaction":
                 value=360,
                 step=30,
                 key="micro_reaction_recent_minutes",
+                disabled=(micro_view_mode == "Historical overlay"),
+                help=(
+                    "Used by Recent overlay / scanner views. Historical overlay "
+                    "automatically scans the full retained 1m research window, "
+                    "so this control is intentionally disabled there."
+                ),
             )
 
         with filter_2:
@@ -37267,6 +37433,7 @@ if selected_section == "micro_reaction":
                 )
 
                 chart_view = chart_retests.copy()
+                raw_visible_retests = pd.DataFrame()
                 if not chart_view.empty:
                     retest_ts = pd.to_numeric(
                         chart_view["retest_timestamp"],
@@ -37279,6 +37446,9 @@ if selected_section == "micro_reaction":
                             inclusive="both",
                         )
                     ].copy()
+                    # Preserve the pre-filter visible population so Historical
+                    # overlay can explain a blank chart (no REACTION vs no scan).
+                    raw_visible_retests = chart_view.copy()
 
                     if micro_status_filter == "REACTION only":
                         chart_view = chart_view.loc[
@@ -37308,6 +37478,53 @@ if selected_section == "micro_reaction":
                             historical_view["status"].astype(str).eq("REACTION")
                         ].copy()
 
+                    # Make an empty historical chart diagnosable. The raw visible
+                    # population is counted before status filtering; this tells us
+                    # whether the scanner found first touches but none qualified as
+                    # REACTION, versus finding no causal retests at all.
+                    raw_for_side = raw_visible_retests.copy()
+                    if (
+                        not raw_for_side.empty
+                        and micro_side_filter != "ALL"
+                    ):
+                        raw_for_side = raw_for_side.loc[
+                            raw_for_side["signal"].astype(str).eq(
+                                micro_side_filter
+                            )
+                        ].copy()
+
+                    if raw_for_side.empty:
+                        historical_first_touches = 0
+                        historical_reactions = 0
+                        historical_failed = 0
+                        historical_indecisive = 0
+                    else:
+                        raw_status = raw_for_side["status"].astype(str)
+                        historical_first_touches = int(len(raw_for_side))
+                        historical_reactions = int(raw_status.eq("REACTION").sum())
+                        historical_failed = int(raw_status.eq("TOUCH_FAILED").sum())
+                        historical_indecisive = int(
+                            raw_status.eq("TOUCH_INDECISIVE").sum()
+                        )
+
+                    diag_1, diag_2, diag_3, diag_4 = st.columns(4)
+                    diag_1.metric(
+                        "Visible first touches",
+                        historical_first_touches,
+                    )
+                    diag_2.metric(
+                        "Visible REACTIONs",
+                        historical_reactions,
+                    )
+                    diag_3.metric(
+                        "Failed touches",
+                        historical_failed,
+                    )
+                    diag_4.metric(
+                        "Indecisive touches",
+                        historical_indecisive,
+                    )
+
                     historical_fig = build_micro_reaction_historical_overlay_chart(
                         candles=chart_candles,
                         symbol=str(selected_micro_symbol),
@@ -37335,9 +37552,23 @@ if selected_section == "micro_reaction":
                         )
 
                     if historical_view.empty:
-                        st.info(
-                            "No causal REACTION falls inside the visible historical window."
-                        )
+                        if historical_first_touches > 0:
+                            st.info(
+                                "The scanner found causal first touches in this "
+                                "historical window, but none qualify as REACTION "
+                                "with the current structural rules/side filter. "
+                                "The counters above show whether they failed or "
+                                "were indecisive."
+                            )
+                        else:
+                            st.info(
+                                "No causal first touch was reconstructed inside "
+                                "this visible historical window. If this is a 5m "
+                                "study, the scanner now requests enough 5m history "
+                                "to cover the full retained 1m window; if this stays "
+                                "at zero, the current pivot/departure/retest rules "
+                                "simply did not produce an event for this symbol."
+                            )
                     else:
                         st.markdown("#### Visible historical REACTIONs")
                         historical_columns = [
