@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 import pandas as pd
 import streamlit as st
@@ -99,6 +100,19 @@ VOLUME_EXHAUSTION_EVENTS_FILE = (
 
 VOLUME_EXHAUSTION_OUTCOMES_FILE = (
     BASE_DIR / "volume_exhaustion_outcomes.csv"
+)
+
+# Micro Flow research. The dashboard can bootstrap recent aggTrades directly
+# from Binance for one symbol. A persistent all-symbol collector can write the
+# same second-level/event schema to these files later without changing the UI.
+MICRO_FLOW_SNAPSHOTS_FILE = (
+    BASE_DIR / "micro_flow_snapshots.csv"
+)
+MICRO_FLOW_EVENTS_FILE = (
+    BASE_DIR / "micro_flow_events.csv"
+)
+MICRO_FLOW_AGGTRADES_URL = (
+    "https://fapi.binance.com/fapi/v1/aggTrades"
 )
 
 # Frozen research candidate discovered on 2026-10-02.
@@ -7832,6 +7846,7 @@ def render_current_market_flow_panel(
 DASHBOARD_SECTIONS = {
     "overview": "📊 Overview",
     "market_flow": "🌊 Market Flow",
+    "micro_flow": "⚡ Micro Flow",
     "volume_exhaustion": "⚡ Volume Exhaustion",
     "micro_reaction": "🧬 Micro REACTION",
     "reaction_swing_lab": "🧪 Reaction & Swing Lab",
@@ -7877,6 +7892,7 @@ if (
     and selected_section not in {
         "geometry_scanner",
         "volume_exhaustion",
+        "micro_flow",
         "micro_reaction",
         "swing_sweep_reclaim",
         "market_flow",
@@ -36738,6 +36754,597 @@ def render_confirmed_swing_sweep_reclaim_scanner(
     )
 
 
+
+# ==========================================
+# MICRO FLOW RESEARCH HELPERS
+# ==========================================
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_micro_flow_recent_agg_trades(
+    symbol,
+    lookback_minutes=30,
+    max_trades=50000,
+):
+    """Load recent USD-M Futures aggregate trades for one symbol.
+
+    This is a bootstrap research source for the dashboard, not the final
+    all-symbol collector. Binance aggregate trades are already executed flow,
+    so they avoid treating resting/cancelled book liquidity as real demand.
+    """
+    symbol = str(symbol).upper().strip()
+    lookback_minutes = max(1, min(int(lookback_minutes), 60))
+    max_trades = max(1000, int(max_trades))
+
+    end_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+    start_ms = end_ms - lookback_minutes * 60_000
+
+    rows = []
+    last_id = None
+    truncated = False
+    request_count = 0
+
+    while len(rows) < max_trades and request_count < 80:
+        params = {
+            "symbol": symbol,
+            "limit": 1000,
+        }
+        if last_id is None:
+            params["startTime"] = int(start_ms)
+            params["endTime"] = int(end_ms)
+        else:
+            params["fromId"] = int(last_id) + 1
+
+        try:
+            response = requests.get(
+                MICRO_FLOW_AGGTRADES_URL,
+                params=params,
+                timeout=8,
+            )
+            response.raise_for_status()
+            batch = response.json()
+        except Exception as exc:
+            return pd.DataFrame(), {
+                "error": str(exc),
+                "truncated": False,
+                "requests": request_count,
+                "lookback_minutes": lookback_minutes,
+            }
+
+        request_count += 1
+        if not isinstance(batch, list) or not batch:
+            break
+
+        for item in batch:
+            try:
+                trade_ts = int(item["T"])
+            except Exception:
+                continue
+            if trade_ts < start_ms:
+                continue
+            if trade_ts > end_ms:
+                continue
+            rows.append({
+                "agg_trade_id": int(item["a"]),
+                "timestamp": trade_ts,
+                "price": float(item["p"]),
+                "quantity": float(item["q"]),
+                "buyer_is_maker": bool(item["m"]),
+            })
+
+        try:
+            batch_last_id = int(batch[-1]["a"])
+            batch_last_ts = int(batch[-1]["T"])
+        except Exception:
+            break
+
+        if last_id is not None and batch_last_id <= last_id:
+            break
+        last_id = batch_last_id
+
+        if batch_last_ts >= end_ms or len(batch) < 1000:
+            break
+
+    if len(rows) >= max_trades:
+        truncated = True
+        rows = rows[:max_trades]
+
+    if not rows:
+        return pd.DataFrame(), {
+            "error": None,
+            "truncated": truncated,
+            "requests": request_count,
+            "lookback_minutes": lookback_minutes,
+        }
+
+    trades = pd.DataFrame(rows).drop_duplicates(
+        subset=["agg_trade_id"],
+        keep="last",
+    )
+    trades = trades.sort_values("timestamp").reset_index(drop=True)
+    trades["notional"] = trades["price"] * trades["quantity"]
+    # Binance m=True means the buyer was maker, therefore the aggressor was SELL.
+    trades["taker_side"] = np.where(
+        trades["buyer_is_maker"],
+        "SELL",
+        "BUY",
+    )
+    trades["time_utc"] = pd.to_datetime(
+        trades["timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    )
+
+    return trades, {
+        "error": None,
+        "truncated": truncated,
+        "requests": request_count,
+        "lookback_minutes": lookback_minutes,
+        "first_timestamp": int(trades["timestamp"].min()),
+        "last_timestamp": int(trades["timestamp"].max()),
+    }
+
+
+def _micro_flow_future_window(series, seconds, operation):
+    """Forward rolling helper excluding the signal second itself."""
+    shifted = series.shift(-1)
+    reversed_series = shifted.iloc[::-1]
+    if operation == "max":
+        result = reversed_series.rolling(
+            int(seconds),
+            min_periods=int(seconds),
+        ).max()
+    else:
+        result = reversed_series.rolling(
+            int(seconds),
+            min_periods=int(seconds),
+        ).min()
+    return result.iloc[::-1]
+
+
+def build_micro_flow_second_bars(trades):
+    """Convert aggTrades to causal one-second micro-flow features/outcomes."""
+    if trades is None or trades.empty:
+        return pd.DataFrame()
+
+    work = trades.copy()
+    work["second"] = pd.to_datetime(
+        work["timestamp"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.floor("s")
+    work = work.dropna(subset=["second", "price", "notional"])
+    if work.empty:
+        return pd.DataFrame()
+
+    work["buy_notional"] = np.where(
+        work["taker_side"].eq("BUY"),
+        work["notional"],
+        0.0,
+    )
+    work["sell_notional"] = np.where(
+        work["taker_side"].eq("SELL"),
+        work["notional"],
+        0.0,
+    )
+    work["buy_trade"] = work["taker_side"].eq("BUY").astype(int)
+    work["sell_trade"] = work["taker_side"].eq("SELL").astype(int)
+
+    grouped = work.groupby("second", sort=True)
+    seconds = grouped.agg(
+        open=("price", "first"),
+        high=("price", "max"),
+        low=("price", "min"),
+        close=("price", "last"),
+        trade_count=("agg_trade_id", "count"),
+        buy_trades=("buy_trade", "sum"),
+        sell_trades=("sell_trade", "sum"),
+        buy_notional=("buy_notional", "sum"),
+        sell_notional=("sell_notional", "sum"),
+        total_notional=("notional", "sum"),
+    ).reset_index()
+
+    full_index = pd.date_range(
+        seconds["second"].min(),
+        seconds["second"].max(),
+        freq="1s",
+        tz="UTC",
+    )
+    seconds = seconds.set_index("second").reindex(full_index)
+    seconds.index.name = "second"
+
+    last_price = seconds["close"].ffill()
+    for price_col in ["open", "high", "low", "close"]:
+        seconds[price_col] = seconds[price_col].fillna(last_price)
+
+    for flow_col in [
+        "trade_count",
+        "buy_trades",
+        "sell_trades",
+        "buy_notional",
+        "sell_notional",
+        "total_notional",
+    ]:
+        seconds[flow_col] = seconds[flow_col].fillna(0.0)
+
+    seconds = seconds.reset_index()
+    seconds["timestamp"] = (
+        seconds["second"].astype("int64") // 1_000_000
+    ).astype("int64")
+
+    for window in [1, 3, 5, 15]:
+        buy = seconds["buy_notional"].rolling(
+            window,
+            min_periods=window,
+        ).sum()
+        sell = seconds["sell_notional"].rolling(
+            window,
+            min_periods=window,
+        ).sum()
+        total = buy + sell
+        seconds[f"buy_notional_{window}s"] = buy
+        seconds[f"sell_notional_{window}s"] = sell
+        seconds[f"notional_{window}s"] = total
+        seconds[f"flow_imbalance_{window}s"] = np.where(
+            total > 0,
+            (buy - sell) / total,
+            np.nan,
+        )
+        seconds[f"trades_{window}s"] = seconds["trade_count"].rolling(
+            window,
+            min_periods=window,
+        ).sum()
+        seconds[f"return_{window}s_pct"] = (
+            seconds["close"] / seconds["close"].shift(window) - 1.0
+        ) * 100.0
+
+    baseline_notional = (
+        seconds["notional_5s"]
+        .shift(1)
+        .rolling(60, min_periods=20)
+        .median()
+    )
+    baseline_trades = (
+        seconds["trades_5s"]
+        .shift(1)
+        .rolling(60, min_periods=20)
+        .median()
+    )
+    seconds["relative_activity_5s"] = (
+        seconds["notional_5s"] / baseline_notional.replace(0, np.nan)
+    )
+    seconds["trade_acceleration_5s"] = (
+        seconds["trades_5s"] / baseline_trades.replace(0, np.nan)
+    )
+    seconds["flow_price_alignment_5s"] = (
+        seconds["flow_imbalance_5s"]
+        * seconds["return_5s_pct"]
+    )
+
+    # Signal state at second t is executable only from the next second.
+    seconds["entry_time"] = seconds["second"].shift(-1)
+    seconds["entry_price"] = seconds["open"].shift(-1)
+
+    for horizon_min in [1, 3, 5]:
+        horizon_seconds = horizon_min * 60
+        future_high = _micro_flow_future_window(
+            seconds["high"], horizon_seconds, "max"
+        )
+        future_low = _micro_flow_future_window(
+            seconds["low"], horizon_seconds, "min"
+        )
+        future_close = seconds["close"].shift(-horizon_seconds)
+        entry = seconds["entry_price"]
+
+        seconds[f"long_mfe_{horizon_min}m_pct"] = np.maximum(
+            0.0,
+            (future_high / entry - 1.0) * 100.0,
+        )
+        seconds[f"long_mae_{horizon_min}m_pct"] = np.maximum(
+            0.0,
+            (1.0 - future_low / entry) * 100.0,
+        )
+        seconds[f"long_return_{horizon_min}m_pct"] = (
+            future_close / entry - 1.0
+        ) * 100.0
+
+        seconds[f"short_mfe_{horizon_min}m_pct"] = np.maximum(
+            0.0,
+            (1.0 - future_low / entry) * 100.0,
+        )
+        seconds[f"short_mae_{horizon_min}m_pct"] = np.maximum(
+            0.0,
+            (future_high / entry - 1.0) * 100.0,
+        )
+        seconds[f"short_return_{horizon_min}m_pct"] = (
+            1.0 - future_close / entry
+        ) * 100.0
+        seconds[f"complete_{horizon_min}m"] = (
+            future_high.notna()
+            & future_low.notna()
+            & future_close.notna()
+            & entry.notna()
+        )
+
+    return seconds
+
+
+def attach_micro_flow_btc_context(symbol_seconds, btc_seconds):
+    if symbol_seconds is None or symbol_seconds.empty:
+        return pd.DataFrame()
+
+    result = symbol_seconds.copy()
+    if btc_seconds is None or btc_seconds.empty:
+        result["btc_return_5s_pct"] = np.nan
+        result["btc_return_15s_pct"] = np.nan
+        result["residual_vs_btc_5s_pct"] = np.nan
+        result["residual_vs_btc_15s_pct"] = np.nan
+        return result
+
+    context = btc_seconds[[
+        "timestamp",
+        "return_5s_pct",
+        "return_15s_pct",
+    ]].rename(columns={
+        "return_5s_pct": "btc_return_5s_pct",
+        "return_15s_pct": "btc_return_15s_pct",
+    })
+    result = result.merge(context, on="timestamp", how="left")
+    result["residual_vs_btc_5s_pct"] = (
+        result["return_5s_pct"] - result["btc_return_5s_pct"]
+    )
+    result["residual_vs_btc_15s_pct"] = (
+        result["return_15s_pct"] - result["btc_return_15s_pct"]
+    )
+    return result
+
+
+def extract_micro_flow_events(
+    seconds,
+    flow_threshold=0.55,
+    min_relative_activity=1.50,
+    min_momentum_return_pct=0.04,
+    absorption_flow_threshold=0.70,
+    absorption_max_return_pct=0.02,
+    cooldown_seconds=10,
+):
+    """Extract sparse transitions from continuous micro states.
+
+    These thresholds are exploratory research controls, not production rules.
+    A cooldown prevents one persistent state from becoming one event per second.
+    """
+    if seconds is None or seconds.empty:
+        return pd.DataFrame()
+
+    frame = seconds.copy()
+    flow5 = pd.to_numeric(frame["flow_imbalance_5s"], errors="coerce")
+    ret5 = pd.to_numeric(frame["return_5s_pct"], errors="coerce")
+    activity = pd.to_numeric(frame["relative_activity_5s"], errors="coerce")
+
+    conditions = {
+        "MOMENTUM_LONG": (
+            (flow5 >= float(flow_threshold))
+            & (ret5 >= float(min_momentum_return_pct))
+            & (activity >= float(min_relative_activity))
+        ),
+        "MOMENTUM_SHORT": (
+            (flow5 <= -float(flow_threshold))
+            & (ret5 <= -float(min_momentum_return_pct))
+            & (activity >= float(min_relative_activity))
+        ),
+        # Strong aggressive buying with almost no upward response -> potential
+        # sell-side absorption/reversal. Mirror logic for LONG.
+        "ABSORPTION_SHORT": (
+            (flow5 >= float(absorption_flow_threshold))
+            & (ret5.abs() <= float(absorption_max_return_pct))
+            & (activity >= float(min_relative_activity))
+        ),
+        "ABSORPTION_LONG": (
+            (flow5 <= -float(absorption_flow_threshold))
+            & (ret5.abs() <= float(absorption_max_return_pct))
+            & (activity >= float(min_relative_activity))
+        ),
+    }
+
+    selected_indexes = []
+    selected_types = []
+    selected_sides = []
+    cooldown_seconds = max(1, int(cooldown_seconds))
+
+    for event_type, mask in conditions.items():
+        candidate_idx = np.flatnonzero(mask.fillna(False).to_numpy())
+        last_idx = -10**9
+        for idx in candidate_idx:
+            if idx - last_idx < cooldown_seconds:
+                continue
+            selected_indexes.append(int(idx))
+            selected_types.append(event_type)
+            selected_sides.append(
+                "LONG" if event_type.endswith("LONG") else "SHORT"
+            )
+            last_idx = int(idx)
+
+    if not selected_indexes:
+        return pd.DataFrame()
+
+    event_rows = frame.iloc[selected_indexes].copy().reset_index(drop=True)
+    event_rows["event_type"] = selected_types
+    event_rows["side"] = selected_sides
+
+    for horizon in [1, 3, 5]:
+        for metric in ["mfe", "mae", "return"]:
+            event_rows[f"{metric}_{horizon}m_pct"] = np.where(
+                event_rows["side"].eq("LONG"),
+                event_rows[f"long_{metric}_{horizon}m_pct"],
+                event_rows[f"short_{metric}_{horizon}m_pct"],
+            )
+
+    event_rows["event_time_local"] = (
+        pd.to_datetime(event_rows["second"], utc=True, errors="coerce")
+        .dt.tz_convert(TZ)
+    )
+    event_rows["entry_time_local"] = (
+        pd.to_datetime(event_rows["entry_time"], utc=True, errors="coerce")
+        .dt.tz_convert(TZ)
+    )
+    return event_rows.sort_values("timestamp").reset_index(drop=True)
+
+
+def build_micro_flow_event_summary(events, fee_per_side_pct=0.05):
+    if events is None or events.empty:
+        return pd.DataFrame()
+
+    rows = []
+    roundtrip_cost = 2.0 * float(fee_per_side_pct)
+    for (event_type, side), group in events.groupby(
+        ["event_type", "side"], dropna=False
+    ):
+        row = {
+            "Event": event_type,
+            "Side": side,
+            "N": int(len(group)),
+        }
+        for horizon in [1, 3, 5]:
+            complete = group[
+                group[f"complete_{horizon}m"].fillna(False)
+            ].copy()
+            row[f"N {horizon}m"] = int(len(complete))
+            for metric, label in [
+                ("mfe", "MFE"),
+                ("mae", "MAE"),
+                ("return", "Return"),
+            ]:
+                values = pd.to_numeric(
+                    complete[f"{metric}_{horizon}m_pct"],
+                    errors="coerce",
+                ).dropna()
+                row[f"{label}{horizon} avg %"] = (
+                    float(values.mean()) if not values.empty else np.nan
+                )
+                row[f"{label}{horizon} med %"] = (
+                    float(values.median()) if not values.empty else np.nan
+                )
+            returns = pd.to_numeric(
+                complete[f"return_{horizon}m_pct"], errors="coerce"
+            ).dropna()
+            row[f"Net return {horizon}m avg %"] = (
+                float((returns - roundtrip_cost).mean())
+                if not returns.empty else np.nan
+            )
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values(
+        ["Event", "Side"]
+    ).reset_index(drop=True)
+
+
+def build_micro_flow_chart(seconds, events, symbol):
+    if seconds is None or seconds.empty:
+        return go.Figure()
+
+    frame = seconds.copy()
+    x = pd.to_datetime(frame["second"], utc=True, errors="coerce").dt.tz_convert(TZ)
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.50, 0.28, 0.22],
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=frame["close"],
+            mode="lines",
+            name=f"{symbol} price",
+        ),
+        row=1,
+        col=1,
+    )
+
+    if events is not None and not events.empty:
+        marker_map = {
+            "MOMENTUM_LONG": "triangle-up",
+            "MOMENTUM_SHORT": "triangle-down",
+            "ABSORPTION_LONG": "star-triangle-up",
+            "ABSORPTION_SHORT": "star-triangle-down",
+        }
+        for event_type, group in events.groupby("event_type"):
+            fig.add_trace(
+                go.Scatter(
+                    x=pd.to_datetime(
+                        group["second"], utc=True, errors="coerce"
+                    ).dt.tz_convert(TZ),
+                    y=group["close"],
+                    mode="markers",
+                    name=event_type,
+                    marker={
+                        "size": 9,
+                        "symbol": marker_map.get(event_type, "circle"),
+                    },
+                    customdata=np.column_stack([
+                        group["flow_imbalance_5s"],
+                        group["relative_activity_5s"],
+                        group["return_5s_pct"],
+                    ]),
+                    hovertemplate=(
+                        "%{x}<br>Price %{y:.8g}<br>"
+                        "Flow5 %{customdata[0]:.3f}<br>"
+                        "Activity %{customdata[1]:.2f}x<br>"
+                        "Ret5 %{customdata[2]:.4f}%<extra></extra>"
+                    ),
+                ),
+                row=1,
+                col=1,
+            )
+
+    for key, label in [
+        ("flow_imbalance_1s", "Flow 1s"),
+        ("flow_imbalance_5s", "Flow 5s"),
+        ("flow_imbalance_15s", "Flow 15s"),
+    ]:
+        fig.add_trace(
+            go.Scatter(x=x, y=frame[key], mode="lines", name=label),
+            row=2,
+            col=1,
+        )
+    fig.add_hline(y=0, row=2, col=1, line_width=1)
+
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=frame["relative_activity_5s"],
+            mode="lines",
+            name="Relative activity 5s",
+        ),
+        row=3,
+        col=1,
+    )
+    fig.add_hline(y=1, row=3, col=1, line_width=1)
+
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="Flow", range=[-1.05, 1.05], row=2, col=1)
+    fig.update_yaxes(title_text="Activity x", row=3, col=1)
+    fig.update_layout(
+        height=760,
+        title=f"Micro Flow bootstrap · {symbol}",
+        hovermode="x unified",
+        legend={"orientation": "h"},
+        margin={"l": 40, "r": 20, "t": 60, "b": 40},
+    )
+    return fig
+
+
+def load_micro_flow_persisted_events():
+    modified_ns = get_file_modified_ns(MICRO_FLOW_EVENTS_FILE)
+    if modified_ns is None:
+        return pd.DataFrame()
+    return load_csv_cached(
+        MICRO_FLOW_EVENTS_FILE,
+        modified_ns,
+    ).copy()
+
 # ==========================================
 # MICRO REACTION RESEARCH HELPERS
 # ==========================================
@@ -38312,40 +38919,89 @@ def build_micro_reaction_driver_leaderboard(
 
 
 MICRO_REACTION_CROSS_CONDITIONS = {
+    # Core structure: strongest regions from the latest 24h 5m/5x5 pass.
     "departure_1_1_5": {
         "label": "Departure 1.00–1.50%",
         "source": "max_departure_pct",
         "min": 1.00,
         "max": 1.50,
-        "tier": "PRIMARY",
-    },
-    "rel_volume_lt_1": {
-        "label": "Rel vol <1.00x",
-        "source": "reaction_relative_volume_30",
-        "max": 1.00,
-        "tier": "PRIMARY",
-    },
-    "rejection_wick_ge_0_8": {
-        "label": "Rejection wick ≥0.80",
-        "source": "reaction_rejection_wick_share",
-        "min": 0.80,
-        "tier": "PRIMARY",
+        "family": "CORE",
     },
     "confirm_retest_30_60": {
         "label": "Confirm→Retest 30–60m",
         "source": "confirmed_to_retest_min",
         "min": 30.0,
         "max": 60.0,
-        "tier": "PRIMARY",
+        "family": "CORE",
+    },
+
+    # Volume relationships that separated better in the latest build.
+    "reaction_departure_relvol_0_75_1": {
+        "label": "Reaction/departure rel vol 0.75–1.00x",
+        "source": "reaction_vs_departure_rel_volume",
+        "min": 0.75,
+        "max": 1.00,
+        "family": "VOLUME",
+    },
+    "rel_volume_1_5_2": {
+        "label": "Relative volume 1.50–2.00x",
+        "source": "reaction_relative_volume_30",
+        "min": 1.50,
+        "max": 2.00,
+        "family": "VOLUME",
+    },
+
+    # Reaction-candle geometry. Body/range and tiny rejection wick are highly
+    # related, so the cross enumerator deliberately never combines them together.
+    "reaction_range_0_35_0_50": {
+        "label": "Reaction range 0.35–0.50%",
+        "source": "reaction_range_pct",
+        "min": 0.35,
+        "max": 0.50,
+        "family": "CANDLE",
+    },
+    "body_range_ge_0_8": {
+        "label": "Body/range ≥0.80",
+        "source": "__body_range_share__",
+        "min": 0.80,
+        "family": "CANDLE",
+    },
+    "rejection_wick_lt_0_1": {
+        "label": "Rejection wick <0.10",
+        "source": "reaction_rejection_wick_share",
+        "max": 0.10,
+        "family": "CANDLE",
+    },
+
+    # Secondary regions kept to test whether they add conditional value rather
+    # than because they were strong enough to define the core hypothesis alone.
+    "confirm_retest_10_20": {
+        "label": "Confirm→Retest 10–20m",
+        "source": "confirmed_to_retest_min",
+        "min": 10.0,
+        "max": 20.0,
+        "family": "SECONDARY",
     },
     "close_strength_0_55_0_85": {
         "label": "Close strength 0.55–0.85",
         "source": "reaction_close_strength",
         "min": 0.55,
         "max": 0.85,
-        "tier": "SECONDARY",
+        "family": "SECONDARY",
     },
 }
+
+# Mutually exclusive windows should never be emitted as a cross hypothesis.
+MICRO_REACTION_CROSS_EXCLUSIVE_GROUPS = (
+    frozenset({"confirm_retest_30_60", "confirm_retest_10_20"}),
+)
+
+# These two describe nearly the same candle geometry. Keeping both as
+# single-driver candidates is useful, but counting their intersection as two
+# independent confirmations would overstate the evidence.
+MICRO_REACTION_CROSS_REDUNDANT_PAIRS = (
+    frozenset({"body_range_ge_0_8", "rejection_wick_lt_0_1"}),
+)
 
 
 def _micro_reaction_cross_condition_mask(frame, condition_key):
@@ -38354,13 +39010,33 @@ def _micro_reaction_cross_condition_mask(frame, condition_key):
     if spec is None or frame is None or frame.empty:
         return pd.Series(False, index=getattr(frame, "index", None), dtype=bool)
 
-    values = pd.to_numeric(
-        frame.get(
-            str(spec["source"]),
-            pd.Series(np.nan, index=frame.index),
-        ),
-        errors="coerce",
-    )
+    source = str(spec["source"])
+    if source == "__body_range_share__":
+        body = pd.to_numeric(
+            frame.get(
+                "reaction_body_pct",
+                pd.Series(np.nan, index=frame.index),
+            ),
+            errors="coerce",
+        )
+        candle_range = pd.to_numeric(
+            frame.get(
+                "reaction_range_pct",
+                pd.Series(np.nan, index=frame.index),
+            ),
+            errors="coerce",
+        )
+        values = (
+            body / candle_range.replace(0.0, np.nan)
+        ).clip(lower=0.0, upper=1.0)
+    else:
+        values = pd.to_numeric(
+            frame.get(
+                source,
+                pd.Series(np.nan, index=frame.index),
+            ),
+            errors="coerce",
+        )
     mask = values.notna()
     if "min" in spec:
         mask &= values.ge(float(spec["min"]))
@@ -38519,13 +39195,12 @@ def build_micro_reaction_driver_cross_analysis(
     slippage_per_side_pct=0.0,
     max_depth=5,
 ):
-    """Evaluate all broad 2→N driver crosses on the same causal universe.
+    """Evaluate pre-declared 2→N driver crosses on the same causal universe.
 
-    The five component regions are intentionally broad and pre-declared from
-    the initial single-driver pass.  We enumerate their intersections rather
-    than searching arbitrary numeric thresholds.  Results remain exploratory:
-    overlapping rows are highly dependent and must later survive longer windows
-    and forward/stability tests.
+    Regions come from the latest single-driver pass rather than an optimizer.
+    Mutually-exclusive time windows and intentionally redundant candle-geometry
+    pairs are skipped. Results remain exploratory: overlapping rows are highly
+    dependent and must later survive longer windows and forward/stability tests.
     """
     from itertools import combinations
 
@@ -38558,6 +39233,20 @@ def build_micro_reaction_driver_cross_analysis(
     rows = []
     for depth in range(2, max_depth + 1):
         for combo in combinations(condition_keys, depth):
+            combo_set = frozenset(combo)
+
+            if any(
+                exclusive_group.issubset(combo_set)
+                for exclusive_group in MICRO_REACTION_CROSS_EXCLUSIVE_GROUPS
+            ):
+                continue
+
+            if any(
+                redundant_pair.issubset(combo_set)
+                for redundant_pair in MICRO_REACTION_CROSS_REDUNDANT_PAIRS
+            ):
+                continue
+
             group = filter_micro_reaction_driver_cross_events(
                 retests_df=work,
                 condition_keys=combo,
@@ -38584,17 +39273,23 @@ def build_micro_reaction_driver_cross_analysis(
                 str(MICRO_REACTION_CROSS_CONDITIONS[key]["label"])
                 for key in combo
             ]
-            tiers = {
-                str(MICRO_REACTION_CROSS_CONDITIONS[key].get("tier", "PRIMARY"))
+            families = {
+                str(
+                    MICRO_REACTION_CROSS_CONDITIONS[key].get(
+                        "family", "SECONDARY"
+                    )
+                )
                 for key in combo
             }
+            family_order = ["CORE", "VOLUME", "CANDLE", "SECONDARY"]
+            family_label = " + ".join(
+                family for family in family_order if family in families
+            )
             row = {
                 "Cross": " × ".join(labels),
                 "Condition keys": "|".join(combo),
                 "Depth": int(depth),
-                "Family": (
-                    "PRIMARY ONLY" if tiers == {"PRIMARY"} else "WITH CLOSE STRENGTH"
-                ),
+                "Family": family_label,
                 "N": int(len(group)),
                 "Symbols": int(
                     group.get("symbol", pd.Series(dtype="object"))
@@ -40159,6 +40854,447 @@ if selected_section == "volume_exhaustion":
     render_volume_exhaustion_live()
 
 
+if selected_section == "micro_flow":
+    st.markdown("## ⚡ Micro Flow")
+    st.caption(
+        "Research bootstrap for a continuously active micro strategy. "
+        "It uses executed Binance Futures aggTrades, aggregates them to 1-second "
+        "states, measures aggressive buy/sell flow, price response, activity "
+        "acceleration and BTC-relative movement, then evaluates causal 1m/3m/5m "
+        "outcomes from the next second. This dashboard fetch is intentionally "
+        "single-symbol; the production research path is a persistent all-symbol "
+        "WebSocket collector feeding the same schema."
+    )
+
+    bootstrap_tab, collector_tab = st.tabs([
+        "Bootstrap · recent aggTrades",
+        "Persistent collector dataset",
+    ])
+
+    with bootstrap_tab:
+        micro_flow_symbols = sorted({
+            str(symbol).upper()
+            for symbol in CANDIDATE_V1_MARKET_SYMBOLS
+            if str(symbol).strip()
+        })
+        if not micro_flow_symbols:
+            micro_flow_symbols = ["BTCUSDT"]
+
+        top_1, top_2, top_3, top_4 = st.columns([1.25, 1, 1, 1])
+        with top_1:
+            micro_flow_symbol = st.selectbox(
+                "Symbol",
+                micro_flow_symbols,
+                index=(
+                    micro_flow_symbols.index("BTCUSDT")
+                    if "BTCUSDT" in micro_flow_symbols
+                    else 0
+                ),
+                key="micro_flow_symbol",
+            )
+        with top_2:
+            micro_flow_lookback = st.selectbox(
+                "Recent lookback",
+                [15, 30, 60],
+                index=1,
+                format_func=lambda value: f"{value} min",
+                key="micro_flow_lookback",
+            )
+        with top_3:
+            micro_flow_max_trades = st.selectbox(
+                "Max aggTrades",
+                [20000, 50000, 100000],
+                index=1,
+                format_func=lambda value: f"{value:,}",
+                key="micro_flow_max_trades",
+            )
+        with top_4:
+            st.write("")
+            st.write("")
+            micro_flow_refresh = st.button(
+                "Load / refresh flow",
+                use_container_width=True,
+                key="micro_flow_refresh",
+            )
+
+        st.markdown("### Exploratory event definitions")
+        threshold_1, threshold_2, threshold_3 = st.columns(3)
+        with threshold_1:
+            micro_flow_threshold = st.number_input(
+                "Momentum · |flow 5s| ≥",
+                min_value=0.10,
+                max_value=0.95,
+                value=0.55,
+                step=0.05,
+                key="micro_flow_threshold",
+            )
+            micro_flow_min_activity = st.number_input(
+                "Relative activity 5s ≥",
+                min_value=0.50,
+                max_value=10.00,
+                value=1.50,
+                step=0.25,
+                key="micro_flow_min_activity",
+            )
+        with threshold_2:
+            micro_flow_min_return = st.number_input(
+                "Momentum · |return 5s| ≥ %",
+                min_value=0.000,
+                max_value=1.000,
+                value=0.040,
+                step=0.010,
+                format="%.3f",
+                key="micro_flow_min_return",
+            )
+            micro_flow_absorption_flow = st.number_input(
+                "Absorption · |flow 5s| ≥",
+                min_value=0.10,
+                max_value=0.99,
+                value=0.70,
+                step=0.05,
+                key="micro_flow_absorption_flow",
+            )
+        with threshold_3:
+            micro_flow_absorption_return = st.number_input(
+                "Absorption · |return 5s| ≤ %",
+                min_value=0.000,
+                max_value=0.500,
+                value=0.020,
+                step=0.005,
+                format="%.3f",
+                key="micro_flow_absorption_return",
+            )
+            micro_flow_cooldown = st.number_input(
+                "Event cooldown · seconds",
+                min_value=1,
+                max_value=120,
+                value=10,
+                step=1,
+                key="micro_flow_cooldown",
+            )
+
+        fee_per_side = st.number_input(
+            "Research fee per side %",
+            min_value=0.0,
+            max_value=0.5,
+            value=0.05,
+            step=0.01,
+            format="%.3f",
+            key="micro_flow_fee_per_side",
+            help=(
+                "Used only for time-exit net return diagnostics. "
+                "The event detector itself never reads future outcomes or fees."
+            ),
+        )
+
+        stored_symbol = st.session_state.get("micro_flow_bootstrap_symbol")
+        stored_lookback = st.session_state.get("micro_flow_bootstrap_lookback")
+        stored_max_trades = st.session_state.get("micro_flow_bootstrap_max_trades")
+        needs_flow_fetch = (
+            stored_symbol != micro_flow_symbol
+            or stored_lookback != int(micro_flow_lookback)
+            or stored_max_trades != int(micro_flow_max_trades)
+            or "micro_flow_bootstrap_seconds" not in st.session_state
+        )
+
+        if micro_flow_refresh:
+            with st.spinner(
+                f"Loading recent executed flow for {micro_flow_symbol}..."
+            ):
+                symbol_trades, symbol_diag = load_micro_flow_recent_agg_trades(
+                    micro_flow_symbol,
+                    lookback_minutes=int(micro_flow_lookback),
+                    max_trades=int(micro_flow_max_trades),
+                )
+                if symbol_diag.get("error"):
+                    st.error(
+                        "Could not load Binance aggTrades: "
+                        f"{symbol_diag['error']}"
+                    )
+                elif symbol_trades.empty:
+                    st.warning("No aggregate trades were returned.")
+                else:
+                    symbol_seconds = build_micro_flow_second_bars(symbol_trades)
+                    btc_diag = None
+                    if micro_flow_symbol == "BTCUSDT":
+                        btc_seconds = symbol_seconds.copy()
+                    else:
+                        btc_trades, btc_diag = load_micro_flow_recent_agg_trades(
+                            "BTCUSDT",
+                            lookback_minutes=int(micro_flow_lookback),
+                            max_trades=int(micro_flow_max_trades),
+                        )
+                        btc_seconds = build_micro_flow_second_bars(btc_trades)
+
+                    symbol_seconds = attach_micro_flow_btc_context(
+                        symbol_seconds,
+                        btc_seconds,
+                    )
+                    st.session_state["micro_flow_bootstrap_seconds"] = symbol_seconds
+                    st.session_state["micro_flow_bootstrap_trades_n"] = len(symbol_trades)
+                    st.session_state["micro_flow_bootstrap_symbol"] = micro_flow_symbol
+                    st.session_state["micro_flow_bootstrap_lookback"] = int(micro_flow_lookback)
+                    st.session_state["micro_flow_bootstrap_max_trades"] = int(micro_flow_max_trades)
+                    st.session_state["micro_flow_bootstrap_diag"] = {
+                        "symbol": symbol_diag,
+                        "btc": btc_diag,
+                    }
+                    needs_flow_fetch = False
+
+        if needs_flow_fetch:
+            st.info(
+                "Press **Load / refresh flow** to build the recent micro-flow "
+                "research sample for the selected symbol."
+            )
+        else:
+            seconds = st.session_state.get(
+                "micro_flow_bootstrap_seconds",
+                pd.DataFrame(),
+            ).copy()
+            diagnostics = st.session_state.get(
+                "micro_flow_bootstrap_diag",
+                {},
+            )
+            events = extract_micro_flow_events(
+                seconds,
+                flow_threshold=float(micro_flow_threshold),
+                min_relative_activity=float(micro_flow_min_activity),
+                min_momentum_return_pct=float(micro_flow_min_return),
+                absorption_flow_threshold=float(micro_flow_absorption_flow),
+                absorption_max_return_pct=float(micro_flow_absorption_return),
+                cooldown_seconds=int(micro_flow_cooldown),
+            )
+
+            if seconds.empty:
+                st.warning("The loaded micro-flow sample is empty.")
+            else:
+                latest = seconds.dropna(subset=["close"]).iloc[-1]
+                metric_cols = st.columns(6)
+                metric_cols[0].metric(
+                    "aggTrades",
+                    f"{int(st.session_state.get('micro_flow_bootstrap_trades_n', 0)):,}",
+                )
+                metric_cols[1].metric(
+                    "Flow 1s",
+                    (
+                        f"{float(latest['flow_imbalance_1s']):+.3f}"
+                        if pd.notna(latest.get("flow_imbalance_1s")) else "—"
+                    ),
+                )
+                metric_cols[2].metric(
+                    "Flow 5s",
+                    (
+                        f"{float(latest['flow_imbalance_5s']):+.3f}"
+                        if pd.notna(latest.get("flow_imbalance_5s")) else "—"
+                    ),
+                )
+                metric_cols[3].metric(
+                    "Return 5s",
+                    (
+                        f"{float(latest['return_5s_pct']):+.4f}%"
+                        if pd.notna(latest.get("return_5s_pct")) else "—"
+                    ),
+                )
+                metric_cols[4].metric(
+                    "Activity 5s",
+                    (
+                        f"{float(latest['relative_activity_5s']):.2f}x"
+                        if pd.notna(latest.get("relative_activity_5s")) else "—"
+                    ),
+                )
+                metric_cols[5].metric(
+                    "Residual vs BTC 5s",
+                    (
+                        f"{float(latest['residual_vs_btc_5s_pct']):+.4f}%"
+                        if pd.notna(latest.get("residual_vs_btc_5s_pct")) else "—"
+                    ),
+                )
+
+                symbol_diag = diagnostics.get("symbol") or {}
+                if symbol_diag.get("truncated"):
+                    st.warning(
+                        "The aggTrade sample hit the configured trade cap. "
+                        "Increase Max aggTrades or use a shorter lookback for "
+                        "a complete bootstrap window."
+                    )
+                st.caption(
+                    "Bootstrap source: Binance USD-M Futures executed aggregate "
+                    f"trades · requests={symbol_diag.get('requests', '—')} · "
+                    "m=True is interpreted as aggressive SELL. BTC residual is "
+                    "currently raw return difference, not beta-adjusted yet."
+                )
+
+                flow_fig = build_micro_flow_chart(
+                    seconds,
+                    events,
+                    micro_flow_symbol,
+                )
+                st.plotly_chart(
+                    flow_fig,
+                    use_container_width=True,
+                    key="micro_flow_bootstrap_chart",
+                    config={
+                        "displaylogo": False,
+                        "scrollZoom": True,
+                    },
+                )
+
+                st.markdown("### Event outcome research")
+                event_frequency = (
+                    len(events) / max(float(micro_flow_lookback) / 60.0, 1e-9)
+                    if events is not None else 0.0
+                )
+                summary_metrics = st.columns(4)
+                summary_metrics[0].metric("Events", len(events))
+                summary_metrics[1].metric(
+                    "Events / hour",
+                    f"{event_frequency:.1f}",
+                )
+                summary_metrics[2].metric(
+                    "Momentum",
+                    int(events["event_type"].str.startswith("MOMENTUM").sum())
+                    if not events.empty else 0,
+                )
+                summary_metrics[3].metric(
+                    "Absorption",
+                    int(events["event_type"].str.startswith("ABSORPTION").sum())
+                    if not events.empty else 0,
+                )
+
+                if events.empty:
+                    st.info(
+                        "No exploratory events matched these thresholds. "
+                        "Lower the flow/activity thresholds or inspect another symbol."
+                    )
+                else:
+                    event_summary = build_micro_flow_event_summary(
+                        events,
+                        fee_per_side_pct=float(fee_per_side),
+                    )
+                    st.dataframe(
+                        event_summary,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_flow_event_summary",
+                    )
+
+                    event_columns = [
+                        "event_time_local",
+                        "entry_time_local",
+                        "event_type",
+                        "side",
+                        "entry_price",
+                        "flow_imbalance_1s",
+                        "flow_imbalance_5s",
+                        "flow_imbalance_15s",
+                        "return_5s_pct",
+                        "return_15s_pct",
+                        "residual_vs_btc_5s_pct",
+                        "relative_activity_5s",
+                        "trade_acceleration_5s",
+                        "mfe_1m_pct",
+                        "mae_1m_pct",
+                        "return_1m_pct",
+                        "mfe_3m_pct",
+                        "mae_3m_pct",
+                        "return_3m_pct",
+                        "mfe_5m_pct",
+                        "mae_5m_pct",
+                        "return_5m_pct",
+                        "complete_1m",
+                        "complete_3m",
+                        "complete_5m",
+                    ]
+                    event_columns = [
+                        column for column in event_columns
+                        if column in events.columns
+                    ]
+                    display_events = events[event_columns].sort_values(
+                        "event_time_local",
+                        ascending=False,
+                    )
+                    st.dataframe(
+                        display_events,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_flow_event_detail",
+                    )
+                    st.download_button(
+                        "⬇️ Download bootstrap Micro Flow events",
+                        data=display_events.to_csv(index=False).encode("utf-8"),
+                        file_name=(
+                            f"micro_flow_{micro_flow_symbol}_"
+                            f"{int(micro_flow_lookback)}m_events.csv"
+                        ),
+                        mime="text/csv",
+                        key="micro_flow_event_download",
+                    )
+
+                with st.expander("Raw one-second state sample", expanded=False):
+                    raw_columns = [
+                        "second",
+                        "close",
+                        "flow_imbalance_1s",
+                        "flow_imbalance_3s",
+                        "flow_imbalance_5s",
+                        "flow_imbalance_15s",
+                        "return_1s_pct",
+                        "return_3s_pct",
+                        "return_5s_pct",
+                        "return_15s_pct",
+                        "relative_activity_5s",
+                        "trade_acceleration_5s",
+                        "residual_vs_btc_5s_pct",
+                        "flow_price_alignment_5s",
+                    ]
+                    st.dataframe(
+                        seconds[[
+                            column for column in raw_columns
+                            if column in seconds.columns
+                        ]].tail(1000),
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_flow_raw_states",
+                    )
+
+    with collector_tab:
+        st.markdown("### Persistent all-symbol collector")
+        st.caption(
+            "This is the path for the real continuously-active research engine: "
+            "one central WebSocket consumer collects aggTrades for the market, "
+            "writes causal 1-second snapshots/events, and this tab analyzes the "
+            "persisted universe without hammering Binance REST on every rerun."
+        )
+        persisted_events = load_micro_flow_persisted_events()
+        if persisted_events.empty:
+            st.info(
+                "No `micro_flow_events.csv` exists yet. The dashboard bootstrap "
+                "above is ready, but the all-symbol continuous collector still "
+                "needs to be wired into the central Market Data producer."
+            )
+            st.markdown(
+                "**Collector target:** aggTrades → 1s state → 1/3/5/15s flow "
+                "windows → BTC context → event/state persistence → 1m/3m/5m outcomes."
+            )
+        else:
+            st.success(
+                f"Persistent collector events loaded: {len(persisted_events):,}"
+            )
+            st.dataframe(
+                persisted_events.tail(500),
+                use_container_width=True,
+                hide_index=True,
+                key="micro_flow_persisted_events",
+            )
+            st.download_button(
+                "⬇️ Download persistent Micro Flow events",
+                data=persisted_events.to_csv(index=False).encode("utf-8"),
+                file_name="micro_flow_events.csv",
+                mime="text/csv",
+                key="micro_flow_persisted_download",
+            )
+
+
 if selected_section == "micro_reaction":
     st.markdown("## 🧬 Micro REACTION")
     st.caption(
@@ -41647,14 +42783,16 @@ if selected_section == "micro_reaction":
 
                         st.markdown("##### Multi-driver hypothesis crosses")
                         st.caption(
-                            "Tests every 2→5 way intersection among the broad regions that "
-                            "were worth keeping from the first driver pass: Departure "
-                            "1.00–1.50%, Relative volume <1x, Rejection wick ≥0.80, "
-                            "Confirm→Retest 30–60m, and the weaker secondary Close strength "
-                            "0.55–0.85 region. No numeric threshold is optimized here. Rows "
-                            "overlap heavily, so use them to discover a structural hypothesis, "
-                            "not as independent proof. Net columns use the fee/slippage inputs "
-                            "from the scalp matrix above."
+                            "Latest hypothesis set from the current 24h pass. Core: Departure "
+                            "1.00–1.50% and Confirm→Retest 30–60m. Volume: reaction/departure "
+                            "relative volume 0.75–1.00x and Relative volume 1.50–2.00x. "
+                            "Candle geometry: Reaction range 0.35–0.50%, Body/range ≥0.80, "
+                            "or Rejection wick <0.10. Confirm→Retest 10–20m and Close strength "
+                            "0.55–0.85 stay as secondary tests. The analyzer skips mutually "
+                            "exclusive confirmation windows and never combines Body/range ≥0.80 "
+                            "with Rejection wick <0.10 because they are strongly redundant. "
+                            "No threshold is optimized here; rows overlap and remain exploratory. "
+                            "Net columns use the fee/slippage inputs from the scalp matrix above."
                         )
 
                         cross_c1, cross_c2, cross_c3, cross_c4 = st.columns(4)
@@ -41680,7 +42818,13 @@ if selected_section == "micro_reaction":
                         with cross_c3:
                             cross_family_filter = st.selectbox(
                                 "Cross family",
-                                ["ALL", "PRIMARY ONLY", "WITH CLOSE STRENGTH"],
+                                [
+                                    "ALL",
+                                    "CORE ONLY",
+                                    "WITH VOLUME",
+                                    "WITH CANDLE",
+                                    "WITH SECONDARY",
+                                ],
                                 index=0,
                                 key="micro_reaction_cross_family",
                             )
@@ -41722,10 +42866,26 @@ if selected_section == "micro_reaction":
                                     cross_table["Exec N"], errors="coerce"
                                 ).fillna(0).ge(int(cross_min_n))
                             ].copy()
-                            if cross_family_filter != "ALL":
+                            if cross_family_filter == "CORE ONLY":
                                 cross_view = cross_view.loc[
-                                    cross_view["Family"].astype(str).eq(
-                                        str(cross_family_filter)
+                                    cross_view["Family"].astype(str).eq("CORE")
+                                ].copy()
+                            elif cross_family_filter == "WITH VOLUME":
+                                cross_view = cross_view.loc[
+                                    cross_view["Family"].astype(str).str.contains(
+                                        "VOLUME", regex=False
+                                    )
+                                ].copy()
+                            elif cross_family_filter == "WITH CANDLE":
+                                cross_view = cross_view.loc[
+                                    cross_view["Family"].astype(str).str.contains(
+                                        "CANDLE", regex=False
+                                    )
+                                ].copy()
+                            elif cross_family_filter == "WITH SECONDARY":
+                                cross_view = cross_view.loc[
+                                    cross_view["Family"].astype(str).str.contains(
+                                        "SECONDARY", regex=False
                                     )
                                 ].copy()
 
@@ -41813,9 +42973,11 @@ if selected_section == "micro_reaction":
                                 st.caption(
                                     "Avg gross lift pp is the improvement over the unfiltered "
                                     "REACTION baseline under the exact same side / TF / TP / SL / "
-                                    "horizon. A positive lift with N≈10 is only a lead; N≥30 across "
-                                    "many symbols is much more useful. Avg net and Net PF already "
-                                    "deduct the configured round-trip cost."
+                                    "horizon. For trading frequency, ~20–30 signals/day across the "
+                                    "market is already active; for statistical confidence, N≈20 in "
+                                    "one day is still preliminary and should be checked on 48h/72h "
+                                    "and then forward. Avg net and Net PF already deduct the configured "
+                                    "round-trip cost."
                                 )
 
                                 cross_csv_window = (
