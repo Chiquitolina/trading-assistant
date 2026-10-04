@@ -27436,17 +27436,16 @@ def build_micro_reaction_historical_overlay_chart(
     candles,
     symbol,
     retests_df,
+    chart_timeframe="1m",
     show_structure=False,
     show_outcome_labels=False,
     outcome_horizon=30,
 ):
-    """Long 1m chart with every visible causal Micro REACTION.
+    """Historical chart with every visible causal Micro REACTION.
 
-    This view is deliberately lighter than the normal structural overlay: it
-    does not redraw every detected pivot in the market. By default it plots only
-    REACTION retests + next-1m-open entries, with MFE/MAE in hover. Optional
-    structure markers add only the parent pivot/confirmation/departure of those
-    REACTIONs. This keeps 2k-5k candle inspections usable.
+    Detection/execution remains causal on the original 1m path. The chart can
+    render either 1m candles or a 5m aggregation of that same visible path, so
+    longer windows stay readable without changing the research definition.
     """
     if candles is None or candles.empty:
         return go.Figure()
@@ -27469,7 +27468,10 @@ def build_micro_reaction_historical_overlay_chart(
     visible_end_ms = int(work["timestamp"].max())
     visible_start_time = work["chart_time"].iloc[0]
     visible_end_time = work["chart_time"].iloc[-1]
-    visible_end_with_padding = visible_end_time + pd.Timedelta(minutes=1)
+    chart_tf_minutes = max(1, int(timeframe_to_minutes(chart_timeframe)))
+    visible_end_with_padding = visible_end_time + pd.Timedelta(
+        minutes=chart_tf_minutes
+    )
 
     fig = go.Figure()
     fig.add_trace(
@@ -27479,7 +27481,7 @@ def build_micro_reaction_historical_overlay_chart(
             high=work["high"],
             low=work["low"],
             close=work["close"],
-            name="1m",
+            name=str(chart_timeframe),
         )
     )
 
@@ -27713,7 +27715,7 @@ def build_micro_reaction_historical_overlay_chart(
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         title=(
-            f"{str(symbol)} · Micro REACTION · historical overlay · "
+            f"{str(symbol)} · Micro REACTION · {str(chart_timeframe)} · "
             f"{len(reactions)} visible REACTION(s)"
         ),
     )
@@ -37448,8 +37450,7 @@ if selected_section == "micro_reaction":
                 disabled=(micro_view_mode == "Historical overlay"),
                 help=(
                     "Used by Recent overlay / scanner views. Historical overlay "
-                    "automatically scans the full retained 1m research window, "
-                    "so this control is intentionally disabled there."
+                    "uses the selected chart window instead."
                 ),
             )
 
@@ -37474,15 +37475,21 @@ if selected_section == "micro_reaction":
                 key="micro_reaction_side_filter",
             )
 
+        micro_chart_timeframe = "1m"
+        micro_chart_window_minutes = 1440
+        micro_chart_candles = 600
+
         with filter_4:
             if micro_view_mode == "Historical overlay":
-                micro_chart_candles = st.slider(
-                    "Historical 1m candles",
-                    min_value=500,
-                    max_value=int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
-                    value=min(2000, int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT)),
-                    step=250,
-                    key="micro_reaction_historical_chart_candles",
+                micro_chart_timeframe = st.selectbox(
+                    "Chart timeframe",
+                    ["1m", "5m"],
+                    index=1,
+                    key="micro_reaction_historical_chart_timeframe",
+                    help=(
+                        "Visualization only. Micro REACTION detection and entry "
+                        "timing remain causal on the 1m path."
+                    ),
                 )
             else:
                 micro_chart_candles = st.slider(
@@ -37498,8 +37505,23 @@ if selected_section == "micro_reaction":
         micro_historical_show_labels = False
         micro_historical_outcome_horizon = 30
         if micro_view_mode == "Historical overlay":
-            history_1, history_2, history_3 = st.columns(3)
+            history_1, history_2, history_3, history_4 = st.columns(4)
             with history_1:
+                historical_window_label = st.selectbox(
+                    "Chart window",
+                    ["6 hours", "12 hours", "1 day", "2 days", "3 days"],
+                    index=2,
+                    key="micro_reaction_historical_window",
+                )
+                micro_chart_window_minutes = {
+                    "6 hours": 360,
+                    "12 hours": 720,
+                    "1 day": 1440,
+                    "2 days": 2880,
+                    "3 days": 4320,
+                }[historical_window_label]
+                micro_chart_candles = int(micro_chart_window_minutes)
+            with history_2:
                 micro_historical_show_structure = st.checkbox(
                     "Show parent structure markers",
                     value=False,
@@ -37509,7 +37531,7 @@ if selected_section == "micro_reaction":
                         "for REACTIONs visible in the historical window."
                     ),
                 )
-            with history_2:
+            with history_3:
                 micro_historical_show_labels = st.checkbox(
                     "Show MFE / MAE labels",
                     value=False,
@@ -37519,7 +37541,7 @@ if selected_section == "micro_reaction":
                         "available in hover even when labels are hidden."
                     ),
                 )
-            with history_3:
+            with history_4:
                 micro_historical_outcome_horizon = st.selectbox(
                     "Label horizon",
                     [15, 30, 60],
@@ -37544,11 +37566,10 @@ if selected_section == "micro_reaction":
 
             if micro_view_mode == "Historical overlay":
                 st.caption(
-                    "Long-window mode: diamonds = every visible causal REACTION · "
-                    "stars = next-1m-open hypothetical entries. MFE/MAE 15m/30m/60m "
-                    "are available in hover. The scanner uses the full Redis 1m "
-                    "research window so changing only the chart length does not "
-                    "redefine the structural rules."
+                    "Historical mode: choose a 1m or 5m chart and a fixed time "
+                    "window. Detection still runs causally on 1m; the chart "
+                    "timeframe changes only the visualization. Diamonds are "
+                    "REACTIONs and stars are next-1m-open hypothetical entries."
                 )
             elif micro_view_mode == "Focused event":
                 st.caption(
@@ -37563,29 +37584,90 @@ if selected_section == "micro_reaction":
                     "next 1m open."
                 )
 
-            chart_candles = load_volume_exhaustion_research_candles(
-                symbol=str(selected_micro_symbol),
-                timeframe="1m",
-                limit=int(micro_chart_candles),
-            )
+            if micro_view_mode == "Historical overlay":
+                # Load a causal 1m scan path with left-side warmup, then display
+                # exactly the requested clock window. A 5m chart is derived from
+                # the same visible 1m path so visualization cannot drift from the
+                # data used by the detector.
+                detector_warmup_minutes = 0
+                for micro_tf in micro_timeframes:
+                    detector_name = detector_windows.get(micro_tf, "5x5")
+                    try:
+                        detector_bars = int(str(detector_name).split("x")[0])
+                    except (TypeError, ValueError):
+                        detector_bars = 5
+                    detector_warmup_minutes = max(
+                        detector_warmup_minutes,
+                        int(detector_bars * 2 * timeframe_to_minutes(micro_tf)),
+                    )
+
+                historical_scan_limit = min(
+                    int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
+                    int(
+                        micro_chart_window_minutes
+                        + micro_max_age
+                        + detector_warmup_minutes
+                        + 60
+                    ),
+                )
+                scan_1m_candles = load_volume_exhaustion_research_candles(
+                    symbol=str(selected_micro_symbol),
+                    timeframe="1m",
+                    limit=int(historical_scan_limit),
+                )
+
+                if scan_1m_candles is None or scan_1m_candles.empty:
+                    chart_candles = pd.DataFrame()
+                    visible_1m_candles = pd.DataFrame()
+                else:
+                    scan_1m_candles = _prepare_confirmed_swing_retest_candles(
+                        scan_1m_candles
+                    )
+                    latest_visible_ts = int(
+                        pd.to_numeric(
+                            scan_1m_candles["timestamp"],
+                            errors="coerce",
+                        ).dropna().max()
+                    )
+                    visible_cutoff_ts = (
+                        latest_visible_ts
+                        - max(0, int(micro_chart_window_minutes) - 1) * 60_000
+                    )
+                    visible_1m_candles = scan_1m_candles.loc[
+                        pd.to_numeric(
+                            scan_1m_candles["timestamp"],
+                            errors="coerce",
+                        ) >= visible_cutoff_ts
+                    ].copy()
+                    if micro_chart_timeframe == "5m":
+                        chart_candles = _resample_contiguous_1m_for_micro_swing(
+                            visible_1m_candles,
+                            "5m",
+                        )
+                    else:
+                        chart_candles = visible_1m_candles.copy()
+            else:
+                chart_candles = load_volume_exhaustion_research_candles(
+                    symbol=str(selected_micro_symbol),
+                    timeframe="1m",
+                    limit=int(micro_chart_candles),
+                )
+                visible_1m_candles = chart_candles
 
             if chart_candles is None or chart_candles.empty:
                 st.warning(
-                    "No closed 1m candles are available for the selected symbol."
+                    "No closed candles are available for the selected symbol/window."
                 )
             else:
                 historical_scan_diagnostics = None
                 if micro_view_mode == "Historical overlay":
-                    # Dedicated exact-window reconstruction: scan the SAME 1m
-                    # candles being plotted. This avoids retention / recent-window
-                    # behavior from the all-symbol live scanner hiding older events.
                     with st.spinner(
-                        "Reconstructing every causal Micro REACTION in the "
-                        f"visible {int(micro_chart_candles)}-candle window..."
+                        "Reconstructing causal Micro REACTIONs for the selected "
+                        f"{micro_chart_timeframe} / {historical_window_label} view..."
                     ):
                         chart_retests, historical_scan_diagnostics = (
                             build_micro_reaction_historical_retests(
-                                one_minute=chart_candles,
+                                one_minute=scan_1m_candles,
                                 swing_timeframes=tuple(micro_timeframes),
                                 swing_detector_items=tuple(
                                     sorted(detector_windows.items())
@@ -37749,17 +37831,25 @@ if selected_section == "micro_reaction":
                             ),
                         )
                         st.caption(
-                            "Historical diagnostics use the exact plotted 1m "
-                            "window. If pivots are high but first touches are low, "
+                            "Historical diagnostics use the causal 1m scan path "
+                            "behind the selected chart window. If pivots are high but first touches are low, "
                             "the departure/retest rules are filtering them; if "
                             "first touches are high but REACTIONs are low, the "
                             "reaction-candle condition is the filter."
                         )
 
+                    st.caption(
+                        f"Rendering {len(chart_candles):,} × {micro_chart_timeframe} "
+                        f"candles for {historical_window_label}. Detection used "
+                        f"{len(scan_1m_candles):,} causal 1m candles including "
+                        "left-side warmup for pivot confirmation and retests."
+                    )
+
                     historical_fig = build_micro_reaction_historical_overlay_chart(
                         candles=chart_candles,
                         symbol=str(selected_micro_symbol),
                         retests_df=historical_view,
+                        chart_timeframe=str(micro_chart_timeframe),
                         show_structure=bool(micro_historical_show_structure),
                         show_outcome_labels=bool(micro_historical_show_labels),
                         outcome_horizon=int(micro_historical_outcome_horizon),
@@ -37774,12 +37864,15 @@ if selected_section == "micro_reaction":
                         },
                     )
 
-                    if int(micro_chart_candles) >= int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT):
+                    if (
+                        micro_view_mode == "Historical overlay"
+                        and int(historical_scan_limit)
+                        >= int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT)
+                    ):
                         st.caption(
-                            "Left-edge note: this chart is using the complete 1m "
-                            "history currently retained for research. Events whose "
-                            "pivot/confirmation happened before that retained window "
-                            "can be right-censored near the far left edge."
+                            "Left-edge note: the requested chart plus causal warmup "
+                            "reached the retained 1m research limit. Very old parent "
+                            "structures can therefore be censored at the far left edge."
                         )
 
                     if historical_view.empty:
