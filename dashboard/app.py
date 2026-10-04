@@ -8964,7 +8964,7 @@ def load_micro_reaction_historical_1m_candles(
 
     while remaining > 0 and safety_calls < 10:
         safety_calls += 1
-        batch_limit = min(1500, max(1, remaining + (1 if end_time is None else 0)))
+        batch_limit = min(1000, max(1, remaining + (1 if end_time is None else 0)))
         params = {
             "symbol": str(symbol).upper(),
             "interval": "1m",
@@ -10696,6 +10696,376 @@ def build_micro_reaction_historical_retests(
     return (
         result.sort_values("retest_timestamp", ascending=False).reset_index(drop=True),
         diagnostics,
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def scan_micro_reaction_historical_symbol_window(
+    symbol,
+    window_minutes,
+    swing_timeframes,
+    swing_detector_items,
+    min_swing_prominence_pct,
+    retest_tolerance_pct,
+    min_departure_pct,
+    max_age_minutes,
+):
+    """Build one symbol's historical Micro REACTION universe for a clock window.
+
+    The requested window is the RETEST/REACTION window. Extra 1m candles are
+    loaded to the left so pivots can confirm before the window and still retest
+    inside it. Forward MFE/MAE is right-censored naturally near the current edge;
+    horizon-complete flags remain the source of truth for summary Ns.
+    """
+    try:
+        window_minutes = max(1, int(window_minutes))
+        max_age_minutes = max(1, int(max_age_minutes))
+    except (TypeError, ValueError):
+        return pd.DataFrame(), {
+            "symbol": str(symbol),
+            "bars": 0,
+            "first touches": 0,
+            "REACTIONs": 0,
+            "error": "invalid_window",
+        }
+
+    detector_windows = dict(swing_detector_items)
+    detector_warmup_minutes = 0
+    for swing_timeframe in tuple(str(tf) for tf in swing_timeframes):
+        detector_name = detector_windows.get(swing_timeframe, "5x5")
+        try:
+            detector_bars = int(str(detector_name).split("x")[0])
+        except (TypeError, ValueError):
+            detector_bars = 5
+        detector_warmup_minutes = max(
+            detector_warmup_minutes,
+            int(
+                (2 * detector_bars + 2)
+                * timeframe_to_minutes(swing_timeframe)
+            ),
+        )
+
+    # Left context must cover a confirmation that predates the requested retest
+    # window by as much as max_age_minutes. Keep an extra hour for clean 5m
+    # resampling / detector warmup. 72h + normal parameters remains < 5k bars.
+    required_bars = int(
+        window_minutes
+        + max_age_minutes
+        + detector_warmup_minutes
+        + 60
+    )
+    required_bars = min(12000, max(300, required_bars))
+
+    one_minute = load_micro_reaction_historical_1m_candles(
+        symbol=str(symbol),
+        required_bars=int(required_bars),
+    )
+    prepared = _prepare_confirmed_swing_retest_candles(one_minute)
+
+    if prepared.empty:
+        return pd.DataFrame(), {
+            "symbol": str(symbol),
+            "bars": 0,
+            "first touches": 0,
+            "REACTIONs": 0,
+            "error": "no_history",
+        }
+
+    retests, diagnostics = build_micro_reaction_historical_retests(
+        one_minute=prepared,
+        swing_timeframes=tuple(str(tf) for tf in swing_timeframes),
+        swing_detector_items=tuple(swing_detector_items),
+        min_swing_prominence_pct=float(min_swing_prominence_pct),
+        retest_tolerance_pct=float(retest_tolerance_pct),
+        min_departure_pct=float(min_departure_pct),
+        max_age_minutes=int(max_age_minutes),
+    )
+
+    latest_ts = int(
+        pd.to_numeric(prepared["timestamp"], errors="coerce").dropna().max()
+    )
+    window_start_ts = latest_ts - int(window_minutes) * 60_000
+
+    diagnostics = dict(diagnostics or {})
+    diagnostics.update({
+        "symbol": str(symbol),
+        "bars": int(len(prepared)),
+        "window_start_timestamp": int(window_start_ts),
+        "window_end_timestamp": int(latest_ts),
+    })
+
+    if retests is None or retests.empty:
+        diagnostics["window first touches"] = 0
+        diagnostics["window REACTIONs"] = 0
+        return pd.DataFrame(), diagnostics
+
+    retest_ts = pd.to_numeric(
+        retests["retest_timestamp"],
+        errors="coerce",
+    )
+    window_retests = retests.loc[
+        retest_ts.ge(window_start_ts)
+        & retest_ts.le(latest_ts)
+    ].copy()
+
+    if window_retests.empty:
+        diagnostics["window first touches"] = 0
+        diagnostics["window REACTIONs"] = 0
+        return pd.DataFrame(), diagnostics
+
+    window_retests["symbol"] = str(symbol)
+    diagnostics["window first touches"] = int(len(window_retests))
+    diagnostics["window REACTIONs"] = int(
+        window_retests["status"].fillna("").astype(str).eq("REACTION").sum()
+    )
+
+    return (
+        window_retests
+        .sort_values("retest_timestamp", ascending=False)
+        .reset_index(drop=True),
+        diagnostics,
+    )
+
+
+def build_micro_reaction_historical_signal_summary(retests_df):
+    """Aggregate historical Micro REACTION entries by TF / detector / side."""
+    if retests_df is None or retests_df.empty:
+        return pd.DataFrame()
+
+    required = {"timeframe", "detector", "signal", "status"}
+    if not required.issubset(retests_df.columns):
+        return pd.DataFrame()
+
+    rows = []
+    for (timeframe, detector, side), group in retests_df.groupby(
+        ["timeframe", "detector", "signal"],
+        dropna=False,
+        sort=True,
+    ):
+        reactions = group.loc[
+            group["status"].fillna("").astype(str).eq("REACTION")
+        ].copy()
+
+        row = {
+            "TF": str(timeframe),
+            "Detector": str(detector),
+            "Side": str(side),
+            "First touches": int(len(group)),
+            "Signals": int(len(reactions)),
+            "Symbols": int(
+                reactions["symbol"].astype(str).nunique()
+                if "symbol" in reactions.columns and not reactions.empty
+                else 0
+            ),
+            "Reaction rate %": (
+                float(len(reactions)) / float(len(group)) * 100.0
+                if len(group)
+                else np.nan
+            ),
+        }
+
+        for horizon in (15, 30, 60):
+            mfe_col = f"reaction_mfe_{horizon}m_pct"
+            mae_col = f"reaction_mae_{horizon}m_pct"
+            ret_col = f"reaction_return_{horizon}m_pct"
+            complete_col = f"reaction_complete_{horizon}m"
+
+            mfe = pd.to_numeric(
+                reactions.get(mfe_col, pd.Series(np.nan, index=reactions.index)),
+                errors="coerce",
+            )
+            mae = pd.to_numeric(
+                reactions.get(mae_col, pd.Series(np.nan, index=reactions.index)),
+                errors="coerce",
+            )
+            ret = pd.to_numeric(
+                reactions.get(ret_col, pd.Series(np.nan, index=reactions.index)),
+                errors="coerce",
+            )
+
+            if complete_col in reactions.columns:
+                complete = reactions[complete_col].fillna(False).astype(bool)
+            else:
+                complete = mfe.notna() & mae.notna() & ret.notna()
+            valid = complete & mfe.notna() & mae.notna() & ret.notna()
+
+            row[f"N {horizon}m"] = int(valid.sum())
+            row[f"MFE {horizon}m avg %"] = (
+                float(mfe.loc[valid].mean()) if valid.any() else np.nan
+            )
+            row[f"MFE {horizon}m med %"] = (
+                float(mfe.loc[valid].median()) if valid.any() else np.nan
+            )
+            row[f"MAE {horizon}m avg %"] = (
+                float(mae.loc[valid].mean()) if valid.any() else np.nan
+            )
+            row[f"MAE {horizon}m med %"] = (
+                float(mae.loc[valid].median()) if valid.any() else np.nan
+            )
+            row[f"Return {horizon}m avg %"] = (
+                float(ret.loc[valid].mean()) if valid.any() else np.nan
+            )
+            row[f"Return {horizon}m med %"] = (
+                float(ret.loc[valid].median()) if valid.any() else np.nan
+            )
+
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    for column in result.columns:
+        if column in {"TF", "Detector", "Side"}:
+            continue
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+        if "%" in column:
+            result[column] = result[column].round(4)
+
+    tf_order = {"1m": 0, "5m": 1}
+    side_order = {"LONG": 0, "SHORT": 1}
+    result["_tf"] = result["TF"].map(tf_order).fillna(99)
+    result["_side"] = result["Side"].map(side_order).fillna(99)
+    return (
+        result
+        .sort_values(["_tf", "Detector", "_side"], kind="stable")
+        .drop(columns=["_tf", "_side"])
+        .reset_index(drop=True)
+    )
+
+
+def build_micro_reaction_historical_signal_table(
+    retests_df,
+    good_mfe_30m_pct=0.30,
+    good_max_mae_30m_pct=0.20,
+    bad_max_mfe_30m_pct=0.15,
+    bad_min_mae_30m_pct=0.30,
+):
+    """Return one row per causal REACTION entry with exploratory quality tags."""
+    if retests_df is None or retests_df.empty:
+        return pd.DataFrame()
+
+    work = retests_df.loc[
+        retests_df["status"].fillna("").astype(str).eq("REACTION")
+    ].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    mfe30 = pd.to_numeric(work.get("reaction_mfe_30m_pct"), errors="coerce")
+    mae30 = pd.to_numeric(work.get("reaction_mae_30m_pct"), errors="coerce")
+    complete30 = (
+        work.get(
+            "reaction_complete_30m",
+            pd.Series(False, index=work.index),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+
+    quality = pd.Series("PENDING", index=work.index, dtype="object")
+    valid = complete30 & mfe30.notna() & mae30.notna()
+    good = (
+        valid
+        & mfe30.ge(float(good_mfe_30m_pct))
+        & mae30.le(float(good_max_mae_30m_pct))
+    )
+    bad = (
+        valid
+        & (
+            mfe30.lt(float(bad_max_mfe_30m_pct))
+            | mae30.ge(float(bad_min_mae_30m_pct))
+        )
+    )
+    quality.loc[valid] = "MIXED"
+    quality.loc[bad] = "BAD"
+    quality.loc[good] = "GOOD"
+
+    ratio = mfe30 / mae30.replace(0.0, np.nan)
+    ratio = ratio.where(mae30.gt(0.0), np.inf)
+
+    signal_id = (
+        work["symbol"].astype(str)
+        + "|"
+        + work["timeframe"].astype(str)
+        + "|"
+        + work["signal"].astype(str)
+        + "|"
+        + pd.to_numeric(work["retest_timestamp"], errors="coerce")
+        .fillna(0)
+        .astype("int64")
+        .astype(str)
+    )
+
+    table = pd.DataFrame(index=work.index)
+    table["Signal ID"] = signal_id
+    table["Symbol"] = work["symbol"].astype(str)
+    table["Side"] = work["signal"].astype(str)
+    table["TF"] = work["timeframe"].astype(str)
+    table["Detector"] = work["detector"].astype(str)
+    table["Reaction time"] = work.get("retest_time")
+    table["Entry time"] = work.get("first_touch_entry_time")
+    table["Entry"] = pd.to_numeric(
+        work.get("first_touch_entry_price"), errors="coerce"
+    )
+    table["Quality 30m"] = quality
+
+    for horizon in (15, 30, 60):
+        table[f"MFE {horizon}m %"] = pd.to_numeric(
+            work.get(f"reaction_mfe_{horizon}m_pct"), errors="coerce"
+        )
+        table[f"MAE {horizon}m %"] = pd.to_numeric(
+            work.get(f"reaction_mae_{horizon}m_pct"), errors="coerce"
+        )
+        table[f"Return {horizon}m %"] = pd.to_numeric(
+            work.get(f"reaction_return_{horizon}m_pct"), errors="coerce"
+        )
+        table[f"Complete {horizon}m"] = (
+            work.get(
+                f"reaction_complete_{horizon}m",
+                pd.Series(False, index=work.index),
+            )
+            .fillna(False)
+            .astype(bool)
+        )
+
+    table["MFE/MAE ratio 30m"] = ratio
+    table["MFE-MAE 30m pp"] = mfe30 - mae30
+    table["Departure %"] = pd.to_numeric(
+        work.get("max_departure_pct"), errors="coerce"
+    )
+    table["Confirm→Retest min"] = pd.to_numeric(
+        work.get("confirmed_to_retest_min"), errors="coerce"
+    )
+    table["Retest distance %"] = pd.to_numeric(
+        work.get("retest_distance_pct"), errors="coerce"
+    )
+    table["Pivot→Confirmation %"] = pd.to_numeric(
+        work.get("pivot_to_confirmation_pct"), errors="coerce"
+    )
+
+    numeric_columns = [
+        column
+        for column in table.columns
+        if (
+            "%" in column
+            or " pp" in column
+            or column in {
+                "Entry",
+                "MFE/MAE ratio 30m",
+                "Confirm→Retest min",
+            }
+        )
+    ]
+    for column in numeric_columns:
+        if column not in table.columns:
+            continue
+        table[column] = pd.to_numeric(table[column], errors="coerce")
+        table[column] = table[column].round(5)
+
+    return (
+        table
+        .sort_values("Reaction time", ascending=False, na_position="last")
+        .reset_index(drop=True)
     )
 
 
@@ -38289,10 +38659,311 @@ if selected_section == "micro_reaction":
                 )
 
             # -------------------------------------------------
+            # Historical all-symbol signal table.
+            # -------------------------------------------------
+            if micro_scope == "All symbols":
+                st.markdown("---")
+                st.markdown("### All Symbols · historical Micro REACTION signals")
+                st.caption(
+                    "Builds a causal 24h / 48h / 72h research table from Binance "
+                    "Futures 1m history for every configured symbol. The first run "
+                    "can take a while because history is downloaded symbol by symbol; "
+                    "identical symbol/parameter windows are cached for 15 minutes. "
+                    "Only REACTION rows become signal entries; recent signals without "
+                    "a complete forward horizon remain PENDING rather than being dropped."
+                )
+
+                global_1, global_2, global_3, global_4 = st.columns(4)
+                with global_1:
+                    global_window_label = st.selectbox(
+                        "Historical signal window",
+                        ["24h", "48h", "72h"],
+                        index=0,
+                        key="micro_reaction_global_window",
+                    )
+                    global_window_minutes = {
+                        "24h": 1440,
+                        "48h": 2880,
+                        "72h": 4320,
+                    }[global_window_label]
+
+                with global_2:
+                    global_good_mfe = st.number_input(
+                        "GOOD · min MFE 30m %",
+                        min_value=0.0,
+                        value=0.30,
+                        step=0.05,
+                        format="%.2f",
+                        key="micro_reaction_global_good_mfe",
+                    )
+
+                with global_3:
+                    global_good_mae = st.number_input(
+                        "GOOD · max MAE 30m %",
+                        min_value=0.0,
+                        value=0.20,
+                        step=0.05,
+                        format="%.2f",
+                        key="micro_reaction_global_good_mae",
+                    )
+
+                with global_4:
+                    global_quality_filter = st.selectbox(
+                        "Quality filter",
+                        ["ALL", "GOOD", "MIXED", "BAD", "PENDING"],
+                        index=0,
+                        key="micro_reaction_global_quality_filter",
+                    )
+
+                bad_1, bad_2, run_col = st.columns([1, 1, 1.4])
+                with bad_1:
+                    global_bad_mfe = st.number_input(
+                        "BAD · max MFE 30m %",
+                        min_value=0.0,
+                        value=0.15,
+                        step=0.05,
+                        format="%.2f",
+                        key="micro_reaction_global_bad_mfe",
+                    )
+                with bad_2:
+                    global_bad_mae = st.number_input(
+                        "BAD · min MAE 30m %",
+                        min_value=0.0,
+                        value=0.30,
+                        step=0.05,
+                        format="%.2f",
+                        key="micro_reaction_global_bad_mae",
+                    )
+                with run_col:
+                    st.caption(
+                        "GOOD/BAD are exploratory labels only; they do not alter "
+                        "signal detection. Summary statistics always use the full "
+                        "causal REACTION universe."
+                    )
+                    run_global_scan = st.button(
+                        f"Build {global_window_label} all-symbol signal table",
+                        type="primary",
+                        use_container_width=True,
+                        key="micro_reaction_global_run",
+                    )
+
+                current_global_config = {
+                    "window": str(global_window_label),
+                    "timeframes": tuple(str(tf) for tf in micro_timeframes),
+                    "detectors": tuple(sorted(detector_windows.items())),
+                    "prominence": float(micro_prominence),
+                    "tolerance": float(micro_tolerance),
+                    "departure": float(micro_departure),
+                    "max_age": int(micro_max_age),
+                }
+
+                if run_global_scan:
+                    global_frames = []
+                    global_diagnostics = []
+                    progress = st.progress(0)
+                    progress_text = st.empty()
+                    symbol_count = max(1, len(micro_symbols))
+
+                    for symbol_index, global_symbol in enumerate(micro_symbols):
+                        progress_text.caption(
+                            f"Historical Micro REACTION scan · {symbol_index + 1}/"
+                            f"{len(micro_symbols)} · {global_symbol}"
+                        )
+                        try:
+                            symbol_retests, symbol_diag = (
+                                scan_micro_reaction_historical_symbol_window(
+                                    symbol=str(global_symbol),
+                                    window_minutes=int(global_window_minutes),
+                                    swing_timeframes=tuple(micro_timeframes),
+                                    swing_detector_items=tuple(
+                                        sorted(detector_windows.items())
+                                    ),
+                                    min_swing_prominence_pct=float(micro_prominence),
+                                    retest_tolerance_pct=float(micro_tolerance),
+                                    min_departure_pct=float(micro_departure),
+                                    max_age_minutes=int(micro_max_age),
+                                )
+                            )
+                        except Exception as exc:
+                            symbol_retests = pd.DataFrame()
+                            symbol_diag = {
+                                "symbol": str(global_symbol),
+                                "error": str(exc),
+                                "window first touches": 0,
+                                "window REACTIONs": 0,
+                            }
+
+                        if symbol_retests is not None and not symbol_retests.empty:
+                            global_frames.append(symbol_retests)
+                        global_diagnostics.append(dict(symbol_diag or {}))
+
+                        progress.progress(
+                            min(100, int((symbol_index + 1) / symbol_count * 100))
+                        )
+                        # Keep the public REST scan polite enough that a fresh
+                        # 300-symbol build is less likely to burst Binance limits.
+                        if (symbol_index + 1) % 5 == 0:
+                            time.sleep(0.20)
+
+                    progress.empty()
+                    progress_text.empty()
+
+                    historical_all_retests = (
+                        pd.concat(global_frames, ignore_index=True)
+                        if global_frames
+                        else pd.DataFrame()
+                    )
+                    st.session_state[
+                        "micro_reaction_global_historical_retests"
+                    ] = historical_all_retests
+                    st.session_state[
+                        "micro_reaction_global_historical_diagnostics"
+                    ] = pd.DataFrame(global_diagnostics)
+                    st.session_state[
+                        "micro_reaction_global_historical_config"
+                    ] = current_global_config
+
+                stored_global_retests = st.session_state.get(
+                    "micro_reaction_global_historical_retests",
+                    pd.DataFrame(),
+                )
+                stored_global_config = st.session_state.get(
+                    "micro_reaction_global_historical_config"
+                )
+                stored_global_diag = st.session_state.get(
+                    "micro_reaction_global_historical_diagnostics",
+                    pd.DataFrame(),
+                )
+
+                if stored_global_config is not None and (
+                    stored_global_config != current_global_config
+                ):
+                    st.warning(
+                        "The table below was built with different structural "
+                        "parameters/window. Press Build again to refresh it."
+                    )
+
+                if stored_global_retests is None or stored_global_retests.empty:
+                    st.info(
+                        "Press Build to create the historical all-symbol signal table."
+                    )
+                else:
+                    global_summary = build_micro_reaction_historical_signal_summary(
+                        stored_global_retests
+                    )
+                    global_signals = build_micro_reaction_historical_signal_table(
+                        stored_global_retests,
+                        good_mfe_30m_pct=float(global_good_mfe),
+                        good_max_mae_30m_pct=float(global_good_mae),
+                        bad_max_mfe_30m_pct=float(global_bad_mfe),
+                        bad_min_mae_30m_pct=float(global_bad_mae),
+                    )
+
+                    total_reactions = int(len(global_signals))
+                    complete_30 = int(
+                        global_signals.get(
+                            "Complete 30m",
+                            pd.Series(False, index=global_signals.index),
+                        ).fillna(False).astype(bool).sum()
+                    ) if not global_signals.empty else 0
+                    quality_counts = (
+                        global_signals["Quality 30m"].value_counts()
+                        if not global_signals.empty
+                        else pd.Series(dtype="int64")
+                    )
+
+                    g1, g2, g3, g4, g5 = st.columns(5)
+                    g1.metric("Signals", total_reactions)
+                    g2.metric("30m complete", complete_30)
+                    g3.metric("GOOD", int(quality_counts.get("GOOD", 0)))
+                    g4.metric("BAD", int(quality_counts.get("BAD", 0)))
+                    g5.metric(
+                        "Symbols with signals",
+                        int(global_signals["Symbol"].nunique())
+                        if not global_signals.empty
+                        else 0,
+                    )
+
+                    if not global_summary.empty:
+                        st.markdown("#### Historical summary · TF × detector × side")
+                        st.dataframe(
+                            global_summary,
+                            use_container_width=True,
+                            hide_index=True,
+                            key="micro_reaction_global_summary_table",
+                        )
+
+                    signal_view = global_signals.copy()
+                    if (
+                        global_quality_filter != "ALL"
+                        and not signal_view.empty
+                    ):
+                        signal_view = signal_view.loc[
+                            signal_view["Quality 30m"].astype(str).eq(
+                                global_quality_filter
+                            )
+                        ].copy()
+
+                    st.markdown("#### Every historical Micro REACTION signal")
+                    st.caption(
+                        "One row = one causal REACTION entry at the next 1m open. "
+                        "MFE/MAE/Return are side-adjusted; MAE is shown as a positive "
+                        "adverse-excursion magnitude. PENDING means the selected "
+                        "forward horizon is not complete yet."
+                    )
+                    st.dataframe(
+                        signal_view,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_reaction_global_signal_table",
+                    )
+
+                    csv_window = (
+                        stored_global_config.get("window", "historical")
+                        if isinstance(stored_global_config, dict)
+                        else "historical"
+                    )
+                    st.download_button(
+                        "Download all Micro REACTION signals CSV",
+                        data=global_signals.to_csv(index=False).encode("utf-8"),
+                        file_name=(
+                            "micro_reaction_all_symbols_"
+                            f"{str(csv_window).lower()}_signals.csv"
+                        ),
+                        mime="text/csv",
+                        key="micro_reaction_global_signal_download",
+                    )
+
+                    if (
+                        isinstance(stored_global_diag, pd.DataFrame)
+                        and not stored_global_diag.empty
+                    ):
+                        scanned_symbols = int(
+                            stored_global_diag.get(
+                                "symbol",
+                                pd.Series(dtype="object"),
+                            ).nunique()
+                        )
+                        no_history = int(
+                            stored_global_diag.get(
+                                "error",
+                                pd.Series(dtype="object"),
+                            ).fillna("").eq("no_history").sum()
+                        )
+                        st.caption(
+                            f"Historical scan diagnostics: {scanned_symbols} symbols "
+                            f"processed · {no_history} without usable 1m history."
+                        )
+
+            # -------------------------------------------------
             # Scanner / event table.
             # -------------------------------------------------
             st.markdown("---")
-            st.markdown("### Micro REACTION scanner")
+            st.markdown(
+                "### Recent Micro REACTION scanner"
+                if micro_scope == "All symbols"
+                else "### Micro REACTION scanner"
+            )
 
             scanner_symbols = (
                 (str(selected_micro_symbol),)
