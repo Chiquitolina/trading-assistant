@@ -26973,6 +26973,295 @@ def build_micro_reaction_chart(
     return fig
 
 
+def build_micro_reaction_comparison_table(retests_df):
+    """Compare causal Micro REACTION behavior by TF, detector and side.
+
+    The denominator is every first confirmed-swing retest in the scanner
+    universe. MFE/MAE statistics use REACTION rows only because those are the
+    rows that would produce a next-1m-open entry. Medians are preferred here
+    so a few outsized micro-cap runs do not dominate the baseline comparison.
+    """
+    if retests_df is None or retests_df.empty:
+        return pd.DataFrame()
+
+    required = {
+        "timeframe",
+        "detector",
+        "signal",
+        "status",
+    }
+    if not required.issubset(retests_df.columns):
+        return pd.DataFrame()
+
+    work = retests_df.copy()
+    rows = []
+
+    for (timeframe, detector, side), group in work.groupby(
+        ["timeframe", "detector", "signal"],
+        dropna=False,
+        sort=True,
+    ):
+        reactions = group.loc[
+            group["status"].fillna("").astype(str).eq("REACTION")
+        ].copy()
+
+        row = {
+            "TF": str(timeframe),
+            "Detector": str(detector),
+            "Side": str(side),
+            "First touches": int(len(group)),
+            "REACTION": int(len(reactions)),
+            "Reaction rate %": (
+                float(len(reactions)) / float(len(group)) * 100.0
+                if len(group)
+                else np.nan
+            ),
+        }
+
+        for horizon in (15, 30, 60):
+            mfe_col = f"reaction_mfe_{horizon}m_pct"
+            mae_col = f"reaction_mae_{horizon}m_pct"
+
+            mfe = pd.to_numeric(
+                reactions.get(
+                    mfe_col,
+                    pd.Series(np.nan, index=reactions.index),
+                ),
+                errors="coerce",
+            )
+            mae = pd.to_numeric(
+                reactions.get(
+                    mae_col,
+                    pd.Series(np.nan, index=reactions.index),
+                ),
+                errors="coerce",
+            )
+            valid = mfe.notna() & mae.notna()
+
+            row[f"N {horizon}m"] = int(valid.sum())
+            row[f"MFE {horizon}m med %"] = (
+                float(mfe.loc[valid].median())
+                if valid.any()
+                else np.nan
+            )
+            row[f"MAE {horizon}m med %"] = (
+                float(mae.loc[valid].median())
+                if valid.any()
+                else np.nan
+            )
+
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    numeric_cols = [
+        column
+        for column in result.columns
+        if column not in {"TF", "Detector", "Side"}
+    ]
+    for column in numeric_cols:
+        result[column] = pd.to_numeric(
+            result[column],
+            errors="coerce",
+        )
+
+    float_cols = [
+        column
+        for column in result.columns
+        if "%" in column
+    ]
+    result[float_cols] = result[float_cols].round(4)
+
+    tf_order = {"1m": 0, "5m": 1}
+    side_order = {"LONG": 0, "SHORT": 1}
+    result["_tf_order"] = result["TF"].map(tf_order).fillna(99)
+    result["_side_order"] = result["Side"].map(side_order).fillna(99)
+    return (
+        result
+        .sort_values(
+            ["_tf_order", "Detector", "_side_order"],
+            kind="stable",
+        )
+        .drop(columns=["_tf_order", "_side_order"])
+        .reset_index(drop=True)
+    )
+
+
+def build_micro_reaction_selected_event_chart(
+    candles,
+    event_row,
+):
+    """Focused 1m chart for one causal Micro REACTION sequence only.
+
+    The route is Pivot -> Confirmation -> Departure -> Retest -> Entry.
+    No other swing markers are drawn, so parentage is visually unambiguous.
+    """
+    if candles is None or candles.empty:
+        return go.Figure()
+
+    candles = _prepare_confirmed_swing_retest_candles(candles)
+    if candles.empty:
+        return go.Figure()
+
+    stages = [
+        (
+            "Pivot",
+            event_row.get("pivot_timestamp"),
+            event_row.get("swing_price"),
+            "triangle-up"
+            if str(event_row.get("signal", "")).upper() == "LONG"
+            else "triangle-down",
+        ),
+        (
+            "Confirmation",
+            event_row.get("actionable_timestamp"),
+            event_row.get("entry_price"),
+            "circle-open",
+        ),
+        (
+            "Departure",
+            event_row.get("departure_timestamp"),
+            event_row.get("departure_price"),
+            "square-open",
+        ),
+        (
+            "Retest",
+            event_row.get("retest_timestamp"),
+            event_row.get("retest_price"),
+            "diamond",
+        ),
+        (
+            "Entry",
+            event_row.get("first_touch_entry_timestamp"),
+            event_row.get("first_touch_entry_price"),
+            "star",
+        ),
+    ]
+
+    clean_stages = []
+    for label, timestamp, price, marker_symbol in stages:
+        timestamp = pd.to_numeric(timestamp, errors="coerce")
+        price = pd.to_numeric(price, errors="coerce")
+        if pd.isna(timestamp) or pd.isna(price):
+            continue
+        clean_stages.append(
+            (
+                str(label),
+                int(timestamp),
+                float(price),
+                str(marker_symbol),
+            )
+        )
+
+    if not clean_stages:
+        return go.Figure()
+
+    earliest_stage = min(stage[1] for stage in clean_stages)
+    latest_stage = max(stage[1] for stage in clean_stages)
+    visible_start = earliest_stage - 30 * 60_000
+    visible_end = latest_stage + 90 * 60_000
+
+    view = candles.loc[
+        pd.to_numeric(candles["timestamp"], errors="coerce")
+        .between(visible_start, visible_end, inclusive="both")
+    ].copy()
+    if view.empty:
+        view = candles.copy()
+
+    view["chart_time"] = pd.to_datetime(
+        pd.to_numeric(view["timestamp"], errors="coerce"),
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).dt.tz_convert(TZ)
+    view = view.dropna(subset=["chart_time"]).copy()
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Candlestick(
+            x=view["chart_time"],
+            open=view["open"],
+            high=view["high"],
+            low=view["low"],
+            close=view["close"],
+            name="1m",
+        )
+    )
+
+    route_times = [
+        pd.to_datetime(ts, unit="ms", utc=True).tz_convert(TZ)
+        for _, ts, _, _ in clean_stages
+    ]
+    route_prices = [price for _, _, price, _ in clean_stages]
+    route_labels = [label for label, _, _, _ in clean_stages]
+
+    fig.add_trace(
+        go.Scatter(
+            x=route_times,
+            y=route_prices,
+            mode="lines",
+            name="Causal route",
+            hoverinfo="skip",
+        )
+    )
+
+    for label, timestamp, price, marker_symbol in clean_stages:
+        fig.add_trace(
+            go.Scatter(
+                x=[
+                    pd.to_datetime(
+                        timestamp,
+                        unit="ms",
+                        utc=True,
+                    ).tz_convert(TZ)
+                ],
+                y=[price],
+                mode="markers+text",
+                text=[label],
+                textposition="top center",
+                marker={
+                    "size": 13 if label != "Entry" else 16,
+                    "symbol": marker_symbol,
+                },
+                name=label,
+                hovertemplate=(
+                    f"<b>{label}</b><br>"
+                    "Time: %{x}<br>"
+                    "Price: %{y:.8f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    swing_price = pd.to_numeric(
+        event_row.get("swing_price"),
+        errors="coerce",
+    )
+    if pd.notna(swing_price):
+        fig.add_hline(
+            y=float(swing_price),
+            line_dash="dot",
+            annotation_text="Confirmed swing level",
+            annotation_position="bottom right",
+        )
+
+    fig.update_layout(
+        height=620,
+        margin={"l": 10, "r": 10, "t": 50, "b": 10},
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        title=(
+            f"{event_row.get('symbol', '')} · "
+            f"{event_row.get('timeframe', '')} "
+            f"{event_row.get('detector', '')} · "
+            f"{event_row.get('signal', '')} · focused causal sequence"
+        ),
+    )
+    return fig
+
+
 # ============================================================
 # CONFIRMED 15m SWING · SWEEP -> RECLAIM
 # Separate research strategy. Existing retest/touch logic above
@@ -36807,6 +37096,40 @@ if selected_section == "micro_reaction":
                     )
                 )
 
+            # -------------------------------------------------
+            # Clean baseline comparison: REACTION behavior by TF / side.
+            # Uses the complete scanner universe before UI status/side filters.
+            # -------------------------------------------------
+            comparison_table = build_micro_reaction_comparison_table(
+                micro_retests_df
+            )
+            if not comparison_table.empty:
+                st.markdown("### Baseline comparison · timeframe × side")
+                st.caption(
+                    "First touches are the denominator. MFE/MAE use only causal "
+                    "REACTION entries and are reported as medians. This is the "
+                    "clean first view for comparing 1m vs 5m and LONG vs SHORT "
+                    "before optimizing TP/SL."
+                )
+                st.dataframe(
+                    comparison_table,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="micro_reaction_baseline_comparison",
+                )
+
+                five_minute_comparison = comparison_table.loc[
+                    comparison_table["TF"].astype(str).eq("5m")
+                ].copy()
+                if not five_minute_comparison.empty:
+                    st.markdown("#### 5m focus · LONG vs SHORT")
+                    st.dataframe(
+                        five_minute_comparison,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_reaction_5m_side_comparison",
+                    )
+
             scanner_view = micro_retests_df.copy()
             if not scanner_view.empty:
                 if micro_status_filter == "REACTION only":
@@ -36979,6 +37302,113 @@ if selected_section == "micro_reaction":
                 selected_micro_row = scanner_view.loc[
                     label_to_index[selected_micro_label]
                 ]
+
+                # Focused chart for exactly one structural event. This avoids
+                # confusing parent pivots when the general chart has many swings.
+                selected_retest_age = pd.to_numeric(
+                    selected_micro_row.get("retest_age_min"),
+                    errors="coerce",
+                )
+                selected_pivot_span = pd.to_numeric(
+                    selected_micro_row.get("pivot_to_retest_min"),
+                    errors="coerce",
+                )
+                selected_fetch_limit = max(
+                    int(micro_chart_candles),
+                    240,
+                )
+                if pd.notna(selected_retest_age):
+                    selected_fetch_limit = max(
+                        selected_fetch_limit,
+                        int(np.ceil(float(selected_retest_age))) + 180,
+                    )
+                if pd.notna(selected_pivot_span):
+                    selected_fetch_limit = max(
+                        selected_fetch_limit,
+                        int(np.ceil(float(selected_pivot_span))) + 180,
+                    )
+                selected_fetch_limit = min(
+                    int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT),
+                    int(selected_fetch_limit),
+                )
+
+                selected_event_candles = (
+                    load_volume_exhaustion_research_candles(
+                        symbol=str(selected_micro_row.get("symbol", "")),
+                        timeframe="1m",
+                        limit=int(selected_fetch_limit),
+                    )
+                )
+
+                if (
+                    selected_event_candles is None
+                    or selected_event_candles.empty
+                ):
+                    st.warning(
+                        "No 1m candles are available for the selected event."
+                    )
+                else:
+                    focused_fig = build_micro_reaction_selected_event_chart(
+                        candles=selected_event_candles,
+                        event_row=selected_micro_row,
+                    )
+                    if len(focused_fig.data):
+                        st.plotly_chart(
+                            focused_fig,
+                            use_container_width=True,
+                            key="micro_reaction_selected_event_chart",
+                            config={
+                                "displaylogo": False,
+                                "scrollZoom": True,
+                            },
+                        )
+                    else:
+                        st.info(
+                            "The selected event is outside the currently "
+                            "available 1m history."
+                        )
+
+                selected_metrics = st.columns(6)
+                selected_metrics[0].metric(
+                    "TF",
+                    str(selected_micro_row.get("timeframe", "—")),
+                )
+                selected_metrics[1].metric(
+                    "Side",
+                    str(selected_micro_row.get("signal", "—")),
+                )
+                selected_metrics[2].metric(
+                    "MFE 15m",
+                    (
+                        f"{float(pd.to_numeric(selected_micro_row.get('reaction_mfe_15m_pct'), errors='coerce')):.3f}%"
+                        if pd.notna(pd.to_numeric(selected_micro_row.get("reaction_mfe_15m_pct"), errors="coerce"))
+                        else "—"
+                    ),
+                )
+                selected_metrics[3].metric(
+                    "MAE 15m",
+                    (
+                        f"{float(pd.to_numeric(selected_micro_row.get('reaction_mae_15m_pct'), errors='coerce')):.3f}%"
+                        if pd.notna(pd.to_numeric(selected_micro_row.get("reaction_mae_15m_pct"), errors="coerce"))
+                        else "—"
+                    ),
+                )
+                selected_metrics[4].metric(
+                    "MFE 60m",
+                    (
+                        f"{float(pd.to_numeric(selected_micro_row.get('reaction_mfe_60m_pct'), errors='coerce')):.3f}%"
+                        if pd.notna(pd.to_numeric(selected_micro_row.get("reaction_mfe_60m_pct"), errors="coerce"))
+                        else "—"
+                    ),
+                )
+                selected_metrics[5].metric(
+                    "MAE 60m",
+                    (
+                        f"{float(pd.to_numeric(selected_micro_row.get('reaction_mae_60m_pct'), errors='coerce')):.3f}%"
+                        if pd.notna(pd.to_numeric(selected_micro_row.get("reaction_mae_60m_pct"), errors="coerce"))
+                        else "—"
+                    ),
+                )
 
                 timeline_rows = [
                     {
