@@ -89,10 +89,32 @@ from dashboard.analytics.candidate_v1_market_regime import (
 from config.strategies.v1 import SYMBOLS as CANDIDATE_V1_MARKET_SYMBOLS
 from config.market_sectors import MIN_SECTOR_SYMBOLS as CANDIDATE_V1_MIN_SECTOR_SYMBOLS
 from engine.live.data.market_sector_catalog import MarketSectorCatalog
-from engine.live.data.redis_market_data_protocol import (
-    MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY,
-    MICRO_FLOW_COLLECTOR_STATUS_KEY,
-    MICRO_FLOW_SECONDS_STREAM,
+# Import the protocol module itself instead of hard-importing the new Micro Flow
+# names. Streamlit can hot-reload app.py while keeping an older imported module
+# object alive; using getattr fallbacks prevents the whole dashboard from
+# crashing during that transition. The canonical values still come from the
+# shared protocol whenever they are available.
+from engine.live.data import redis_market_data_protocol as _redis_md_protocol
+
+_MICRO_FLOW_KEY_PREFIX = getattr(
+    _redis_md_protocol,
+    "KEY_PREFIX",
+    "market-data:v1",
+)
+MICRO_FLOW_SECONDS_STREAM = getattr(
+    _redis_md_protocol,
+    "MICRO_FLOW_SECONDS_STREAM",
+    f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:seconds",
+)
+MICRO_FLOW_COLLECTOR_STATUS_KEY = getattr(
+    _redis_md_protocol,
+    "MICRO_FLOW_COLLECTOR_STATUS_KEY",
+    f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:collector-status",
+)
+MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY = getattr(
+    _redis_md_protocol,
+    "MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY",
+    f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:collector-heartbeat",
 )
 
 # Candidate monitor functions intentionally are NOT decorated with st.fragment.
