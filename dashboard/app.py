@@ -8938,6 +8938,142 @@ def load_volume_exhaustion_research_candles(
 
 
 @st.cache_data(ttl=120, show_spinner=False)
+def load_micro_reaction_historical_1m_candles(
+    symbol,
+    required_bars,
+):
+    """Load enough CLOSED Binance Futures 1m candles for historical research.
+
+    Redis intentionally keeps a relatively short rolling history, which is
+    perfect for live scanning but cannot guarantee a full 1/2/3-day inspector.
+    Historical Micro REACTION therefore backfills public USD-M Futures klines
+    on demand. Requests are paginated backwards (max 1500 bars/request), cached,
+    deduplicated and restricted to closed candles only.
+    """
+    try:
+        required_bars = max(1, int(required_bars))
+    except (TypeError, ValueError):
+        return pd.DataFrame()
+
+    url = "https://fapi.binance.com/fapi/v1/klines"
+    now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+    remaining = required_bars
+    end_time = None
+    frames = []
+    safety_calls = 0
+
+    while remaining > 0 and safety_calls < 10:
+        safety_calls += 1
+        batch_limit = min(1500, max(1, remaining + (1 if end_time is None else 0)))
+        params = {
+            "symbol": str(symbol).upper(),
+            "interval": "1m",
+            "limit": int(batch_limit),
+        }
+        if end_time is not None:
+            params["endTime"] = int(end_time)
+
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            break
+
+        if not payload:
+            break
+
+        frame = pd.DataFrame(
+            payload,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+                "quote_volume",
+                "trades",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "ignore",
+            ],
+        )
+
+        for column in [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+        ]:
+            frame[column] = pd.to_numeric(
+                frame[column],
+                errors="coerce",
+            )
+
+        frame = frame.dropna(
+            subset=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "close_time",
+            ]
+        ).copy()
+
+        # Never let the currently forming 1m candle leak into research.
+        frame = frame.loc[
+            frame["close_time"] < now_ms
+        ].copy()
+
+        if frame.empty:
+            oldest_raw = pd.to_numeric(
+                pd.DataFrame(payload)[0],
+                errors="coerce",
+            ).dropna()
+            if oldest_raw.empty:
+                break
+            end_time = int(oldest_raw.min()) - 1
+            continue
+
+        frames.append(frame)
+        remaining = max(0, required_bars - sum(len(item) for item in frames))
+        oldest_open = int(frame["timestamp"].min())
+        next_end_time = oldest_open - 1
+        if end_time is not None and next_end_time >= end_time:
+            break
+        end_time = next_end_time
+
+        if len(payload) < batch_limit:
+            break
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = pd.concat(frames, ignore_index=True)
+    result = (
+        result
+        .sort_values("timestamp")
+        .drop_duplicates(subset=["timestamp"], keep="last")
+        .tail(required_bars)
+        .reset_index(drop=True)
+    )
+
+    return result[
+        ["timestamp", "open", "high", "low", "close", "volume"]
+    ].copy()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def build_volume_exhaustion_confirmation_study_all_symbols(
     symbols,
     candle_limit,
@@ -27464,11 +27600,15 @@ def build_micro_reaction_historical_overlay_chart(
     if work.empty:
         return go.Figure()
 
+    chart_tf_minutes = max(1, int(timeframe_to_minutes(chart_timeframe)))
     visible_start_ms = int(work["timestamp"].min())
-    visible_end_ms = int(work["timestamp"].max())
+    visible_end_ms = int(
+        work["timestamp"].max()
+        + chart_tf_minutes * 60_000
+        - 1
+    )
     visible_start_time = work["chart_time"].iloc[0]
     visible_end_time = work["chart_time"].iloc[-1]
-    chart_tf_minutes = max(1, int(timeframe_to_minutes(chart_timeframe)))
     visible_end_with_padding = visible_end_time + pd.Timedelta(
         minutes=chart_tf_minutes
     )
@@ -37610,42 +37750,99 @@ if selected_section == "micro_reaction":
                         + 60
                     ),
                 )
-                scan_1m_candles = load_volume_exhaustion_research_candles(
+
+                # Historical overlay needs a real clock window, not whatever
+                # happens to remain in the short Redis rolling list. Backfill
+                # public Binance Futures 1m klines on demand; keep Redis as a
+                # fallback if the REST request is unavailable.
+                scan_1m_candles = load_micro_reaction_historical_1m_candles(
                     symbol=str(selected_micro_symbol),
-                    timeframe="1m",
-                    limit=int(historical_scan_limit),
+                    required_bars=int(historical_scan_limit),
                 )
+                micro_historical_data_source = "Binance Futures REST"
+
+                if scan_1m_candles is None or scan_1m_candles.empty:
+                    scan_1m_candles = load_volume_exhaustion_research_candles(
+                        symbol=str(selected_micro_symbol),
+                        timeframe="1m",
+                        limit=int(historical_scan_limit),
+                    )
+                    micro_historical_data_source = "Redis retained history"
 
                 if scan_1m_candles is None or scan_1m_candles.empty:
                     chart_candles = pd.DataFrame()
                     visible_1m_candles = pd.DataFrame()
+                    micro_expected_chart_bars = 0
                 else:
                     scan_1m_candles = _prepare_confirmed_swing_retest_candles(
                         scan_1m_candles
                     )
-                    latest_visible_ts = int(
-                        pd.to_numeric(
-                            scan_1m_candles["timestamp"],
-                            errors="coerce",
-                        ).dropna().max()
+
+                    # Build the DISPLAY from the requested number of timeframe
+                    # bars, not from a Redis/time cutoff that may contain less
+                    # history. For 1 day this is exactly 1440 x 1m or 288 x 5m
+                    # whenever Binance returned the full requested history.
+                    chart_tf_minutes = max(
+                        1,
+                        int(timeframe_to_minutes(micro_chart_timeframe)),
                     )
-                    visible_cutoff_ts = (
-                        latest_visible_ts
-                        - max(0, int(micro_chart_window_minutes) - 1) * 60_000
-                    )
-                    visible_1m_candles = scan_1m_candles.loc[
-                        pd.to_numeric(
-                            scan_1m_candles["timestamp"],
-                            errors="coerce",
-                        ) >= visible_cutoff_ts
-                    ].copy()
-                    if micro_chart_timeframe == "5m":
-                        chart_candles = _resample_contiguous_1m_for_micro_swing(
-                            visible_1m_candles,
-                            "5m",
+                    micro_expected_chart_bars = int(
+                        np.ceil(
+                            float(micro_chart_window_minutes)
+                            / float(chart_tf_minutes)
                         )
+                    )
+
+                    if micro_chart_timeframe == "5m":
+                        all_chart_candles = (
+                            _resample_contiguous_1m_for_micro_swing(
+                                scan_1m_candles,
+                                "5m",
+                            )
+                        )
+                        chart_candles = all_chart_candles.tail(
+                            micro_expected_chart_bars
+                        ).copy()
                     else:
-                        chart_candles = visible_1m_candles.copy()
+                        chart_candles = scan_1m_candles.tail(
+                            micro_expected_chart_bars
+                        ).copy()
+
+                    if chart_candles.empty:
+                        visible_1m_candles = pd.DataFrame()
+                    else:
+                        chart_start_ts = int(
+                            pd.to_numeric(
+                                chart_candles["timestamp"],
+                                errors="coerce",
+                            ).dropna().min()
+                        )
+                        chart_last_open_ts = int(
+                            pd.to_numeric(
+                                chart_candles["timestamp"],
+                                errors="coerce",
+                            ).dropna().max()
+                        )
+                        chart_end_exclusive_ts = (
+                            chart_last_open_ts
+                            + chart_tf_minutes * 60_000
+                        )
+                        visible_1m_candles = scan_1m_candles.loc[
+                            (
+                                pd.to_numeric(
+                                    scan_1m_candles["timestamp"],
+                                    errors="coerce",
+                                )
+                                >= chart_start_ts
+                            )
+                            & (
+                                pd.to_numeric(
+                                    scan_1m_candles["timestamp"],
+                                    errors="coerce",
+                                )
+                                < chart_end_exclusive_ts
+                            )
+                        ].copy()
             else:
                 chart_candles = load_volume_exhaustion_research_candles(
                     symbol=str(selected_micro_symbol),
@@ -37706,11 +37903,17 @@ if selected_section == "micro_reaction":
                         errors="coerce",
                     ).dropna().min()
                 )
+                chart_tf_minutes_for_range = max(
+                    1,
+                    int(timeframe_to_minutes(micro_chart_timeframe)),
+                )
                 visible_end_ms = int(
                     pd.to_numeric(
                         chart_candles["timestamp"],
                         errors="coerce",
                     ).dropna().max()
+                    + chart_tf_minutes_for_range * 60_000
+                    - 1
                 )
 
                 chart_view = chart_retests.copy()
@@ -37839,11 +38042,26 @@ if selected_section == "micro_reaction":
                         )
 
                     st.caption(
-                        f"Rendering {len(chart_candles):,} × {micro_chart_timeframe} "
-                        f"candles for {historical_window_label}. Detection used "
+                        f"Rendering {len(chart_candles):,} / "
+                        f"{int(micro_expected_chart_bars):,} expected × "
+                        f"{micro_chart_timeframe} candles for "
+                        f"{historical_window_label}. Historical source: "
+                        f"{micro_historical_data_source}. Detection used "
                         f"{len(scan_1m_candles):,} causal 1m candles including "
                         "left-side warmup for pivot confirmation and retests."
                     )
+
+                    if (
+                        int(micro_expected_chart_bars) > 0
+                        and len(chart_candles) < int(micro_expected_chart_bars)
+                    ):
+                        st.warning(
+                            "The selected historical source returned only "
+                            f"{len(chart_candles):,} of "
+                            f"{int(micro_expected_chart_bars):,} requested "
+                            f"{micro_chart_timeframe} candles. The chart below "
+                            "therefore does NOT cover the full selected window."
+                        )
 
                     historical_fig = build_micro_reaction_historical_overlay_chart(
                         candles=chart_candles,
