@@ -145,6 +145,14 @@ class WSClient:
         self._last_error_log_at = 0.0
         self._suppressed_error_count = 0
 
+        # Every websocket manager/connect cycle gets its own generation.
+        # Callbacks from a stopped TWM can arrive late (especially
+        # ReadLoopClosed errors). They must never mutate the health of the
+        # replacement connection.
+        self._connection_generation = 0
+        self._stale_callback_count = 0
+        self._last_stale_callback_log_at = 0.0
+
 
 
         self._coverage_lock = threading.Lock()
@@ -404,7 +412,16 @@ class WSClient:
 
     def _connect(self):
 
-        print(f"\n\033[94m[WS CLIENT:{self.client_name}]\033[0m 🔌 Connecting WS...")
+        # Promote a new callback generation before touching the old manager.
+        # Any delayed callbacks from the previous TWM become stale
+        # immediately and are ignored by _handle_message().
+        self._connection_generation += 1
+        connection_generation = self._connection_generation
+
+        print(
+            f"\n\033[94m[WS CLIENT:{self.client_name}]\033[0m "
+            f"🔌 Connecting WS generation={connection_generation}..."
+        )
 
 
 
@@ -542,11 +559,13 @@ class WSClient:
 
                     streams=streams,
 
-                    callback=lambda msg, gid=group_id: self._handle_message(
+                    callback=lambda msg, gid=group_id, gen=connection_generation: self._handle_message(
 
                         msg,
 
                         group_id=gid,
+
+                        generation=gen,
 
                     ),
 
@@ -1042,9 +1061,37 @@ class WSClient:
 
 
 
-    def _handle_message(self, msg, group_id=None):
+    def _handle_message(
+        self,
+        msg,
+        group_id=None,
+        generation=None,
+    ):
 
         try:
+
+            if (
+                generation is not None
+                and generation != self._connection_generation
+            ):
+                self._stale_callback_count += 1
+
+                now = time.time()
+                if (
+                    now - self._last_stale_callback_log_at
+                    >= 30.0
+                ):
+                    print(
+                        f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
+                        "ℹ️ Ignoring stale callbacks "
+                        f"count={self._stale_callback_count} "
+                        f"callback_generation={generation} "
+                        f"active_generation={self._connection_generation}"
+                    )
+                    self._stale_callback_count = 0
+                    self._last_stale_callback_log_at = now
+
+                return
 
             if isinstance(msg, dict) and msg.get("e") == "error":
                 now = time.time()

@@ -460,6 +460,13 @@ class MarketDataService:
                         transition["type"]
                         == "reconnected"
                     ):
+                        # Reset the fail-fast timer immediately, before the
+                        # potentially long REST repair below. Otherwise a
+                        # later disconnect during recovery can inherit the
+                        # timestamp of the previous outage and trigger a
+                        # false "stuck disconnected" fatal.
+                        self._mark_ws_watchdog_recovered()
+
                         self._run_ws_recovery(
                             disconnected_at_ms=(
                                 transition[
@@ -2794,6 +2801,24 @@ class MarketDataService:
             )
 
 
+    def _mark_ws_watchdog_recovered(self):
+        if self.ws_connecting_since_monotonic is None:
+            return
+
+        disconnected_for = (
+            time.monotonic()
+            - self.ws_connecting_since_monotonic
+        )
+
+        print(
+            "[MARKET DATA WS WATCHDOG] "
+            "connection recovered "
+            f"after={disconnected_for:.1f}s"
+        )
+
+        self.ws_connecting_since_monotonic = None
+
+
     def _check_ws_connection_watchdog(self):
         connected = bool(
             self.ws
@@ -2803,22 +2828,7 @@ class MarketDataService:
         now = time.monotonic()
 
         if connected:
-            if (
-                self.ws_connecting_since_monotonic
-                is not None
-            ):
-                disconnected_for = (
-                    now
-                    - self.ws_connecting_since_monotonic
-                )
-
-                print(
-                    "[MARKET DATA WS WATCHDOG] "
-                    "connection recovered "
-                    f"after={disconnected_for:.1f}s"
-                )
-
-            self.ws_connecting_since_monotonic = None
+            self._mark_ws_watchdog_recovered()
             return
 
         if self.ws_connecting_since_monotonic is None:
