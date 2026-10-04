@@ -10382,6 +10382,188 @@ def _resample_contiguous_1m_for_micro_swing(
 
 
 @st.cache_data(ttl=120, show_spinner=False)
+def build_micro_reaction_historical_retests(
+    one_minute,
+    swing_timeframes,
+    swing_detector_items,
+    min_swing_prominence_pct,
+    retest_tolerance_pct,
+    min_departure_pct,
+    max_age_minutes,
+):
+    """Reconstruct every causal Micro REACTION inside one visible 1m window.
+
+    This is intentionally separate from the lightweight all-symbol live scanner.
+    Historical overlay must use the exact 1m dataframe that is being plotted so
+    a 5,000-candle chart and its structural scan cannot silently diverge.
+    """
+    prepared = _prepare_confirmed_swing_retest_candles(one_minute)
+    diagnostics = {
+        "1m candles": int(len(prepared)),
+        "pivots": 0,
+        "confirmed": 0,
+        "eligible confirmations": 0,
+        "first touches": 0,
+        "REACTIONs": 0,
+        "failed": 0,
+        "indecisive": 0,
+    }
+
+    if prepared.empty:
+        return pd.DataFrame(), diagnostics
+
+    detector_windows = dict(swing_detector_items)
+    swing_timeframes = tuple(str(tf) for tf in swing_timeframes)
+    earliest_1m_ts = int(prepared["timestamp"].min())
+    latest_1m_ts = int(prepared["timestamp"].max())
+    forward_cache = _build_confirmed_swing_retest_forward_cache(prepared)
+    rows = []
+
+    for swing_timeframe in swing_timeframes:
+        detector_name = detector_windows.get(swing_timeframe, "5x5")
+        try:
+            swing_bars = int(str(detector_name).split("x")[0])
+        except (TypeError, ValueError):
+            swing_bars = 5
+
+        detector = SwingDetector(
+            left_bars=swing_bars,
+            right_bars=swing_bars,
+            min_prominence_pct=float(min_swing_prominence_pct),
+        )
+
+        if swing_timeframe == "1m":
+            timeframe_candles = prepared.copy()
+        elif swing_timeframe == "5m":
+            # For the long historical chart, derive 5m from the SAME 1m path.
+            # This removes any retention mismatch between Redis 1m and 5m lists.
+            timeframe_candles = _resample_contiguous_1m_for_micro_swing(
+                prepared,
+                "5m",
+            )
+        else:
+            timeframe_candles = pd.DataFrame()
+
+        if timeframe_candles is None or timeframe_candles.empty:
+            continue
+
+        points = detector.detect_all(
+            timeframe_candles.to_dict(orient="records")
+        )
+        diagnostics["pivots"] += int(len(points))
+
+        for point in points:
+            if point.pivot_timestamp is None:
+                continue
+
+            info = get_volume_exhaustion_swing_confirmation_info(
+                point=point,
+                timeframe_candles=timeframe_candles,
+                swing_timeframe=swing_timeframe,
+            )
+            if info is None:
+                continue
+            diagnostics["confirmed"] += 1
+
+            actionable_ts = int(info["actionable_timestamp"])
+            # Historical overlay owns exactly this plotted 1m window. If the
+            # confirmation becomes actionable outside it, the causal path cannot
+            # be reconstructed from the visible data and is intentionally skipped.
+            if actionable_ts < earliest_1m_ts or actionable_ts > latest_1m_ts:
+                continue
+            diagnostics["eligible confirmations"] += 1
+
+            signal_side = (
+                "SHORT"
+                if point.side == "HIGH"
+                else "LONG"
+                if point.side == "LOW"
+                else None
+            )
+            if signal_side is None:
+                continue
+
+            try:
+                prominence_pct = float(point.prominence_pct)
+            except (TypeError, ValueError):
+                prominence_pct = np.nan
+
+            swing_row = {
+                "timeframe": swing_timeframe,
+                "detector": detector_name,
+                "signal": signal_side,
+                "pivot_timestamp": int(point.pivot_timestamp),
+                "actionable_timestamp": actionable_ts,
+                "pivot_price": float(point.price),
+                "entry_price": float(info["confirmation_close"]),
+                "pivot_to_confirmation_pct": float(info["move_pct"]),
+                "prominence_pct": prominence_pct,
+            }
+
+            retest = _find_confirmed_swing_retest(
+                one_minute=prepared,
+                swing_row=swing_row,
+                retest_tolerance_pct=float(retest_tolerance_pct),
+                min_departure_pct=float(min_departure_pct),
+                max_age_minutes=int(max_age_minutes),
+            )
+            if retest is None:
+                continue
+
+            diagnostics["first touches"] += 1
+            status = str(retest.get("status", ""))
+            if status == "REACTION":
+                diagnostics["REACTIONs"] += 1
+            elif status == "TOUCH_FAILED":
+                diagnostics["failed"] += 1
+            elif status == "TOUCH_INDECISIVE":
+                diagnostics["indecisive"] += 1
+
+            retest["symbol"] = ""
+            retest["retest_age_min"] = max(
+                0.0,
+                (latest_1m_ts - int(retest["retest_timestamp"])) / 60_000.0,
+            )
+            retest = _attach_confirmed_swing_volume_context(
+                retest,
+                prepared,
+            )
+            retest = _attach_confirmed_swing_reaction_run(
+                retest,
+                forward_cache,
+            )
+            retest = _attach_confirmed_swing_order_recovery_analysis(
+                retest,
+                forward_cache,
+            )
+            rows.append(retest)
+
+    if not rows:
+        return pd.DataFrame(), diagnostics
+
+    result = pd.DataFrame(rows)
+    for source_col, target_col in [
+        ("pivot_timestamp", "pivot_time"),
+        ("actionable_timestamp", "confirmation_available"),
+        ("departure_timestamp", "departure_time"),
+        ("retest_timestamp", "retest_time"),
+    ]:
+        if source_col not in result.columns:
+            continue
+        result[target_col] = pd.to_datetime(
+            pd.to_numeric(result[source_col], errors="coerce"),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        ).dt.tz_convert(TZ)
+
+    return (
+        result.sort_values("retest_timestamp", ascending=False).reset_index(drop=True),
+        diagnostics,
+    )
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def scan_confirmed_swing_retests_all_symbols(
     symbols,
     swing_timeframes,
@@ -37392,32 +37574,49 @@ if selected_section == "micro_reaction":
                     "No closed 1m candles are available for the selected symbol."
                 )
             else:
-                # Historical mode always scans the full currently retained 1m
-                # research window. The visible slider then only slices the chart;
-                # it does not change the REACTION definition or scanner horizon.
-                chart_scan_recent_minutes = (
-                    int(VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT)
-                    if micro_view_mode == "Historical overlay"
-                    else max(
+                historical_scan_diagnostics = None
+                if micro_view_mode == "Historical overlay":
+                    # Dedicated exact-window reconstruction: scan the SAME 1m
+                    # candles being plotted. This avoids retention / recent-window
+                    # behavior from the all-symbol live scanner hiding older events.
+                    with st.spinner(
+                        "Reconstructing every causal Micro REACTION in the "
+                        f"visible {int(micro_chart_candles)}-candle window..."
+                    ):
+                        chart_retests, historical_scan_diagnostics = (
+                            build_micro_reaction_historical_retests(
+                                one_minute=chart_candles,
+                                swing_timeframes=tuple(micro_timeframes),
+                                swing_detector_items=tuple(
+                                    sorted(detector_windows.items())
+                                ),
+                                min_swing_prominence_pct=float(micro_prominence),
+                                retest_tolerance_pct=float(micro_tolerance),
+                                min_departure_pct=float(micro_departure),
+                                max_age_minutes=int(micro_max_age),
+                            )
+                        )
+                    if chart_retests is not None and not chart_retests.empty:
+                        chart_retests["symbol"] = str(selected_micro_symbol)
+                else:
+                    chart_scan_recent_minutes = max(
                         int(micro_recent_minutes),
                         int(micro_chart_candles),
                     )
-                )
-
-                chart_retests = (
-                    scan_confirmed_swing_retests_all_symbols(
-                        symbols=(str(selected_micro_symbol),),
-                        swing_timeframes=tuple(micro_timeframes),
-                        swing_detector_items=tuple(
-                            sorted(detector_windows.items())
-                        ),
-                        min_swing_prominence_pct=float(micro_prominence),
-                        retest_tolerance_pct=float(micro_tolerance),
-                        min_departure_pct=float(micro_departure),
-                        max_age_minutes=int(micro_max_age),
-                        max_retest_age_minutes=int(chart_scan_recent_minutes),
+                    chart_retests = (
+                        scan_confirmed_swing_retests_all_symbols(
+                            symbols=(str(selected_micro_symbol),),
+                            swing_timeframes=tuple(micro_timeframes),
+                            swing_detector_items=tuple(
+                                sorted(detector_windows.items())
+                            ),
+                            min_swing_prominence_pct=float(micro_prominence),
+                            retest_tolerance_pct=float(micro_tolerance),
+                            min_departure_pct=float(micro_departure),
+                            max_age_minutes=int(micro_max_age),
+                            max_retest_age_minutes=int(chart_scan_recent_minutes),
+                        )
                     )
-                )
 
                 visible_start_ms = int(
                     pd.to_numeric(
@@ -37524,6 +37723,38 @@ if selected_section == "micro_reaction":
                         "Indecisive touches",
                         historical_indecisive,
                     )
+
+                    if isinstance(historical_scan_diagnostics, dict):
+                        stage_1, stage_2, stage_3 = st.columns(3)
+                        stage_1.metric(
+                            "Pivots detected",
+                            int(historical_scan_diagnostics.get("pivots", 0)),
+                        )
+                        stage_2.metric(
+                            "Confirmed in window",
+                            int(
+                                historical_scan_diagnostics.get(
+                                    "eligible confirmations",
+                                    0,
+                                )
+                            ),
+                        )
+                        stage_3.metric(
+                            "Reached first touch",
+                            int(
+                                historical_scan_diagnostics.get(
+                                    "first touches",
+                                    0,
+                                )
+                            ),
+                        )
+                        st.caption(
+                            "Historical diagnostics use the exact plotted 1m "
+                            "window. If pivots are high but first touches are low, "
+                            "the departure/retest rules are filtering them; if "
+                            "first touches are high but REACTIONs are low, the "
+                            "reaction-candle condition is the filter."
+                        )
 
                     historical_fig = build_micro_reaction_historical_overlay_chart(
                         candles=chart_candles,
