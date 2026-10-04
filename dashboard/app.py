@@ -9449,6 +9449,16 @@ def _attach_confirmed_swing_reaction_run(retest, forward_cache):
 
 
 
+# Micro REACTION is a short-horizon execution study. These metrics are
+# measured from the actual hypothetical entry (next consecutive 1m open),
+# not from the REACTION candle close.
+MICRO_REACTION_RESEARCH_METRICS_VERSION = "scalp_entry_v1"
+MICRO_REACTION_SCALP_HORIZONS = (1, 3, 5, 10, 15, 30)
+MICRO_REACTION_PRIMARY_HORIZONS = (1, 3, 5)
+MICRO_REACTION_SECONDARY_HORIZONS = (10, 15, 30)
+MICRO_REACTION_5M_HIT_THRESHOLDS = (0.10, 0.20, 0.30)
+
+
 CONFIRMED_SWING_FIRST_TOUCH_TP_GRID = (
     0.25, 0.50, 0.75, 1.00, 1.50, 2.00,
 )
@@ -9489,6 +9499,20 @@ def _attach_confirmed_swing_order_recovery_analysis(
     retest["first_touch_entry_time"] = pd.NaT
     retest["first_touch_60m_complete"] = False
     retest["first_touch_60m_results"] = {}
+
+    # Short-horizon Micro REACTION metrics are measured from the executable
+    # next-1m-open entry. Keep them separate from reaction_mfe_* fields, whose
+    # historical semantics are based on the REACTION close.
+    for horizon_min in MICRO_REACTION_SCALP_HORIZONS:
+        retest[f"reaction_entry_mfe_{horizon_min}m_pct"] = np.nan
+        retest[f"reaction_entry_mae_{horizon_min}m_pct"] = np.nan
+        retest[f"reaction_entry_return_{horizon_min}m_pct"] = np.nan
+        retest[f"reaction_entry_complete_{horizon_min}m"] = False
+
+    for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
+        threshold_key = f"{float(threshold_pct):.2f}".replace(".", "_")
+        retest[f"reaction_entry_hit_plus_{threshold_key}_within_5m"] = False
+        retest[f"reaction_entry_hit_adverse_{threshold_key}_within_5m"] = False
 
     # Compact chronological research payload:
     # - one first-hit result per TP/SL pair, scanned up to 360m;
@@ -9645,6 +9669,74 @@ def _attach_confirmed_swing_order_recovery_analysis(
             len(timestamps) - int(start_idx),
         ),
     )
+
+    # ------------------------------------------------------------
+    # Micro REACTION scalp excursion from ACTUAL entry price.
+    # ------------------------------------------------------------
+    if status == "REACTION":
+        for horizon_min in MICRO_REACTION_SCALP_HORIZONS:
+            horizon_min = int(horizon_min)
+            if available_bars < horizon_min:
+                continue
+
+            horizon_idx = start_idx + horizon_min - 1
+            horizon_high = float(
+                np.max(highs[start_idx : horizon_idx + 1])
+            )
+            horizon_low = float(
+                np.min(lows[start_idx : horizon_idx + 1])
+            )
+            horizon_close = float(closes[horizon_idx])
+
+            if side == "LONG":
+                horizon_mfe = max(
+                    0.0,
+                    (horizon_high / entry_price - 1.0) * 100.0,
+                )
+                horizon_mae = max(
+                    0.0,
+                    (1.0 - horizon_low / entry_price) * 100.0,
+                )
+                horizon_return = (
+                    horizon_close / entry_price - 1.0
+                ) * 100.0
+            else:
+                horizon_mfe = max(
+                    0.0,
+                    (1.0 - horizon_low / entry_price) * 100.0,
+                )
+                horizon_mae = max(
+                    0.0,
+                    (horizon_high / entry_price - 1.0) * 100.0,
+                )
+                horizon_return = (
+                    1.0 - horizon_close / entry_price
+                ) * 100.0
+
+            retest[f"reaction_entry_mfe_{horizon_min}m_pct"] = float(
+                horizon_mfe
+            )
+            retest[f"reaction_entry_mae_{horizon_min}m_pct"] = float(
+                horizon_mae
+            )
+            retest[f"reaction_entry_return_{horizon_min}m_pct"] = float(
+                horizon_return
+            )
+            retest[f"reaction_entry_complete_{horizon_min}m"] = True
+
+        if bool(retest.get("reaction_entry_complete_5m", False)):
+            mfe_5m = float(retest["reaction_entry_mfe_5m_pct"])
+            mae_5m = float(retest["reaction_entry_mae_5m_pct"])
+            for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
+                threshold_key = (
+                    f"{float(threshold_pct):.2f}".replace(".", "_")
+                )
+                retest[
+                    f"reaction_entry_hit_plus_{threshold_key}_within_5m"
+                ] = bool(mfe_5m >= float(threshold_pct))
+                retest[
+                    f"reaction_entry_hit_adverse_{threshold_key}_within_5m"
+                ] = bool(mae_5m >= float(threshold_pct))
 
     complete_horizons = []
     time_exit_returns = {}
@@ -10709,6 +10801,7 @@ def scan_micro_reaction_historical_symbol_window(
     retest_tolerance_pct,
     min_departure_pct,
     max_age_minutes,
+    metrics_version=MICRO_REACTION_RESEARCH_METRICS_VERSION,
 ):
     """Build one symbol's historical Micro REACTION universe for a clock window.
 
@@ -10717,6 +10810,8 @@ def scan_micro_reaction_historical_symbol_window(
     inside it. Forward MFE/MAE is right-censored naturally near the current edge;
     horizon-complete flags remain the source of truth for summary Ns.
     """
+    _ = str(metrics_version)
+
     try:
         window_minutes = max(1, int(window_minutes))
         max_age_minutes = max(1, int(max_age_minutes))
@@ -10828,7 +10923,11 @@ def scan_micro_reaction_historical_symbol_window(
 
 
 def build_micro_reaction_historical_signal_summary(retests_df):
-    """Aggregate historical Micro REACTION entries by TF / detector / side."""
+    """Aggregate executable Micro REACTION scalp metrics by TF / detector / side.
+
+    Primary horizons are 1m/3m/5m from the next-1m-open entry. Longer 10m/15m/30m
+    values are retained only as follow-through context.
+    """
     if retests_df is None or retests_df.empty:
         return pd.DataFrame()
 
@@ -10864,11 +10963,11 @@ def build_micro_reaction_historical_signal_summary(retests_df):
             ),
         }
 
-        for horizon in (15, 30, 60):
-            mfe_col = f"reaction_mfe_{horizon}m_pct"
-            mae_col = f"reaction_mae_{horizon}m_pct"
-            ret_col = f"reaction_return_{horizon}m_pct"
-            complete_col = f"reaction_complete_{horizon}m"
+        for horizon in MICRO_REACTION_SCALP_HORIZONS:
+            mfe_col = f"reaction_entry_mfe_{horizon}m_pct"
+            mae_col = f"reaction_entry_mae_{horizon}m_pct"
+            ret_col = f"reaction_entry_return_{horizon}m_pct"
+            complete_col = f"reaction_entry_complete_{horizon}m"
 
             mfe = pd.to_numeric(
                 reactions.get(mfe_col, pd.Series(np.nan, index=reactions.index)),
@@ -10882,11 +10981,14 @@ def build_micro_reaction_historical_signal_summary(retests_df):
                 reactions.get(ret_col, pd.Series(np.nan, index=reactions.index)),
                 errors="coerce",
             )
-
-            if complete_col in reactions.columns:
-                complete = reactions[complete_col].fillna(False).astype(bool)
-            else:
-                complete = mfe.notna() & mae.notna() & ret.notna()
+            complete = (
+                reactions.get(
+                    complete_col,
+                    pd.Series(False, index=reactions.index),
+                )
+                .fillna(False)
+                .astype(bool)
+            )
             valid = complete & mfe.notna() & mae.notna() & ret.notna()
 
             row[f"N {horizon}m"] = int(valid.sum())
@@ -10907,6 +11009,58 @@ def build_micro_reaction_historical_signal_summary(retests_df):
             )
             row[f"Return {horizon}m med %"] = (
                 float(ret.loc[valid].median()) if valid.any() else np.nan
+            )
+            row[f"Positive close {horizon}m %"] = (
+                float(ret.loc[valid].gt(0.0).mean() * 100.0)
+                if valid.any()
+                else np.nan
+            )
+
+        complete_5m = (
+            reactions.get(
+                "reaction_entry_complete_5m",
+                pd.Series(False, index=reactions.index),
+            )
+            .fillna(False)
+            .astype(bool)
+        )
+        mfe_5m = pd.to_numeric(
+            reactions.get(
+                "reaction_entry_mfe_5m_pct",
+                pd.Series(np.nan, index=reactions.index),
+            ),
+            errors="coerce",
+        )
+        mae_5m = pd.to_numeric(
+            reactions.get(
+                "reaction_entry_mae_5m_pct",
+                pd.Series(np.nan, index=reactions.index),
+            ),
+            errors="coerce",
+        )
+        valid_5m = complete_5m & mfe_5m.notna() & mae_5m.notna()
+
+        for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
+            label = f"{float(threshold_pct):.2f}%"
+            row[f"Hit +{label} ≤5m %"] = (
+                float(
+                    mfe_5m.loc[valid_5m]
+                    .ge(float(threshold_pct))
+                    .mean()
+                    * 100.0
+                )
+                if valid_5m.any()
+                else np.nan
+            )
+            row[f"Adverse {label} ≤5m %"] = (
+                float(
+                    mae_5m.loc[valid_5m]
+                    .ge(float(threshold_pct))
+                    .mean()
+                    * 100.0
+                )
+                if valid_5m.any()
+                else np.nan
             )
 
         rows.append(row)
@@ -10936,12 +11090,12 @@ def build_micro_reaction_historical_signal_summary(retests_df):
 
 def build_micro_reaction_historical_signal_table(
     retests_df,
-    good_mfe_30m_pct=0.30,
-    good_max_mae_30m_pct=0.20,
-    bad_max_mfe_30m_pct=0.15,
-    bad_min_mae_30m_pct=0.30,
+    good_mfe_5m_pct=0.20,
+    good_max_mae_5m_pct=0.15,
+    bad_max_mfe_5m_pct=0.10,
+    bad_min_mae_5m_pct=0.20,
 ):
-    """Return one row per causal REACTION entry with exploratory quality tags."""
+    """Return one row per executable REACTION with 1m/3m/5m scalp outcomes."""
     if retests_df is None or retests_df.empty:
         return pd.DataFrame()
 
@@ -10951,11 +11105,17 @@ def build_micro_reaction_historical_signal_table(
     if work.empty:
         return pd.DataFrame()
 
-    mfe30 = pd.to_numeric(work.get("reaction_mfe_30m_pct"), errors="coerce")
-    mae30 = pd.to_numeric(work.get("reaction_mae_30m_pct"), errors="coerce")
-    complete30 = (
+    mfe5 = pd.to_numeric(
+        work.get("reaction_entry_mfe_5m_pct"),
+        errors="coerce",
+    )
+    mae5 = pd.to_numeric(
+        work.get("reaction_entry_mae_5m_pct"),
+        errors="coerce",
+    )
+    complete5 = (
         work.get(
-            "reaction_complete_30m",
+            "reaction_entry_complete_5m",
             pd.Series(False, index=work.index),
         )
         .fillna(False)
@@ -10963,25 +11123,25 @@ def build_micro_reaction_historical_signal_table(
     )
 
     quality = pd.Series("PENDING", index=work.index, dtype="object")
-    valid = complete30 & mfe30.notna() & mae30.notna()
+    valid = complete5 & mfe5.notna() & mae5.notna()
     good = (
         valid
-        & mfe30.ge(float(good_mfe_30m_pct))
-        & mae30.le(float(good_max_mae_30m_pct))
+        & mfe5.ge(float(good_mfe_5m_pct))
+        & mae5.le(float(good_max_mae_5m_pct))
     )
     bad = (
         valid
         & (
-            mfe30.lt(float(bad_max_mfe_30m_pct))
-            | mae30.ge(float(bad_min_mae_30m_pct))
+            mfe5.lt(float(bad_max_mfe_5m_pct))
+            | mae5.ge(float(bad_min_mae_5m_pct))
         )
     )
     quality.loc[valid] = "MIXED"
     quality.loc[bad] = "BAD"
     quality.loc[good] = "GOOD"
 
-    ratio = mfe30 / mae30.replace(0.0, np.nan)
-    ratio = ratio.where(mae30.gt(0.0), np.inf)
+    ratio = mfe5 / mae5.replace(0.0, np.nan)
+    ratio = ratio.where(mae5.gt(0.0), np.inf)
 
     signal_id = (
         work["symbol"].astype(str)
@@ -11007,29 +11167,45 @@ def build_micro_reaction_historical_signal_table(
     table["Entry"] = pd.to_numeric(
         work.get("first_touch_entry_price"), errors="coerce"
     )
-    table["Quality 30m"] = quality
+    table["Quality 5m"] = quality
 
-    for horizon in (15, 30, 60):
+    for horizon in MICRO_REACTION_SCALP_HORIZONS:
         table[f"MFE {horizon}m %"] = pd.to_numeric(
-            work.get(f"reaction_mfe_{horizon}m_pct"), errors="coerce"
+            work.get(f"reaction_entry_mfe_{horizon}m_pct"),
+            errors="coerce",
         )
         table[f"MAE {horizon}m %"] = pd.to_numeric(
-            work.get(f"reaction_mae_{horizon}m_pct"), errors="coerce"
+            work.get(f"reaction_entry_mae_{horizon}m_pct"),
+            errors="coerce",
         )
         table[f"Return {horizon}m %"] = pd.to_numeric(
-            work.get(f"reaction_return_{horizon}m_pct"), errors="coerce"
+            work.get(f"reaction_entry_return_{horizon}m_pct"),
+            errors="coerce",
         )
         table[f"Complete {horizon}m"] = (
             work.get(
-                f"reaction_complete_{horizon}m",
+                f"reaction_entry_complete_{horizon}m",
                 pd.Series(False, index=work.index),
             )
             .fillna(False)
             .astype(bool)
         )
 
-    table["MFE/MAE ratio 30m"] = ratio
-    table["MFE-MAE 30m pp"] = mfe30 - mae30
+    for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
+        label = f"{float(threshold_pct):.2f}%"
+        table[f"Hit +{label} ≤5m"] = (
+            complete5
+            & mfe5.notna()
+            & mfe5.ge(float(threshold_pct))
+        )
+        table[f"Adverse {label} ≤5m"] = (
+            complete5
+            & mae5.notna()
+            & mae5.ge(float(threshold_pct))
+        )
+
+    table["MFE/MAE ratio 5m"] = ratio
+    table["MFE-MAE 5m pp"] = mfe5 - mae5
     table["Departure %"] = pd.to_numeric(
         work.get("max_departure_pct"), errors="coerce"
     )
@@ -11051,10 +11227,12 @@ def build_micro_reaction_historical_signal_table(
             or " pp" in column
             or column in {
                 "Entry",
-                "MFE/MAE ratio 30m",
+                "MFE/MAE ratio 5m",
                 "Confirm→Retest min",
             }
         )
+        and not column.startswith("Hit +")
+        and not column.startswith("Adverse ")
     ]
     for column in numeric_columns:
         if column not in table.columns:
@@ -27822,29 +28000,16 @@ def build_micro_reaction_chart(
 
 
 def build_micro_reaction_comparison_table(retests_df):
-    """Compare causal Micro REACTION behavior by TF, detector and side.
-
-    The denominator is every first confirmed-swing retest in the scanner
-    universe. MFE/MAE statistics use REACTION rows only because those are the
-    rows that would produce a next-1m-open entry. Medians are preferred here
-    so a few outsized micro-cap runs do not dominate the baseline comparison.
-    """
+    """Compare executable Micro REACTION scalp behavior by TF, detector and side."""
     if retests_df is None or retests_df.empty:
         return pd.DataFrame()
 
-    required = {
-        "timeframe",
-        "detector",
-        "signal",
-        "status",
-    }
+    required = {"timeframe", "detector", "signal", "status"}
     if not required.issubset(retests_df.columns):
         return pd.DataFrame()
 
-    work = retests_df.copy()
     rows = []
-
-    for (timeframe, detector, side), group in work.groupby(
+    for (timeframe, detector, side), group in retests_df.groupby(
         ["timeframe", "detector", "signal"],
         dropna=False,
         sort=True,
@@ -27866,36 +28031,53 @@ def build_micro_reaction_comparison_table(retests_df):
             ),
         }
 
-        for horizon in (15, 30, 60):
-            mfe_col = f"reaction_mfe_{horizon}m_pct"
-            mae_col = f"reaction_mae_{horizon}m_pct"
-
+        for horizon in MICRO_REACTION_PRIMARY_HORIZONS:
             mfe = pd.to_numeric(
                 reactions.get(
-                    mfe_col,
+                    f"reaction_entry_mfe_{horizon}m_pct",
                     pd.Series(np.nan, index=reactions.index),
                 ),
                 errors="coerce",
             )
             mae = pd.to_numeric(
                 reactions.get(
-                    mae_col,
+                    f"reaction_entry_mae_{horizon}m_pct",
                     pd.Series(np.nan, index=reactions.index),
                 ),
                 errors="coerce",
             )
-            valid = mfe.notna() & mae.notna()
+            ret = pd.to_numeric(
+                reactions.get(
+                    f"reaction_entry_return_{horizon}m_pct",
+                    pd.Series(np.nan, index=reactions.index),
+                ),
+                errors="coerce",
+            )
+            complete = (
+                reactions.get(
+                    f"reaction_entry_complete_{horizon}m",
+                    pd.Series(False, index=reactions.index),
+                )
+                .fillna(False)
+                .astype(bool)
+            )
+            valid = complete & mfe.notna() & mae.notna() & ret.notna()
 
             row[f"N {horizon}m"] = int(valid.sum())
+            row[f"MFE {horizon}m avg %"] = (
+                float(mfe.loc[valid].mean()) if valid.any() else np.nan
+            )
             row[f"MFE {horizon}m med %"] = (
-                float(mfe.loc[valid].median())
-                if valid.any()
-                else np.nan
+                float(mfe.loc[valid].median()) if valid.any() else np.nan
+            )
+            row[f"MAE {horizon}m avg %"] = (
+                float(mae.loc[valid].mean()) if valid.any() else np.nan
             )
             row[f"MAE {horizon}m med %"] = (
-                float(mae.loc[valid].median())
-                if valid.any()
-                else np.nan
+                float(mae.loc[valid].median()) if valid.any() else np.nan
+            )
+            row[f"Return {horizon}m avg %"] = (
+                float(ret.loc[valid].mean()) if valid.any() else np.nan
             )
 
         rows.append(row)
@@ -27904,23 +28086,12 @@ def build_micro_reaction_comparison_table(retests_df):
     if result.empty:
         return result
 
-    numeric_cols = [
-        column
-        for column in result.columns
-        if column not in {"TF", "Detector", "Side"}
-    ]
-    for column in numeric_cols:
-        result[column] = pd.to_numeric(
-            result[column],
-            errors="coerce",
-        )
-
-    float_cols = [
-        column
-        for column in result.columns
-        if "%" in column
-    ]
-    result[float_cols] = result[float_cols].round(4)
+    for column in result.columns:
+        if column in {"TF", "Detector", "Side"}:
+            continue
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+        if "%" in column:
+            result[column] = result[column].round(4)
 
     tf_order = {"1m": 0, "5m": 1}
     side_order = {"LONG": 0, "SHORT": 1}
@@ -27928,14 +28099,10 @@ def build_micro_reaction_comparison_table(retests_df):
     result["_side_order"] = result["Side"].map(side_order).fillna(99)
     return (
         result
-        .sort_values(
-            ["_tf_order", "Detector", "_side_order"],
-            kind="stable",
-        )
+        .sort_values(["_tf_order", "Detector", "_side_order"], kind="stable")
         .drop(columns=["_tf_order", "_side_order"])
         .reset_index(drop=True)
     )
-
 
 
 def build_micro_reaction_historical_overlay_chart(
@@ -27945,7 +28112,7 @@ def build_micro_reaction_historical_overlay_chart(
     chart_timeframe="1m",
     show_structure=False,
     show_outcome_labels=False,
-    outcome_horizon=30,
+    outcome_horizon=5,
 ):
     """Historical chart with every visible causal Micro REACTION.
 
@@ -28019,8 +28186,8 @@ def build_micro_reaction_historical_overlay_chart(
         ].copy()
 
     horizon = int(outcome_horizon)
-    mfe_col = f"reaction_mfe_{horizon}m_pct"
-    mae_col = f"reaction_mae_{horizon}m_pct"
+    mfe_col = f"reaction_entry_mfe_{horizon}m_pct"
+    mae_col = f"reaction_entry_mae_{horizon}m_pct"
 
     if not reactions.empty:
         # Optional parent-structure markers. Only structures that actually led
@@ -28110,12 +28277,12 @@ def build_micro_reaction_historical_overlay_chart(
                 "detector",
                 "swing_price",
                 "first_touch_entry_price",
-                "reaction_mfe_15m_pct",
-                "reaction_mae_15m_pct",
-                "reaction_mfe_30m_pct",
-                "reaction_mae_30m_pct",
-                "reaction_mfe_60m_pct",
-                "reaction_mae_60m_pct",
+                "reaction_entry_mfe_1m_pct",
+                "reaction_entry_mae_1m_pct",
+                "reaction_entry_mfe_3m_pct",
+                "reaction_entry_mae_3m_pct",
+                "reaction_entry_mfe_5m_pct",
+                "reaction_entry_mae_5m_pct",
             ]
             for column in custom_columns:
                 if column not in side_rows.columns:
@@ -28160,9 +28327,9 @@ def build_micro_reaction_historical_overlay_chart(
                         "Detector: %{customdata[1]}<br>"
                         "Swing: %{customdata[2]:.8f}<br>"
                         "Next-open entry: %{customdata[3]:.8f}<br>"
-                        "MFE/MAE 15m: +%{customdata[4]:.3f}% / -%{customdata[5]:.3f}%<br>"
-                        "MFE/MAE 30m: +%{customdata[6]:.3f}% / -%{customdata[7]:.3f}%<br>"
-                        "MFE/MAE 60m: +%{customdata[8]:.3f}% / -%{customdata[9]:.3f}%"
+                        "Entry MFE/MAE 1m: +%{customdata[4]:.3f}% / -%{customdata[5]:.3f}%<br>"
+                        "Entry MFE/MAE 3m: +%{customdata[6]:.3f}% / -%{customdata[7]:.3f}%<br>"
+                        "Entry MFE/MAE 5m: +%{customdata[8]:.3f}% / -%{customdata[9]:.3f}%"
                         "<extra></extra>"
                     ),
                 )
@@ -38013,7 +38180,7 @@ if selected_section == "micro_reaction":
 
         micro_historical_show_structure = False
         micro_historical_show_labels = False
-        micro_historical_outcome_horizon = 30
+        micro_historical_outcome_horizon = 5
         if micro_view_mode == "Historical overlay":
             history_1, history_2, history_3, history_4 = st.columns(4)
             with history_1:
@@ -38054,8 +38221,8 @@ if selected_section == "micro_reaction":
             with history_4:
                 micro_historical_outcome_horizon = st.selectbox(
                     "Label horizon",
-                    [15, 30, 60],
-                    index=1,
+                    [1, 3, 5],
+                    index=2,
                     format_func=lambda value: f"{value}m",
                     key="micro_reaction_historical_outcome_horizon",
                 )
@@ -38490,12 +38657,15 @@ if selected_section == "micro_reaction":
                             "retest_time",
                             "first_touch_entry_time",
                             "first_touch_entry_price",
-                            "reaction_mfe_15m_pct",
-                            "reaction_mae_15m_pct",
-                            "reaction_mfe_30m_pct",
-                            "reaction_mae_30m_pct",
-                            "reaction_mfe_60m_pct",
-                            "reaction_mae_60m_pct",
+                            "reaction_entry_mfe_1m_pct",
+                            "reaction_entry_mae_1m_pct",
+                            "reaction_entry_return_1m_pct",
+                            "reaction_entry_mfe_3m_pct",
+                            "reaction_entry_mae_3m_pct",
+                            "reaction_entry_return_3m_pct",
+                            "reaction_entry_mfe_5m_pct",
+                            "reaction_entry_mae_5m_pct",
+                            "reaction_entry_return_5m_pct",
                         ]
                         historical_columns = [
                             column
@@ -38669,8 +38839,10 @@ if selected_section == "micro_reaction":
                     "Futures 1m history for every configured symbol. The first run "
                     "can take a while because history is downloaded symbol by symbol; "
                     "identical symbol/parameter windows are cached for 15 minutes. "
-                    "Only REACTION rows become signal entries; recent signals without "
-                    "a complete forward horizon remain PENDING rather than being dropped."
+                    "Only REACTION rows become signal entries. Primary scalp outcomes "
+                    "are measured from the executable next-1m-open entry at 1m / 3m / 5m; "
+                    "10m / 15m / 30m are follow-through context. Recent signals without "
+                    "a complete selected horizon remain PENDING rather than being dropped."
                 )
 
                 global_1, global_2, global_3, global_4 = st.columns(4)
@@ -38689,22 +38861,22 @@ if selected_section == "micro_reaction":
 
                 with global_2:
                     global_good_mfe = st.number_input(
-                        "GOOD · min MFE 30m %",
-                        min_value=0.0,
-                        value=0.30,
-                        step=0.05,
-                        format="%.2f",
-                        key="micro_reaction_global_good_mfe",
-                    )
-
-                with global_3:
-                    global_good_mae = st.number_input(
-                        "GOOD · max MAE 30m %",
+                        "GOOD · min MFE 5m %",
                         min_value=0.0,
                         value=0.20,
                         step=0.05,
                         format="%.2f",
-                        key="micro_reaction_global_good_mae",
+                        key="micro_reaction_global_good_mfe_5m",
+                    )
+
+                with global_3:
+                    global_good_mae = st.number_input(
+                        "GOOD · max MAE 5m %",
+                        min_value=0.0,
+                        value=0.15,
+                        step=0.05,
+                        format="%.2f",
+                        key="micro_reaction_global_good_mae_5m",
                     )
 
                 with global_4:
@@ -38718,27 +38890,27 @@ if selected_section == "micro_reaction":
                 bad_1, bad_2, run_col = st.columns([1, 1, 1.4])
                 with bad_1:
                     global_bad_mfe = st.number_input(
-                        "BAD · max MFE 30m %",
+                        "BAD · max MFE 5m %",
                         min_value=0.0,
-                        value=0.15,
+                        value=0.10,
                         step=0.05,
                         format="%.2f",
-                        key="micro_reaction_global_bad_mfe",
+                        key="micro_reaction_global_bad_mfe_5m",
                     )
                 with bad_2:
                     global_bad_mae = st.number_input(
-                        "BAD · min MAE 30m %",
+                        "BAD · min MAE 5m %",
                         min_value=0.0,
-                        value=0.30,
+                        value=0.20,
                         step=0.05,
                         format="%.2f",
-                        key="micro_reaction_global_bad_mae",
+                        key="micro_reaction_global_bad_mae_5m",
                     )
                 with run_col:
                     st.caption(
-                        "GOOD/BAD are exploratory labels only; they do not alter "
-                        "signal detection. Summary statistics always use the full "
-                        "causal REACTION universe."
+                        "GOOD/BAD use the 5-minute executable-entry outcome only and "
+                        "are exploratory labels; they never alter signal detection. "
+                        "Summary statistics always use the full causal REACTION universe."
                     )
                     run_global_scan = st.button(
                         f"Build {global_window_label} all-symbol signal table",
@@ -38755,6 +38927,7 @@ if selected_section == "micro_reaction":
                     "tolerance": float(micro_tolerance),
                     "departure": float(micro_departure),
                     "max_age": int(micro_max_age),
+                    "metrics_version": MICRO_REACTION_RESEARCH_METRICS_VERSION,
                 }
 
                 if run_global_scan:
@@ -38782,6 +38955,9 @@ if selected_section == "micro_reaction":
                                     retest_tolerance_pct=float(micro_tolerance),
                                     min_departure_pct=float(micro_departure),
                                     max_age_minutes=int(micro_max_age),
+                                    metrics_version=(
+                                        MICRO_REACTION_RESEARCH_METRICS_VERSION
+                                    ),
                                 )
                             )
                         except Exception as exc:
@@ -38853,30 +39029,30 @@ if selected_section == "micro_reaction":
                     )
                     global_signals = build_micro_reaction_historical_signal_table(
                         stored_global_retests,
-                        good_mfe_30m_pct=float(global_good_mfe),
-                        good_max_mae_30m_pct=float(global_good_mae),
-                        bad_max_mfe_30m_pct=float(global_bad_mfe),
-                        bad_min_mae_30m_pct=float(global_bad_mae),
+                        good_mfe_5m_pct=float(global_good_mfe),
+                        good_max_mae_5m_pct=float(global_good_mae),
+                        bad_max_mfe_5m_pct=float(global_bad_mfe),
+                        bad_min_mae_5m_pct=float(global_bad_mae),
                     )
 
                     total_reactions = int(len(global_signals))
-                    complete_30 = int(
+                    complete_5 = int(
                         global_signals.get(
-                            "Complete 30m",
+                            "Complete 5m",
                             pd.Series(False, index=global_signals.index),
                         ).fillna(False).astype(bool).sum()
                     ) if not global_signals.empty else 0
                     quality_counts = (
-                        global_signals["Quality 30m"].value_counts()
+                        global_signals["Quality 5m"].value_counts()
                         if not global_signals.empty
                         else pd.Series(dtype="int64")
                     )
 
                     g1, g2, g3, g4, g5 = st.columns(5)
                     g1.metric("Signals", total_reactions)
-                    g2.metric("30m complete", complete_30)
-                    g3.metric("GOOD", int(quality_counts.get("GOOD", 0)))
-                    g4.metric("BAD", int(quality_counts.get("BAD", 0)))
+                    g2.metric("5m complete", complete_5)
+                    g3.metric("GOOD 5m", int(quality_counts.get("GOOD", 0)))
+                    g4.metric("BAD 5m", int(quality_counts.get("BAD", 0)))
                     g5.metric(
                         "Symbols with signals",
                         int(global_signals["Symbol"].nunique())
@@ -38885,12 +39061,71 @@ if selected_section == "micro_reaction":
                     )
 
                     if not global_summary.empty:
-                        st.markdown("#### Historical summary · TF × detector × side")
+                        st.markdown("#### Scalp summary · 1m / 3m / 5m")
+                        st.caption(
+                            "All excursion/return metrics below start at the actual "
+                            "next-1m-open hypothetical entry. Average and median are "
+                            "shown together because micro-cap outliers can distort means."
+                        )
+                        primary_columns = [
+                            "TF", "Detector", "Side", "First touches", "Signals",
+                            "Symbols", "Reaction rate %",
+                        ]
+                        for horizon in MICRO_REACTION_PRIMARY_HORIZONS:
+                            primary_columns.extend([
+                                f"N {horizon}m",
+                                f"MFE {horizon}m avg %",
+                                f"MFE {horizon}m med %",
+                                f"MAE {horizon}m avg %",
+                                f"MAE {horizon}m med %",
+                                f"Return {horizon}m avg %",
+                                f"Return {horizon}m med %",
+                                f"Positive close {horizon}m %",
+                            ])
+                        for threshold_pct in MICRO_REACTION_5M_HIT_THRESHOLDS:
+                            threshold_label = f"{float(threshold_pct):.2f}%"
+                            primary_columns.extend([
+                                f"Hit +{threshold_label} ≤5m %",
+                                f"Adverse {threshold_label} ≤5m %",
+                            ])
+                        primary_columns = [
+                            column for column in primary_columns
+                            if column in global_summary.columns
+                        ]
                         st.dataframe(
-                            global_summary,
+                            global_summary[primary_columns],
                             use_container_width=True,
                             hide_index=True,
-                            key="micro_reaction_global_summary_table",
+                            key="micro_reaction_global_scalp_summary_table",
+                        )
+                        st.caption(
+                            "Hit +X% ≤5m and Adverse X% ≤5m are independent reach "
+                            "rates. A signal can count in both if both excursions occur; "
+                            "the chronological TP-vs-SL first-touch matrix is a separate "
+                            "next step."
+                        )
+
+                        st.markdown("#### Follow-through context · 10m / 15m / 30m")
+                        secondary_columns = [
+                            "TF", "Detector", "Side", "Signals",
+                        ]
+                        for horizon in MICRO_REACTION_SECONDARY_HORIZONS:
+                            secondary_columns.extend([
+                                f"N {horizon}m",
+                                f"MFE {horizon}m med %",
+                                f"MAE {horizon}m med %",
+                                f"Return {horizon}m med %",
+                                f"Positive close {horizon}m %",
+                            ])
+                        secondary_columns = [
+                            column for column in secondary_columns
+                            if column in global_summary.columns
+                        ]
+                        st.dataframe(
+                            global_summary[secondary_columns],
+                            use_container_width=True,
+                            hide_index=True,
+                            key="micro_reaction_global_followthrough_summary_table",
                         )
 
                     signal_view = global_signals.copy()
@@ -38899,7 +39134,7 @@ if selected_section == "micro_reaction":
                         and not signal_view.empty
                     ):
                         signal_view = signal_view.loc[
-                            signal_view["Quality 30m"].astype(str).eq(
+                            signal_view["Quality 5m"].astype(str).eq(
                                 global_quality_filter
                             )
                         ].copy()
@@ -38907,9 +39142,10 @@ if selected_section == "micro_reaction":
                     st.markdown("#### Every historical Micro REACTION signal")
                     st.caption(
                         "One row = one causal REACTION entry at the next 1m open. "
-                        "MFE/MAE/Return are side-adjusted; MAE is shown as a positive "
-                        "adverse-excursion magnitude. PENDING means the selected "
-                        "forward horizon is not complete yet."
+                        "Primary MFE/MAE/Return are measured from the executable "
+                        "next-1m-open entry at 1m / 3m / 5m. MAE is a positive adverse-"
+                        "excursion magnitude. PENDING means the 5m quality horizon is "
+                        "not complete yet; 10m / 15m / 30m remain follow-through context."
                     )
                     st.dataframe(
                         signal_view,
@@ -39019,10 +39255,10 @@ if selected_section == "micro_reaction":
             if not comparison_table.empty:
                 st.markdown("### Baseline comparison · timeframe × side")
                 st.caption(
-                    "First touches are the denominator. MFE/MAE use only causal "
-                    "REACTION entries and are reported as medians. This is the "
-                    "clean first view for comparing 1m vs 5m and LONG vs SHORT "
-                    "before optimizing TP/SL."
+                    "First touches are the denominator. Scalp MFE/MAE/Return use "
+                    "only causal REACTION entries and start at the executable next-"
+                    "1m-open price. The primary comparison is 1m / 3m / 5m before "
+                    "optimizing any TP/SL rule."
                 )
                 st.dataframe(
                     comparison_table,
@@ -39131,12 +39367,15 @@ if selected_section == "micro_reaction":
                     "confirmed_to_retest_min",
                     "retest_distance_pct",
                     "penetration_pct",
-                    "reaction_mfe_15m_pct",
-                    "reaction_mae_15m_pct",
-                    "reaction_mfe_30m_pct",
-                    "reaction_mae_30m_pct",
-                    "reaction_mfe_60m_pct",
-                    "reaction_mae_60m_pct",
+                    "reaction_entry_mfe_1m_pct",
+                    "reaction_entry_mae_1m_pct",
+                    "reaction_entry_return_1m_pct",
+                    "reaction_entry_mfe_3m_pct",
+                    "reaction_entry_mae_3m_pct",
+                    "reaction_entry_return_3m_pct",
+                    "reaction_entry_mfe_5m_pct",
+                    "reaction_entry_mae_5m_pct",
+                    "reaction_entry_return_5m_pct",
                 ]
                 display_columns = [
                     column
@@ -39155,12 +39394,15 @@ if selected_section == "micro_reaction":
                     "confirmed_to_retest_min",
                     "retest_distance_pct",
                     "penetration_pct",
-                    "reaction_mfe_15m_pct",
-                    "reaction_mae_15m_pct",
-                    "reaction_mfe_30m_pct",
-                    "reaction_mae_30m_pct",
-                    "reaction_mfe_60m_pct",
-                    "reaction_mae_60m_pct",
+                    "reaction_entry_mfe_1m_pct",
+                    "reaction_entry_mae_1m_pct",
+                    "reaction_entry_return_1m_pct",
+                    "reaction_entry_mfe_3m_pct",
+                    "reaction_entry_mae_3m_pct",
+                    "reaction_entry_return_3m_pct",
+                    "reaction_entry_mfe_5m_pct",
+                    "reaction_entry_mae_5m_pct",
+                    "reaction_entry_return_5m_pct",
                 ]
                 for column in numeric_display_columns:
                     if column in display.columns:
@@ -39282,46 +39524,24 @@ if selected_section == "micro_reaction":
                         )
 
                 selected_metrics = st.columns(6)
-                selected_metrics[0].metric(
-                    "TF",
-                    str(selected_micro_row.get("timeframe", "—")),
-                )
-                selected_metrics[1].metric(
-                    "Side",
-                    str(selected_micro_row.get("signal", "—")),
-                )
-                selected_metrics[2].metric(
-                    "MFE 15m",
-                    (
-                        f"{float(pd.to_numeric(selected_micro_row.get('reaction_mfe_15m_pct'), errors='coerce')):.3f}%"
-                        if pd.notna(pd.to_numeric(selected_micro_row.get("reaction_mfe_15m_pct"), errors="coerce"))
-                        else "—"
-                    ),
-                )
-                selected_metrics[3].metric(
-                    "MAE 15m",
-                    (
-                        f"{float(pd.to_numeric(selected_micro_row.get('reaction_mae_15m_pct'), errors='coerce')):.3f}%"
-                        if pd.notna(pd.to_numeric(selected_micro_row.get("reaction_mae_15m_pct"), errors="coerce"))
-                        else "—"
-                    ),
-                )
-                selected_metrics[4].metric(
-                    "MFE 60m",
-                    (
-                        f"{float(pd.to_numeric(selected_micro_row.get('reaction_mfe_60m_pct'), errors='coerce')):.3f}%"
-                        if pd.notna(pd.to_numeric(selected_micro_row.get("reaction_mfe_60m_pct"), errors="coerce"))
-                        else "—"
-                    ),
-                )
-                selected_metrics[5].metric(
-                    "MAE 60m",
-                    (
-                        f"{float(pd.to_numeric(selected_micro_row.get('reaction_mae_60m_pct'), errors='coerce')):.3f}%"
-                        if pd.notna(pd.to_numeric(selected_micro_row.get("reaction_mae_60m_pct"), errors="coerce"))
-                        else "—"
-                    ),
-                )
+                for metric_index, (metric_label, metric_column) in enumerate([
+                    ("MFE 1m", "reaction_entry_mfe_1m_pct"),
+                    ("MAE 1m", "reaction_entry_mae_1m_pct"),
+                    ("MFE 3m", "reaction_entry_mfe_3m_pct"),
+                    ("MAE 3m", "reaction_entry_mae_3m_pct"),
+                    ("MFE 5m", "reaction_entry_mfe_5m_pct"),
+                    ("MAE 5m", "reaction_entry_mae_5m_pct"),
+                ]):
+                    metric_value = pd.to_numeric(
+                        selected_micro_row.get(metric_column),
+                        errors="coerce",
+                    )
+                    selected_metrics[metric_index].metric(
+                        metric_label,
+                        f"{float(metric_value):.3f}%"
+                        if pd.notna(metric_value)
+                        else "—",
+                    )
 
                 timeline_rows = [
                     {
