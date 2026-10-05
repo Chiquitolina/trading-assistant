@@ -21827,15 +21827,167 @@ def _candidate_v2_portfolio_priority(
     group,
     priority_mode,
 ):
-    """Deterministic causal ranking for signals sharing the same entry minute."""
+    """Deterministic causal ranking for signals sharing the same entry minute.
+
+    Every selector uses only fields already attached to the Candidate V2
+    REACTION. No future-minute signal or trade outcome participates.
+    """
     if group is None or group.empty:
         return pd.DataFrame()
 
     work = group.copy()
 
-    # Strict live / first signal: entry timestamps are already grouped by minute.
-    # Symbol order is only a deterministic tie-break when several signals are
-    # simultaneously knowable at the same next-1m-open.
+    def numeric(column):
+        return pd.to_numeric(
+            work.get(
+                column,
+                pd.Series(
+                    np.nan,
+                    index=work.index,
+                ),
+            ),
+            errors="coerce",
+        )
+
+    def bool_series(column):
+        raw = work.get(
+            column,
+            pd.Series(
+                False,
+                index=work.index,
+            ),
+        )
+        if pd.api.types.is_bool_dtype(raw):
+            return raw.fillna(False).astype(bool)
+        return (
+            raw.fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(
+                [
+                    "true",
+                    "1",
+                    "yes",
+                ]
+            )
+        )
+
+    def strength_series():
+        return numeric(
+            "side_adjusted_strength_vs_btc_4h"
+        )
+
+    def sector_directional_strength():
+        raw = numeric(
+            "sector_strength_vs_btc_4h"
+        )
+        side = (
+            work.get(
+                "side",
+                pd.Series(
+                    "",
+                    index=work.index,
+                ),
+            )
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+        return pd.Series(
+            np.where(
+                side.eq("LONG"),
+                raw,
+                np.where(
+                    side.eq("SHORT"),
+                    -raw,
+                    np.nan,
+                ),
+            ),
+            index=work.index,
+            dtype=float,
+        )
+
+    def rank_desc(series):
+        """1 = best. Missing values are always sent to the back."""
+        values = pd.to_numeric(
+            series,
+            errors="coerce",
+        )
+        ranks = values.rank(
+            method="min",
+            ascending=False,
+            na_option="bottom",
+        )
+        return pd.to_numeric(
+            ranks,
+            errors="coerce",
+        )
+
+    def consensus_sort(
+        second_series,
+        *,
+        second_label,
+    ):
+        work["_strength_score"] = (
+            strength_series()
+        )
+        work["_consensus_secondary"] = (
+            pd.to_numeric(
+                second_series,
+                errors="coerce",
+            )
+        )
+        work["_rank_strength"] = rank_desc(
+            work[
+                "_strength_score"
+            ]
+        )
+        work[
+            "_rank_secondary"
+        ] = rank_desc(
+            work[
+                "_consensus_secondary"
+            ]
+        )
+        work[
+            "_consensus_rank_sum"
+        ] = (
+            work[
+                "_rank_strength"
+            ]
+            + work[
+                "_rank_secondary"
+            ]
+        )
+        work[
+            "_consensus_secondary_label"
+        ] = str(
+            second_label
+        )
+
+        return work.sort_values(
+            [
+                "_consensus_rank_sum",
+                "_rank_strength",
+                "_rank_secondary",
+                "_strength_score",
+                "symbol",
+            ],
+            ascending=[
+                True,
+                True,
+                True,
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    # --------------------------------------------------------------
+    # Baseline deterministic selector.
+    # --------------------------------------------------------------
     if priority_mode in {
         "First signal / symbol tie-break",
         "Symbol order",
@@ -21845,59 +21997,253 @@ def _candidate_v2_portfolio_priority(
             kind="stable",
         )
 
-    if priority_mode == "Highest Strength vs BTC 4h":
-        column = "side_adjusted_strength_vs_btc_4h"
-        work["_portfolio_priority"] = pd.to_numeric(
-            work.get(
-                column,
-                pd.Series(np.nan, index=work.index),
-            ),
-            errors="coerce",
+    # --------------------------------------------------------------
+    # Existing single-variable selectors.
+    # --------------------------------------------------------------
+    if priority_mode in {
+        "Highest Strength vs BTC 4h",
+        "Strength vs BTC 4h",
+    }:
+        work["_portfolio_priority"] = (
+            strength_series()
         )
         return work.sort_values(
-            ["_portfolio_priority", "symbol"],
-            ascending=[False, True],
+            [
+                "_portfolio_priority",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                True,
+            ],
             na_position="last",
             kind="stable",
         )
 
-    if priority_mode == "Highest Return rank 4h":
-        column = "return_rank_pct_4h"
-        work["_portfolio_priority"] = pd.to_numeric(
-            work.get(
-                column,
-                pd.Series(np.nan, index=work.index),
-            ),
-            errors="coerce",
+    if priority_mode in {
+        "Highest Return rank 4h",
+        "Return rank 4h",
+    }:
+        work["_portfolio_priority"] = numeric(
+            "return_rank_pct_4h"
         )
         return work.sort_values(
-            ["_portfolio_priority", "symbol"],
-            ascending=[False, True],
+            [
+                "_portfolio_priority",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                True,
+            ],
             na_position="last",
             kind="stable",
         )
 
-    if priority_mode == "Highest Volume rank 4h":
-        column = "volume_rank_pct_4h"
-        work["_portfolio_priority"] = pd.to_numeric(
-            work.get(
-                column,
-                pd.Series(np.nan, index=work.index),
-            ),
-            errors="coerce",
+    if priority_mode in {
+        "Highest Volume rank 4h",
+        "Volume rank 4h",
+    }:
+        work["_portfolio_priority"] = numeric(
+            "volume_rank_pct_4h"
         )
         return work.sort_values(
-            ["_portfolio_priority", "symbol"],
-            ascending=[False, True],
+            [
+                "_portfolio_priority",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                True,
+            ],
             na_position="last",
             kind="stable",
         )
 
+    # --------------------------------------------------------------
+    # New symbol / sector / structure selectors.
+    # --------------------------------------------------------------
+    if priority_mode == "Highest Relative Volume 4h":
+        work["_portfolio_priority"] = numeric(
+            "relative_volume_4h"
+        )
+        work["_strength_score"] = (
+            strength_series()
+        )
+        return work.sort_values(
+            [
+                "_portfolio_priority",
+                "_strength_score",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    if (
+        priority_mode
+        == "Highest Sector Strength vs BTC 4h"
+    ):
+        # Side adjusted:
+        # LONG prefers sector > BTC; SHORT prefers sector < BTC.
+        work[
+            "_sector_directional_strength"
+        ] = sector_directional_strength()
+        work["_strength_score"] = (
+            strength_series()
+        )
+        return work.sort_values(
+            [
+                "_sector_directional_strength",
+                "_strength_score",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    if (
+        priority_mode
+        == "Best Sector Alignment → Strength"
+    ):
+        alignment = (
+            work.get(
+                "Sector-side alignment",
+                pd.Series(
+                    "UNKNOWN",
+                    index=work.index,
+                ),
+            )
+            .fillna("UNKNOWN")
+            .astype(str)
+            .str.upper()
+        )
+        work["_sector_alignment_score"] = (
+            alignment.map({
+                "ALIGNED": 2.0,
+                "UNKNOWN": 1.0,
+                "AGAINST": 0.0,
+            }).fillna(1.0)
+        )
+        work[
+            "_sector_directional_strength"
+        ] = sector_directional_strength()
+        work["_strength_score"] = (
+            strength_series()
+        )
+        return work.sort_values(
+            [
+                "_sector_alignment_score",
+                "_sector_directional_strength",
+                "_strength_score",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                False,
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    if priority_mode == "Most HTF Room → Strength":
+        work["_room_score"] = numeric(
+            "nearest_opposing_room_pct"
+        )
+        work["_strength_score"] = (
+            strength_series()
+        )
+        return work.sort_values(
+            [
+                "_room_score",
+                "_strength_score",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    if (
+        priority_mode
+        == "Candidate V1 Driver first → Strength"
+    ):
+        work["_v1_driver_score"] = (
+            bool_series(
+                "is_candidate_v1_driver"
+            )
+            .astype(int)
+        )
+        work["_strength_score"] = (
+            strength_series()
+        )
+        return work.sort_values(
+            [
+                "_v1_driver_score",
+                "_strength_score",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    if (
+        priority_mode
+        == "Most aligned RSI extremes → Strength"
+    ):
+        work["_rsi_extreme_score"] = numeric(
+            "aligned_rsi_extreme_count"
+        )
+        work["_strength_score"] = (
+            strength_series()
+        )
+        return work.sort_values(
+            [
+                "_rsi_extreme_score",
+                "_strength_score",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    # --------------------------------------------------------------
+    # Existing market-state selectors.
+    # --------------------------------------------------------------
     if priority_mode == "Best 1h alignment → Strength":
         alignment = (
             work.get(
                 "Market alignment 1h",
-                pd.Series("UNKNOWN", index=work.index),
+                pd.Series(
+                    "UNKNOWN",
+                    index=work.index,
+                ),
             )
             .fillna("UNKNOWN")
             .astype(str)
@@ -21907,12 +22253,8 @@ def _candidate_v2_portfolio_priority(
             "MIXED": 1.0,
             "HEADWIND": 0.0,
         }).fillna(-1.0)
-        work["_strength_score"] = pd.to_numeric(
-            work.get(
-                "side_adjusted_strength_vs_btc_4h",
-                pd.Series(np.nan, index=work.index),
-            ),
-            errors="coerce",
+        work["_strength_score"] = (
+            strength_series()
         )
         return work.sort_values(
             [
@@ -21929,34 +22271,34 @@ def _candidate_v2_portfolio_priority(
             kind="stable",
         )
 
-    if priority_mode == "Best directional Δ breadth 1h → Strength":
-        delta = pd.to_numeric(
-            work.get(
-                "breadth_delta_1h",
-                pd.Series(np.nan, index=work.index),
-            ),
-            errors="coerce",
+    if (
+        priority_mode
+        == "Best directional Δ breadth 1h → Strength"
+    ):
+        delta = numeric(
+            "breadth_delta_1h"
         )
         side = (
             work.get(
                 "side",
-                pd.Series("", index=work.index),
+                pd.Series(
+                    "",
+                    index=work.index,
+                ),
             )
             .fillna("")
             .astype(str)
             .str.upper()
         )
-        work["_directional_breadth_delta"] = np.where(
+        work[
+            "_directional_breadth_delta"
+        ] = np.where(
             side.eq("SHORT"),
             -delta,
             delta,
         )
-        work["_strength_score"] = pd.to_numeric(
-            work.get(
-                "side_adjusted_strength_vs_btc_4h",
-                pd.Series(np.nan, index=work.index),
-            ),
-            errors="coerce",
+        work["_strength_score"] = (
+            strength_series()
         )
         return work.sort_values(
             [
@@ -21973,26 +22315,42 @@ def _candidate_v2_portfolio_priority(
             kind="stable",
         )
 
-    # Backward compatibility with the first simulator version.
-    legacy_map = {
-        "Strength vs BTC 4h": "side_adjusted_strength_vs_btc_4h",
-        "Return rank 4h": "return_rank_pct_4h",
-        "Volume rank 4h": "volume_rank_pct_4h",
-    }
-    legacy_column = legacy_map.get(priority_mode)
-    if legacy_column is not None:
-        work["_portfolio_priority"] = pd.to_numeric(
-            work.get(
-                legacy_column,
-                pd.Series(np.nan, index=work.index),
+    # --------------------------------------------------------------
+    # Ordinal consensus models.
+    # No arbitrary weights: rank 1 is best in each dimension, then
+    # we minimize rank_strength + rank_secondary.
+    # --------------------------------------------------------------
+    if (
+        priority_mode
+        == "Strength + Volume consensus"
+    ):
+        return consensus_sort(
+            numeric(
+                "volume_rank_pct_4h"
             ),
-            errors="coerce",
+            second_label="volume_rank_pct_4h",
         )
-        return work.sort_values(
-            ["_portfolio_priority", "symbol"],
-            ascending=[False, True],
-            na_position="last",
-            kind="stable",
+
+    if (
+        priority_mode
+        == "Strength + Sector consensus"
+    ):
+        return consensus_sort(
+            sector_directional_strength(),
+            second_label=(
+                "side_adjusted_"
+                "sector_strength_vs_btc_4h"
+            ),
+        )
+
+    if priority_mode == "Strength + Room consensus":
+        return consensus_sort(
+            numeric(
+                "nearest_opposing_room_pct"
+            ),
+            second_label=(
+                "nearest_opposing_room_pct"
+            ),
         )
 
     return work.sort_values(
@@ -23154,6 +23512,15 @@ def _candidate_v2_one_slot_selector_modes():
         "Highest Strength vs BTC 4h",
         "Highest Return rank 4h",
         "Highest Volume rank 4h",
+        "Highest Relative Volume 4h",
+        "Highest Sector Strength vs BTC 4h",
+        "Best Sector Alignment → Strength",
+        "Most HTF Room → Strength",
+        "Candidate V1 Driver first → Strength",
+        "Most aligned RSI extremes → Strength",
+        "Strength + Volume consensus",
+        "Strength + Sector consensus",
+        "Strength + Room consensus",
         "Best 1h alignment → Strength",
         "Best directional Δ breadth 1h → Strength",
     ]
@@ -23165,6 +23532,15 @@ def _candidate_v2_one_slot_selector_short_name(mode):
         "Highest Strength vs BTC 4h": "Strength",
         "Highest Return rank 4h": "Return rank",
         "Highest Volume rank 4h": "Volume rank",
+        "Highest Relative Volume 4h": "Rel volume",
+        "Highest Sector Strength vs BTC 4h": "Sector strength",
+        "Best Sector Alignment → Strength": "Sector align",
+        "Most HTF Room → Strength": "HTF room",
+        "Candidate V1 Driver first → Strength": "V1 driver",
+        "Most aligned RSI extremes → Strength": "RSI extremes",
+        "Strength + Volume consensus": "S+Volume",
+        "Strength + Sector consensus": "S+Sector",
+        "Strength + Room consensus": "S+Room",
         "Best 1h alignment → Strength": "1h align",
         "Best directional Δ breadth 1h → Strength": "Δ breadth 1h",
     }
@@ -23172,7 +23548,6 @@ def _candidate_v2_one_slot_selector_short_name(mode):
         str(mode),
         str(mode),
     )
-
 
 def _candidate_v2_one_slot_realized_path(
     intervals,
@@ -23412,6 +23787,86 @@ def _candidate_v2_one_slot_realized_path(
                     errors="coerce",
                 ).iloc[0]
             ),
+            "Relative volume 4h": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "relative_volume_4h",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "Sector strength vs BTC 4h %": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "sector_strength_vs_btc_4h",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "Sector alignment": str(
+                chosen.get(
+                    "Sector-side alignment",
+                    "",
+                )
+            ),
+            "HTF room %": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "nearest_opposing_room_pct",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "Aligned RSI extremes": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "aligned_rsi_extreme_count",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "V1 driver": bool(
+                (
+                    str(
+                        chosen.get(
+                            "is_candidate_v1_driver",
+                            False,
+                        )
+                    )
+                    .strip()
+                    .lower()
+                    in {
+                        "true",
+                        "1",
+                        "yes",
+                    }
+                )
+                if not isinstance(
+                    chosen.get(
+                        "is_candidate_v1_driver",
+                        False,
+                    ),
+                    (bool, np.bool_),
+                )
+                else bool(
+                    chosen.get(
+                        "is_candidate_v1_driver",
+                        False,
+                    )
+                )
+            ),
             "Market 1h": str(
                 chosen.get(
                     "Market alignment 1h",
@@ -23456,6 +23911,10 @@ def _candidate_v2_one_slot_realized_path(
         "Strength vs BTC 4h %",
         "Return rank 4h %",
         "Volume rank 4h %",
+        "Relative volume 4h",
+        "Sector strength vs BTC 4h %",
+        "HTF room %",
+        "Aligned RSI extremes",
         "Breadth Δ1h pp",
     ]:
         if column in result.columns:
@@ -23507,6 +23966,12 @@ def _candidate_v2_one_slot_realized_path(
         "Strength vs BTC 4h %",
         "Return rank 4h %",
         "Volume rank 4h %",
+        "Relative volume 4h",
+        "Sector strength vs BTC 4h %",
+        "Sector alignment",
+        "HTF room %",
+        "Aligned RSI extremes",
+        "V1 driver",
         "Market 1h",
         "Breadth Δ1h pp",
         "Event key",
@@ -23525,10 +23990,7 @@ def _candidate_v2_one_slot_realized_path(
 def _candidate_v2_same_minute_selector_batches(
     intervals,
 ):
-    """Compare selectors on the exact same multi-candidate minute.
-
-    This isolates ranking behavior from the one-slot holding-path effect.
-    """
+    """Compare every causal selector on the exact same multi-signal minute."""
     if intervals is None or intervals.empty:
         return pd.DataFrame()
 
@@ -23536,7 +23998,10 @@ def _candidate_v2_same_minute_selector_batches(
     work["_entry_ts"] = pd.to_numeric(
         work.get(
             "_entry_ts",
-            pd.Series(np.nan, index=work.index),
+            pd.Series(
+                np.nan,
+                index=work.index,
+            ),
         ),
         errors="coerce",
     )
@@ -23560,6 +24025,7 @@ def _candidate_v2_same_minute_selector_batches(
             continue
 
         picks = {}
+
         for mode in selector_modes:
             ranked = (
                 _candidate_v2_portfolio_priority(
@@ -23570,6 +24036,7 @@ def _candidate_v2_same_minute_selector_batches(
             if ranked is None or ranked.empty:
                 picks[mode] = ""
                 continue
+
             picks[mode] = str(
                 ranked.iloc[0].get(
                     "symbol",
@@ -23625,6 +24092,7 @@ def _candidate_v2_same_minute_selector_batches(
     result = pd.DataFrame(
         rows
     )
+
     result["Entry"] = (
         pd.to_datetime(
             result["Entry timestamp"],
@@ -23638,15 +24106,17 @@ def _candidate_v2_same_minute_selector_batches(
         )
     )
 
+    selector_columns = [
+        _candidate_v2_one_slot_selector_short_name(
+            mode
+        )
+        for mode in selector_modes
+    ]
+
     columns = [
         "Entry",
         "Candidates",
-        "First",
-        "Strength",
-        "Return rank",
-        "Volume rank",
-        "1h align",
-        "Δ breadth 1h",
+        *selector_columns,
         "Unique selector picks",
         "All selectors same",
         "Entry timestamp",
@@ -23660,7 +24130,6 @@ def _candidate_v2_same_minute_selector_batches(
         ]
     ].copy()
 
-
 def _candidate_v2_selector_pairwise_agreement(
     batch_comparison,
 ):
@@ -23671,12 +24140,12 @@ def _candidate_v2_selector_pairwise_agreement(
         return pd.DataFrame()
 
     selector_columns = [
-        "First",
-        "Strength",
-        "Return rank",
-        "Volume rank",
-        "1h align",
-        "Δ breadth 1h",
+        _candidate_v2_one_slot_selector_short_name(
+            mode
+        )
+        for mode in (
+            _candidate_v2_one_slot_selector_modes()
+        )
     ]
 
     selector_columns = [
@@ -23706,8 +24175,12 @@ def _candidate_v2_selector_pairwise_agreement(
                 continue
 
             same = (
-                shared[left].astype(str)
-                == shared[right].astype(str)
+                shared[
+                    left
+                ].astype(str)
+                == shared[
+                    right
+                ].astype(str)
             )
 
             rows.append({
@@ -23731,7 +24204,6 @@ def _candidate_v2_selector_pairwise_agreement(
     return pd.DataFrame(
         rows
     )
-
 
 def _candidate_v2_realized_selector_timeline(
     path_detail,
@@ -23814,7 +24286,10 @@ def _candidate_v2_realized_selector_timeline(
                 if not selected.empty
                 else ""
             )
-            row[short] = symbol
+
+            row[
+                short
+            ] = symbol
 
             if symbol:
                 picks.append(
@@ -23867,14 +24342,16 @@ def _candidate_v2_realized_selector_timeline(
         )
     )
 
+    selector_columns = [
+        _candidate_v2_one_slot_selector_short_name(
+            mode
+        )
+        for mode in selector_modes
+    ]
+
     columns = [
         "Entry",
-        "First",
-        "Strength",
-        "Return rank",
-        "Volume rank",
-        "1h align",
-        "Δ breadth 1h",
+        *selector_columns,
         "Selectors entering",
         "Unique symbols",
         "Same symbol among entering",
@@ -23888,7 +24365,6 @@ def _candidate_v2_realized_selector_timeline(
             if column in result.columns
         ]
     ].copy()
-
 
 def _candidate_v2_one_slot_selector_comparison(
     intervals,
@@ -25612,25 +26088,42 @@ def render_candidate_v2_research(retests_df):
             key="candidate_v2_portfolio_compound",
         )
 
-        priority_options = [
-            "First signal / symbol tie-break",
-            "Highest Strength vs BTC 4h",
-            "Highest Return rank 4h",
-            "Highest Volume rank 4h",
-            "Best 1h alignment → Strength",
-            "Best directional Δ breadth 1h → Strength",
-        ]
+        priority_options = (
+            _candidate_v2_one_slot_selector_modes()
+        )
         portfolio_priority = ps7.selectbox(
             "Same-minute priority",
             options=priority_options,
-            index=0,
+            index=priority_options.index(
+                "Highest Strength vs BTC 4h"
+            ),
             key="candidate_v2_portfolio_priority",
             help=(
                 "Only matters when more signals arrive in the same minute than "
-                "free slots. It never looks ahead to future minutes. The 1h/4h "
-                "selectors use causal context already attached to the REACTION."
+                "free slots. It never looks ahead to future minutes. Symbol, sector, "
+                "room, RSI, V1-driver and 1h/4h fields are causal context already "
+                "attached to the REACTION. Consensus modes use ordinal ranks only."
             ),
         )
+
+        with st.expander(
+            "Same-minute selector definitions",
+            expanded=False,
+        ):
+            st.markdown(
+                """
+- **Highest Strength vs BTC 4h:** highest side-adjusted symbol strength.
+- **Highest Return / Volume Rank:** highest causal 4h cross-sectional percentile.
+- **Highest Relative Volume 4h:** highest symbol relative-volume ratio.
+- **Highest Sector Strength:** side-adjusted sector strength vs BTC.
+- **Best Sector Alignment → Strength:** prefer ALIGNED sector, then sector strength, then symbol strength.
+- **Most HTF Room → Strength:** most opposing structural room, then symbol strength.
+- **Candidate V1 Driver first → Strength:** prefer V1-driver candidates, then symbol strength.
+- **Most aligned RSI extremes → Strength:** most aligned extreme RSI timeframes, then strength.
+- **Consensus modes:** no fitted weights; minimize the sum of ordinal ranks for Strength + Volume / Sector / Room.
+- **1h modes:** market-state priority followed by symbol strength.
+                """
+            )
 
         ps8, ps9, ps10 = st.columns(3)
         portfolio_sizing_mode = ps8.selectbox(
@@ -26342,8 +26835,8 @@ def render_candidate_v2_research(retests_df):
                     ),
                     help=(
                         "Among minutes with more than one candidate, percentage "
-                        "where all selector rules independently picked the exact "
-                        "same symbol."
+                        "where every available selector independently picked "
+                        "the exact same symbol."
                     ),
                 )
                 sc3.metric(
@@ -26382,9 +26875,9 @@ def render_candidate_v2_research(retests_df):
                     )
                     st.caption(
                         "Every row is a minute with 2+ simultaneous Candidate V2 "
-                        "signals. This table answers whether Strength, Return Rank, "
-                        "Volume Rank and the 1h rules are genuinely selecting "
-                        "different symbols before one-slot occupancy is considered."
+                        "signals. This table compares all symbol, sector, room, "
+                        "RSI, V1-driver, consensus and 1h ranking rules before "
+                        "one-slot occupancy is considered."
                     )
                     st.dataframe(
                         batch_comparison,
@@ -26496,7 +26989,7 @@ def render_candidate_v2_research(retests_df):
                         "###### Selector trade-by-trade details"
                     )
                     st.caption(
-                        "Long-form table with the actual selected trade, its causal "
+                        "Long-form table with the actual selected trade, all causal "
                         "ranking inputs, hold duration, outcome and dynamic equity-margin PnL."
                     )
 
