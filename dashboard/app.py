@@ -21827,38 +21827,170 @@ def _candidate_v2_portfolio_priority(
     group,
     priority_mode,
 ):
-    """Deterministic, causal same-minute ranking for limited-slot research."""
+    """Deterministic causal ranking for signals sharing the same entry minute."""
     if group is None or group.empty:
         return pd.DataFrame()
 
     work = group.copy()
 
-    if priority_mode == "Strength vs BTC 4h":
-        column = "side_adjusted_strength_vs_btc_4h"
-    elif priority_mode == "Return rank 4h":
-        column = "return_rank_pct_4h"
-    elif priority_mode == "Volume rank 4h":
-        column = "volume_rank_pct_4h"
-    else:
-        column = None
+    # Strict live / first signal: entry timestamps are already grouped by minute.
+    # Symbol order is only a deterministic tie-break when several signals are
+    # simultaneously knowable at the same next-1m-open.
+    if priority_mode in {
+        "First signal / symbol tie-break",
+        "Symbol order",
+    }:
+        return work.sort_values(
+            ["symbol"],
+            kind="stable",
+        )
 
-    if (
-        column is not None
-        and column in work.columns
-    ):
+    if priority_mode == "Highest Strength vs BTC 4h":
+        column = "side_adjusted_strength_vs_btc_4h"
         work["_portfolio_priority"] = pd.to_numeric(
-            work[column],
+            work.get(
+                column,
+                pd.Series(np.nan, index=work.index),
+            ),
+            errors="coerce",
+        )
+        return work.sort_values(
+            ["_portfolio_priority", "symbol"],
+            ascending=[False, True],
+            na_position="last",
+            kind="stable",
+        )
+
+    if priority_mode == "Highest Return rank 4h":
+        column = "return_rank_pct_4h"
+        work["_portfolio_priority"] = pd.to_numeric(
+            work.get(
+                column,
+                pd.Series(np.nan, index=work.index),
+            ),
+            errors="coerce",
+        )
+        return work.sort_values(
+            ["_portfolio_priority", "symbol"],
+            ascending=[False, True],
+            na_position="last",
+            kind="stable",
+        )
+
+    if priority_mode == "Highest Volume rank 4h":
+        column = "volume_rank_pct_4h"
+        work["_portfolio_priority"] = pd.to_numeric(
+            work.get(
+                column,
+                pd.Series(np.nan, index=work.index),
+            ),
+            errors="coerce",
+        )
+        return work.sort_values(
+            ["_portfolio_priority", "symbol"],
+            ascending=[False, True],
+            na_position="last",
+            kind="stable",
+        )
+
+    if priority_mode == "Best 1h alignment → Strength":
+        alignment = (
+            work.get(
+                "Market alignment 1h",
+                pd.Series("UNKNOWN", index=work.index),
+            )
+            .fillna("UNKNOWN")
+            .astype(str)
+        )
+        work["_alignment_score"] = alignment.map({
+            "TAILWIND": 2.0,
+            "MIXED": 1.0,
+            "HEADWIND": 0.0,
+        }).fillna(-1.0)
+        work["_strength_score"] = pd.to_numeric(
+            work.get(
+                "side_adjusted_strength_vs_btc_4h",
+                pd.Series(np.nan, index=work.index),
+            ),
             errors="coerce",
         )
         return work.sort_values(
             [
-                "_portfolio_priority",
+                "_alignment_score",
+                "_strength_score",
                 "symbol",
             ],
             ascending=[
                 False,
+                False,
                 True,
             ],
+            na_position="last",
+            kind="stable",
+        )
+
+    if priority_mode == "Best directional Δ breadth 1h → Strength":
+        delta = pd.to_numeric(
+            work.get(
+                "breadth_delta_1h",
+                pd.Series(np.nan, index=work.index),
+            ),
+            errors="coerce",
+        )
+        side = (
+            work.get(
+                "side",
+                pd.Series("", index=work.index),
+            )
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+        work["_directional_breadth_delta"] = np.where(
+            side.eq("SHORT"),
+            -delta,
+            delta,
+        )
+        work["_strength_score"] = pd.to_numeric(
+            work.get(
+                "side_adjusted_strength_vs_btc_4h",
+                pd.Series(np.nan, index=work.index),
+            ),
+            errors="coerce",
+        )
+        return work.sort_values(
+            [
+                "_directional_breadth_delta",
+                "_strength_score",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    # Backward compatibility with the first simulator version.
+    legacy_map = {
+        "Strength vs BTC 4h": "side_adjusted_strength_vs_btc_4h",
+        "Return rank 4h": "return_rank_pct_4h",
+        "Volume rank 4h": "volume_rank_pct_4h",
+    }
+    legacy_column = legacy_map.get(priority_mode)
+    if legacy_column is not None:
+        work["_portfolio_priority"] = pd.to_numeric(
+            work.get(
+                legacy_column,
+                pd.Series(np.nan, index=work.index),
+            ),
+            errors="coerce",
+        )
+        return work.sort_values(
+            ["_portfolio_priority", "symbol"],
+            ascending=[False, True],
             na_position="last",
             kind="stable",
         )
@@ -21867,7 +21999,6 @@ def _candidate_v2_portfolio_priority(
         ["symbol"],
         kind="stable",
     )
-
 
 def _candidate_v2_portfolio_simulation(
     intervals,
@@ -21879,7 +22010,9 @@ def _candidate_v2_portfolio_simulation(
     selected_sl_pct=3.0,
     max_margin_pct=80.0,
     compound=True,
-    priority_mode="Symbol order",
+    priority_mode="First signal / symbol tie-break",
+    sizing_mode="Risk % equity",
+    fixed_margin_usd=150.0,
 ):
     """Chronological portfolio simulation using resolved Candidate V2 executions.
 
@@ -21895,14 +22028,21 @@ def _candidate_v2_portfolio_simulation(
     max_slots = int(max_slots)
     risk_per_trade_pct = float(risk_per_trade_pct)
     max_margin_pct = float(max_margin_pct)
+    fixed_margin_usd = float(fixed_margin_usd)
+    sizing_mode = str(sizing_mode or "Risk % equity")
 
     if (
         starting_equity <= 0
         or leverage <= 0
         or max_slots <= 0
-        or risk_per_trade_pct <= 0
         or max_margin_pct <= 0
     ):
+        return {}
+
+    if sizing_mode == "Risk % equity" and risk_per_trade_pct <= 0:
+        return {}
+
+    if sizing_mode == "Fixed margin USDT" and fixed_margin_usd <= 0:
         return {}
 
     work = intervals.copy()
@@ -22198,6 +22338,12 @@ def _candidate_v2_portfolio_simulation(
                 "risk_per_trade_pct": float(
                     risk_per_trade_pct
                 ),
+                "sizing_mode": str(
+                    sizing_mode
+                ),
+                "fixed_margin_usd": float(
+                    fixed_margin_usd
+                ),
                 "stop_loss_net_pct_for_sizing": float(
                     stop_loss_net_pct
                 ),
@@ -22234,24 +22380,38 @@ def _candidate_v2_portfolio_simulation(
                 )
             )
 
-            risk_budget_usd = (
-                sizing_equity
-                * risk_per_trade_pct
-                / 100.0
-            )
-
-            notional_usd = (
-                risk_budget_usd
-                / (
-                    stop_loss_net_pct
+            if sizing_mode == "Fixed margin USDT":
+                margin_usd = float(
+                    fixed_margin_usd
+                )
+                notional_usd = (
+                    margin_usd
+                    * leverage
+                )
+                risk_budget_usd = (
+                    notional_usd
+                    * (
+                        stop_loss_net_pct
+                        / 100.0
+                    )
+                )
+            else:
+                risk_budget_usd = (
+                    sizing_equity
+                    * risk_per_trade_pct
                     / 100.0
                 )
-            )
-
-            margin_usd = (
-                notional_usd
-                / leverage
-            )
+                notional_usd = (
+                    risk_budget_usd
+                    / (
+                        stop_loss_net_pct
+                        / 100.0
+                    )
+                )
+                margin_usd = (
+                    notional_usd
+                    / leverage
+                )
 
             totals_before = (
                 active_totals()
@@ -22675,6 +22835,12 @@ def _candidate_v2_portfolio_simulation(
         "Priority mode": str(
             priority_mode
         ),
+        "Sizing mode": str(
+            sizing_mode
+        ),
+        "Fixed margin $": float(
+            fixed_margin_usd
+        ),
     }
 
     if not ledger.empty:
@@ -22800,6 +22966,195 @@ def _candidate_v2_portfolio_simulation(
     }
 
 
+
+def _candidate_v2_one_slot_selector_study(
+    intervals,
+    *,
+    starting_equity,
+    fixed_margin_usd,
+    leverage,
+    selected_sl_pct,
+    max_margin_pct,
+):
+    """Compare causal same-minute selectors with exactly one open position."""
+    if intervals is None or intervals.empty:
+        return pd.DataFrame()
+
+    modes = [
+        "First signal / symbol tie-break",
+        "Highest Strength vs BTC 4h",
+        "Highest Return rank 4h",
+        "Highest Volume rank 4h",
+        "Best 1h alignment → Strength",
+        "Best directional Δ breadth 1h → Strength",
+    ]
+
+    rows = []
+    for mode in modes:
+        result = _candidate_v2_portfolio_simulation(
+            intervals,
+            starting_equity=starting_equity,
+            leverage=leverage,
+            max_slots=1,
+            selected_sl_pct=selected_sl_pct,
+            max_margin_pct=max_margin_pct,
+            compound=False,
+            priority_mode=mode,
+            sizing_mode="Fixed margin USDT",
+            fixed_margin_usd=fixed_margin_usd,
+        )
+        summary = result.get("summary", {}) if result else {}
+        if not summary:
+            continue
+
+        rows.append({
+            "Selector": mode,
+            "Margin/trade $": round(float(fixed_margin_usd), 2),
+            "Leverage": f"x{int(leverage)}",
+            "Notional/trade $": round(
+                float(fixed_margin_usd) * float(leverage),
+                2,
+            ),
+            "Stop risk/trade $": round(
+                float(fixed_margin_usd)
+                * float(leverage)
+                * float(summary.get("Sizing stop loss net %", selected_sl_pct))
+                / 100.0,
+                2,
+            ),
+            "Stop risk % start": round(
+                (
+                    float(fixed_margin_usd)
+                    * float(leverage)
+                    * float(summary.get("Sizing stop loss net %", selected_sl_pct))
+                    / 100.0
+                )
+                / float(starting_equity)
+                * 100.0,
+                2,
+            ),
+            "Accepted": int(summary.get("Accepted trades", 0)),
+            "Skipped": int(summary.get("Skipped trades", 0)),
+            "Raw net pts": round(
+                float(summary.get("Raw net pts accepted", 0.0)),
+                4,
+            ),
+            "Final equity $": round(
+                float(summary.get("Final equity", np.nan)),
+                2,
+            ),
+            "Return %": round(
+                float(summary.get("Return %", np.nan)),
+                3,
+            ),
+            "Max DD %": round(
+                float(summary.get("Max drawdown %", np.nan)),
+                3,
+            ),
+            "Portfolio PF": round(
+                float(summary.get("Portfolio PF", np.nan)),
+                3,
+            )
+            if np.isfinite(float(summary.get("Portfolio PF", np.nan)))
+            else summary.get("Portfolio PF", np.nan),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_one_slot_margin_leverage_grid(
+    intervals,
+    *,
+    starting_equity,
+    selected_sl_pct,
+    max_margin_pct,
+    priority_mode,
+):
+    """Fixed-margin one-slot stress grid across realistic small-account sizes."""
+    if intervals is None or intervals.empty:
+        return pd.DataFrame()
+
+    margins = (
+        25.0,
+        50.0,
+        75.0,
+        100.0,
+        125.0,
+        150.0,
+    )
+    leverages = (
+        3,
+        5,
+        10,
+    )
+
+    rows = []
+    for leverage in leverages:
+        for margin_usd in margins:
+            result = _candidate_v2_portfolio_simulation(
+                intervals,
+                starting_equity=starting_equity,
+                leverage=leverage,
+                max_slots=1,
+                selected_sl_pct=selected_sl_pct,
+                max_margin_pct=max_margin_pct,
+                compound=False,
+                priority_mode=priority_mode,
+                sizing_mode="Fixed margin USDT",
+                fixed_margin_usd=margin_usd,
+            )
+            summary = result.get("summary", {}) if result else {}
+            if not summary:
+                continue
+
+            rows.append({
+                "Margin $": float(margin_usd),
+                "Leverage": f"x{int(leverage)}",
+                "Notional $": round(
+                    float(margin_usd) * float(leverage),
+                    2,
+                ),
+                "Stop risk $": round(
+                    float(margin_usd)
+                    * float(leverage)
+                    * float(summary.get("Sizing stop loss net %", selected_sl_pct))
+                    / 100.0,
+                    2,
+                ),
+                "Stop risk % start": round(
+                    (
+                        float(margin_usd)
+                        * float(leverage)
+                        * float(summary.get("Sizing stop loss net %", selected_sl_pct))
+                        / 100.0
+                    )
+                    / float(starting_equity)
+                    * 100.0,
+                    2,
+                ),
+                "Accepted": int(summary.get("Accepted trades", 0)),
+                "Skipped": int(summary.get("Skipped trades", 0)),
+                "Final equity $": round(
+                    float(summary.get("Final equity", np.nan)),
+                    2,
+                ),
+                "Return %": round(
+                    float(summary.get("Return %", np.nan)),
+                    3,
+                ),
+                "Max DD %": round(
+                    float(summary.get("Max drawdown %", np.nan)),
+                    3,
+                ),
+                "Raw net pts": round(
+                    float(summary.get("Raw net pts accepted", 0.0)),
+                    4,
+                ),
+            })
+
+    return pd.DataFrame(rows)
+
+
 def _candidate_v2_portfolio_scenario_grid(
     intervals,
     *,
@@ -22851,6 +23206,8 @@ def _candidate_v2_portfolio_scenario_grid(
                     selected_sl_pct=(
                         selected_sl_pct
                     ),
+                    sizing_mode="Risk % equity",
+                    fixed_margin_usd=150.0,
                     max_margin_pct=(
                         max_margin_pct
                     ),
@@ -24110,8 +24467,9 @@ def render_candidate_v2_research(retests_df):
         st.caption(
             "Chronological account-level simulation for this exact V2 variant + "
             "TP/SL cell. Defaults are $200 starting equity and x5 leverage. "
-            "Sizing is risk-based: each accepted trade risks a configurable % "
-            "of account equity if the selected SL is hit. The V2 trade PnL is "
+            "Sizing can be risk-based or fixed-margin. In fixed-margin mode, "
+            "notional = margin × leverage; in risk mode the selected SL determines "
+            "notional from a % of equity. The V2 trade PnL is "
             "already net of the configured execution costs. Leverage changes "
             "initial margin requirement only; it does not multiply a fixed "
             "notional's PnL."
@@ -24176,10 +24534,12 @@ def render_candidate_v2_research(retests_df):
         )
 
         priority_options = [
-            "Symbol order",
-            "Strength vs BTC 4h",
-            "Return rank 4h",
-            "Volume rank 4h",
+            "First signal / symbol tie-break",
+            "Highest Strength vs BTC 4h",
+            "Highest Return rank 4h",
+            "Highest Volume rank 4h",
+            "Best 1h alignment → Strength",
+            "Best directional Δ breadth 1h → Strength",
         ]
         portfolio_priority = ps7.selectbox(
             "Same-minute priority",
@@ -24188,8 +24548,35 @@ def render_candidate_v2_research(retests_df):
             key="candidate_v2_portfolio_priority",
             help=(
                 "Only matters when more signals arrive in the same minute than "
-                "free slots. Every option uses information already available at "
-                "REACTION time."
+                "free slots. It never looks ahead to future minutes. The 1h/4h "
+                "selectors use causal context already attached to the REACTION."
+            ),
+        )
+
+        ps8, ps9 = st.columns(2)
+        portfolio_sizing_mode = ps8.selectbox(
+            "Position sizing mode",
+            options=[
+                "Risk % equity",
+                "Fixed margin USDT",
+            ],
+            index=0,
+            key="candidate_v2_portfolio_sizing_mode",
+        )
+        portfolio_fixed_margin = ps9.number_input(
+            "Fixed margin per trade (USDT)",
+            min_value=1.0,
+            max_value=100_000.0,
+            value=150.0,
+            step=5.0,
+            key="candidate_v2_portfolio_fixed_margin",
+            disabled=(
+                portfolio_sizing_mode
+                != "Fixed margin USDT"
+            ),
+            help=(
+                "In Fixed margin mode, notional = margin × leverage. "
+                "For example $150 margin at x5 = $750 notional."
             ),
         )
 
@@ -24203,6 +24590,8 @@ def render_candidate_v2_research(retests_df):
             max_margin_pct=portfolio_margin_cap,
             compound=portfolio_compound,
             priority_mode=portfolio_priority,
+            sizing_mode=portfolio_sizing_mode,
+            fixed_margin_usd=portfolio_fixed_margin,
         )
 
         if portfolio_result:
@@ -24217,36 +24606,72 @@ def render_candidate_v2_research(retests_df):
                     float(selected_sl),
                 )
             )
-            initial_risk_usd = (
-                float(portfolio_starting_equity)
-                * float(portfolio_risk_pct)
-                / 100.0
-            )
-            initial_notional_usd = (
-                initial_risk_usd
-                / (
-                    stop_net_pct
+            if portfolio_sizing_mode == "Fixed margin USDT":
+                initial_margin_usd = float(
+                    portfolio_fixed_margin
+                )
+                initial_notional_usd = (
+                    initial_margin_usd
+                    * float(
+                        portfolio_leverage
+                    )
+                )
+                initial_risk_usd = (
+                    initial_notional_usd
+                    * stop_net_pct
                     / 100.0
                 )
-                if stop_net_pct > 0
-                else np.nan
-            )
-            initial_margin_usd = (
-                initial_notional_usd
-                / float(portfolio_leverage)
+            else:
+                initial_risk_usd = (
+                    float(portfolio_starting_equity)
+                    * float(portfolio_risk_pct)
+                    / 100.0
+                )
+                initial_notional_usd = (
+                    initial_risk_usd
+                    / (
+                        stop_net_pct
+                        / 100.0
+                    )
+                    if stop_net_pct > 0
+                    else np.nan
+                )
+                initial_margin_usd = (
+                    initial_notional_usd
+                    / float(portfolio_leverage)
+                    if (
+                        pd.notna(initial_notional_usd)
+                        and float(portfolio_leverage) > 0
+                    )
+                    else np.nan
+                )
+
+            initial_stop_risk_pct_equity = (
+                initial_risk_usd
+                / float(
+                    portfolio_starting_equity
+                )
+                * 100.0
                 if (
-                    pd.notna(initial_notional_usd)
-                    and float(portfolio_leverage) > 0
+                    float(
+                        portfolio_starting_equity
+                    )
+                    > 0
+                    and pd.notna(
+                        initial_risk_usd
+                    )
                 )
                 else np.nan
             )
 
             st.caption(
-                f"Sizing reference · net stop used: {stop_net_pct:.4f}% "
+                f"Sizing reference · mode: {portfolio_sizing_mode} · "
+                f"net stop used: {stop_net_pct:.4f}% "
                 f"({portfolio_summary.get('Stop loss sizing source', '—')}) · "
-                f"initial risk/trade: ${initial_risk_usd:.4f} · "
-                f"initial notional/trade: ${initial_notional_usd:.2f} · "
-                f"initial margin/trade at x{portfolio_leverage}: "
+                f"risk/trade at start: ${initial_risk_usd:.2f} "
+                f"({initial_stop_risk_pct_equity:.2f}% equity) · "
+                f"notional/trade: ${initial_notional_usd:.2f} · "
+                f"margin/trade at x{portfolio_leverage}: "
                 f"${initial_margin_usd:.2f}."
             )
 
@@ -24354,8 +24779,12 @@ def render_candidate_v2_research(retests_df):
                         f"TP {float(selected_tp):g}% / "
                         f"SL {float(selected_sl):g}% · "
                         f"{portfolio_slots} slots · "
-                        f"{float(portfolio_risk_pct):g}% risk/trade · "
-                        f"x{portfolio_leverage}"
+                        + (
+                            f"${float(portfolio_fixed_margin):g} margin/trade · "
+                            if portfolio_sizing_mode == "Fixed margin USDT"
+                            else f"{float(portfolio_risk_pct):g}% risk/trade · "
+                        )
+                        + f"x{portfolio_leverage}"
                     ),
                     xaxis_title=f"Time ({TZ})",
                     yaxis_title="Realized equity (USDT)",
@@ -24441,6 +24870,127 @@ def render_candidate_v2_research(retests_df):
                         mime="text/csv",
                         key="candidate_v2_portfolio_trade_download",
                     )
+
+
+            st.markdown("###### 🎯 One-slot selector lab · fixed margin")
+            st.caption(
+                "This is the exact test for the 'one position at a time' idea. "
+                "A position, once opened, is never replaced by a later signal. "
+                "The selector only chooses among signals that become executable "
+                "in the same minute while the single slot is free. Default margin "
+                "is $150 so you can compare x5 and x10 directly."
+            )
+
+            os1, os2 = st.columns(2)
+            one_slot_margin = os1.number_input(
+                "One-slot margin per trade (USDT)",
+                min_value=1.0,
+                max_value=max(
+                    1_000.0,
+                    float(portfolio_starting_equity) * 5.0,
+                ),
+                value=150.0,
+                step=5.0,
+                key="candidate_v2_one_slot_margin",
+            )
+            one_slot_leverage = os2.selectbox(
+                "One-slot leverage",
+                options=[3, 5, 10],
+                index=1,
+                format_func=lambda value: f"x{value}",
+                key="candidate_v2_one_slot_leverage",
+            )
+
+            one_slot_selector_table = (
+                _candidate_v2_one_slot_selector_study(
+                    resolved_concurrency,
+                    starting_equity=portfolio_starting_equity,
+                    fixed_margin_usd=one_slot_margin,
+                    leverage=one_slot_leverage,
+                    selected_sl_pct=selected_sl,
+                    max_margin_pct=portfolio_margin_cap,
+                )
+            )
+
+            if not one_slot_selector_table.empty:
+                st.dataframe(
+                    one_slot_selector_table,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="candidate_v2_one_slot_selector_table",
+                )
+                st.download_button(
+                    "Download one-slot selector comparison CSV",
+                    data=one_slot_selector_table.to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name=(
+                        f"candidate_v2_one_slot_selectors_"
+                        f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                        f"tp{float(selected_tp):g}_"
+                        f"sl{float(selected_sl):g}_"
+                        f"{snap_horizon}m.csv"
+                    ),
+                    mime="text/csv",
+                    key="candidate_v2_one_slot_selector_download",
+                )
+
+            chosen_one_slot_selector = st.selectbox(
+                "Selector for margin × leverage stress grid",
+                options=priority_options,
+                index=0,
+                key="candidate_v2_one_slot_grid_selector",
+            )
+
+            one_slot_grid = (
+                _candidate_v2_one_slot_margin_leverage_grid(
+                    resolved_concurrency,
+                    starting_equity=portfolio_starting_equity,
+                    selected_sl_pct=selected_sl,
+                    max_margin_pct=portfolio_margin_cap,
+                    priority_mode=chosen_one_slot_selector,
+                )
+            )
+
+            if not one_slot_grid.empty:
+                st.markdown(
+                    "###### One slot · fixed margin × leverage"
+                )
+                st.caption(
+                    "Compares $25/$50/$75/$100/$125/$150 margin at x3/x5/x10 "
+                    "using the selected causal selector. Stop-risk is shown both "
+                    "in dollars and as % of the starting account."
+                )
+                st.dataframe(
+                    one_slot_grid,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="candidate_v2_one_slot_margin_leverage_grid",
+                )
+                st.download_button(
+                    "Download one-slot margin × leverage CSV",
+                    data=one_slot_grid.to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name=(
+                        f"candidate_v2_one_slot_margin_leverage_"
+                        f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                        f"tp{float(selected_tp):g}_"
+                        f"sl{float(selected_sl):g}_"
+                        f"{snap_horizon}m.csv"
+                    ),
+                    mime="text/csv",
+                    key="candidate_v2_one_slot_margin_leverage_download",
+                )
+
+            st.info(
+                "Micro Flow is not used as a selector in this table yet because "
+                "the current Candidate V2 execution rows do not carry a causal "
+                "Micro Flow feature per REACTION. The dashboard has Micro Flow "
+                "research, but wiring future Micro Flow data into old V2 trades "
+                "would be look-ahead unless we first persist/reconstruct it at "
+                "REACTION time."
+            )
 
             st.warning(
                 "Execution-research limitation: this simulator does NOT model "
