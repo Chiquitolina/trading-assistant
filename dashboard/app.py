@@ -21760,6 +21760,1201 @@ def _candidate_v2_concurrency_analysis(
     }
 
 
+
+def _candidate_v2_portfolio_stop_loss_pct(
+    intervals,
+    selected_sl_pct,
+):
+    """Estimate the net loss % used only for risk-based position sizing."""
+    fallback_sl = abs(float(selected_sl_pct))
+
+    if intervals is None or intervals.empty:
+        return fallback_sl, 0.0, "selected SL only"
+
+    work = intervals.copy()
+
+    costs = pd.to_numeric(
+        work.get(
+            "execution_cost_pct",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    ).dropna()
+    median_cost = (
+        float(costs.median())
+        if len(costs)
+        else 0.0
+    )
+
+    outcomes = (
+        work.get(
+            "Outcome",
+            pd.Series("", index=work.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    net = pd.to_numeric(
+        work.get(
+            "net_pnl_pct",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    )
+
+    sl_losses = net.loc[
+        outcomes.isin(
+            ["SL", "SL_AMBIGUOUS"]
+        )
+        & net.lt(0)
+    ].abs().dropna()
+
+    if len(sl_losses):
+        return (
+            float(sl_losses.median()),
+            median_cost,
+            "median observed net SL",
+        )
+
+    return (
+        float(fallback_sl + median_cost),
+        median_cost,
+        "selected SL + median execution cost",
+    )
+
+
+def _candidate_v2_portfolio_priority(
+    group,
+    priority_mode,
+):
+    """Deterministic, causal same-minute ranking for limited-slot research."""
+    if group is None or group.empty:
+        return pd.DataFrame()
+
+    work = group.copy()
+
+    if priority_mode == "Strength vs BTC 4h":
+        column = "side_adjusted_strength_vs_btc_4h"
+    elif priority_mode == "Return rank 4h":
+        column = "return_rank_pct_4h"
+    elif priority_mode == "Volume rank 4h":
+        column = "volume_rank_pct_4h"
+    else:
+        column = None
+
+    if (
+        column is not None
+        and column in work.columns
+    ):
+        work["_portfolio_priority"] = pd.to_numeric(
+            work[column],
+            errors="coerce",
+        )
+        return work.sort_values(
+            [
+                "_portfolio_priority",
+                "symbol",
+            ],
+            ascending=[
+                False,
+                True,
+            ],
+            na_position="last",
+            kind="stable",
+        )
+
+    return work.sort_values(
+        ["symbol"],
+        kind="stable",
+    )
+
+
+def _candidate_v2_portfolio_simulation(
+    intervals,
+    *,
+    starting_equity=200.0,
+    leverage=5.0,
+    max_slots=10,
+    risk_per_trade_pct=0.25,
+    selected_sl_pct=3.0,
+    max_margin_pct=80.0,
+    compound=True,
+    priority_mode="Symbol order",
+):
+    """Chronological portfolio simulation using resolved Candidate V2 executions.
+
+    PnL is already net of the execution costs configured in the V2 execution grid.
+    Leverage changes required initial margin only; it does not multiply the same
+    notional's PnL. Liquidation, maintenance margin and funding are not simulated.
+    """
+    if intervals is None or intervals.empty:
+        return {}
+
+    starting_equity = float(starting_equity)
+    leverage = float(leverage)
+    max_slots = int(max_slots)
+    risk_per_trade_pct = float(risk_per_trade_pct)
+    max_margin_pct = float(max_margin_pct)
+
+    if (
+        starting_equity <= 0
+        or leverage <= 0
+        or max_slots <= 0
+        or risk_per_trade_pct <= 0
+        or max_margin_pct <= 0
+    ):
+        return {}
+
+    work = intervals.copy()
+
+    required = {
+        "_entry_ts",
+        "_effective_exit_ts",
+        "net_pnl_pct",
+    }
+    if not required.issubset(work.columns):
+        return {}
+
+    work["_entry_ts"] = pd.to_numeric(
+        work["_entry_ts"],
+        errors="coerce",
+    )
+    work["_effective_exit_ts"] = pd.to_numeric(
+        work["_effective_exit_ts"],
+        errors="coerce",
+    )
+    work["_portfolio_net_pct"] = pd.to_numeric(
+        work["net_pnl_pct"],
+        errors="coerce",
+    )
+
+    work = work.loc[
+        work["_entry_ts"].notna()
+        & work["_effective_exit_ts"].notna()
+        & work["_portfolio_net_pct"].notna()
+        & work["_effective_exit_ts"].gt(
+            work["_entry_ts"]
+        )
+    ].copy()
+
+    if work.empty:
+        return {}
+
+    work = work.sort_values(
+        ["_entry_ts", "symbol"],
+        kind="stable",
+    ).copy()
+
+    (
+        stop_loss_net_pct,
+        median_execution_cost_pct,
+        stop_loss_source,
+    ) = _candidate_v2_portfolio_stop_loss_pct(
+        work,
+        selected_sl_pct,
+    )
+
+    if stop_loss_net_pct <= 0:
+        return {}
+
+    balance = float(starting_equity)
+    active = []
+    ledger_rows = []
+    equity_rows = [{
+        "timestamp": int(
+            work["_entry_ts"].min()
+        ),
+        "equity": float(
+            starting_equity
+        ),
+        "event": "START",
+    }]
+
+    peak_open_positions = 0
+    peak_notional_usd = 0.0
+    peak_margin_usd = 0.0
+    peak_stop_risk_usd = 0.0
+
+    def active_totals():
+        return {
+            "notional": float(
+                sum(
+                    float(
+                        item[
+                            "notional_usd"
+                        ]
+                    )
+                    for item in active
+                )
+            ),
+            "margin": float(
+                sum(
+                    float(
+                        item[
+                            "margin_usd"
+                        ]
+                    )
+                    for item in active
+                )
+            ),
+            "risk": float(
+                sum(
+                    float(
+                        item[
+                            "risk_budget_usd"
+                        ]
+                    )
+                    for item in active
+                )
+            ),
+        }
+
+    def register_peaks():
+        nonlocal peak_open_positions
+        nonlocal peak_notional_usd
+        nonlocal peak_margin_usd
+        nonlocal peak_stop_risk_usd
+
+        totals = active_totals()
+
+        peak_open_positions = max(
+            peak_open_positions,
+            int(len(active)),
+        )
+        peak_notional_usd = max(
+            peak_notional_usd,
+            totals["notional"],
+        )
+        peak_margin_usd = max(
+            peak_margin_usd,
+            totals["margin"],
+        )
+        peak_stop_risk_usd = max(
+            peak_stop_risk_usd,
+            totals["risk"],
+        )
+
+    def close_until(timestamp):
+        nonlocal balance
+        nonlocal active
+
+        due = [
+            item
+            for item in active
+            if int(
+                item[
+                    "exit_ts"
+                ]
+            ) <= int(timestamp)
+        ]
+        if not due:
+            return
+
+        remaining = [
+            item
+            for item in active
+            if int(
+                item[
+                    "exit_ts"
+                ]
+            ) > int(timestamp)
+        ]
+
+        due = sorted(
+            due,
+            key=lambda item: (
+                int(
+                    item[
+                        "exit_ts"
+                    ]
+                ),
+                str(
+                    item.get(
+                        "symbol",
+                        "",
+                    )
+                ),
+            ),
+        )
+
+        cursor = 0
+
+        while cursor < len(due):
+            exit_ts = int(
+                due[
+                    cursor
+                ][
+                    "exit_ts"
+                ]
+            )
+            same_exit = []
+
+            while (
+                cursor < len(due)
+                and int(
+                    due[
+                        cursor
+                    ][
+                        "exit_ts"
+                    ]
+                )
+                == exit_ts
+            ):
+                same_exit.append(
+                    due[
+                        cursor
+                    ]
+                )
+                cursor += 1
+
+            batch_pnl = float(
+                sum(
+                    float(
+                        item[
+                            "pnl_usd"
+                        ]
+                    )
+                    for item in same_exit
+                )
+            )
+            balance += batch_pnl
+
+            for item in same_exit:
+                item[
+                    "exit_equity_usd"
+                ] = float(
+                    balance
+                )
+
+            equity_rows.append({
+                "timestamp": int(
+                    exit_ts
+                ),
+                "equity": float(
+                    balance
+                ),
+                "event": "EXIT",
+            })
+
+        active = remaining
+
+    for entry_ts, raw_group in work.groupby(
+        "_entry_ts",
+        sort=True,
+    ):
+        entry_ts = int(entry_ts)
+
+        close_until(
+            entry_ts
+        )
+
+        ordered_group = (
+            _candidate_v2_portfolio_priority(
+                raw_group,
+                priority_mode,
+            )
+        )
+
+        for _, row in ordered_group.iterrows():
+            symbol = str(
+                row.get(
+                    "symbol",
+                    "",
+                )
+            )
+            side = str(
+                row.get(
+                    "side",
+                    "",
+                )
+            )
+            outcome = str(
+                row.get(
+                    "Outcome",
+                    "",
+                )
+            )
+
+            record = {
+                "entry_timestamp": int(
+                    entry_ts
+                ),
+                "exit_timestamp": int(
+                    row[
+                        "_effective_exit_ts"
+                    ]
+                ),
+                "symbol": symbol,
+                "side": side,
+                "outcome": outcome,
+                "accepted": False,
+                "skip_reason": "",
+                "leverage": float(
+                    leverage
+                ),
+                "max_slots": int(
+                    max_slots
+                ),
+                "risk_per_trade_pct": float(
+                    risk_per_trade_pct
+                ),
+                "stop_loss_net_pct_for_sizing": float(
+                    stop_loss_net_pct
+                ),
+                "raw_net_pnl_pct": float(
+                    row[
+                        "_portfolio_net_pct"
+                    ]
+                ),
+            }
+
+            if balance <= 0:
+                record[
+                    "skip_reason"
+                ] = "equity_nonpositive"
+                ledger_rows.append(
+                    record
+                )
+                continue
+
+            if len(active) >= max_slots:
+                record[
+                    "skip_reason"
+                ] = "slot_limit"
+                ledger_rows.append(
+                    record
+                )
+                continue
+
+            sizing_equity = (
+                float(balance)
+                if bool(compound)
+                else float(
+                    starting_equity
+                )
+            )
+
+            risk_budget_usd = (
+                sizing_equity
+                * risk_per_trade_pct
+                / 100.0
+            )
+
+            notional_usd = (
+                risk_budget_usd
+                / (
+                    stop_loss_net_pct
+                    / 100.0
+                )
+            )
+
+            margin_usd = (
+                notional_usd
+                / leverage
+            )
+
+            totals_before = (
+                active_totals()
+            )
+
+            margin_limit_usd = (
+                max(
+                    float(balance),
+                    0.0,
+                )
+                * max_margin_pct
+                / 100.0
+            )
+
+            if (
+                totals_before[
+                    "margin"
+                ]
+                + margin_usd
+                > margin_limit_usd
+                + 1e-12
+            ):
+                record[
+                    "skip_reason"
+                ] = "margin_limit"
+                record[
+                    "risk_budget_usd"
+                ] = float(
+                    risk_budget_usd
+                )
+                record[
+                    "notional_usd"
+                ] = float(
+                    notional_usd
+                )
+                record[
+                    "margin_usd"
+                ] = float(
+                    margin_usd
+                )
+                ledger_rows.append(
+                    record
+                )
+                continue
+
+            pnl_usd = (
+                notional_usd
+                * float(
+                    row[
+                        "_portfolio_net_pct"
+                    ]
+                )
+                / 100.0
+            )
+
+            position = {
+                "exit_ts": int(
+                    row[
+                        "_effective_exit_ts"
+                    ]
+                ),
+                "symbol": symbol,
+                "side": side,
+                "outcome": outcome,
+                "entry_equity_usd": float(
+                    balance
+                ),
+                "risk_budget_usd": float(
+                    risk_budget_usd
+                ),
+                "notional_usd": float(
+                    notional_usd
+                ),
+                "margin_usd": float(
+                    margin_usd
+                ),
+                "pnl_usd": float(
+                    pnl_usd
+                ),
+                "net_pnl_pct": float(
+                    row[
+                        "_portfolio_net_pct"
+                    ]
+                ),
+            }
+
+            active.append(
+                position
+            )
+            register_peaks()
+
+            totals_after = (
+                active_totals()
+            )
+
+            record.update({
+                "accepted": True,
+                "entry_equity_usd": float(
+                    balance
+                ),
+                "risk_budget_usd": float(
+                    risk_budget_usd
+                ),
+                "notional_usd": float(
+                    notional_usd
+                ),
+                "margin_usd": float(
+                    margin_usd
+                ),
+                "pnl_usd": float(
+                    pnl_usd
+                ),
+                "open_positions_after_entry": int(
+                    len(active)
+                ),
+                "portfolio_margin_after_entry_usd": float(
+                    totals_after[
+                        "margin"
+                    ]
+                ),
+                "portfolio_notional_after_entry_usd": float(
+                    totals_after[
+                        "notional"
+                    ]
+                ),
+                "portfolio_stop_risk_after_entry_usd": float(
+                    totals_after[
+                        "risk"
+                    ]
+                ),
+            })
+            ledger_rows.append(
+                record
+            )
+
+    if active:
+        close_until(
+            max(
+                int(
+                    item[
+                        "exit_ts"
+                    ]
+                )
+                for item in active
+            )
+        )
+
+    ledger = pd.DataFrame(
+        ledger_rows
+    )
+    equity_curve = pd.DataFrame(
+        equity_rows
+    )
+
+    if ledger.empty:
+        return {}
+
+    accepted = ledger.loc[
+        ledger[
+            "accepted"
+        ].fillna(False)
+    ].copy()
+
+    skipped = ledger.loc[
+        ~ledger[
+            "accepted"
+        ].fillna(False)
+    ].copy()
+
+    accepted_pnl = pd.to_numeric(
+        accepted.get(
+            "pnl_usd",
+            pd.Series(dtype=float),
+        ),
+        errors="coerce",
+    ).dropna()
+
+    portfolio_pf = np.nan
+
+    if len(accepted_pnl):
+        gains = accepted_pnl.loc[
+            accepted_pnl.gt(0)
+        ]
+        losses = accepted_pnl.loc[
+            accepted_pnl.lt(0)
+        ]
+
+        if (
+            len(losses)
+            and abs(
+                float(
+                    losses.sum()
+                )
+            )
+            > 1e-12
+        ):
+            portfolio_pf = float(
+                gains.sum()
+                / abs(
+                    losses.sum()
+                )
+            )
+        elif len(gains):
+            portfolio_pf = np.inf
+
+    if not equity_curve.empty:
+        equity_curve = (
+            equity_curve
+            .sort_values(
+                ["timestamp"],
+                kind="stable",
+            )
+            .groupby(
+                ["timestamp"],
+                as_index=False,
+                sort=True,
+            )
+            .agg(
+                equity=(
+                    "equity",
+                    "last",
+                ),
+                event=(
+                    "event",
+                    "last",
+                ),
+            )
+        )
+
+        equity_values = pd.to_numeric(
+            equity_curve[
+                "equity"
+            ],
+            errors="coerce",
+        ).astype(float)
+
+        running_peak = (
+            equity_values.cummax()
+        )
+        drawdown_usd = (
+            equity_values
+            - running_peak
+        )
+        drawdown_pct = (
+            drawdown_usd
+            / running_peak.replace(
+                0,
+                np.nan,
+            )
+            * 100.0
+        )
+
+        equity_curve[
+            "drawdown_usd"
+        ] = drawdown_usd
+        equity_curve[
+            "drawdown_pct"
+        ] = drawdown_pct
+
+        max_drawdown_usd = abs(
+            float(
+                drawdown_usd.min()
+            )
+        )
+        max_drawdown_pct = abs(
+            float(
+                drawdown_pct.min()
+            )
+        )
+    else:
+        max_drawdown_usd = 0.0
+        max_drawdown_pct = 0.0
+
+    final_equity = float(
+        balance
+    )
+    net_pnl_usd = (
+        final_equity
+        - starting_equity
+    )
+    return_pct = (
+        (
+            final_equity
+            / starting_equity
+        )
+        - 1.0
+    ) * 100.0
+
+    all_raw_net = pd.to_numeric(
+        work[
+            "_portfolio_net_pct"
+        ],
+        errors="coerce",
+    ).dropna()
+
+    accepted_raw_net = pd.to_numeric(
+        accepted.get(
+            "raw_net_pnl_pct",
+            pd.Series(dtype=float),
+        ),
+        errors="coerce",
+    ).dropna()
+
+    skip_counts = (
+        skipped.get(
+            "skip_reason",
+            pd.Series(dtype=str),
+        )
+        .fillna("")
+        .astype(str)
+        .value_counts()
+        .to_dict()
+    )
+
+    summary = {
+        "Starting equity": float(
+            starting_equity
+        ),
+        "Final equity": float(
+            final_equity
+        ),
+        "Net PnL $": float(
+            net_pnl_usd
+        ),
+        "Return %": float(
+            return_pct
+        ),
+        "Max drawdown $": float(
+            max_drawdown_usd
+        ),
+        "Max drawdown %": float(
+            max_drawdown_pct
+        ),
+        "Portfolio PF": (
+            float(
+                portfolio_pf
+            )
+            if pd.notna(
+                portfolio_pf
+            )
+            else np.nan
+        ),
+        "Eligible trades": int(
+            len(work)
+        ),
+        "Accepted trades": int(
+            len(accepted)
+        ),
+        "Skipped trades": int(
+            len(skipped)
+        ),
+        "Accepted %": (
+            float(
+                len(accepted)
+                / len(work)
+                * 100.0
+            )
+            if len(work)
+            else np.nan
+        ),
+        "Peak open positions": int(
+            peak_open_positions
+        ),
+        "Peak notional $": float(
+            peak_notional_usd
+        ),
+        "Peak margin $": float(
+            peak_margin_usd
+        ),
+        "Peak margin % of start": float(
+            peak_margin_usd
+            / starting_equity
+            * 100.0
+        ),
+        "Peak stop risk $": float(
+            peak_stop_risk_usd
+        ),
+        "Peak stop risk % of start": float(
+            peak_stop_risk_usd
+            / starting_equity
+            * 100.0
+        ),
+        "Raw net pts accepted": float(
+            accepted_raw_net.sum()
+        )
+        if len(
+            accepted_raw_net
+        )
+        else 0.0,
+        "Raw net pts all": float(
+            all_raw_net.sum()
+        )
+        if len(
+            all_raw_net
+        )
+        else 0.0,
+        "Sizing stop loss net %": float(
+            stop_loss_net_pct
+        ),
+        "Median execution cost %": float(
+            median_execution_cost_pct
+        ),
+        "Stop loss sizing source": str(
+            stop_loss_source
+        ),
+        "Skipped slot limit": int(
+            skip_counts.get(
+                "slot_limit",
+                0,
+            )
+        ),
+        "Skipped margin limit": int(
+            skip_counts.get(
+                "margin_limit",
+                0,
+            )
+        ),
+        "Compound sizing": bool(
+            compound
+        ),
+        "Priority mode": str(
+            priority_mode
+        ),
+    }
+
+    if not ledger.empty:
+        def local_time(series):
+            numeric = pd.to_numeric(
+                series,
+                errors="coerce",
+            )
+            return (
+                pd.to_datetime(
+                    numeric,
+                    unit="ms",
+                    utc=True,
+                    errors="coerce",
+                )
+                .dt.tz_convert(TZ)
+                .dt.strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+            )
+
+        ledger[
+            "Entry"
+        ] = local_time(
+            ledger[
+                "entry_timestamp"
+            ]
+        )
+        ledger[
+            "Exit"
+        ] = local_time(
+            ledger[
+                "exit_timestamp"
+            ]
+        )
+
+        display_cols = [
+            "Entry",
+            "Exit",
+            "symbol",
+            "side",
+            "outcome",
+            "accepted",
+            "skip_reason",
+            "entry_equity_usd",
+            "risk_budget_usd",
+            "notional_usd",
+            "margin_usd",
+            "raw_net_pnl_pct",
+            "pnl_usd",
+            "open_positions_after_entry",
+            "portfolio_margin_after_entry_usd",
+            "portfolio_notional_after_entry_usd",
+            "portfolio_stop_risk_after_entry_usd",
+        ]
+
+        display_cols = [
+            col
+            for col in display_cols
+            if col in ledger.columns
+        ]
+
+        ledger = ledger[
+            display_cols
+        ].copy()
+
+        rename = {
+            "symbol": "Symbol",
+            "side": "Side",
+            "outcome": "Outcome",
+            "accepted": "Accepted",
+            "skip_reason": "Skip reason",
+            "entry_equity_usd": "Entry equity $",
+            "risk_budget_usd": "Risk budget $",
+            "notional_usd": "Notional $",
+            "margin_usd": "Margin $",
+            "raw_net_pnl_pct": "Trade net %",
+            "pnl_usd": "PnL $",
+            "open_positions_after_entry": "Open after entry",
+            "portfolio_margin_after_entry_usd": "Portfolio margin $",
+            "portfolio_notional_after_entry_usd": "Portfolio notional $",
+            "portfolio_stop_risk_after_entry_usd": "Portfolio stop risk $",
+        }
+        ledger = ledger.rename(
+            columns=rename
+        )
+
+        money_cols = [
+            "Entry equity $",
+            "Risk budget $",
+            "Notional $",
+            "Margin $",
+            "PnL $",
+            "Portfolio margin $",
+            "Portfolio notional $",
+            "Portfolio stop risk $",
+        ]
+        for col in money_cols:
+            if col in ledger.columns:
+                ledger[
+                    col
+                ] = pd.to_numeric(
+                    ledger[
+                        col
+                    ],
+                    errors="coerce",
+                ).round(4)
+
+        if "Trade net %" in ledger.columns:
+            ledger[
+                "Trade net %"
+            ] = pd.to_numeric(
+                ledger[
+                    "Trade net %"
+                ],
+                errors="coerce",
+            ).round(4)
+
+    return {
+        "summary": summary,
+        "ledger": ledger,
+        "equity_curve": equity_curve,
+    }
+
+
+def _candidate_v2_portfolio_scenario_grid(
+    intervals,
+    *,
+    starting_equity,
+    leverage,
+    selected_sl_pct,
+    max_margin_pct,
+    compound,
+    priority_mode,
+):
+    """Small robustness grid for slots × risk/trade using one selected V2 cell."""
+    if intervals is None or intervals.empty:
+        return pd.DataFrame()
+
+    rows = []
+
+    slot_values = (
+        3,
+        5,
+        10,
+        20,
+        30,
+    )
+    risk_values = (
+        0.10,
+        0.25,
+        0.50,
+        0.75,
+        1.00,
+    )
+
+    for slots in slot_values:
+        for risk_pct in risk_values:
+            result = (
+                _candidate_v2_portfolio_simulation(
+                    intervals,
+                    starting_equity=(
+                        starting_equity
+                    ),
+                    leverage=(
+                        leverage
+                    ),
+                    max_slots=(
+                        slots
+                    ),
+                    risk_per_trade_pct=(
+                        risk_pct
+                    ),
+                    selected_sl_pct=(
+                        selected_sl_pct
+                    ),
+                    max_margin_pct=(
+                        max_margin_pct
+                    ),
+                    compound=(
+                        compound
+                    ),
+                    priority_mode=(
+                        priority_mode
+                    ),
+                )
+            )
+
+            summary = (
+                result.get(
+                    "summary",
+                    {},
+                )
+                if result
+                else {}
+            )
+
+            if not summary:
+                continue
+
+            rows.append({
+                "Slots": int(
+                    slots
+                ),
+                "Risk/trade %": float(
+                    risk_pct
+                ),
+                "Final equity $": round(
+                    float(
+                        summary.get(
+                            "Final equity",
+                            np.nan,
+                        )
+                    ),
+                    2,
+                ),
+                "Return %": round(
+                    float(
+                        summary.get(
+                            "Return %",
+                            np.nan,
+                        )
+                    ),
+                    3,
+                ),
+                "Max DD %": round(
+                    float(
+                        summary.get(
+                            "Max drawdown %",
+                            np.nan,
+                        )
+                    ),
+                    3,
+                ),
+                "Accepted": int(
+                    summary.get(
+                        "Accepted trades",
+                        0,
+                    )
+                ),
+                "Skipped": int(
+                    summary.get(
+                        "Skipped trades",
+                        0,
+                    )
+                ),
+                "Peak margin %": round(
+                    float(
+                        summary.get(
+                            "Peak margin % of start",
+                            np.nan,
+                        )
+                    ),
+                    2,
+                ),
+                "Peak stop risk %": round(
+                    float(
+                        summary.get(
+                            "Peak stop risk % of start",
+                            np.nan,
+                        )
+                    ),
+                    2,
+                ),
+                "Raw net pts accepted": round(
+                    float(
+                        summary.get(
+                            "Raw net pts accepted",
+                            np.nan,
+                        )
+                    ),
+                    4,
+                ),
+            })
+
+    return pd.DataFrame(
+        rows
+    )
+
+
 def _candidate_v2_transition_performance_table(selected_pair, column):
     if (
         selected_pair is None
@@ -22906,6 +24101,353 @@ def render_candidate_v2_research(retests_df):
                     "candidate_v2_"
                     "single_trade_detail"
                 ),
+            )
+
+
+
+    if concurrency:
+        st.markdown("###### 💰 Portfolio Execution Simulator")
+        st.caption(
+            "Chronological account-level simulation for this exact V2 variant + "
+            "TP/SL cell. Defaults are $200 starting equity and x5 leverage. "
+            "Sizing is risk-based: each accepted trade risks a configurable % "
+            "of account equity if the selected SL is hit. The V2 trade PnL is "
+            "already net of the configured execution costs. Leverage changes "
+            "initial margin requirement only; it does not multiply a fixed "
+            "notional's PnL."
+        )
+
+        ps1, ps2, ps3, ps4 = st.columns(4)
+
+        portfolio_starting_equity = ps1.number_input(
+            "Starting equity (USDT)",
+            min_value=10.0,
+            max_value=1_000_000.0,
+            value=200.0,
+            step=10.0,
+            key="candidate_v2_portfolio_starting_equity",
+        )
+
+        portfolio_leverage = ps2.selectbox(
+            "Leverage",
+            options=[1, 3, 5, 10],
+            index=2,
+            format_func=lambda value: f"x{value}",
+            key="candidate_v2_portfolio_leverage",
+        )
+
+        portfolio_slots = ps3.selectbox(
+            "Max simultaneous slots",
+            options=[1, 2, 3, 5, 10, 20, 30],
+            index=4,
+            key="candidate_v2_portfolio_slots",
+        )
+
+        portfolio_risk_pct = ps4.number_input(
+            "Risk per trade (% equity)",
+            min_value=0.01,
+            max_value=5.00,
+            value=0.25,
+            step=0.05,
+            format="%.2f",
+            key="candidate_v2_portfolio_risk_pct",
+        )
+
+        ps5, ps6, ps7 = st.columns(3)
+
+        portfolio_margin_cap = ps5.slider(
+            "Max initial margin use",
+            min_value=10,
+            max_value=100,
+            value=80,
+            step=5,
+            format="%d%%",
+            key="candidate_v2_portfolio_margin_cap",
+            help=(
+                "Rejects a new trade if total simulated initial margin would "
+                "exceed this share of current realized account equity."
+            ),
+        )
+
+        portfolio_compound = ps6.checkbox(
+            "Compound sizing with realized equity",
+            value=True,
+            key="candidate_v2_portfolio_compound",
+        )
+
+        priority_options = [
+            "Symbol order",
+            "Strength vs BTC 4h",
+            "Return rank 4h",
+            "Volume rank 4h",
+        ]
+        portfolio_priority = ps7.selectbox(
+            "Same-minute priority",
+            options=priority_options,
+            index=0,
+            key="candidate_v2_portfolio_priority",
+            help=(
+                "Only matters when more signals arrive in the same minute than "
+                "free slots. Every option uses information already available at "
+                "REACTION time."
+            ),
+        )
+
+        portfolio_result = _candidate_v2_portfolio_simulation(
+            resolved_concurrency,
+            starting_equity=portfolio_starting_equity,
+            leverage=portfolio_leverage,
+            max_slots=portfolio_slots,
+            risk_per_trade_pct=portfolio_risk_pct,
+            selected_sl_pct=selected_sl,
+            max_margin_pct=portfolio_margin_cap,
+            compound=portfolio_compound,
+            priority_mode=portfolio_priority,
+        )
+
+        if portfolio_result:
+            portfolio_summary = portfolio_result.get(
+                "summary",
+                {},
+            )
+
+            stop_net_pct = float(
+                portfolio_summary.get(
+                    "Sizing stop loss net %",
+                    float(selected_sl),
+                )
+            )
+            initial_risk_usd = (
+                float(portfolio_starting_equity)
+                * float(portfolio_risk_pct)
+                / 100.0
+            )
+            initial_notional_usd = (
+                initial_risk_usd
+                / (
+                    stop_net_pct
+                    / 100.0
+                )
+                if stop_net_pct > 0
+                else np.nan
+            )
+            initial_margin_usd = (
+                initial_notional_usd
+                / float(portfolio_leverage)
+                if (
+                    pd.notna(initial_notional_usd)
+                    and float(portfolio_leverage) > 0
+                )
+                else np.nan
+            )
+
+            st.caption(
+                f"Sizing reference · net stop used: {stop_net_pct:.4f}% "
+                f"({portfolio_summary.get('Stop loss sizing source', '—')}) · "
+                f"initial risk/trade: ${initial_risk_usd:.4f} · "
+                f"initial notional/trade: ${initial_notional_usd:.2f} · "
+                f"initial margin/trade at x{portfolio_leverage}: "
+                f"${initial_margin_usd:.2f}."
+            )
+
+            pm1, pm2, pm3, pm4 = st.columns(4)
+            pm1.metric(
+                "Final equity",
+                f"${float(portfolio_summary.get('Final equity', np.nan)):.2f}",
+            )
+            pm2.metric(
+                "Return",
+                f"{float(portfolio_summary.get('Return %', np.nan)):+.2f}%",
+            )
+            pm3.metric(
+                "Net PnL",
+                f"${float(portfolio_summary.get('Net PnL $', np.nan)):+.2f}",
+            )
+            pm4.metric(
+                "Max drawdown",
+                (
+                    f"{float(portfolio_summary.get('Max drawdown %', np.nan)):.2f}% "
+                    f"(${float(portfolio_summary.get('Max drawdown $', np.nan)):.2f})"
+                ),
+            )
+
+            pm5, pm6, pm7, pm8 = st.columns(4)
+            pm5.metric(
+                "Accepted / eligible",
+                (
+                    f"{int(portfolio_summary.get('Accepted trades', 0))} / "
+                    f"{int(portfolio_summary.get('Eligible trades', 0))}"
+                ),
+                delta=(
+                    f"{float(portfolio_summary.get('Accepted %', 0.0)):.1f}% accepted"
+                ),
+            )
+            pm6.metric(
+                "Peak margin",
+                (
+                    f"${float(portfolio_summary.get('Peak margin $', 0.0)):.2f} "
+                    f"({float(portfolio_summary.get('Peak margin % of start', 0.0)):.1f}%)"
+                ),
+            )
+            pm7.metric(
+                "Peak stop risk",
+                (
+                    f"${float(portfolio_summary.get('Peak stop risk $', 0.0)):.2f} "
+                    f"({float(portfolio_summary.get('Peak stop risk % of start', 0.0)):.1f}%)"
+                ),
+                help=(
+                    "Sum of the risk budgets of simultaneously open positions. "
+                    "This is a portfolio stress measure, not a liquidation model."
+                ),
+            )
+            pm8.metric(
+                "Raw net pts captured",
+                (
+                    f"{float(portfolio_summary.get('Raw net pts accepted', 0.0)):+.2f} "
+                    f"/ {float(portfolio_summary.get('Raw net pts all', 0.0)):+.2f}"
+                ),
+            )
+
+            st.caption(
+                f"Skipped by slot limit: "
+                f"{int(portfolio_summary.get('Skipped slot limit', 0))} · "
+                f"Skipped by margin cap: "
+                f"{int(portfolio_summary.get('Skipped margin limit', 0))} · "
+                f"Peak open positions actually used: "
+                f"{int(portfolio_summary.get('Peak open positions', 0))}."
+            )
+
+            equity_curve = portfolio_result.get(
+                "equity_curve",
+                pd.DataFrame(),
+            ).copy()
+
+            if not equity_curve.empty:
+                equity_curve["time"] = (
+                    pd.to_datetime(
+                        equity_curve["timestamp"],
+                        unit="ms",
+                        utc=True,
+                        errors="coerce",
+                    )
+                    .dt.tz_convert(TZ)
+                )
+
+                fig_portfolio = go.Figure()
+                fig_portfolio.add_trace(
+                    go.Scatter(
+                        x=equity_curve["time"],
+                        y=equity_curve["equity"],
+                        mode="lines+markers",
+                        name="Realized equity",
+                    )
+                )
+                fig_portfolio.add_hline(
+                    y=float(portfolio_starting_equity),
+                    line_dash="dot",
+                    annotation_text="Starting equity",
+                    annotation_position="top left",
+                )
+                fig_portfolio.update_layout(
+                    title=(
+                        f"Portfolio equity · {variant} · "
+                        f"TP {float(selected_tp):g}% / "
+                        f"SL {float(selected_sl):g}% · "
+                        f"{portfolio_slots} slots · "
+                        f"{float(portfolio_risk_pct):g}% risk/trade · "
+                        f"x{portfolio_leverage}"
+                    ),
+                    xaxis_title=f"Time ({TZ})",
+                    yaxis_title="Realized equity (USDT)",
+                    height=410,
+                    margin={
+                        "l": 10,
+                        "r": 10,
+                        "t": 55,
+                        "b": 10,
+                    },
+                )
+                st.plotly_chart(
+                    fig_portfolio,
+                    use_container_width=True,
+                    key="candidate_v2_portfolio_equity_curve",
+                    config={"displaylogo": False},
+                )
+
+            st.markdown("###### Portfolio scenario grid · slots × risk/trade")
+            st.caption(
+                "Uses the same $ starting equity, leverage, margin cap, compounding "
+                "choice and same-minute priority selected above. This lets us compare "
+                "how much of the edge is captured versus account drawdown and margin."
+            )
+
+            portfolio_grid = _candidate_v2_portfolio_scenario_grid(
+                resolved_concurrency,
+                starting_equity=portfolio_starting_equity,
+                leverage=portfolio_leverage,
+                selected_sl_pct=selected_sl,
+                max_margin_pct=portfolio_margin_cap,
+                compound=portfolio_compound,
+                priority_mode=portfolio_priority,
+            )
+
+            if not portfolio_grid.empty:
+                st.dataframe(
+                    portfolio_grid,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="candidate_v2_portfolio_scenario_grid",
+                )
+                st.download_button(
+                    "Download portfolio scenario grid CSV",
+                    data=portfolio_grid.to_csv(index=False).encode("utf-8"),
+                    file_name=(
+                        f"candidate_v2_portfolio_grid_"
+                        f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                        f"tp{float(selected_tp):g}_"
+                        f"sl{float(selected_sl):g}_"
+                        f"{snap_horizon}m.csv"
+                    ),
+                    mime="text/csv",
+                    key="candidate_v2_portfolio_grid_download",
+                )
+
+            portfolio_ledger = portfolio_result.get(
+                "ledger",
+                pd.DataFrame(),
+            )
+
+            if portfolio_ledger is not None and not portfolio_ledger.empty:
+                with st.expander(
+                    "Portfolio trade-by-trade · accepted + skipped",
+                    expanded=False,
+                ):
+                    st.dataframe(
+                        portfolio_ledger,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="candidate_v2_portfolio_trade_ledger",
+                    )
+                    st.download_button(
+                        "Download portfolio trade-by-trade CSV",
+                        data=portfolio_ledger.to_csv(index=False).encode("utf-8"),
+                        file_name=(
+                            f"candidate_v2_portfolio_trades_"
+                            f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                            f"tp{float(selected_tp):g}_"
+                            f"sl{float(selected_sl):g}_"
+                            f"{snap_horizon}m.csv"
+                        ),
+                        mime="text/csv",
+                        key="candidate_v2_portfolio_trade_download",
+                    )
+
+            st.warning(
+                "Execution-research limitation: this simulator does NOT model "
+                "liquidation price, maintenance-margin tiers, funding, intratrade "
+                "mark-to-market margin stress, partial fills or exchange outages. "
+                "It assumes the historical replay exit is executed. Use Peak margin "
+                "and Peak stop risk as sizing diagnostics, not as a liquidation guarantee."
             )
 
 
