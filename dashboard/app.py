@@ -19982,7 +19982,15 @@ def _candidate_v2_merge_execution_context(execution, context):
         "Symbol-side alignment",
         "Sector-side alignment",
         "Directional strength bucket",
+        "retest_timestamp",
+        "retest_close",
+        "candidate_v1_reaction_known_ts",
         "nearest_opposing_room_pct",
+        "nearest_opposing_swing_tf",
+        "nearest_opposing_swing_price",
+        "nearest_opposing_swing_pivot_timestamp",
+        "nearest_opposing_swing_confirmed_timestamp",
+        "nearest_opposing_swing_actionable_timestamp",
         "aligned_rsi_extreme_count",
         "aligned_rsi_extreme_timeframes",
         "is_candidate_v1_driver",
@@ -21823,6 +21831,682 @@ def _candidate_v2_portfolio_stop_loss_pct(
     )
 
 
+
+def _candidate_v2_room_causality_components(frame):
+    """Re-validate every stored HTF-room observation from timestamps/prices.
+
+    Causal contract:
+    - REACTION becomes known at retest_timestamp + 1m close.
+    - SwingDetector uses 5x5 swings.
+    - confirmed_timestamp is the OPEN timestamp of the 5th right-bar candle.
+    - The swing becomes actionable only after that confirming candle closes:
+      actionable = confirmed_timestamp + timeframe_ms.
+    - Only actionable <= REACTION-known timestamp is legal.
+    """
+    if frame is None or frame.empty:
+        return pd.DataFrame(
+            index=getattr(frame, "index", None),
+        )
+
+    work = frame.copy()
+    result = pd.DataFrame(
+        index=work.index,
+    )
+
+    room = pd.to_numeric(
+        work.get(
+            "nearest_opposing_room_pct",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    )
+
+    reaction_price = pd.to_numeric(
+        work.get(
+            "retest_close",
+            work.get(
+                "reaction_price",
+                pd.Series(np.nan, index=work.index),
+            ),
+        ),
+        errors="coerce",
+    )
+
+    known_ts = pd.to_numeric(
+        work.get(
+            "candidate_v1_reaction_known_ts",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    )
+    if "retest_timestamp" in work.columns:
+        fallback_known = (
+            pd.to_numeric(
+                work["retest_timestamp"],
+                errors="coerce",
+            )
+            + 60_000
+        )
+        known_ts = known_ts.fillna(
+            fallback_known
+        )
+
+    swing_tf = (
+        work.get(
+            "nearest_opposing_swing_tf",
+            pd.Series("", index=work.index),
+        )
+        .fillna("")
+        .astype(str)
+    )
+
+    timeframe_ms_map = {
+        "30m": 30 * 60_000,
+        "1h": 60 * 60_000,
+        "4h": 4 * 60 * 60_000,
+    }
+    timeframe_ms = pd.to_numeric(
+        swing_tf.map(
+            timeframe_ms_map
+        ),
+        errors="coerce",
+    )
+
+    swing_price = pd.to_numeric(
+        work.get(
+            "nearest_opposing_swing_price",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    )
+    pivot_ts = pd.to_numeric(
+        work.get(
+            "nearest_opposing_swing_pivot_timestamp",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    )
+    confirmed_ts = pd.to_numeric(
+        work.get(
+            "nearest_opposing_swing_confirmed_timestamp",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    )
+    actionable_ts = pd.to_numeric(
+        work.get(
+            "nearest_opposing_swing_actionable_timestamp",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    )
+
+    side = (
+        work.get(
+            "side",
+            work.get(
+                "signal",
+                pd.Series("", index=work.index),
+            ),
+        )
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    has_room = room.notna()
+    metadata_complete = (
+        timeframe_ms.notna()
+        & reaction_price.gt(0)
+        & swing_price.gt(0)
+        & pivot_ts.notna()
+        & confirmed_ts.notna()
+        & actionable_ts.notna()
+        & known_ts.notna()
+        & side.isin(
+            ["LONG", "SHORT"]
+        )
+    )
+
+    expected_actionable = (
+        confirmed_ts
+        + timeframe_ms
+    )
+    actionable_matches = (
+        metadata_complete
+        & actionable_ts.eq(
+            expected_actionable
+        )
+    )
+    actionable_before_reaction = (
+        metadata_complete
+        & actionable_ts.le(
+            known_ts
+        )
+    )
+    pivot_before_confirmation = (
+        metadata_complete
+        & pivot_ts.lt(
+            confirmed_ts
+        )
+    )
+
+    # 5x5: the confirming candle is at least 5 timeframe bars after pivot.
+    five_right_bars_elapsed = (
+        metadata_complete
+        & confirmed_ts.sub(
+            pivot_ts
+        ).ge(
+            timeframe_ms * 5.0
+        )
+    )
+
+    direction_ok = (
+        metadata_complete
+        & (
+            (
+                side.eq("LONG")
+                & swing_price.gt(
+                    reaction_price
+                )
+            )
+            |
+            (
+                side.eq("SHORT")
+                & swing_price.lt(
+                    reaction_price
+                )
+            )
+        )
+    )
+
+    recomputed_room = pd.Series(
+        np.nan,
+        index=work.index,
+        dtype=float,
+    )
+    long_mask = (
+        side.eq("LONG")
+        & reaction_price.gt(0)
+        & swing_price.gt(
+            reaction_price
+        )
+    )
+    short_mask = (
+        side.eq("SHORT")
+        & reaction_price.gt(0)
+        & swing_price.gt(0)
+        & swing_price.lt(
+            reaction_price
+        )
+    )
+
+    recomputed_room.loc[
+        long_mask
+    ] = (
+        swing_price.loc[
+            long_mask
+        ]
+        / reaction_price.loc[
+            long_mask
+        ]
+        - 1.0
+    ) * 100.0
+
+    recomputed_room.loc[
+        short_mask
+    ] = (
+        reaction_price.loc[
+            short_mask
+        ]
+        / swing_price.loc[
+            short_mask
+        ]
+        - 1.0
+    ) * 100.0
+
+    room_abs_diff = (
+        room
+        - recomputed_room
+    ).abs()
+
+    # Stored values are floating point calculations from the exact same prices.
+    room_matches = (
+        metadata_complete
+        & recomputed_room.notna()
+        & room_abs_diff.le(
+            1e-6
+        )
+    )
+
+    causal_verified = (
+        has_room
+        & metadata_complete
+        & actionable_matches
+        & actionable_before_reaction
+        & pivot_before_confirmation
+        & five_right_bars_elapsed
+        & direction_ok
+        & room_matches
+    )
+
+    status = pd.Series(
+        "NO_ROOM",
+        index=work.index,
+        dtype="object",
+    )
+    status.loc[
+        has_room
+        & ~metadata_complete
+    ] = "UNVERIFIED_METADATA"
+    status.loc[
+        has_room
+        & metadata_complete
+        & ~causal_verified
+    ] = "FAIL"
+    status.loc[
+        causal_verified
+    ] = "PASS"
+
+    result[
+        "room_causal_status"
+    ] = status
+    result[
+        "room_causal_verified"
+    ] = causal_verified
+    result[
+        "room_metadata_complete"
+    ] = metadata_complete
+    result[
+        "room_actionable_matches_confirmation_close"
+    ] = actionable_matches
+    result[
+        "room_actionable_before_reaction_known"
+    ] = actionable_before_reaction
+    result[
+        "room_pivot_before_confirmation"
+    ] = pivot_before_confirmation
+    result[
+        "room_five_right_bars_elapsed"
+    ] = five_right_bars_elapsed
+    result[
+        "room_direction_ok"
+    ] = direction_ok
+    result[
+        "room_value_matches_prices"
+    ] = room_matches
+    result[
+        "room_recomputed_pct"
+    ] = recomputed_room
+    result[
+        "room_abs_diff_pct"
+    ] = room_abs_diff
+    result[
+        "room_causal_lag_min"
+    ] = (
+        known_ts
+        - actionable_ts
+    ) / 60_000.0
+    result[
+        "room_reaction_known_timestamp"
+    ] = known_ts
+    result[
+        "room_expected_actionable_timestamp"
+    ] = expected_actionable
+    result[
+        "room_stored_actionable_timestamp"
+    ] = actionable_ts
+
+    return result
+
+
+def _candidate_v2_room_causality_audit(frame):
+    """Human-readable audit table, one row per V2 REACTION."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    work = frame.copy()
+
+    if "candidate_v1_event_key" in work.columns:
+        work = (
+            work.sort_values(
+                ["candidate_v1_event_key"],
+                kind="stable",
+            )
+            .drop_duplicates(
+                "candidate_v1_event_key",
+                keep="last",
+            )
+        )
+
+    checks = (
+        _candidate_v2_room_causality_components(
+            work
+        )
+    )
+
+    audit = pd.DataFrame(
+        index=work.index,
+    )
+
+    for source, target in [
+        ("candidate_v1_event_key", "Event key"),
+        ("symbol", "Symbol"),
+        ("side", "Side"),
+        ("nearest_opposing_room_pct", "Stored room %"),
+        ("nearest_opposing_swing_tf", "Opposing TF"),
+        ("nearest_opposing_swing_price", "Opposing price"),
+        ("retest_close", "REACTION price"),
+        ("nearest_opposing_swing_pivot_timestamp", "Pivot ts"),
+        ("nearest_opposing_swing_confirmed_timestamp", "Confirmed candle ts"),
+        ("nearest_opposing_swing_actionable_timestamp", "Actionable ts"),
+    ]:
+        if source in work.columns:
+            audit[
+                target
+            ] = work[
+                source
+            ]
+
+    audit[
+        "REACTION known ts"
+    ] = checks[
+        "room_reaction_known_timestamp"
+    ]
+    audit[
+        "Expected actionable ts"
+    ] = checks[
+        "room_expected_actionable_timestamp"
+    ]
+    audit[
+        "Recomputed room %"
+    ] = checks[
+        "room_recomputed_pct"
+    ]
+    audit[
+        "Room abs diff %"
+    ] = checks[
+        "room_abs_diff_pct"
+    ]
+    audit[
+        "Causal lag min"
+    ] = checks[
+        "room_causal_lag_min"
+    ]
+    audit[
+        "Metadata complete"
+    ] = checks[
+        "room_metadata_complete"
+    ]
+    audit[
+        "Actionable = confirm close"
+    ] = checks[
+        "room_actionable_matches_confirmation_close"
+    ]
+    audit[
+        "Actionable <= REACTION known"
+    ] = checks[
+        "room_actionable_before_reaction_known"
+    ]
+    audit[
+        "Pivot before confirmation"
+    ] = checks[
+        "room_pivot_before_confirmation"
+    ]
+    audit[
+        "5 right bars elapsed"
+    ] = checks[
+        "room_five_right_bars_elapsed"
+    ]
+    audit[
+        "Direction valid"
+    ] = checks[
+        "room_direction_ok"
+    ]
+    audit[
+        "Room matches prices"
+    ] = checks[
+        "room_value_matches_prices"
+    ]
+    audit[
+        "Audit"
+    ] = checks[
+        "room_causal_status"
+    ]
+
+    timestamp_columns = [
+        "Pivot ts",
+        "Confirmed candle ts",
+        "Actionable ts",
+        "REACTION known ts",
+        "Expected actionable ts",
+    ]
+    for column in timestamp_columns:
+        if column not in audit.columns:
+            continue
+        numeric = pd.to_numeric(
+            audit[
+                column
+            ],
+            errors="coerce",
+        )
+        audit[
+            column.replace(
+                " ts",
+                " time",
+            )
+        ] = (
+            pd.to_datetime(
+                numeric,
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+            .dt.strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        )
+
+    numeric_columns = [
+        "Stored room %",
+        "Opposing price",
+        "REACTION price",
+        "Recomputed room %",
+        "Room abs diff %",
+        "Causal lag min",
+    ]
+    for column in numeric_columns:
+        if column in audit.columns:
+            audit[
+                column
+            ] = pd.to_numeric(
+                audit[
+                    column
+                ],
+                errors="coerce",
+            ).round(6)
+
+    preferred = [
+        "Audit",
+        "Symbol",
+        "Side",
+        "Stored room %",
+        "Recomputed room %",
+        "Room abs diff %",
+        "Opposing TF",
+        "REACTION price",
+        "Opposing price",
+        "Pivot time",
+        "Confirmed candle time",
+        "Actionable time",
+        "REACTION known time",
+        "Causal lag min",
+        "Metadata complete",
+        "Actionable = confirm close",
+        "Actionable <= REACTION known",
+        "Pivot before confirmation",
+        "5 right bars elapsed",
+        "Direction valid",
+        "Room matches prices",
+        "Event key",
+    ]
+
+    return audit[
+        [
+            column
+            for column in preferred
+            if column in audit.columns
+        ]
+    ].reset_index(
+        drop=True
+    )
+
+
+def _candidate_v2_room_audit_summary(audit):
+    if audit is None or audit.empty:
+        return {}
+
+    status = (
+        audit.get(
+            "Audit",
+            pd.Series(
+                "",
+                index=audit.index,
+            ),
+        )
+        .fillna("")
+        .astype(str)
+    )
+
+    room_rows = status.ne(
+        "NO_ROOM"
+    )
+    with_room = audit.loc[
+        room_rows
+    ].copy()
+
+    if with_room.empty:
+        return {
+            "room_rows": 0,
+            "passed": 0,
+            "pass_pct": np.nan,
+            "failed": 0,
+            "unverified": 0,
+            "future_violations": 0,
+            "value_mismatches": 0,
+            "direction_failures": 0,
+            "min_causal_lag_min": np.nan,
+        }
+
+    with_status = (
+        with_room[
+            "Audit"
+        ]
+        .fillna("")
+        .astype(str)
+    )
+
+    lag = pd.to_numeric(
+        with_room.get(
+            "Causal lag min",
+            pd.Series(
+                np.nan,
+                index=with_room.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    actionable_ok = (
+        with_room.get(
+            "Actionable <= REACTION known",
+            pd.Series(
+                False,
+                index=with_room.index,
+            ),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    room_match = (
+        with_room.get(
+            "Room matches prices",
+            pd.Series(
+                False,
+                index=with_room.index,
+            ),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    direction_ok = (
+        with_room.get(
+            "Direction valid",
+            pd.Series(
+                False,
+                index=with_room.index,
+            ),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+
+    passed = int(
+        with_status.eq(
+            "PASS"
+        ).sum()
+    )
+
+    return {
+        "room_rows": int(
+            len(
+                with_room
+            )
+        ),
+        "passed": passed,
+        "pass_pct": (
+            float(
+                passed
+                / len(
+                    with_room
+                )
+                * 100.0
+            )
+            if len(
+                with_room
+            )
+            else np.nan
+        ),
+        "failed": int(
+            with_status.eq(
+                "FAIL"
+            ).sum()
+        ),
+        "unverified": int(
+            with_status.eq(
+                "UNVERIFIED_METADATA"
+            ).sum()
+        ),
+        "future_violations": int(
+            (~actionable_ok).sum()
+        ),
+        "value_mismatches": int(
+            (~room_match).sum()
+        ),
+        "direction_failures": int(
+            (~direction_ok).sum()
+        ),
+        "min_causal_lag_min": (
+            float(
+                lag.min()
+            )
+            if lag.notna().any()
+            else np.nan
+        ),
+    }
+
+
 def _candidate_v2_portfolio_priority(
     group,
     priority_mode,
@@ -22159,19 +22843,37 @@ def _candidate_v2_portfolio_priority(
         )
 
     if priority_mode == "Most HTF Room → Strength":
+        room_audit = (
+            _candidate_v2_room_causality_components(
+                work
+            )
+        )
+        work["_room_causal_verified"] = (
+            room_audit[
+                "room_causal_verified"
+            ]
+            .fillna(False)
+            .astype(bool)
+        )
         work["_room_score"] = numeric(
             "nearest_opposing_room_pct"
+        ).where(
+            work[
+                "_room_causal_verified"
+            ]
         )
         work["_strength_score"] = (
             strength_series()
         )
         return work.sort_values(
             [
+                "_room_causal_verified",
                 "_room_score",
                 "_strength_score",
                 "symbol",
             ],
             ascending=[
+                False,
                 False,
                 False,
                 True,
@@ -22344,12 +23046,25 @@ def _candidate_v2_portfolio_priority(
         )
 
     if priority_mode == "Strength + Room consensus":
+        room_audit = (
+            _candidate_v2_room_causality_components(
+                work
+            )
+        )
+        causal_room = numeric(
+            "nearest_opposing_room_pct"
+        ).where(
+            room_audit[
+                "room_causal_verified"
+            ]
+            .fillna(False)
+            .astype(bool)
+        )
         return consensus_sort(
-            numeric(
-                "nearest_opposing_room_pct"
-            ),
+            causal_room,
             second_label=(
                 "nearest_opposing_room_pct"
+                "_causal_verified"
             ),
         )
 
@@ -23826,6 +24541,45 @@ def _candidate_v2_one_slot_realized_path(
                     errors="coerce",
                 ).iloc[0]
             ),
+            "Opposing swing TF": str(
+                chosen.get(
+                    "nearest_opposing_swing_tf",
+                    "",
+                )
+            ),
+            "Opposing swing actionable ts": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "nearest_opposing_swing_actionable_timestamp",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "REACTION known ts": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "candidate_v1_reaction_known_ts",
+                            (
+                                pd.to_numeric(
+                                    pd.Series([
+                                        chosen.get(
+                                            "retest_timestamp",
+                                            np.nan,
+                                        )
+                                    ]),
+                                    errors="coerce",
+                                ).iloc[0]
+                                + 60_000
+                            ),
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
             "Aligned RSI extremes": (
                 pd.to_numeric(
                     pd.Series([
@@ -23914,6 +24668,9 @@ def _candidate_v2_one_slot_realized_path(
         "Relative volume 4h",
         "Sector strength vs BTC 4h %",
         "HTF room %",
+        "Opposing swing TF",
+        "Opposing swing actionable ts",
+        "REACTION known ts",
         "Aligned RSI extremes",
         "Breadth Δ1h pp",
     ]:
@@ -26117,12 +26874,194 @@ def render_candidate_v2_research(retests_df):
 - **Highest Relative Volume 4h:** highest symbol relative-volume ratio.
 - **Highest Sector Strength:** side-adjusted sector strength vs BTC.
 - **Best Sector Alignment → Strength:** prefer ALIGNED sector, then sector strength, then symbol strength.
-- **Most HTF Room → Strength:** most opposing structural room, then symbol strength.
+- **Most HTF Room → Strength:** largest **causality-verified** opposing structural room, then symbol strength. Unverified room is sent to the back.
 - **Candidate V1 Driver first → Strength:** prefer V1-driver candidates, then symbol strength.
 - **Most aligned RSI extremes → Strength:** most aligned extreme RSI timeframes, then strength.
 - **Consensus modes:** no fitted weights; minimize the sum of ordinal ranks for Strength + Volume / Sector / Room.
 - **1h modes:** market-state priority followed by symbol strength.
                 """
+            )
+
+
+        st.markdown(
+            "###### 🧪 HTF Room causality audit"
+        )
+        st.caption(
+            "Re-validates the stored room without looking at outcomes. For every "
+            "REACTION with room, it checks that the opposing 30m/1h/4h 5x5 swing "
+            "was already actionable when the REACTION closed, that actionable time "
+            "= confirming-candle timestamp + timeframe, that the pivot preceded "
+            "confirmation, that at least five right bars elapsed, that the opposing "
+            "price is truly in the trade direction, and that room recomputed from "
+            "the stored REACTION/swing prices exactly matches the stored value."
+        )
+
+        room_audit = (
+            _candidate_v2_room_causality_audit(
+                source_concurrency
+            )
+        )
+        room_audit_summary = (
+            _candidate_v2_room_audit_summary(
+                room_audit
+            )
+        )
+
+        if room_audit is not None and not room_audit.empty:
+            ra1, ra2, ra3, ra4, ra5 = st.columns(5)
+
+            room_rows = int(
+                room_audit_summary.get(
+                    "room_rows",
+                    0,
+                )
+            )
+            passed = int(
+                room_audit_summary.get(
+                    "passed",
+                    0,
+                )
+            )
+            pass_pct = room_audit_summary.get(
+                "pass_pct",
+                np.nan,
+            )
+            future_violations = int(
+                room_audit_summary.get(
+                    "future_violations",
+                    0,
+                )
+            )
+            value_mismatches = int(
+                room_audit_summary.get(
+                    "value_mismatches",
+                    0,
+                )
+            )
+            min_lag = room_audit_summary.get(
+                "min_causal_lag_min",
+                np.nan,
+            )
+
+            ra1.metric(
+                "REACTIONs with room",
+                room_rows,
+            )
+            ra2.metric(
+                "Causal PASS",
+                passed,
+                delta=(
+                    f"{float(pass_pct):.1f}%"
+                    if pd.notna(
+                        pass_pct
+                    )
+                    else None
+                ),
+            )
+            ra3.metric(
+                "Future-use violations",
+                future_violations,
+            )
+            ra4.metric(
+                "Room-value mismatches",
+                value_mismatches,
+            )
+            ra5.metric(
+                "Minimum causal lag",
+                (
+                    f"{float(min_lag):.1f}m"
+                    if pd.notna(
+                        min_lag
+                    )
+                    else "—"
+                ),
+                help=(
+                    "REACTION-known time minus the opposing swing's actionable time. "
+                    "Must be >= 0."
+                ),
+            )
+
+            audit_bad = room_audit.loc[
+                room_audit[
+                    "Audit"
+                ].astype(str).ne(
+                    "PASS"
+                )
+                & room_audit[
+                    "Audit"
+                ].astype(str).ne(
+                    "NO_ROOM"
+                )
+            ].copy()
+
+            if (
+                room_rows > 0
+                and passed == room_rows
+                and future_violations == 0
+                and value_mismatches == 0
+            ):
+                st.success(
+                    "HTF Room causal audit PASS: every room used by this selected "
+                    "V2 cell can be traced to an opposing swing that was fully "
+                    "confirmed and actionable before the REACTION became known."
+                )
+            else:
+                st.warning(
+                    "HTF Room audit is not fully verified. Room-based selectors "
+                    "now automatically send unverified room rows to the back. "
+                    "Inspect the failed rows before considering live use."
+                )
+
+            if not audit_bad.empty:
+                st.markdown(
+                    "###### Room audit exceptions"
+                )
+                st.dataframe(
+                    audit_bad,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_"
+                        "room_causality_exceptions"
+                    ),
+                )
+
+            with st.expander(
+                "Full HTF Room causal audit",
+                expanded=False,
+            ):
+                st.dataframe(
+                    room_audit,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_"
+                        "room_causality_full"
+                    ),
+                )
+                st.download_button(
+                    "Download HTF Room causal audit CSV",
+                    data=room_audit.to_csv(
+                        index=False
+                    ).encode(
+                        "utf-8"
+                    ),
+                    file_name=(
+                        f"candidate_v2_room_causality_"
+                        f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                        f"tp{float(selected_tp):g}_"
+                        f"sl{float(selected_sl):g}_"
+                        f"{snap_horizon}m.csv"
+                    ),
+                    mime="text/csv",
+                    key=(
+                        "candidate_v2_"
+                        "room_causality_download"
+                    ),
+                )
+        else:
+            st.info(
+                "No HTF Room provenance is available in this selected V2 cell."
             )
 
         ps8, ps9, ps10 = st.columns(3)
@@ -26575,6 +27514,210 @@ def render_candidate_v2_research(retests_df):
                     key="candidate_v2_one_slot_selector_download",
                 )
 
+
+
+            st.markdown(
+                "###### 🚀 Most HTF Room → Strength · x3 / x5 / x10"
+            )
+            st.caption(
+                "Same selector, same one-slot 80%-of-equity margin rule, same "
+                "TP/SL/horizon. Only leverage changes. This isolates exposure "
+                "from selector quality; Raw net pts and accepted trade path should "
+                "stay the same when margin constraints do not interfere."
+            )
+
+            room_lev_rows = []
+
+            for room_leverage in (
+                3,
+                5,
+                10,
+            ):
+                room_lev_result = (
+                    _candidate_v2_portfolio_simulation(
+                        resolved_concurrency,
+                        starting_equity=(
+                            portfolio_starting_equity
+                        ),
+                        leverage=room_leverage,
+                        max_slots=1,
+                        selected_sl_pct=selected_sl,
+                        max_margin_pct=(
+                            portfolio_margin_cap
+                        ),
+                        compound=True,
+                        priority_mode=(
+                            "Most HTF Room → Strength"
+                        ),
+                        sizing_mode=(
+                            "Margin % equity"
+                        ),
+                        margin_per_trade_pct=80.0,
+                    )
+                )
+
+                room_lev_summary = (
+                    room_lev_result.get(
+                        "summary",
+                        {},
+                    )
+                    if room_lev_result
+                    else {}
+                )
+
+                if not room_lev_summary:
+                    continue
+
+                room_stop_pct = float(
+                    room_lev_summary.get(
+                        "Sizing stop loss net %",
+                        float(
+                            selected_sl
+                        ),
+                    )
+                )
+                room_initial_margin = (
+                    float(
+                        portfolio_starting_equity
+                    )
+                    * 0.80
+                )
+                room_initial_notional = (
+                    room_initial_margin
+                    * float(
+                        room_leverage
+                    )
+                )
+                room_initial_stop_risk = (
+                    room_initial_notional
+                    * room_stop_pct
+                    / 100.0
+                )
+
+                room_lev_rows.append({
+                    "Leverage": (
+                        f"x{room_leverage}"
+                    ),
+                    "Margin % equity": 80.0,
+                    "Initial margin $": round(
+                        room_initial_margin,
+                        2,
+                    ),
+                    "Initial notional $": round(
+                        room_initial_notional,
+                        2,
+                    ),
+                    "Initial stop risk $": round(
+                        room_initial_stop_risk,
+                        2,
+                    ),
+                    "Initial stop risk % equity": round(
+                        room_initial_stop_risk
+                        / float(
+                            portfolio_starting_equity
+                        )
+                        * 100.0,
+                        2,
+                    ),
+                    "Accepted": int(
+                        room_lev_summary.get(
+                            "Accepted trades",
+                            0,
+                        )
+                    ),
+                    "Skipped": int(
+                        room_lev_summary.get(
+                            "Skipped trades",
+                            0,
+                        )
+                    ),
+                    "Margin-cap skips": int(
+                        room_lev_summary.get(
+                            "Skipped margin limit",
+                            0,
+                        )
+                    ),
+                    "Raw net pts": round(
+                        float(
+                            room_lev_summary.get(
+                                "Raw net pts accepted",
+                                0.0,
+                            )
+                        ),
+                        4,
+                    ),
+                    "Final equity $": round(
+                        float(
+                            room_lev_summary.get(
+                                "Final equity",
+                                np.nan,
+                            )
+                        ),
+                        2,
+                    ),
+                    "Return %": round(
+                        float(
+                            room_lev_summary.get(
+                                "Return %",
+                                np.nan,
+                            )
+                        ),
+                        3,
+                    ),
+                    "Max DD %": round(
+                        float(
+                            room_lev_summary.get(
+                                "Max drawdown %",
+                                np.nan,
+                            )
+                        ),
+                        3,
+                    ),
+                    "Peak stop risk % start": round(
+                        float(
+                            room_lev_summary.get(
+                                "Peak stop risk % of start",
+                                np.nan,
+                            )
+                        ),
+                        2,
+                    ),
+                })
+
+            room_leverage_table = pd.DataFrame(
+                room_lev_rows
+            )
+
+            if not room_leverage_table.empty:
+                st.dataframe(
+                    room_leverage_table,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_"
+                        "room_leverage_comparison"
+                    ),
+                )
+                st.download_button(
+                    "Download HTF Room x3/x5/x10 CSV",
+                    data=room_leverage_table.to_csv(
+                        index=False
+                    ).encode(
+                        "utf-8"
+                    ),
+                    file_name=(
+                        f"candidate_v2_room_x3_x5_x10_"
+                        f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                        f"tp{float(selected_tp):g}_"
+                        f"sl{float(selected_sl):g}_"
+                        f"{snap_horizon}m.csv"
+                    ),
+                    mime="text/csv",
+                    key=(
+                        "candidate_v2_"
+                        "room_leverage_download"
+                    ),
+                )
 
             st.markdown("###### ⚡ Quick reruns · 80% equity margin")
             st.caption(
