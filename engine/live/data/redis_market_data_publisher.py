@@ -26,6 +26,7 @@ from engine.live.data.redis_market_data_protocol import (
 
     MICRO_FLOW_SECONDS_STREAM_MAXLEN,
     MICRO_FLOW_TRANSPORT_STATE_KEY,
+    micro_flow_shard_transport_state_key,
 
     closed_published_key,
 
@@ -2312,6 +2313,25 @@ class RedisMarketDataPublisher:
         }
         payload.update(metadata)
 
+        symbols = payload.get("symbols")
+        if isinstance(symbols, (list, tuple, set)):
+            payload["symbols"] = [
+                normalize_symbol(symbol)
+                for symbol in symbols
+                if symbol
+            ]
+
+        scope = str(payload.get("scope") or "global").strip().lower()
+        shard_id = payload.get("shard_id")
+        if scope == "shard" and shard_id is not None:
+            state_key = micro_flow_shard_transport_state_key(
+                shard_id
+            )
+        else:
+            # Backward-compatible global transport state used by the legacy
+            # inline producer. New shard producers never overwrite this key.
+            state_key = MICRO_FLOW_TRANSPORT_STATE_KEY
+
         serialized = self._serialize(payload)
         pipeline = self.redis.pipeline(transaction=False)
         pipeline.xadd(
@@ -2321,7 +2341,7 @@ class RedisMarketDataPublisher:
             approximate=True,
         )
         pipeline.set(
-            MICRO_FLOW_TRANSPORT_STATE_KEY,
+            state_key,
             serialized,
         )
         result = pipeline.execute()

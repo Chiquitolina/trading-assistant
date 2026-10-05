@@ -18,6 +18,7 @@ from engine.live.data.redis_market_data_protocol import (
     MICRO_FLOW_COLLECTOR_STATUS_KEY,
     MICRO_FLOW_SECONDS_STREAM,
     MICRO_FLOW_TRANSPORT_STATE_KEY,
+    MICRO_FLOW_SHARD_STATUS_PREFIX,
 )
 
 
@@ -181,7 +182,12 @@ class MicroFlowCollector:
         self.events_invalidated = 0
         self.synthetic_event_candidates_skipped = 0
         self.synthetic_entry_invalidations = 0
+        # transport_gap_open remains a backward-compatible aggregate health
+        # flag. In sharded mode only symbols owned by an open shard are paused.
         self.transport_gap_open = False
+        self.transport_global_gap_open = False
+        self.transport_open_shards = {}
+        self.transport_gap_symbols = set()
         self.transport_gaps = 0
         self.transport_markers = 0
         self.transport_gap_seconds_skipped = 0
@@ -406,10 +412,91 @@ class MicroFlowCollector:
         self.btc_feature_order.clear()
         return invalidated
 
-    def _load_transport_state(self):
-        raw = self.redis.get(
-            MICRO_FLOW_TRANSPORT_STATE_KEY
+    def _reset_symbols_after_transport_gap(self, symbols):
+        symbols = {
+            str(symbol).upper()
+            for symbol in (symbols or [])
+            if symbol
+        }
+        invalidated = 0
+
+        for symbol in symbols:
+            self.bars.pop(symbol, None)
+            self.features.pop(symbol, None)
+            self.last_timestamp.pop(symbol, None)
+            self.last_event_timestamp.pop(symbol, None)
+            pending = self.pending_events.pop(symbol, [])
+            invalidated += len(pending)
+
+        self.transport_events_invalidated += invalidated
+        self.events_invalidated += invalidated
+
+        # BTC-relative features must never bridge a BTC transport gap. Other
+        # symbols can keep running; their BTC residual is simply unavailable
+        # until BTC warms again.
+        if "BTCUSDT" in symbols:
+            self.btc_features.clear()
+            self.btc_feature_order.clear()
+
+        return invalidated
+
+    def _refresh_transport_gap_scope(self):
+        scoped_symbols = set()
+        for item in self.transport_open_shards.values():
+            scoped_symbols.update(item.get("symbols", set()))
+
+        self.transport_gap_symbols = scoped_symbols
+        self.transport_gap_open = bool(
+            self.transport_global_gap_open
+            or self.transport_open_shards
         )
+
+    @staticmethod
+    def _transport_symbols(payload):
+        raw = payload.get("symbols")
+        if not isinstance(raw, (list, tuple, set)):
+            return set()
+        return {
+            str(symbol).upper()
+            for symbol in raw
+            if symbol
+        }
+
+    def _load_transport_state(self):
+        # Prefer shard state when present. This prevents a stale legacy global
+        # key from freezing the collector after migrating away from inline WS.
+        shard_pattern = (
+            f"{MICRO_FLOW_SHARD_STATUS_PREFIX}:*:transport-state"
+        )
+        shard_keys = list(self.redis.scan_iter(match=shard_pattern, count=50))
+
+        if shard_keys:
+            for key in shard_keys:
+                raw = self.redis.get(key)
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("type") != "micro_flow_transport":
+                    continue
+                if str(payload.get("event") or "").lower() != "transport_gap_start":
+                    continue
+
+                shard_id = str(payload.get("shard_id"))
+                symbols = self._transport_symbols(payload)
+                self.transport_open_shards[shard_id] = {
+                    "symbols": symbols,
+                    "started_at_ms": int(payload.get("timestamp") or 0) or None,
+                }
+
+            self._refresh_transport_gap_scope()
+            return
+
+        raw = self.redis.get(MICRO_FLOW_TRANSPORT_STATE_KEY)
         if not raw:
             return
 
@@ -420,18 +507,17 @@ class MicroFlowCollector:
 
         if not isinstance(payload, dict):
             return
-
         if payload.get("type") != "micro_flow_transport":
             return
 
-        event = str(payload.get("event") or "")
+        event = str(payload.get("event") or "").lower()
         if event == "transport_gap_start":
-            self.transport_gap_open = True
+            self.transport_global_gap_open = True
             self.transport_last_gap_started_at_ms = int(
                 payload.get("timestamp") or 0
             ) or None
         elif event == "transport_gap_end":
-            self.transport_gap_open = False
+            self.transport_global_gap_open = False
             self.transport_last_gap_ended_at_ms = int(
                 payload.get("timestamp") or 0
             ) or None
@@ -442,16 +528,83 @@ class MicroFlowCollector:
                 except (TypeError, ValueError):
                     pass
 
+        self._refresh_transport_gap_scope()
+
     def _handle_transport_marker(self, payload):
         event = str(payload.get("event") or "").strip().lower()
         timestamp = int(payload.get("timestamp") or 0)
+        scope = str(payload.get("scope") or "global").strip().lower()
         self.transport_markers += 1
 
+        if scope == "shard" and payload.get("shard_id") is not None:
+            shard_id = str(payload.get("shard_id"))
+            symbols = self._transport_symbols(payload)
+
+            if event == "transport_gap_start":
+                already_open = shard_id in self.transport_open_shards
+                self.transport_open_shards[shard_id] = {
+                    "symbols": symbols,
+                    "started_at_ms": timestamp or None,
+                }
+                if not already_open:
+                    self.transport_gaps += 1
+                    invalidated = self._reset_symbols_after_transport_gap(
+                        symbols
+                    )
+                else:
+                    invalidated = 0
+
+                self.transport_last_gap_started_at_ms = timestamp or None
+                self._refresh_transport_gap_scope()
+                print(
+                    "[MICRO FLOW COLLECTOR] shard transport gap start "
+                    f"shard={shard_id} symbols={len(symbols)} "
+                    f"timestamp={timestamp} invalidated={invalidated}"
+                )
+                return True
+
+            if event == "transport_gap_end":
+                previous = self.transport_open_shards.pop(shard_id, None)
+                reset_symbols = symbols or (
+                    previous.get("symbols", set())
+                    if previous
+                    else set()
+                )
+                invalidated = self._reset_symbols_after_transport_gap(
+                    reset_symbols
+                )
+                self.transport_last_gap_ended_at_ms = timestamp or None
+
+                duration = payload.get("gap_duration_ms")
+                if duration is None and previous:
+                    started = previous.get("started_at_ms")
+                    if started:
+                        duration = max(0, timestamp - int(started))
+                if duration is not None:
+                    try:
+                        self.transport_last_gap_duration_ms = int(duration)
+                    except (TypeError, ValueError):
+                        self.transport_last_gap_duration_ms = None
+
+                self._refresh_transport_gap_scope()
+                print(
+                    "[MICRO FLOW COLLECTOR] shard transport gap end "
+                    f"shard={shard_id} symbols={len(reset_symbols)} "
+                    f"timestamp={timestamp} "
+                    f"duration_ms={self.transport_last_gap_duration_ms} "
+                    f"invalidated={invalidated}"
+                )
+                return True
+
+            return False
+
+        # Legacy global markers remain fully supported for rollback/inline mode.
         if event == "transport_gap_start":
-            self.transport_gap_open = True
+            self.transport_global_gap_open = True
             self.transport_gaps += 1
             self.transport_last_gap_started_at_ms = timestamp or None
             invalidated = self._reset_all_after_transport_gap()
+            self._refresh_transport_gap_scope()
             print(
                 "[MICRO FLOW COLLECTOR] transport gap start "
                 f"timestamp={timestamp} invalidated={invalidated}"
@@ -460,7 +613,7 @@ class MicroFlowCollector:
 
         if event == "transport_gap_end":
             invalidated = self._reset_all_after_transport_gap()
-            self.transport_gap_open = False
+            self.transport_global_gap_open = False
             self.transport_last_gap_ended_at_ms = timestamp or None
 
             duration = payload.get("gap_duration_ms")
@@ -475,6 +628,7 @@ class MicroFlowCollector:
                 except (TypeError, ValueError):
                     self.transport_last_gap_duration_ms = None
 
+            self._refresh_transport_gap_scope()
             print(
                 "[MICRO FLOW COLLECTOR] transport gap end "
                 f"timestamp={timestamp} "
@@ -994,6 +1148,23 @@ class MicroFlowCollector:
                 self.synthetic_entry_invalidations
             ),
             "transport_gap_open": bool(self.transport_gap_open),
+            "transport_global_gap_open": bool(
+                self.transport_global_gap_open
+            ),
+            "transport_open_shards": sorted(
+                self.transport_open_shards.keys(),
+                key=lambda value: (
+                    (0, int(value))
+                    if str(value).isdigit()
+                    else (1, str(value))
+                ),
+            ),
+            "transport_open_shard_count": len(
+                self.transport_open_shards
+            ),
+            "transport_open_symbol_count": len(
+                self.transport_gap_symbols
+            ),
             "transport_gaps": int(self.transport_gaps),
             "transport_markers": int(self.transport_markers),
             "transport_gap_seconds_skipped": int(
@@ -1022,7 +1193,9 @@ class MicroFlowCollector:
                 "event_requires_real_second": True,
                 "entry_requires_immediate_next_real_second": True,
                 "synthetic_seconds_allowed_in_rolling_windows": True,
-                "transport_gap_resets_all_windows": True,
+                "transport_gap_resets_all_windows": False,
+                "transport_gap_resets_impacted_symbols_only": True,
+                "legacy_global_transport_gap_supported": True,
             },
             "thresholds": {
                 "flow_threshold": self.flow_threshold,
@@ -1120,16 +1293,19 @@ class MicroFlowCollector:
                             self._handle_transport_marker(payload)
                             continue
 
-                        if self.transport_gap_open:
-                            # Never interpret missing transport as zero trading.
-                            # Ignore any residual/reordered second states until
-                            # the explicit gap-end marker arrives.
+                        if self.transport_global_gap_open:
+                            # Legacy/global outage: no symbol can be trusted.
                             self.transport_gap_seconds_skipped += 1
                             continue
 
                         bar = self._normalize_real_bar(payload)
                         if bar is None:
                             self.invalid_payloads += 1
+                            continue
+
+                        if bar["symbol"] in self.transport_gap_symbols:
+                            # Sharded outage: pause only the affected symbols.
+                            self.transport_gap_seconds_skipped += 1
                             continue
 
                         self.process_bar(bar)

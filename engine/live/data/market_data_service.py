@@ -39,6 +39,7 @@ from engine.live.data.redis_market_data_protocol import (
     PRODUCER_LOCK_TTL_SECONDS,
 
     STATUS_KEY,
+    MICRO_FLOW_DEFAULT_SHARD_COUNT,
 
     history_key,
     last_closed_key,
@@ -146,7 +147,7 @@ class MarketDataService:
 
         stale_after=90,
 
-        enable_micro_flow=True,
+        enable_micro_flow=False,
         micro_flow_chunk_size=25,
         micro_flow_stale_after=45,
 
@@ -3164,7 +3165,18 @@ class MarketDataService:
 
             "timeframes": self.timeframes,
             "market_flow_timeframes": list(MARKET_FLOW_TIMEFRAMES),
+            # Inline aggTrade transport is now a rollback/debug mode only.
+            # Production Micro Flow runs in independent shard processes.
             "micro_flow_enabled": self.enable_micro_flow,
+            "micro_flow_inline_enabled": self.enable_micro_flow,
+            "micro_flow_mode": (
+                "inline" if self.enable_micro_flow else "sharded_external"
+            ),
+            "micro_flow_shard_count": (
+                0
+                if self.enable_micro_flow
+                else MICRO_FLOW_DEFAULT_SHARD_COUNT
+            ),
             "micro_flow_seconds_published": (
                 self.micro_flow_seconds_published
             ),
@@ -3442,13 +3454,26 @@ def parse_args():
 
     parser.add_argument(
 
+        "--enable-inline-micro-flow",
+
+        action="store_true",
+
+        help=(
+            "Legacy/debug mode: run aggTrade Micro Flow inside the central "
+            "market-data process. Production should use sharded producers."
+        ),
+
+    )
+
+    parser.add_argument(
+
         "--disable-micro-flow",
 
         action="store_true",
 
         help=(
-            "Do not subscribe to aggTrade streams or publish "
-            "Micro Flow second states."
+            "Force-disable the legacy inline aggTrade producer. Kept for "
+            "backward-compatible startup scripts."
         ),
 
     )
@@ -3476,7 +3501,8 @@ def main():
         redis_db=args.redis_db,
 
         enable_micro_flow=(
-            not args.disable_micro_flow
+            bool(args.enable_inline_micro_flow)
+            and not args.disable_micro_flow
         ),
 
     )

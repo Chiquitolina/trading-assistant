@@ -1,0 +1,30 @@
+module.exports = {
+  apps: Array.from({ length: 6 }, (_, shardId) => ({
+    name: `micro-flow-ws-${shardId}`,
+    cwd: "/home/multiservices-1m",
+    script: "/usr/bin/python3",
+    args: [
+      "-u",
+      "-m",
+      "engine.live.data.micro_flow_shard_service",
+      "--shard-id",
+      String(shardId),
+      "--shard-count",
+      "6",
+      "--chunk-size",
+      "60",
+      "--stale-after",
+      "45",
+    ],
+    interpreter: "none",
+    autorestart: true,
+    restart_delay: 5000,
+    max_restarts: 100,
+    min_uptime: 30000,
+    kill_timeout: 30000,
+    time: true,
+    env: {
+      PYTHONUNBUFFERED: "1",
+    },
+  })),
+};

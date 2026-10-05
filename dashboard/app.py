@@ -132,6 +132,17 @@ MICRO_FLOW_TRANSPORT_STATE_KEY = getattr(
     f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:transport-state",
 )
 
+MICRO_FLOW_DEFAULT_SHARD_COUNT = getattr(
+    _redis_md_protocol,
+    "MICRO_FLOW_DEFAULT_SHARD_COUNT",
+    6,
+)
+MICRO_FLOW_SHARD_STATUS_PREFIX = getattr(
+    _redis_md_protocol,
+    "MICRO_FLOW_SHARD_STATUS_PREFIX",
+    f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:shard",
+)
+
 # Candidate monitor functions intentionally are NOT decorated with st.fragment.
 # They render inside render_volume_exhaustion_live(), which is already a fragment.
 # Nesting Streamlit fragments can duplicate widget/form IDs during fragment reruns.
@@ -6751,8 +6762,16 @@ def load_market_data_pipeline_health():
         "core_ws_connected": False,
         "redis_heartbeat": False,
         "micro_flow_enabled": False,
+        "micro_flow_mode": "UNKNOWN",
         "micro_flow_ws_connected": False,
         "micro_flow_transport_gap_open": False,
+        "micro_flow_transport_gap_count": 0,
+        "micro_flow_shards_expected": 0,
+        "micro_flow_shards_online": 0,
+        "micro_flow_shards_recovering": 0,
+        "micro_flow_shards_offline": 0,
+        "micro_flow_open_shards": [],
+        "micro_flow_shards": [],
         "micro_flow_collector_online": False,
         "micro_flow_collector_gap_open": False,
         "error": None,
@@ -6785,21 +6804,140 @@ def load_market_data_pipeline_health():
                 producer.get("ws_connected", False),
             )
         )
-        result["micro_flow_enabled"] = bool(
-            producer.get("micro_flow_enabled", False)
-        )
-        result["micro_flow_ws_connected"] = bool(
-            producer.get("micro_flow_ws_connected", False)
-        )
-        result["micro_flow_transport_gap_open"] = bool(
-            producer.get("micro_flow_transport_gap_open", False)
-        )
-        result["micro_flow_transport_gap_count"] = int(
-            producer.get("micro_flow_transport_gap_count", 0) or 0
-        )
-        result["micro_flow_last_gap_duration_ms"] = (
-            producer.get("micro_flow_transport_gap_last_duration_ms")
-        )
+        micro_flow_mode = str(
+            producer.get("micro_flow_mode") or "legacy_inline"
+        ).strip().lower()
+        result["micro_flow_mode"] = micro_flow_mode
+
+        if micro_flow_mode == "sharded_external":
+            expected = int(
+                producer.get(
+                    "micro_flow_shard_count",
+                    MICRO_FLOW_DEFAULT_SHARD_COUNT,
+                )
+                or MICRO_FLOW_DEFAULT_SHARD_COUNT
+            )
+            expected = max(1, expected)
+            shard_rows = []
+
+            pattern = f"{MICRO_FLOW_SHARD_STATUS_PREFIX}:*:status"
+            for status_key in client.scan_iter(match=pattern, count=50):
+                raw_shard = client.get(status_key)
+                if not raw_shard:
+                    continue
+                try:
+                    shard = json.loads(raw_shard)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(shard, dict):
+                    continue
+
+                try:
+                    shard_id = int(shard.get("shard_id"))
+                except (TypeError, ValueError):
+                    continue
+                if shard_id < 0 or shard_id >= expected:
+                    continue
+
+                heartbeat_key = (
+                    f"{MICRO_FLOW_SHARD_STATUS_PREFIX}:"
+                    f"{shard_id}:heartbeat"
+                )
+                heartbeat_online = bool(client.exists(heartbeat_key))
+                ws_connected = bool(shard.get("ws_connected", False))
+                running = bool(shard.get("running", False))
+                gap_open = bool(shard.get("transport_gap_open", False))
+                phase = str(shard.get("phase") or "UNKNOWN").upper()
+                online = bool(
+                    heartbeat_online
+                    and running
+                    and ws_connected
+                    and not gap_open
+                    and phase == "READY"
+                )
+                recovering = bool(
+                    heartbeat_online
+                    and running
+                    and not online
+                )
+
+                shard_rows.append({
+                    "shard_id": shard_id,
+                    "phase": phase,
+                    "heartbeat_online": heartbeat_online,
+                    "ws_connected": ws_connected,
+                    "gap_open": gap_open,
+                    "online": online,
+                    "recovering": recovering,
+                    "symbols_count": int(
+                        shard.get("symbols_count", 0) or 0
+                    ),
+                    "transport_gap_count": int(
+                        shard.get("transport_gap_count", 0) or 0
+                    ),
+                })
+
+            by_id = {row["shard_id"]: row for row in shard_rows}
+            normalized_rows = []
+            for shard_id in range(expected):
+                row = by_id.get(shard_id)
+                if row is None:
+                    row = {
+                        "shard_id": shard_id,
+                        "phase": "OFFLINE",
+                        "heartbeat_online": False,
+                        "ws_connected": False,
+                        "gap_open": False,
+                        "online": False,
+                        "recovering": False,
+                        "symbols_count": 0,
+                        "transport_gap_count": 0,
+                    }
+                normalized_rows.append(row)
+
+            online_count = sum(1 for row in normalized_rows if row["online"])
+            recovering_count = sum(
+                1 for row in normalized_rows if row["recovering"]
+            )
+            open_shards = [
+                row["shard_id"]
+                for row in normalized_rows
+                if row["gap_open"]
+            ]
+
+            result["micro_flow_enabled"] = True
+            result["micro_flow_shards_expected"] = expected
+            result["micro_flow_shards_online"] = online_count
+            result["micro_flow_shards_recovering"] = recovering_count
+            result["micro_flow_shards_offline"] = max(
+                0, expected - online_count - recovering_count
+            )
+            result["micro_flow_open_shards"] = open_shards
+            result["micro_flow_shards"] = normalized_rows
+            result["micro_flow_ws_connected"] = bool(
+                online_count == expected
+            )
+            result["micro_flow_transport_gap_open"] = bool(open_shards)
+            result["micro_flow_transport_gap_count"] = sum(
+                row["transport_gap_count"]
+                for row in normalized_rows
+            )
+        else:
+            result["micro_flow_enabled"] = bool(
+                producer.get("micro_flow_enabled", False)
+            )
+            result["micro_flow_ws_connected"] = bool(
+                producer.get("micro_flow_ws_connected", False)
+            )
+            result["micro_flow_transport_gap_open"] = bool(
+                producer.get("micro_flow_transport_gap_open", False)
+            )
+            result["micro_flow_transport_gap_count"] = int(
+                producer.get("micro_flow_transport_gap_count", 0) or 0
+            )
+            result["micro_flow_last_gap_duration_ms"] = (
+                producer.get("micro_flow_transport_gap_last_duration_ms")
+            )
 
         collector_heartbeat = bool(
             client.exists(MICRO_FLOW_COLLECTOR_HEARTBEAT_KEY)
@@ -6821,6 +6959,12 @@ def load_market_data_pipeline_health():
         )
         result["micro_flow_collector_gap_open"] = bool(
             collector.get("transport_gap_open", False)
+        )
+        result["micro_flow_collector_transport_gaps"] = int(
+            collector.get("transport_gaps", 0) or 0
+        )
+        result["micro_flow_collector_open_shards"] = list(
+            collector.get("transport_open_shards", []) or []
         )
 
         if (
@@ -7635,16 +7779,44 @@ def render_live_system_status():
             )
 
         with health_cols[3]:
-            if not market_health.get("micro_flow_enabled"):
-                micro_ws_state = "DISABLED"
-            elif market_health.get("micro_flow_transport_gap_open"):
-                micro_ws_state = "RECOVERING"
-            elif market_health.get("micro_flow_ws_connected"):
-                micro_ws_state = "ONLINE"
+            if market_health.get("micro_flow_mode") == "sharded_external":
+                expected = int(
+                    market_health.get("micro_flow_shards_expected", 0) or 0
+                )
+                online = int(
+                    market_health.get("micro_flow_shards_online", 0) or 0
+                )
+                recovering = int(
+                    market_health.get(
+                        "micro_flow_shards_recovering", 0
+                    ) or 0
+                )
+
+                if expected > 0 and online == expected:
+                    micro_ws_state = "ONLINE"
+                elif online > 0:
+                    micro_ws_state = "DEGRADED"
+                elif recovering > 0:
+                    micro_ws_state = "RECOVERING"
+                else:
+                    micro_ws_state = "OFFLINE"
+
+                micro_ws_label = (
+                    f"Micro Flow shards {online}/{expected}"
+                )
             else:
-                micro_ws_state = "OFFLINE"
+                if not market_health.get("micro_flow_enabled"):
+                    micro_ws_state = "DISABLED"
+                elif market_health.get("micro_flow_transport_gap_open"):
+                    micro_ws_state = "RECOVERING"
+                elif market_health.get("micro_flow_ws_connected"):
+                    micro_ws_state = "ONLINE"
+                else:
+                    micro_ws_state = "OFFLINE"
+                micro_ws_label = "Micro Flow WS"
+
             render_pipeline_state(
-                "Micro Flow WS",
+                micro_ws_label,
                 micro_ws_state,
             )
 
@@ -7663,12 +7835,36 @@ def render_live_system_status():
                 collector_state,
             )
 
-        st.caption(
-            "Market Data phase: "
-            f"{market_health.get('phase', 'UNKNOWN')} · "
-            "Micro Flow transport gaps: "
-            f"{int(market_health.get('micro_flow_transport_gap_count', 0) or 0):,}"
-        )
+        if market_health.get("micro_flow_mode") == "sharded_external":
+            expected = int(
+                market_health.get("micro_flow_shards_expected", 0) or 0
+            )
+            online = int(
+                market_health.get("micro_flow_shards_online", 0) or 0
+            )
+            open_shards = market_health.get(
+                "micro_flow_collector_open_shards", []
+            ) or []
+            shard_suffix = (
+                f" · open shards: {','.join(map(str, open_shards))}"
+                if open_shards
+                else ""
+            )
+            st.caption(
+                "Market Data phase: "
+                f"{market_health.get('phase', 'UNKNOWN')} · "
+                f"Micro Flow shards: {online}/{expected} · "
+                "transport gaps: "
+                f"{int(market_health.get('micro_flow_collector_transport_gaps', 0) or 0):,}"
+                f"{shard_suffix}"
+            )
+        else:
+            st.caption(
+                "Market Data phase: "
+                f"{market_health.get('phase', 'UNKNOWN')} · "
+                "Micro Flow transport gaps: "
+                f"{int(market_health.get('micro_flow_transport_gap_count', 0) or 0):,}"
+            )
 
         if market_health.get("error"):
             st.warning(

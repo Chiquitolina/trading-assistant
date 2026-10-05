@@ -62,6 +62,17 @@ MICRO_FLOW_COLLECTOR_CURSOR_KEY = (
 MICRO_FLOW_TRANSPORT_STATE_KEY = (
     f"{KEY_PREFIX}:micro-flow:transport-state"
 )
+
+# Sharded aggTrade transport. Each shard owns a disjoint symbol subset and
+# publishes to the same MICRO_FLOW_SECONDS_STREAM. Health/transport state is
+# scoped per shard so one failed websocket never invalidates healthy symbols.
+MICRO_FLOW_DEFAULT_SHARD_COUNT = 6
+MICRO_FLOW_SHARD_STATUS_PREFIX = (
+    f"{KEY_PREFIX}:micro-flow:shard"
+)
+MICRO_FLOW_SHARD_HEARTBEAT_TTL_SECONDS = 15
+MICRO_FLOW_SHARD_LOCK_TTL_SECONDS = 30
+
 MICRO_FLOW_COLLECTOR_HEARTBEAT_TTL_SECONDS = 15
 
 HISTORY_MAXLEN = 400
@@ -76,6 +87,40 @@ CLOSED_PUBLISHED_TTL_SECONDS = 6 * 60 * 60
 
 HEARTBEAT_TTL_SECONDS = 15
 PRODUCER_LOCK_TTL_SECONDS = 30
+
+
+
+
+def normalize_shard_id(shard_id: int) -> int:
+    try:
+        shard_id = int(shard_id)
+    except (TypeError, ValueError):
+        raise ValueError("shard_id must be an integer")
+
+    if shard_id < 0:
+        raise ValueError("shard_id must be >= 0")
+
+    return shard_id
+
+
+def micro_flow_shard_status_key(shard_id: int) -> str:
+    shard_id = normalize_shard_id(shard_id)
+    return f"{MICRO_FLOW_SHARD_STATUS_PREFIX}:{shard_id}:status"
+
+
+def micro_flow_shard_heartbeat_key(shard_id: int) -> str:
+    shard_id = normalize_shard_id(shard_id)
+    return f"{MICRO_FLOW_SHARD_STATUS_PREFIX}:{shard_id}:heartbeat"
+
+
+def micro_flow_shard_lock_key(shard_id: int) -> str:
+    shard_id = normalize_shard_id(shard_id)
+    return f"{MICRO_FLOW_SHARD_STATUS_PREFIX}:{shard_id}:producer-lock"
+
+
+def micro_flow_shard_transport_state_key(shard_id: int) -> str:
+    shard_id = normalize_shard_id(shard_id)
+    return f"{MICRO_FLOW_SHARD_STATUS_PREFIX}:{shard_id}:transport-state"
 
 
 def normalize_symbol(symbol: str) -> str:
