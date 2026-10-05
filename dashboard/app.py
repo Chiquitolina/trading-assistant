@@ -20828,6 +20828,938 @@ def _candidate_v2_selected_cell_anatomy(
     return pd.DataFrame(rows)
 
 
+
+def _candidate_v2_concurrency_source(
+    selected_pair,
+    variant,
+    strong_threshold=0.50,
+):
+    """Return one execution row per event for the selected V2 cell/variant."""
+    if selected_pair is None or selected_pair.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    mask = _candidate_v2_variant_mask(
+        selected_pair,
+        variant,
+        strong_threshold=strong_threshold,
+    )
+    source = selected_pair.loc[mask.fillna(False)].copy()
+    if source.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    event_col = (
+        "candidate_v1_event_key"
+        if "candidate_v1_event_key" in source.columns
+        else "candidate_v2_event_key"
+    )
+    if event_col in source.columns:
+        source = (
+            source.sort_values(
+                ["entry_timestamp", "symbol"],
+                kind="stable",
+                na_position="last",
+            )
+            .drop_duplicates(subset=[event_col], keep="last")
+            .reset_index(drop=True)
+        )
+
+    source["_entry_ts"] = pd.to_numeric(
+        source.get("entry_timestamp"),
+        errors="coerce",
+    )
+    source["_exit_ts"] = pd.to_numeric(
+        source.get("exit_timestamp"),
+        errors="coerce",
+    )
+    source["_outcome"] = (
+        source.get(
+            "Outcome",
+            pd.Series("PENDING", index=source.index),
+        )
+        .fillna("PENDING")
+        .astype(str)
+    )
+    source["_net"] = pd.to_numeric(
+        source.get("net_pnl_pct"),
+        errors="coerce",
+    )
+
+    resolved = source.loc[
+        source["_outcome"].ne("PENDING")
+        & source["_entry_ts"].notna()
+        & source["_exit_ts"].notna()
+        & source["_net"].notna()
+    ].copy()
+    if resolved.empty:
+        return source, resolved
+
+    # exit_timestamp identifies the 1m candle in which the trade resolves.
+    # Treat that exit candle as occupied: [entry, exit + 1m).
+    resolved["_effective_exit_ts"] = (
+        resolved["_exit_ts"].astype("int64") + 60_000
+    )
+    resolved = resolved.loc[
+        resolved["_effective_exit_ts"].gt(
+            resolved["_entry_ts"]
+        )
+    ].copy()
+    resolved["_hold_min"] = (
+        resolved["_effective_exit_ts"]
+        - resolved["_entry_ts"]
+    ) / 60_000.0
+
+    return source, resolved
+
+
+def _candidate_v2_concurrency_timeline(intervals):
+    """Build exact time-weighted concurrency from [entry, exit) intervals."""
+    if intervals is None or intervals.empty:
+        return pd.DataFrame(), {}
+
+    deltas = {}
+    for start, end in intervals[[
+        "_entry_ts",
+        "_effective_exit_ts",
+    ]].itertuples(index=False, name=None):
+        start = int(start)
+        end = int(end)
+        if end <= start:
+            continue
+        deltas[start] = deltas.get(start, 0) + 1
+        deltas[end] = deltas.get(end, 0) - 1
+
+    if not deltas:
+        return pd.DataFrame(), {}
+
+    timestamps = sorted(deltas)
+    rows = []
+    open_positions = 0
+    position_minutes = 0.0
+    exposed_minutes = 0.0
+    occupancy_minutes = {}
+    peak = 0
+    peak_ts = None
+
+    for index, ts in enumerate(timestamps):
+        open_positions += int(deltas[ts])
+
+        if open_positions > peak:
+            peak = int(open_positions)
+            peak_ts = int(ts)
+
+        rows.append({
+            "timestamp": int(ts),
+            "open_positions": int(open_positions),
+        })
+
+        if index + 1 >= len(timestamps):
+            continue
+
+        next_ts = int(timestamps[index + 1])
+        minutes = max(
+            0.0,
+            (next_ts - int(ts)) / 60_000.0,
+        )
+        if minutes <= 0:
+            continue
+
+        position_minutes += float(open_positions) * minutes
+
+        if open_positions > 0:
+            exposed_minutes += minutes
+            occupancy_minutes[int(open_positions)] = (
+                occupancy_minutes.get(
+                    int(open_positions),
+                    0.0,
+                )
+                + minutes
+            )
+
+    return pd.DataFrame(rows), {
+        "peak": int(peak),
+        "peak_ts": peak_ts,
+        "position_minutes": float(position_minutes),
+        "exposed_minutes": float(exposed_minutes),
+        "avg_when_active": (
+            float(position_minutes / exposed_minutes)
+            if exposed_minutes > 0
+            else np.nan
+        ),
+        "occupancy_minutes": occupancy_minutes,
+    }
+
+
+def _candidate_v2_entry_concurrency(intervals):
+    """Attach exact crowding state seen by every resolved execution entry."""
+    if intervals is None or intervals.empty:
+        return pd.DataFrame()
+
+    work = intervals.sort_values(
+        ["_entry_ts", "symbol"],
+        kind="stable",
+    ).copy()
+
+    pieces = []
+    active_ends = []
+
+    for entry_ts, group in work.groupby(
+        "_entry_ts",
+        sort=True,
+    ):
+        entry_ts = int(entry_ts)
+
+        # Intervals are [entry, end): positions ending exactly now are already
+        # closed when the new batch enters.
+        active_ends = [
+            end
+            for end in active_ends
+            if int(end) > entry_ts
+        ]
+
+        open_before = int(len(active_ends))
+        same_minute_entries = int(len(group))
+        simultaneous = int(
+            open_before + same_minute_entries
+        )
+
+        part = group.copy()
+        part["open_before_entry"] = open_before
+        part["same_minute_entries"] = same_minute_entries
+        part["entry_concurrency"] = simultaneous
+        part["overlaps_existing"] = bool(
+            open_before > 0
+        )
+        pieces.append(part)
+
+        active_ends.extend(
+            pd.to_numeric(
+                group["_effective_exit_ts"],
+                errors="coerce",
+            )
+            .dropna()
+            .astype("int64")
+            .tolist()
+        )
+
+    if not pieces:
+        return pd.DataFrame()
+
+    return pd.concat(
+        pieces,
+        ignore_index=True,
+        sort=False,
+    )
+
+
+def _candidate_v2_basic_net_stats(frame):
+    if frame is None or frame.empty:
+        return {
+            "N": 0,
+            "Net pts": np.nan,
+            "Avg %": np.nan,
+            "PF": np.nan,
+            "WR %": np.nan,
+            "Max DD pts": np.nan,
+        }
+
+    net = pd.to_numeric(
+        frame.get("net_pnl_pct"),
+        errors="coerce",
+    ).dropna()
+
+    if net.empty:
+        return {
+            "N": 0,
+            "Net pts": np.nan,
+            "Avg %": np.nan,
+            "PF": np.nan,
+            "WR %": np.nan,
+            "Max DD pts": np.nan,
+        }
+
+    wins = net.loc[net.gt(0)]
+    losses = net.loc[net.lt(0)]
+
+    pf = (
+        float(
+            wins.sum()
+            / abs(losses.sum())
+        )
+        if (
+            len(losses)
+            and abs(float(losses.sum())) > 1e-12
+        )
+        else (
+            float("inf")
+            if len(wins)
+            else np.nan
+        )
+    )
+
+    ordered = frame.copy()
+    ordered["_order_ts"] = pd.to_numeric(
+        ordered.get("entry_timestamp"),
+        errors="coerce",
+    )
+    ordered = ordered.sort_values(
+        ["_order_ts", "symbol"],
+        kind="stable",
+    )
+    ordered_net = pd.to_numeric(
+        ordered.get("net_pnl_pct"),
+        errors="coerce",
+    ).fillna(0.0).to_numpy(dtype=float)
+
+    cumulative = np.cumsum(ordered_net)
+
+    if cumulative.size:
+        running_peak = np.maximum.accumulate(
+            np.concatenate(
+                ([0.0], cumulative)
+            )
+        )[1:]
+        drawdown = cumulative - running_peak
+        max_dd = (
+            abs(float(np.min(drawdown)))
+            if drawdown.size
+            else 0.0
+        )
+    else:
+        max_dd = np.nan
+
+    return {
+        "N": int(len(net)),
+        "Net pts": round(
+            float(net.sum()),
+            4,
+        ),
+        "Avg %": round(
+            float(net.mean()),
+            4,
+        ),
+        "PF": (
+            round(float(pf), 3)
+            if np.isfinite(pf)
+            else pf
+        ),
+        "WR %": round(
+            float(
+                net.gt(0).mean()
+                * 100.0
+            ),
+            2,
+        ),
+        "Max DD pts": (
+            round(
+                float(max_dd),
+                4,
+            )
+            if pd.notna(max_dd)
+            else np.nan
+        ),
+    }
+
+
+def _candidate_v2_capacity_simulation(
+    intervals,
+    caps=(1, 2, 3, 5, 10, 20),
+):
+    """First-come capacity study using actual historical exit times."""
+    if intervals is None or intervals.empty:
+        return pd.DataFrame()
+
+    work = intervals.sort_values(
+        ["_entry_ts", "symbol"],
+        kind="stable",
+    ).copy()
+
+    rows = []
+    unique_caps = [
+        int(value)
+        for value in caps
+        if int(value) > 0
+    ]
+
+    for cap in unique_caps:
+        accepted_indexes = []
+        active = []
+
+        for entry_ts, group in work.groupby(
+            "_entry_ts",
+            sort=True,
+        ):
+            entry_ts = int(entry_ts)
+
+            active = [
+                item
+                for item in active
+                if int(item[0]) > entry_ts
+            ]
+
+            available = max(
+                0,
+                int(cap) - len(active),
+            )
+            if available <= 0:
+                continue
+
+            # Same-minute ties still need an explicit live execution ranking
+            # rule. Symbol ordering keeps the research deterministic for now.
+            group = group.sort_values(
+                ["symbol"],
+                kind="stable",
+            )
+            chosen = group.head(
+                available
+            )
+
+            for idx, row in chosen.iterrows():
+                accepted_indexes.append(idx)
+                active.append((
+                    int(
+                        row[
+                            "_effective_exit_ts"
+                        ]
+                    ),
+                    str(
+                        row.get(
+                            "symbol",
+                            "",
+                        )
+                    ),
+                ))
+
+        accepted = work.loc[
+            accepted_indexes
+        ].copy()
+        stats = _candidate_v2_basic_net_stats(
+            accepted
+        )
+
+        rows.append({
+            "Max positions": int(cap),
+            "Accepted": int(len(accepted)),
+            "Skipped": int(
+                len(work) - len(accepted)
+            ),
+            "Accepted %": (
+                round(
+                    len(accepted)
+                    / len(work)
+                    * 100.0,
+                    2,
+                )
+                if len(work)
+                else np.nan
+            ),
+            **stats,
+        })
+
+    all_stats = _candidate_v2_basic_net_stats(
+        work
+    )
+    rows.append({
+        "Max positions": "ALL",
+        "Accepted": int(len(work)),
+        "Skipped": 0,
+        "Accepted %": 100.0,
+        **all_stats,
+    })
+
+    return pd.DataFrame(rows)
+
+
+def _candidate_v2_trade_ledger(entry_detail):
+    """Readable one-row-per-trade ledger for the selected execution cell."""
+    if entry_detail is None or entry_detail.empty:
+        return pd.DataFrame()
+
+    work = entry_detail.copy()
+    ledger = pd.DataFrame(
+        index=work.index
+    )
+
+    def numeric(column):
+        if column not in work.columns:
+            return pd.Series(
+                np.nan,
+                index=work.index,
+            )
+        return pd.to_numeric(
+            work[column],
+            errors="coerce",
+        )
+
+    def local_timestamp(column):
+        values = numeric(column)
+        return (
+            pd.to_datetime(
+                values,
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+            .dt.strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        )
+
+    ledger["Entry"] = local_timestamp(
+        "entry_timestamp"
+    )
+    ledger["Exit"] = local_timestamp(
+        "exit_timestamp"
+    )
+    ledger["Symbol"] = work.get(
+        "symbol",
+        pd.Series("", index=work.index),
+    ).astype(str)
+    ledger["Side"] = work.get(
+        "side",
+        pd.Series("", index=work.index),
+    ).astype(str)
+    ledger["Outcome"] = work.get(
+        "Outcome",
+        pd.Series("", index=work.index),
+    ).astype(str)
+
+    ledger["Hold min"] = numeric(
+        "_hold_min"
+    ).round(1)
+    ledger["Open before"] = numeric(
+        "open_before_entry"
+    ).astype("Int64")
+    ledger["Same-minute signals"] = numeric(
+        "same_minute_entries"
+    ).astype("Int64")
+    ledger["Concurrent after entry"] = numeric(
+        "entry_concurrency"
+    ).astype("Int64")
+    ledger["Net %"] = numeric(
+        "net_pnl_pct"
+    ).round(4)
+    ledger["MFE %"] = numeric(
+        "mfe_until_exit_pct"
+    ).round(4)
+    ledger["MAE %"] = numeric(
+        "mae_until_exit_pct"
+    ).round(4)
+    ledger["Entry price"] = numeric(
+        "entry_price"
+    )
+    ledger["Exit price"] = numeric(
+        "exit_price"
+    )
+
+    optional_map = [
+        (
+            "side_adjusted_strength_vs_btc_4h",
+            "Strength vs BTC 4h %",
+            4,
+        ),
+        (
+            "Market alignment",
+            "Market 4h",
+            None,
+        ),
+        (
+            "Market alignment 1h",
+            "Market 1h",
+            None,
+        ),
+        (
+            "market_breadth_4h",
+            "Breadth 4h %",
+            2,
+        ),
+        (
+            "market_breadth_1h",
+            "Breadth 1h %",
+            2,
+        ),
+        (
+            "breadth_delta_1h",
+            "Breadth Δ1h pp",
+            2,
+        ),
+        (
+            "breadth_direction_1h",
+            "Breadth direction 1h",
+            None,
+        ),
+        (
+            "btc_breadth_divergence_1h",
+            "BTC × breadth 1h",
+            None,
+        ),
+        (
+            "candidate_v2_cohort",
+            "Cohort",
+            None,
+        ),
+    ]
+
+    for source, target, decimals in optional_map:
+        if source not in work.columns:
+            continue
+        if decimals is None:
+            ledger[target] = (
+                work[source]
+                .fillna("")
+                .astype(str)
+            )
+        else:
+            ledger[target] = pd.to_numeric(
+                work[source],
+                errors="coerce",
+            ).round(decimals)
+
+    event_col = (
+        "candidate_v2_event_key"
+        if "candidate_v2_event_key" in work.columns
+        else "candidate_v1_event_key"
+    )
+    if event_col in work.columns:
+        ledger["Event key"] = (
+            work[event_col]
+            .fillna("")
+            .astype(str)
+        )
+
+    return (
+        ledger
+        .reset_index(drop=True)
+    )
+
+
+def _candidate_v2_concurrency_analysis(
+    selected_pair,
+    variant,
+    strong_threshold=0.50,
+    horizon_min=180,
+):
+    """Research actual overlap and capacity for one V2 execution cell."""
+    source, resolved = (
+        _candidate_v2_concurrency_source(
+            selected_pair,
+            variant,
+            strong_threshold=(
+                strong_threshold
+            ),
+        )
+    )
+
+    if source.empty:
+        return {}
+
+    entry_detail = (
+        _candidate_v2_entry_concurrency(
+            resolved
+        )
+    )
+    timeline, actual_stats = (
+        _candidate_v2_concurrency_timeline(
+            resolved
+        )
+    )
+
+    # Conservative upper bound: every candidate stays open for the full
+    # selected horizon, regardless of whether it historically hit TP/SL early.
+    full_horizon = source.loc[
+        source["_entry_ts"].notna()
+    ].copy()
+
+    if not full_horizon.empty:
+        full_horizon[
+            "_effective_exit_ts"
+        ] = (
+            full_horizon[
+                "_entry_ts"
+            ].astype("int64")
+            + int(horizon_min)
+            * 60_000
+        )
+        full_timeline, full_stats = (
+            _candidate_v2_concurrency_timeline(
+                full_horizon
+            )
+        )
+    else:
+        full_timeline = pd.DataFrame()
+        full_stats = {}
+
+    summary_rows = []
+
+    for side_name in (
+        "TOTAL",
+        "LONG",
+        "SHORT",
+    ):
+        side_resolved = (
+            resolved
+            if side_name == "TOTAL"
+            else resolved.loc[
+                resolved["side"]
+                .astype(str)
+                .str.upper()
+                .eq(side_name)
+            ].copy()
+        )
+
+        if side_resolved.empty:
+            continue
+
+        side_entries = (
+            _candidate_v2_entry_concurrency(
+                side_resolved
+            )
+        )
+        _, side_stats = (
+            _candidate_v2_concurrency_timeline(
+                side_resolved
+            )
+        )
+
+        entry_conc = pd.to_numeric(
+            side_entries.get(
+                "entry_concurrency"
+            ),
+            errors="coerce",
+        ).dropna()
+        open_before = pd.to_numeric(
+            side_entries.get(
+                "open_before_entry"
+            ),
+            errors="coerce",
+        ).dropna()
+        hold = pd.to_numeric(
+            side_resolved.get(
+                "_hold_min"
+            ),
+            errors="coerce",
+        ).dropna()
+
+        summary_rows.append({
+            "Side": side_name,
+            "Resolved intervals": int(
+                len(side_resolved)
+            ),
+            "Peak simultaneous": int(
+                side_stats.get(
+                    "peak",
+                    0,
+                )
+                or 0
+            ),
+            "Avg concurrent when active": (
+                round(
+                    float(
+                        side_stats.get(
+                            "avg_when_active"
+                        )
+                    ),
+                    3,
+                )
+                if pd.notna(
+                    side_stats.get(
+                        "avg_when_active",
+                        np.nan,
+                    )
+                )
+                else np.nan
+            ),
+            "Entries overlapping existing %": (
+                round(
+                    float(
+                        open_before.gt(0)
+                        .mean()
+                        * 100.0
+                    ),
+                    2,
+                )
+                if len(open_before)
+                else np.nan
+            ),
+            "Entries at >=3 concurrent %": (
+                round(
+                    float(
+                        entry_conc.ge(3)
+                        .mean()
+                        * 100.0
+                    ),
+                    2,
+                )
+                if len(entry_conc)
+                else np.nan
+            ),
+            "Median hold min": (
+                round(
+                    float(
+                        hold.median()
+                    ),
+                    1,
+                )
+                if len(hold)
+                else np.nan
+            ),
+            "P90 hold min": (
+                round(
+                    float(
+                        hold.quantile(
+                            0.90
+                        )
+                    ),
+                    1,
+                )
+                if len(hold)
+                else np.nan
+            ),
+        })
+
+    bucket_rows = []
+
+    if not entry_detail.empty:
+        entry_detail[
+            "Concurrency bucket"
+        ] = np.select(
+            [
+                pd.to_numeric(
+                    entry_detail[
+                        "entry_concurrency"
+                    ],
+                    errors="coerce",
+                ).eq(1),
+                pd.to_numeric(
+                    entry_detail[
+                        "entry_concurrency"
+                    ],
+                    errors="coerce",
+                ).eq(2),
+                pd.to_numeric(
+                    entry_detail[
+                        "entry_concurrency"
+                    ],
+                    errors="coerce",
+                ).eq(3),
+                pd.to_numeric(
+                    entry_detail[
+                        "entry_concurrency"
+                    ],
+                    errors="coerce",
+                ).eq(4),
+            ],
+            [
+                "1",
+                "2",
+                "3",
+                "4",
+            ],
+            default="5+",
+        )
+
+        for label in [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5+",
+        ]:
+            subset = entry_detail.loc[
+                entry_detail[
+                    "Concurrency bucket"
+                ].eq(label)
+            ].copy()
+
+            if subset.empty:
+                continue
+
+            stats = (
+                _candidate_v2_basic_net_stats(
+                    subset
+                )
+            )
+            bucket_rows.append({
+                "Concurrent after entry": (
+                    label
+                ),
+                **stats,
+            })
+
+    occupancy_rows = []
+    occupancy_minutes = (
+        actual_stats.get(
+            "occupancy_minutes",
+            {},
+        )
+        or {}
+    )
+    exposed_minutes = float(
+        actual_stats.get(
+            "exposed_minutes",
+            0.0,
+        )
+        or 0.0
+    )
+
+    if (
+        occupancy_minutes
+        and exposed_minutes > 0
+    ):
+        for concurrency in sorted(
+            occupancy_minutes
+        ):
+            minutes = float(
+                occupancy_minutes[
+                    concurrency
+                ]
+            )
+            occupancy_rows.append({
+                "Open positions": int(
+                    concurrency
+                ),
+                "Minutes": round(
+                    minutes,
+                    1,
+                ),
+                "Share of exposed time %": round(
+                    minutes
+                    / exposed_minutes
+                    * 100.0,
+                    2,
+                ),
+            })
+
+    return {
+        "source": source,
+        "resolved": resolved,
+        "summary": pd.DataFrame(
+            summary_rows
+        ),
+        "entry_detail": entry_detail,
+        "trade_ledger": (
+            _candidate_v2_trade_ledger(
+                entry_detail
+            )
+        ),
+        "entry_buckets": pd.DataFrame(
+            bucket_rows
+        ),
+        "occupancy": pd.DataFrame(
+            occupancy_rows
+        ),
+        "timeline": timeline,
+        "actual_stats": actual_stats,
+        "full_timeline": full_timeline,
+        "full_stats": full_stats,
+        "capacity": (
+            _candidate_v2_capacity_simulation(
+                resolved
+            )
+        ),
+    }
+
+
 def _candidate_v2_transition_performance_table(selected_pair, column):
     if (
         selected_pair is None
@@ -21445,6 +22377,537 @@ def render_candidate_v2_research(retests_df):
             mime="text/csv",
             key="candidate_v2_selected_cell_anatomy_download",
         )
+
+
+    st.markdown("##### Execution simultaneity / capacity · selected cell")
+    st.caption(
+        "Uses the exact variant and TP/SL cell selected above. Actual overlap "
+        "uses each resolved trade's real TP/SL/TIME_EXIT exit candle; the "
+        f"Full {int(snap_horizon)}m peak is a conservative upper bound where "
+        "every candidate is assumed to stay open for the complete horizon."
+    )
+
+    concurrency = _candidate_v2_concurrency_analysis(
+        selected_pair,
+        variant=variant,
+        strong_threshold=strong_threshold,
+        horizon_min=snap_horizon,
+    )
+
+    if concurrency:
+        actual_stats = concurrency.get(
+            "actual_stats",
+            {},
+        )
+        full_stats = concurrency.get(
+            "full_stats",
+            {},
+        )
+        entry_detail = concurrency.get(
+            "entry_detail",
+            pd.DataFrame(),
+        )
+        resolved_concurrency = concurrency.get(
+            "resolved",
+            pd.DataFrame(),
+        )
+        source_concurrency = concurrency.get(
+            "source",
+            pd.DataFrame(),
+        )
+
+        peak_ts = actual_stats.get(
+            "peak_ts"
+        )
+        peak_label = "—"
+
+        if peak_ts is not None:
+            peak_label = (
+                pd.to_datetime(
+                    int(peak_ts),
+                    unit="ms",
+                    utc=True,
+                )
+                .tz_convert(TZ)
+                .strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+            )
+
+        entry_concurrency = pd.to_numeric(
+            entry_detail.get(
+                "entry_concurrency",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        ).dropna()
+        open_before = pd.to_numeric(
+            entry_detail.get(
+                "open_before_entry",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        ).dropna()
+        holds = pd.to_numeric(
+            resolved_concurrency.get(
+                "_hold_min",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        ).dropna()
+
+        cc1, cc2, cc3, cc4, cc5, cc6 = st.columns(
+            6
+        )
+
+        cc1.metric(
+            "Resolved intervals",
+            int(
+                len(
+                    resolved_concurrency
+                )
+            ),
+            delta=(
+                f"{int(len(source_concurrency) - len(resolved_concurrency))} pending"
+                if (
+                    len(source_concurrency)
+                    > len(resolved_concurrency)
+                )
+                else None
+            ),
+        )
+        cc2.metric(
+            "Peak simultaneous",
+            int(
+                actual_stats.get(
+                    "peak",
+                    0,
+                )
+                or 0
+            ),
+            help=(
+                "Maximum actual resolved positions open at once. "
+                f"Peak at {peak_label} ({TZ})."
+            ),
+        )
+        cc3.metric(
+            f"Full {int(snap_horizon)}m peak",
+            int(
+                full_stats.get(
+                    "peak",
+                    0,
+                )
+                or 0
+            ),
+            help=(
+                "Conservative upper bound if every candidate remains "
+                "open for the complete selected horizon."
+            ),
+        )
+        cc4.metric(
+            "Avg concurrent",
+            (
+                f"{float(actual_stats.get('avg_when_active')):.2f}"
+                if pd.notna(
+                    actual_stats.get(
+                        "avg_when_active",
+                        np.nan,
+                    )
+                )
+                else "—"
+            ),
+            help=(
+                "Time-weighted average while at least one selected "
+                "V2 position is open."
+            ),
+        )
+        cc5.metric(
+            "Entries overlapping",
+            (
+                f"{open_before.gt(0).mean() * 100.0:.1f}%"
+                if len(open_before)
+                else "—"
+            ),
+            help=(
+                "Share of resolved trades whose entry occurred while "
+                "at least one earlier selected trade was already open."
+            ),
+        )
+        cc6.metric(
+            "Median hold",
+            (
+                f"{holds.median():.0f}m"
+                if len(holds)
+                else "—"
+            ),
+        )
+
+        timeline = concurrency.get(
+            "timeline",
+            pd.DataFrame(),
+        ).copy()
+        full_timeline = concurrency.get(
+            "full_timeline",
+            pd.DataFrame(),
+        ).copy()
+
+        if (
+            not timeline.empty
+            or not full_timeline.empty
+        ):
+            fig_concurrency = go.Figure()
+
+            if not timeline.empty:
+                timeline["time"] = (
+                    pd.to_datetime(
+                        timeline["timestamp"],
+                        unit="ms",
+                        utc=True,
+                    )
+                    .dt.tz_convert(TZ)
+                )
+                fig_concurrency.add_trace(
+                    go.Scatter(
+                        x=timeline["time"],
+                        y=timeline[
+                            "open_positions"
+                        ],
+                        mode="lines",
+                        line_shape="hv",
+                        name=(
+                            "Actual resolved overlap"
+                        ),
+                    )
+                )
+
+            if not full_timeline.empty:
+                full_timeline["time"] = (
+                    pd.to_datetime(
+                        full_timeline[
+                            "timestamp"
+                        ],
+                        unit="ms",
+                        utc=True,
+                    )
+                    .dt.tz_convert(TZ)
+                )
+                fig_concurrency.add_trace(
+                    go.Scatter(
+                        x=full_timeline[
+                            "time"
+                        ],
+                        y=full_timeline[
+                            "open_positions"
+                        ],
+                        mode="lines",
+                        line_shape="hv",
+                        name=(
+                            f"Full {int(snap_horizon)}m upper bound"
+                        ),
+                    )
+                )
+
+            fig_concurrency.update_layout(
+                title=(
+                    f"Concurrent positions · {variant} · "
+                    f"TP {float(selected_tp):g}% / "
+                    f"SL {float(selected_sl):g}%"
+                ),
+                xaxis_title=(
+                    f"Time ({TZ})"
+                ),
+                yaxis_title=(
+                    "Open positions"
+                ),
+                height=390,
+                margin={
+                    "l": 10,
+                    "r": 10,
+                    "t": 55,
+                    "b": 10,
+                },
+            )
+            st.plotly_chart(
+                fig_concurrency,
+                use_container_width=True,
+                key=(
+                    "candidate_v2_"
+                    "concurrency_timeline"
+                ),
+                config={
+                    "displaylogo": False
+                },
+            )
+
+        concurrency_summary = (
+            concurrency.get(
+                "summary",
+                pd.DataFrame(),
+            )
+        )
+
+        if not concurrency_summary.empty:
+            st.markdown(
+                "###### Overlap summary by side"
+            )
+            st.dataframe(
+                concurrency_summary,
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_v2_"
+                    "concurrency_summary"
+                ),
+            )
+
+        entry_buckets = concurrency.get(
+            "entry_buckets",
+            pd.DataFrame(),
+        )
+
+        if not entry_buckets.empty:
+            st.markdown(
+                "###### Performance by concurrency at entry"
+            )
+            st.caption(
+                "Checks whether crowded entries behave differently from "
+                "trades entered with little/no simultaneous exposure."
+            )
+            st.dataframe(
+                entry_buckets,
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_v2_"
+                    "concurrency_entry_buckets"
+                ),
+            )
+
+        capacity = concurrency.get(
+            "capacity",
+            pd.DataFrame(),
+        )
+
+        if not capacity.empty:
+            st.markdown(
+                "###### First-come execution capacity simulation"
+            )
+            st.caption(
+                "Tests max concurrent slots using each trade's real historical "
+                "exit. If more signals arrive in the same minute than there are "
+                "free slots, symbol order is only a deterministic research "
+                "tie-break; before live execution we should replace it with an "
+                "explicit ranking rule."
+            )
+            st.dataframe(
+                capacity,
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_v2_"
+                    "capacity_simulation"
+                ),
+            )
+            st.download_button(
+                "Download V2 capacity simulation CSV",
+                data=capacity.to_csv(
+                    index=False
+                ).encode("utf-8"),
+                file_name=(
+                    f"candidate_v2_capacity_"
+                    f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                    f"tp{float(selected_tp):g}_"
+                    f"sl{float(selected_sl):g}_"
+                    f"{snap_horizon}m.csv"
+                ),
+                mime="text/csv",
+                key=(
+                    "candidate_v2_"
+                    "capacity_download"
+                ),
+            )
+
+        occupancy = concurrency.get(
+            "occupancy",
+            pd.DataFrame(),
+        )
+
+        if not occupancy.empty:
+            with st.expander(
+                "Time spent at each concurrency level",
+                expanded=False,
+            ):
+                st.dataframe(
+                    occupancy,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_"
+                        "concurrency_occupancy"
+                    ),
+                )
+
+        trade_ledger = concurrency.get(
+            "trade_ledger",
+            pd.DataFrame(),
+        )
+
+        if not trade_ledger.empty:
+            st.markdown(
+                "###### Trade-by-trade execution ledger"
+            )
+            st.caption(
+                "One row per resolved trade in this exact V2 variant + TP/SL "
+                "cell. Entry/exit are shown in Argentina time, together with "
+                "actual hold, crowding at entry, PnL, MFE/MAE and the causal "
+                "1h/4h context when those columns are available."
+            )
+
+            st.dataframe(
+                trade_ledger,
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_v2_"
+                    "trade_by_trade_ledger"
+                ),
+            )
+
+            st.download_button(
+                "Download V2 trade-by-trade CSV",
+                data=trade_ledger.to_csv(
+                    index=False
+                ).encode("utf-8"),
+                file_name=(
+                    f"candidate_v2_trade_by_trade_"
+                    f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                    f"tp{float(selected_tp):g}_"
+                    f"sl{float(selected_sl):g}_"
+                    f"{snap_horizon}m.csv"
+                ),
+                mime="text/csv",
+                key=(
+                    "candidate_v2_"
+                    "trade_by_trade_download"
+                ),
+            )
+
+            inspect_options = list(
+                range(
+                    len(trade_ledger)
+                )
+            )
+
+            def _trade_label(index):
+                row = trade_ledger.iloc[
+                    int(index)
+                ]
+                return (
+                    f"{row.get('Entry', '—')} · "
+                    f"{row.get('Symbol', '—')} · "
+                    f"{row.get('Side', '—')} · "
+                    f"{row.get('Outcome', '—')} · "
+                    f"net {row.get('Net %', np.nan)}%"
+                )
+
+            selected_trade_index = st.selectbox(
+                "Inspect one selected-cell trade",
+                options=inspect_options,
+                format_func=_trade_label,
+                key=(
+                    "candidate_v2_"
+                    "concurrency_trade_inspect"
+                ),
+            )
+
+            selected_trade = trade_ledger.iloc[
+                int(selected_trade_index)
+            ]
+
+            ti1, ti2, ti3, ti4, ti5, ti6 = st.columns(
+                6
+            )
+            ti1.metric(
+                "Symbol",
+                selected_trade.get(
+                    "Symbol",
+                    "—",
+                ),
+            )
+            ti2.metric(
+                "Side",
+                selected_trade.get(
+                    "Side",
+                    "—",
+                ),
+            )
+            ti3.metric(
+                "Outcome",
+                selected_trade.get(
+                    "Outcome",
+                    "—",
+                ),
+            )
+            ti4.metric(
+                "Net %",
+                (
+                    f"{float(selected_trade.get('Net %')):.4f}%"
+                    if pd.notna(
+                        selected_trade.get(
+                            "Net %",
+                            np.nan,
+                        )
+                    )
+                    else "—"
+                ),
+            )
+            ti5.metric(
+                "Concurrent",
+                (
+                    str(
+                        int(
+                            selected_trade.get(
+                                "Concurrent after entry"
+                            )
+                        )
+                    )
+                    if pd.notna(
+                        selected_trade.get(
+                            "Concurrent after entry",
+                            np.nan,
+                        )
+                    )
+                    else "—"
+                ),
+            )
+            ti6.metric(
+                "Hold",
+                (
+                    f"{float(selected_trade.get('Hold min')):.0f}m"
+                    if pd.notna(
+                        selected_trade.get(
+                            "Hold min",
+                            np.nan,
+                        )
+                    )
+                    else "—"
+                ),
+            )
+
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        selected_trade.to_dict()
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_v2_"
+                    "single_trade_detail"
+                ),
+            )
+
 
     st.markdown("#### 3. Permanent comparison · same execution pair")
     st.caption(
