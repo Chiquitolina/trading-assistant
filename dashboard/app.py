@@ -279,6 +279,9 @@ CANDIDATE_V2_MARKET_CONTEXT_FILE = (
 CANDIDATE_V2_MARKET_TRANSITION_FILE = (
     BASE_DIR / "reports" / "candidate_v2_analysis" / "market_transition_1h_4h.pkl"
 )
+CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE = (
+    BASE_DIR / "reports" / "candidate_v2_analysis" / "selected_cell_history.csv"
+)
 CANDIDATE_V2_STRENGTH_THRESHOLDS = (
     0.00, 0.25, 0.50, 0.75, 1.00, 1.50,
 )
@@ -18708,7 +18711,7 @@ def _candidate_v1_render_execution_matrix(history, key_prefix, retests_df=None):
         grid_c1, grid_c2 = st.columns(2)
         tp_raw = grid_c1.text_input(
             "TP grid %",
-            value="0.5,1.0,1.5,2.0,2.5,3.0",
+            value="0.25,0.35,0.5,0.75,1.0,1.5,2.0,2.5,3.0",
             key=f"{key_prefix}_tp_grid",
         )
         sl_raw = grid_c2.text_input(
@@ -20763,6 +20766,246 @@ def _candidate_v2_mature_snapshot_summary(selected_pair, min_maturity=80.0):
     return result.reset_index(drop=True)
 
 
+
+def _candidate_v2_load_selected_cell_history():
+    path = CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        history = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+    return history
+
+
+def _candidate_v2_append_selected_cell_history(
+    cell_anatomy,
+    *,
+    variant,
+    selected_tp,
+    selected_sl,
+    horizon_min,
+    source_candidates,
+    snapshot_created_at,
+):
+    """Persist one selected-cell checkpoint only when the matrix is rebuilt."""
+    if cell_anatomy is None or cell_anatomy.empty:
+        return
+
+    total = cell_anatomy.loc[
+        cell_anatomy["Side"].astype(str).eq("TOTAL")
+    ]
+    if total.empty:
+        return
+
+    row = total.iloc[0]
+
+    record = {
+        "snapshot_created_at_epoch": float(snapshot_created_at),
+        "snapshot_created_at_utc": (
+            pd.to_datetime(
+                float(snapshot_created_at),
+                unit="s",
+                utc=True,
+                errors="coerce",
+            ).isoformat()
+        ),
+        "Variant": str(variant),
+        "TP %": float(selected_tp),
+        "SL %": float(selected_sl),
+        "Horizon min": int(horizon_min),
+        "Source candidates": int(source_candidates),
+        "Candidates": int(row.get("Candidates", 0) or 0),
+        "Resolved": int(row.get("Resolved", 0) or 0),
+        "Pending": int(row.get("Pending", 0) or 0),
+        "TP": int(row.get("TP", 0) or 0),
+        "SL": int(row.get("SL", 0) or 0),
+        "Time exit": int(row.get("Time exit", 0) or 0),
+        "Net pts": pd.to_numeric(
+            pd.Series([row.get("Net pts", np.nan)]),
+            errors="coerce",
+        ).iloc[0],
+        "Avg %": pd.to_numeric(
+            pd.Series([row.get("Avg %", np.nan)]),
+            errors="coerce",
+        ).iloc[0],
+        "PF": pd.to_numeric(
+            pd.Series([row.get("PF", np.nan)]),
+            errors="coerce",
+        ).iloc[0],
+        "WR %": pd.to_numeric(
+            pd.Series([row.get("WR %", np.nan)]),
+            errors="coerce",
+        ).iloc[0],
+    }
+
+    path = CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    history = _candidate_v2_load_selected_cell_history()
+    history = pd.concat(
+        [
+            history,
+            pd.DataFrame([record]),
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+
+    # Keep the research file bounded while retaining a long history.
+    if len(history) > 5000:
+        history = history.tail(5000).copy()
+
+    tmp = path.with_suffix(".tmp.csv")
+    history.to_csv(
+        tmp,
+        index=False,
+    )
+    tmp.replace(path)
+
+
+def _candidate_v2_selected_cell_history_view(
+    *,
+    variant,
+    selected_tp,
+    selected_sl,
+    horizon_min,
+):
+    history = _candidate_v2_load_selected_cell_history()
+    if history.empty:
+        return pd.DataFrame()
+
+    for column in [
+        "TP %",
+        "SL %",
+        "Horizon min",
+    ]:
+        if column in history.columns:
+            history[column] = pd.to_numeric(
+                history[column],
+                errors="coerce",
+            )
+
+    mask = (
+        history.get(
+            "Variant",
+            pd.Series("", index=history.index),
+        ).astype(str).eq(str(variant))
+        & pd.to_numeric(
+            history.get(
+                "TP %",
+                pd.Series(np.nan, index=history.index),
+            ),
+            errors="coerce",
+        ).sub(float(selected_tp)).abs().lt(1e-9)
+        & pd.to_numeric(
+            history.get(
+                "SL %",
+                pd.Series(np.nan, index=history.index),
+            ),
+            errors="coerce",
+        ).sub(float(selected_sl)).abs().lt(1e-9)
+        & pd.to_numeric(
+            history.get(
+                "Horizon min",
+                pd.Series(np.nan, index=history.index),
+            ),
+            errors="coerce",
+        ).eq(int(horizon_min))
+    )
+
+    selected = history.loc[mask].copy()
+    if selected.empty:
+        return pd.DataFrame()
+
+    selected = selected.sort_values(
+        "snapshot_created_at_epoch",
+        kind="stable",
+    )
+
+    selected["Snapshot local"] = (
+        pd.to_datetime(
+            selected[
+                "snapshot_created_at_epoch"
+            ],
+            unit="s",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+        .dt.strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+    numeric = [
+        "Candidates",
+        "Resolved",
+        "Pending",
+        "TP",
+        "SL",
+        "Time exit",
+        "Net pts",
+        "Avg %",
+        "PF",
+        "WR %",
+    ]
+    for column in numeric:
+        if column in selected.columns:
+            selected[column] = pd.to_numeric(
+                selected[column],
+                errors="coerce",
+            )
+
+    selected["Δ Net pts"] = selected[
+        "Net pts"
+    ].diff()
+    selected["Δ Resolved"] = selected[
+        "Resolved"
+    ].diff()
+    selected["Δ Pending"] = selected[
+        "Pending"
+    ].diff()
+    selected["Δ TP"] = selected[
+        "TP"
+    ].diff()
+    selected["Δ SL"] = selected[
+        "SL"
+    ].diff()
+    selected["Δ Time exit"] = selected[
+        "Time exit"
+    ].diff()
+
+    columns = [
+        "Snapshot local",
+        "Candidates",
+        "Resolved",
+        "Pending",
+        "TP",
+        "SL",
+        "Time exit",
+        "Net pts",
+        "Δ Net pts",
+        "Δ Resolved",
+        "Δ Pending",
+        "Δ TP",
+        "Δ SL",
+        "Δ Time exit",
+        "PF",
+        "WR %",
+    ]
+    return selected[
+        [
+            column
+            for column in columns
+            if column in selected.columns
+        ]
+    ].tail(30).reset_index(
+        drop=True
+    )
+
+
 def _candidate_v2_selected_cell_anatomy(
     selected_pair,
     variant,
@@ -22507,6 +22750,324 @@ def _candidate_v2_room_audit_summary(audit):
     }
 
 
+
+def _candidate_v2_1h_breadth_preference_score(frame):
+    """Side-aware 1h breadth preference.
+
+    Research hypothesis from the existing transition tables:
+    LONG:  EXPANDING > STABLE > CONTRACTING
+    SHORT: CONTRACTING > STABLE > EXPANDING
+
+    This is a preference score only. It does not filter unless a hard gate is
+    explicitly selected.
+    """
+    if frame is None or frame.empty:
+        return pd.Series(dtype=float)
+
+    side = (
+        frame.get(
+            "side",
+            pd.Series("", index=frame.index),
+        )
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    state = (
+        frame.get(
+            "breadth_direction_1h",
+            pd.Series("UNKNOWN", index=frame.index),
+        )
+        .fillna("UNKNOWN")
+        .astype(str)
+        .str.upper()
+    )
+
+    score = pd.Series(
+        -1.0,
+        index=frame.index,
+        dtype=float,
+    )
+
+    long_map = {
+        "EXPANDING": 3.0,
+        "STABLE": 2.0,
+        "CONTRACTING": 1.0,
+    }
+    short_map = {
+        "CONTRACTING": 3.0,
+        "STABLE": 2.0,
+        "EXPANDING": 1.0,
+    }
+
+    for label, value in long_map.items():
+        score.loc[
+            side.eq("LONG")
+            & state.eq(label)
+        ] = value
+
+    for label, value in short_map.items():
+        score.loc[
+            side.eq("SHORT")
+            & state.eq(label)
+        ] = value
+
+    return score
+
+
+def _candidate_v2_btc_breadth_preference_score(frame):
+    """Exploratory side-aware BTC × breadth preference.
+
+    This is intentionally kept as a ranking hypothesis, not a frozen strategy
+    rule. It reflects the current descriptive ordering we want to test:
+    LONG  : BTC_DOWN/BREADTH_UP > BTC_DOWN/BREADTH_DOWN >
+            BTC_UP/BREADTH_UP > BTC_UP/BREADTH_DOWN
+    SHORT : BTC_DOWN/BREADTH_DOWN > BTC_DOWN/BREADTH_UP >
+            BTC_UP/BREADTH_DOWN > BTC_UP/BREADTH_UP
+
+    MIXED/UNKNOWN stays behind the four explicit states.
+    """
+    if frame is None or frame.empty:
+        return pd.Series(dtype=float)
+
+    side = (
+        frame.get(
+            "side",
+            pd.Series("", index=frame.index),
+        )
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    state = (
+        frame.get(
+            "btc_breadth_divergence_1h",
+            pd.Series("UNKNOWN", index=frame.index),
+        )
+        .fillna("UNKNOWN")
+        .astype(str)
+        .str.upper()
+    )
+
+    score = pd.Series(
+        0.0,
+        index=frame.index,
+        dtype=float,
+    )
+
+    long_map = {
+        "BTC_DOWN_BREADTH_UP": 4.0,
+        "BTC_DOWN_BREADTH_DOWN": 3.0,
+        "BTC_UP_BREADTH_UP": 2.0,
+        "BTC_UP_BREADTH_DOWN": 1.0,
+    }
+    short_map = {
+        "BTC_DOWN_BREADTH_DOWN": 4.0,
+        "BTC_DOWN_BREADTH_UP": 3.0,
+        "BTC_UP_BREADTH_DOWN": 2.0,
+        "BTC_UP_BREADTH_UP": 1.0,
+    }
+
+    for label, value in long_map.items():
+        score.loc[
+            side.eq("LONG")
+            & state.eq(label)
+        ] = value
+
+    for label, value in short_map.items():
+        score.loc[
+            side.eq("SHORT")
+            & state.eq(label)
+        ] = value
+
+    return score
+
+
+def _candidate_v2_market_1h_preference_score(frame):
+    """Side-adjusted 1h Market Flow state already attached to each REACTION."""
+    if frame is None or frame.empty:
+        return pd.Series(dtype=float)
+
+    state = (
+        frame.get(
+            "Market alignment 1h",
+            pd.Series("UNKNOWN", index=frame.index),
+        )
+        .fillna("UNKNOWN")
+        .astype(str)
+        .str.upper()
+    )
+
+    return (
+        state.map({
+            "TAILWIND": 3.0,
+            "MIXED": 2.0,
+            "HEADWIND": 1.0,
+        })
+        .fillna(0.0)
+        .astype(float)
+    )
+
+
+def _candidate_v2_market_flow_gate_mask(
+    frame,
+    gate_mode="OFF",
+):
+    """Hard-gate Candidate V2 rows using causal 1h Market Flow fields.
+
+    A hard gate changes whether a signal is allowed to reach the same-minute
+    selector. OFF preserves the current V2 Strength + Flow universe.
+    """
+    if frame is None or frame.empty:
+        return pd.Series(
+            False,
+            index=getattr(frame, "index", None),
+            dtype=bool,
+        )
+
+    mode = str(
+        gate_mode
+        or "OFF"
+    )
+
+    side = (
+        frame.get(
+            "side",
+            pd.Series("", index=frame.index),
+        )
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    breadth = (
+        frame.get(
+            "breadth_direction_1h",
+            pd.Series("UNKNOWN", index=frame.index),
+        )
+        .fillna("UNKNOWN")
+        .astype(str)
+        .str.upper()
+    )
+    btc_breadth = (
+        frame.get(
+            "btc_breadth_divergence_1h",
+            pd.Series("UNKNOWN", index=frame.index),
+        )
+        .fillna("UNKNOWN")
+        .astype(str)
+        .str.upper()
+    )
+    market_1h = (
+        frame.get(
+            "Market alignment 1h",
+            pd.Series("UNKNOWN", index=frame.index),
+        )
+        .fillna("UNKNOWN")
+        .astype(str)
+        .str.upper()
+    )
+
+    all_rows = pd.Series(
+        True,
+        index=frame.index,
+        dtype=bool,
+    )
+
+    if mode == "OFF":
+        return all_rows
+
+    breadth_side_aware = (
+        (
+            side.eq("LONG")
+            & breadth.isin(
+                ["EXPANDING", "STABLE"]
+            )
+        )
+        |
+        (
+            side.eq("SHORT")
+            & breadth.eq(
+                "CONTRACTING"
+            )
+        )
+    )
+
+    btc_down = (
+        btc_breadth.str.startswith(
+            "BTC_DOWN_",
+            na=False,
+        )
+    )
+
+    market_tailwind = (
+        market_1h.eq(
+            "TAILWIND"
+        )
+    )
+
+    market_not_headwind = (
+        market_1h.isin(
+            ["TAILWIND", "MIXED"]
+        )
+    )
+
+    if mode == "Breadth side-aware":
+        return breadth_side_aware
+
+    if mode == "BTC_DOWN only":
+        return btc_down
+
+    if mode == "Market 1h TAILWIND only":
+        return market_tailwind
+
+    if mode == "Market 1h NOT HEADWIND":
+        return market_not_headwind
+
+    if mode == "Breadth side-aware + BTC_DOWN":
+        return (
+            breadth_side_aware
+            & btc_down
+        )
+
+    if mode == "Breadth side-aware + 1h NOT HEADWIND":
+        return (
+            breadth_side_aware
+            & market_not_headwind
+        )
+
+    if mode == "BTC_DOWN + 1h NOT HEADWIND":
+        return (
+            btc_down
+            & market_not_headwind
+        )
+
+    if (
+        mode
+        == "Breadth side-aware + BTC_DOWN + 1h NOT HEADWIND"
+    ):
+        return (
+            breadth_side_aware
+            & btc_down
+            & market_not_headwind
+        )
+
+    return all_rows
+
+
+def _candidate_v2_market_flow_gate_modes():
+    return [
+        "OFF",
+        "Breadth side-aware",
+        "BTC_DOWN only",
+        "Market 1h TAILWIND only",
+        "Market 1h NOT HEADWIND",
+        "Breadth side-aware + BTC_DOWN",
+        "Breadth side-aware + 1h NOT HEADWIND",
+        "BTC_DOWN + 1h NOT HEADWIND",
+        "Breadth side-aware + BTC_DOWN + 1h NOT HEADWIND",
+    ]
+
+
 def _candidate_v2_portfolio_priority(
     group,
     priority_mode,
@@ -22560,6 +23121,88 @@ def _candidate_v2_portfolio_priority(
     def strength_series():
         return numeric(
             "side_adjusted_strength_vs_btc_4h"
+        )
+
+    def causal_room_components():
+        room_audit = (
+            _candidate_v2_room_causality_components(
+                work
+            )
+        )
+        verified = (
+            room_audit[
+                "room_causal_verified"
+            ]
+            .fillna(False)
+            .astype(bool)
+        )
+        room = numeric(
+            "nearest_opposing_room_pct"
+        ).where(
+            verified
+        )
+        return verified, room
+
+    def sort_with_room_and_preference(
+        preference,
+        *,
+        room_first,
+    ):
+        verified, room = (
+            causal_room_components()
+        )
+        work[
+            "_flow_preference_score"
+        ] = pd.to_numeric(
+            preference,
+            errors="coerce",
+        )
+        work[
+            "_room_causal_verified"
+        ] = verified
+        work[
+            "_room_score"
+        ] = room
+        work[
+            "_strength_score"
+        ] = strength_series()
+
+        if room_first:
+            columns = [
+                "_room_causal_verified",
+                "_room_score",
+                "_flow_preference_score",
+                "_strength_score",
+                "symbol",
+            ]
+            ascending = [
+                False,
+                False,
+                False,
+                False,
+                True,
+            ]
+        else:
+            columns = [
+                "_flow_preference_score",
+                "_room_causal_verified",
+                "_room_score",
+                "_strength_score",
+                "symbol",
+            ]
+            ascending = [
+                False,
+                False,
+                False,
+                False,
+                True,
+            ]
+
+        return work.sort_values(
+            columns,
+            ascending=ascending,
+            na_position="last",
+            kind="stable",
         )
 
     def sector_directional_strength():
@@ -22742,6 +23385,77 @@ def _candidate_v2_portfolio_priority(
             ],
             na_position="last",
             kind="stable",
+        )
+
+    # --------------------------------------------------------------
+    # Causal 1h Market Flow preference × causal HTF Room.
+    # Preference modes do NOT remove candidates. They only decide which
+    # signal wins when multiple entries are executable in the same minute.
+    # --------------------------------------------------------------
+    if (
+        priority_mode
+        == "1h Breadth → Room → Strength"
+    ):
+        return sort_with_room_and_preference(
+            _candidate_v2_1h_breadth_preference_score(
+                work
+            ),
+            room_first=False,
+        )
+
+    if (
+        priority_mode
+        == "Room → 1h Breadth → Strength"
+    ):
+        return sort_with_room_and_preference(
+            _candidate_v2_1h_breadth_preference_score(
+                work
+            ),
+            room_first=True,
+        )
+
+    if (
+        priority_mode
+        == "BTC×Breadth → Room → Strength"
+    ):
+        return sort_with_room_and_preference(
+            _candidate_v2_btc_breadth_preference_score(
+                work
+            ),
+            room_first=False,
+        )
+
+    if (
+        priority_mode
+        == "Room → BTC×Breadth → Strength"
+    ):
+        return sort_with_room_and_preference(
+            _candidate_v2_btc_breadth_preference_score(
+                work
+            ),
+            room_first=True,
+        )
+
+    if (
+        priority_mode
+        == "Market 1h → Room → Strength"
+    ):
+        return sort_with_room_and_preference(
+            _candidate_v2_market_1h_preference_score(
+                work
+            ),
+            room_first=False,
+        )
+
+    if (
+        priority_mode
+        == "Room → Market 1h → Strength"
+    ):
+        return sort_with_room_and_preference(
+            _candidate_v2_market_1h_preference_score(
+                work
+            ),
+            room_first=True,
         )
 
     # --------------------------------------------------------------
@@ -23087,6 +23801,7 @@ def _candidate_v2_portfolio_simulation(
     sizing_mode="Margin % equity",
     fixed_margin_usd=150.0,
     margin_per_trade_pct=80.0,
+    market_flow_gate_mode="OFF",
 ):
     """Chronological portfolio simulation using resolved Candidate V2 executions.
 
@@ -23157,6 +23872,64 @@ def _candidate_v2_portfolio_simulation(
 
     if work.empty:
         return {}
+
+    pre_gate_eligible = int(
+        len(work)
+    )
+    gate_mask = (
+        _candidate_v2_market_flow_gate_mask(
+            work,
+            market_flow_gate_mode,
+        )
+        .reindex(
+            work.index,
+            fill_value=False,
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    work = work.loc[
+        gate_mask
+    ].copy()
+    gated_out = int(
+        pre_gate_eligible
+        - len(work)
+    )
+
+    if work.empty:
+        return {
+            "summary": {
+                "Starting equity": float(
+                    starting_equity
+                ),
+                "Final equity": float(
+                    starting_equity
+                ),
+                "Net PnL $": 0.0,
+                "Return %": 0.0,
+                "Max drawdown $": 0.0,
+                "Max drawdown %": 0.0,
+                "Portfolio PF": np.nan,
+                "Pre-gate eligible": int(
+                    pre_gate_eligible
+                ),
+                "Eligible trades": 0,
+                "Gated out": int(
+                    gated_out
+                ),
+                "Accepted trades": 0,
+                "Skipped trades": 0,
+                "Accepted %": 0.0,
+                "Market Flow gate": str(
+                    market_flow_gate_mode
+                ),
+                "Priority mode": str(
+                    priority_mode
+                ),
+            },
+            "ledger": pd.DataFrame(),
+            "equity_curve": pd.DataFrame(),
+        }
 
     work = work.sort_values(
         ["_entry_ts", "symbol"],
@@ -23852,8 +24625,14 @@ def _candidate_v2_portfolio_simulation(
             )
             else np.nan
         ),
+        "Pre-gate eligible": int(
+            pre_gate_eligible
+        ),
         "Eligible trades": int(
             len(work)
+        ),
+        "Gated out": int(
+            gated_out
         ),
         "Accepted trades": int(
             len(accepted)
@@ -23932,6 +24711,9 @@ def _candidate_v2_portfolio_simulation(
         ),
         "Priority mode": str(
             priority_mode
+        ),
+        "Market Flow gate": str(
+            market_flow_gate_mode
         ),
         "Sizing mode": str(
             sizing_mode
@@ -24096,6 +24878,7 @@ def _candidate_v2_one_slot_selector_study(
             priority_mode=mode,
             sizing_mode="Margin % equity",
             margin_per_trade_pct=margin_per_trade_pct,
+            market_flow_gate_mode="OFF",
         )
         summary = result.get("summary", {}) if result else {}
         if not summary:
@@ -24236,6 +25019,12 @@ def _candidate_v2_one_slot_selector_modes():
         "Strength + Volume consensus",
         "Strength + Sector consensus",
         "Strength + Room consensus",
+        "1h Breadth → Room → Strength",
+        "Room → 1h Breadth → Strength",
+        "BTC×Breadth → Room → Strength",
+        "Room → BTC×Breadth → Strength",
+        "Market 1h → Room → Strength",
+        "Room → Market 1h → Strength",
         "Best 1h alignment → Strength",
         "Best directional Δ breadth 1h → Strength",
     ]
@@ -24256,6 +25045,12 @@ def _candidate_v2_one_slot_selector_short_name(mode):
         "Strength + Volume consensus": "S+Volume",
         "Strength + Sector consensus": "S+Sector",
         "Strength + Room consensus": "S+Room",
+        "1h Breadth → Room → Strength": "1h breadth→Room",
+        "Room → 1h Breadth → Strength": "Room→1h breadth",
+        "BTC×Breadth → Room → Strength": "BTC×breadth→Room",
+        "Room → BTC×Breadth → Strength": "Room→BTC×breadth",
+        "Market 1h → Room → Strength": "Market1h→Room",
+        "Room → Market 1h → Strength": "Room→Market1h",
         "Best 1h alignment → Strength": "1h align",
         "Best directional Δ breadth 1h → Strength": "Δ breadth 1h",
     }
@@ -25467,6 +26262,325 @@ def _candidate_v2_one_slot_margin_leverage_grid(
 
     return pd.DataFrame(rows)
 
+
+def _candidate_v2_portfolio_outcome_counts(result):
+    ledger = (
+        result.get(
+            "ledger",
+            pd.DataFrame(),
+        )
+        if result
+        else pd.DataFrame()
+    )
+    if ledger is None or ledger.empty:
+        return {
+            "TP": 0,
+            "SL": 0,
+            "TIME_EXIT": 0,
+        }
+
+    accepted = ledger.loc[
+        ledger.get(
+            "Accepted",
+            pd.Series(
+                False,
+                index=ledger.index,
+            ),
+        )
+        .fillna(False)
+        .astype(bool)
+    ].copy()
+
+    if accepted.empty:
+        return {
+            "TP": 0,
+            "SL": 0,
+            "TIME_EXIT": 0,
+        }
+
+    outcomes = (
+        accepted.get(
+            "Outcome",
+            pd.Series("", index=accepted.index),
+        )
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    return {
+        "TP": int(
+            outcomes.eq("TP").sum()
+        ),
+        "SL": int(
+            outcomes.isin(
+                ["SL", "SL_AMBIGUOUS"]
+            ).sum()
+        ),
+        "TIME_EXIT": int(
+            outcomes.eq("TIME_EXIT").sum()
+        ),
+    }
+
+
+def _candidate_v2_market_flow_incremental_lab(
+    intervals,
+    *,
+    starting_equity,
+    selected_sl_pct,
+    max_margin_pct,
+    leverage=3,
+    margin_per_trade_pct=80.0,
+):
+    """Compare Room baseline vs 1h preference, hard-gate and hybrid variants."""
+    if intervals is None or intervals.empty:
+        return pd.DataFrame()
+
+    scenarios = [
+        (
+            "BASELINE",
+            "Room baseline",
+            "Most HTF Room → Strength",
+            "OFF",
+        ),
+        (
+            "PREFERENCE",
+            "1h Breadth → Room",
+            "1h Breadth → Room → Strength",
+            "OFF",
+        ),
+        (
+            "PREFERENCE",
+            "Room → 1h Breadth",
+            "Room → 1h Breadth → Strength",
+            "OFF",
+        ),
+        (
+            "PREFERENCE",
+            "BTC×Breadth → Room",
+            "BTC×Breadth → Room → Strength",
+            "OFF",
+        ),
+        (
+            "PREFERENCE",
+            "Room → BTC×Breadth",
+            "Room → BTC×Breadth → Strength",
+            "OFF",
+        ),
+        (
+            "PREFERENCE",
+            "Market1h → Room",
+            "Market 1h → Room → Strength",
+            "OFF",
+        ),
+        (
+            "PREFERENCE",
+            "Room → Market1h",
+            "Room → Market 1h → Strength",
+            "OFF",
+        ),
+        (
+            "HARD GATE",
+            "Breadth side-aware gate",
+            "Most HTF Room → Strength",
+            "Breadth side-aware",
+        ),
+        (
+            "HARD GATE",
+            "BTC_DOWN gate",
+            "Most HTF Room → Strength",
+            "BTC_DOWN only",
+        ),
+        (
+            "HARD GATE",
+            "Market1h TAILWIND gate",
+            "Most HTF Room → Strength",
+            "Market 1h TAILWIND only",
+        ),
+        (
+            "HARD GATE",
+            "Market1h NOT HEADWIND gate",
+            "Most HTF Room → Strength",
+            "Market 1h NOT HEADWIND",
+        ),
+        (
+            "HARD GATE",
+            "Breadth + BTC_DOWN gate",
+            "Most HTF Room → Strength",
+            "Breadth side-aware + BTC_DOWN",
+        ),
+        (
+            "HYBRID",
+            "Breadth gate + BTC×Breadth preference",
+            "BTC×Breadth → Room → Strength",
+            "Breadth side-aware",
+        ),
+        (
+            "HYBRID",
+            "BTC_DOWN gate + Breadth preference",
+            "1h Breadth → Room → Strength",
+            "BTC_DOWN only",
+        ),
+        (
+            "HYBRID",
+            "Breadth + BTC_DOWN gate + Room→Market1h",
+            "Room → Market 1h → Strength",
+            "Breadth side-aware + BTC_DOWN",
+        ),
+    ]
+
+    rows = []
+
+    for (
+        mode,
+        label,
+        selector,
+        gate,
+    ) in scenarios:
+        result = (
+            _candidate_v2_portfolio_simulation(
+                intervals,
+                starting_equity=(
+                    starting_equity
+                ),
+                leverage=(
+                    leverage
+                ),
+                max_slots=1,
+                selected_sl_pct=(
+                    selected_sl_pct
+                ),
+                max_margin_pct=(
+                    max_margin_pct
+                ),
+                compound=True,
+                priority_mode=selector,
+                sizing_mode=(
+                    "Margin % equity"
+                ),
+                margin_per_trade_pct=(
+                    margin_per_trade_pct
+                ),
+                market_flow_gate_mode=gate,
+            )
+        )
+
+        summary = (
+            result.get(
+                "summary",
+                {},
+            )
+            if result
+            else {}
+        )
+
+        if not summary:
+            continue
+
+        counts = (
+            _candidate_v2_portfolio_outcome_counts(
+                result
+            )
+        )
+
+        pf = summary.get(
+            "Portfolio PF",
+            np.nan,
+        )
+        pf_display = (
+            round(
+                float(pf),
+                3,
+            )
+            if pd.notna(pf)
+            and np.isfinite(
+                float(pf)
+            )
+            else pf
+        )
+
+        rows.append({
+            "Mode": mode,
+            "Test": label,
+            "Selector": selector,
+            "Hard gate": gate,
+            "Pre-gate": int(
+                summary.get(
+                    "Pre-gate eligible",
+                    0,
+                )
+            ),
+            "Eligible after gate": int(
+                summary.get(
+                    "Eligible trades",
+                    0,
+                )
+            ),
+            "Gated out": int(
+                summary.get(
+                    "Gated out",
+                    0,
+                )
+            ),
+            "Accepted": int(
+                summary.get(
+                    "Accepted trades",
+                    0,
+                )
+            ),
+            "TP": int(
+                counts["TP"]
+            ),
+            "SL": int(
+                counts["SL"]
+            ),
+            "Time exit": int(
+                counts["TIME_EXIT"]
+            ),
+            "Raw net pts": round(
+                float(
+                    summary.get(
+                        "Raw net pts accepted",
+                        0.0,
+                    )
+                ),
+                4,
+            ),
+            "Final equity $": round(
+                float(
+                    summary.get(
+                        "Final equity",
+                        np.nan,
+                    )
+                ),
+                2,
+            ),
+            "Return %": round(
+                float(
+                    summary.get(
+                        "Return %",
+                        np.nan,
+                    )
+                ),
+                3,
+            ),
+            "Max DD %": round(
+                float(
+                    summary.get(
+                        "Max drawdown %",
+                        np.nan,
+                    )
+                ),
+                3,
+            ),
+            "PF": pf_display,
+        })
+
+    return pd.DataFrame(
+        rows
+    )
+
+
 def _candidate_v2_portfolio_scenario_grid(
     intervals,
     *,
@@ -26055,6 +27169,12 @@ def render_candidate_v2_research(retests_df):
             "Notional / trade USDT", min_value=1.0, value=100.0, step=10.0,
             key="candidate_v2_notional"
         )
+        st.caption(
+            "TP grid now includes 0.25% and 0.35% for micro-target research. "
+            "With the current default 0.05% entry + 0.05% exit fees, a 0.25% "
+            "gross TP leaves only about 0.15% before slippage, so interpret the "
+            "smallest targets mainly as execution-sensitivity research."
+        )
         recalc = st.form_submit_button(
             "Apply / recalculate V2 matrix",
             use_container_width=True,
@@ -26185,7 +27305,7 @@ def render_candidate_v2_research(retests_df):
     p1, p2 = st.columns(2)
     tp_list = list(snap_tp)
     sl_list = list(snap_sl)
-    tp_index = min(range(len(tp_list)), key=lambda i: abs(tp_list[i] - 2.0))
+    tp_index = min(range(len(tp_list)), key=lambda i: abs(tp_list[i] - 0.5))
     sl_index = min(range(len(sl_list)), key=lambda i: abs(sl_list[i] - 2.0))
     selected_tp = p1.selectbox(
         "Inspect V2 TP",
@@ -26241,6 +27361,307 @@ def render_candidate_v2_research(retests_df):
             mime="text/csv",
             key="candidate_v2_selected_cell_anatomy_download",
         )
+
+    # Persist the selected cell only on an explicit matrix rebuild.
+    if (
+        (recalc or force_paths)
+        and cell_anatomy is not None
+        and not cell_anatomy.empty
+    ):
+        _candidate_v2_append_selected_cell_history(
+            cell_anatomy,
+            variant=variant,
+            selected_tp=selected_tp,
+            selected_sl=selected_sl,
+            horizon_min=snap_horizon,
+            source_candidates=len(scoped),
+            snapshot_created_at=float(
+                snapshot.get(
+                    "created_at",
+                    time.time(),
+                )
+            ),
+        )
+
+    if cell_anatomy is not None and not cell_anatomy.empty:
+        total_anatomy = cell_anatomy.loc[
+            cell_anatomy[
+                "Side"
+            ].astype(str).eq(
+                "TOTAL"
+            )
+        ]
+
+        if not total_anatomy.empty:
+            total_row = total_anatomy.iloc[0]
+            maturity_candidates = int(
+                total_row.get(
+                    "Candidates",
+                    0,
+                )
+                or 0
+            )
+            maturity_resolved = int(
+                total_row.get(
+                    "Resolved",
+                    0,
+                )
+                or 0
+            )
+            maturity_pending = int(
+                total_row.get(
+                    "Pending",
+                    0,
+                )
+                or 0
+            )
+            maturity_pending_pct = (
+                (
+                    maturity_pending
+                    / maturity_candidates
+                    * 100.0
+                )
+                if maturity_candidates
+                else np.nan
+            )
+            maturity_net = pd.to_numeric(
+                pd.Series([
+                    total_row.get(
+                        "Net pts",
+                        np.nan,
+                    )
+                ]),
+                errors="coerce",
+            ).iloc[0]
+
+            selected_history = (
+                _candidate_v2_selected_cell_history_view(
+                    variant=variant,
+                    selected_tp=selected_tp,
+                    selected_sl=selected_sl,
+                    horizon_min=snap_horizon,
+                )
+            )
+
+            net_delta = np.nan
+            if len(selected_history) >= 2:
+                net_delta = pd.to_numeric(
+                    pd.Series([
+                        selected_history.iloc[-1].get(
+                            "Δ Net pts",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+
+            st.markdown(
+                "##### ⏳ Selected-cell maturity / drift"
+            )
+            st.caption(
+                "PENDING rows are excluded from matrix Net pts until they resolve. "
+                "As new REACTIONs arrive or old PENDING paths mature into TP, SL or "
+                "TIME_EXIT, the same TP/SL cell can move materially. The history "
+                "below is persisted only when you explicitly rebuild the matrix."
+            )
+
+            md1, md2, md3, md4, md5 = st.columns(5)
+            md1.metric(
+                "Candidates",
+                maturity_candidates,
+            )
+            md2.metric(
+                "Resolved",
+                maturity_resolved,
+            )
+            md3.metric(
+                "Pending",
+                maturity_pending,
+                delta=(
+                    f"{maturity_pending_pct:.1f}% of candidates"
+                    if pd.notna(
+                        maturity_pending_pct
+                    )
+                    else None
+                ),
+            )
+            md4.metric(
+                "Net pts now",
+                (
+                    f"{float(maturity_net):+.2f}"
+                    if pd.notna(
+                        maturity_net
+                    )
+                    else "—"
+                ),
+                delta=(
+                    f"{float(net_delta):+.2f} vs prior rebuild"
+                    if pd.notna(
+                        net_delta
+                    )
+                    else None
+                ),
+            )
+            md5.metric(
+                "Snapshot source N",
+                int(
+                    len(
+                        scoped
+                    )
+                ),
+            )
+
+            if not selected_history.empty:
+                with st.expander(
+                    "Selected-cell rebuild history",
+                    expanded=False,
+                ):
+                    st.dataframe(
+                        selected_history,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "candidate_v2_"
+                            "selected_cell_history"
+                        ),
+                    )
+                    st.download_button(
+                        "Download selected-cell history CSV",
+                        data=selected_history.to_csv(
+                            index=False
+                        ).encode(
+                            "utf-8"
+                        ),
+                        file_name=(
+                            f"candidate_v2_cell_history_"
+                            f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                            f"tp{float(selected_tp):g}_"
+                            f"sl{float(selected_sl):g}_"
+                            f"{snap_horizon}m.csv"
+                        ),
+                        mime="text/csv",
+                        key=(
+                            "candidate_v2_"
+                            "selected_cell_history_download"
+                        ),
+                    )
+
+            selected_variant_mask = (
+                _candidate_v2_variant_mask(
+                    selected_pair,
+                    variant,
+                    strong_threshold=strong_threshold,
+                )
+            )
+            pending_rows = selected_pair.loc[
+                selected_variant_mask.fillna(
+                    False
+                )
+                & selected_pair.get(
+                    "Outcome",
+                    pd.Series(
+                        "",
+                        index=selected_pair.index,
+                    ),
+                )
+                .fillna("")
+                .astype(str)
+                .eq("PENDING")
+            ].copy()
+
+            if not pending_rows.empty:
+                pending_rows["Entry"] = (
+                    pd.to_datetime(
+                        pd.to_numeric(
+                            pending_rows.get(
+                                "entry_timestamp",
+                                pd.Series(
+                                    np.nan,
+                                    index=pending_rows.index,
+                                ),
+                            ),
+                            errors="coerce",
+                        ),
+                        unit="ms",
+                        utc=True,
+                        errors="coerce",
+                    )
+                    .dt.tz_convert(TZ)
+                    .dt.strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                )
+
+                pending_columns = [
+                    "symbol",
+                    "side",
+                    "Entry",
+                    "entry_price",
+                    "observed_bars",
+                    "path_complete",
+                    "candidate_v1_event_key",
+                ]
+                pending_columns = [
+                    column
+                    for column in pending_columns
+                    if column in pending_rows.columns
+                ]
+
+                pending_display = (
+                    pending_rows[
+                        pending_columns
+                    ]
+                    .copy()
+                    .rename(
+                        columns={
+                            "symbol": "Symbol",
+                            "side": "Side",
+                            "entry_price": "Entry price",
+                            "observed_bars": "Observed 1m bars",
+                            "path_complete": "Path complete",
+                            "candidate_v1_event_key": "Event key",
+                        }
+                    )
+                )
+
+                with st.expander(
+                    f"Pending / unresolved · {len(pending_display)} trades",
+                    expanded=False,
+                ):
+                    st.caption(
+                        "These are research paths that have not yet resolved for "
+                        "this TP/SL/horizon snapshot. They are not counted in Net pts. "
+                        "A PENDING row does not prove an exchange position is currently "
+                        "open; it means the replay does not yet have a resolved TP, SL "
+                        "or complete TIME_EXIT for that event."
+                    )
+                    st.dataframe(
+                        pending_display,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "candidate_v2_"
+                            "selected_cell_pending"
+                        ),
+                    )
+                    st.download_button(
+                        "Download pending selected-cell CSV",
+                        data=pending_display.to_csv(
+                            index=False
+                        ).encode("utf-8"),
+                        file_name=(
+                            f"candidate_v2_pending_"
+                            f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                            f"tp{float(selected_tp):g}_"
+                            f"sl{float(selected_sl):g}_"
+                            f"{snap_horizon}m.csv"
+                        ),
+                        mime="text/csv",
+                        key=(
+                            "candidate_v2_"
+                            "selected_cell_pending_download"
+                        ),
+                    )
 
 
     st.markdown("##### Execution simultaneity / capacity · selected cell")
@@ -26801,7 +28222,7 @@ def render_candidate_v2_research(retests_df):
         portfolio_leverage = ps2.selectbox(
             "Leverage",
             options=[1, 3, 5, 10],
-            index=2,
+            index=1,
             format_func=lambda value: f"x{value}",
             key="candidate_v2_portfolio_leverage",
         )
@@ -26809,7 +28230,7 @@ def render_candidate_v2_research(retests_df):
         portfolio_slots = ps3.selectbox(
             "Max simultaneous slots",
             options=[1, 2, 3, 5, 10, 20, 30],
-            index=4,
+            index=0,
             key="candidate_v2_portfolio_slots",
         )
 
@@ -26852,7 +28273,7 @@ def render_candidate_v2_research(retests_df):
             "Same-minute priority",
             options=priority_options,
             index=priority_options.index(
-                "Highest Strength vs BTC 4h"
+                "Most HTF Room → Strength"
             ),
             key="candidate_v2_portfolio_priority",
             help=(
@@ -26878,7 +28299,10 @@ def render_candidate_v2_research(retests_df):
 - **Candidate V1 Driver first → Strength:** prefer V1-driver candidates, then symbol strength.
 - **Most aligned RSI extremes → Strength:** most aligned extreme RSI timeframes, then strength.
 - **Consensus modes:** no fitted weights; minimize the sum of ordinal ranks for Strength + Volume / Sector / Room.
-- **1h modes:** market-state priority followed by symbol strength.
+- **1h Breadth → Room / Room → 1h Breadth:** side-aware EXPANDING/STABLE/CONTRACTING preference combined with causal HTF Room.
+- **BTC×Breadth → Room / Room → BTC×Breadth:** exploratory causal BTC/breadth-state preference combined with Room.
+- **Market 1h → Room / Room → Market 1h:** TAILWIND/MIXED/HEADWIND preference combined with Room.
+- **1h modes:** market-state preference only; they never remove a signal unless a hard gate is selected separately.
                 """
             )
 
@@ -27064,6 +28488,29 @@ def render_candidate_v2_research(retests_df):
                 "No HTF Room provenance is available in this selected V2 cell."
             )
 
+
+        st.markdown(
+            "###### 1h Market Flow · hard gate"
+        )
+        st.caption(
+            "OFF keeps the current V2 Strength + Flow universe. A hard gate "
+            "removes candidates BEFORE the same-minute selector. Preference "
+            "selectors above do not remove candidates; they only decide which "
+            "signal wins when several arrive together."
+        )
+
+        portfolio_market_flow_gate = st.selectbox(
+            "Market Flow hard gate",
+            options=(
+                _candidate_v2_market_flow_gate_modes()
+            ),
+            index=0,
+            key=(
+                "candidate_v2_"
+                "portfolio_market_flow_gate"
+            ),
+        )
+
         ps8, ps9, ps10 = st.columns(3)
         portfolio_sizing_mode = ps8.selectbox(
             "Position sizing mode",
@@ -27119,6 +28566,9 @@ def render_candidate_v2_research(retests_df):
             sizing_mode=portfolio_sizing_mode,
             fixed_margin_usd=portfolio_fixed_margin,
             margin_per_trade_pct=portfolio_margin_per_trade_pct,
+            market_flow_gate_mode=(
+                portfolio_market_flow_gate
+            ),
         )
 
         if portfolio_result:
@@ -27279,6 +28729,15 @@ def render_candidate_v2_research(retests_df):
                     f"{float(portfolio_summary.get('Raw net pts accepted', 0.0)):+.2f} "
                     f"/ {float(portfolio_summary.get('Raw net pts all', 0.0)):+.2f}"
                 ),
+            )
+
+            st.caption(
+                f"Pre-gate eligible: "
+                f"{int(portfolio_summary.get('Pre-gate eligible', portfolio_summary.get('Eligible trades', 0)))} · "
+                f"Gated out: "
+                f"{int(portfolio_summary.get('Gated out', 0))} · "
+                f"Hard gate: "
+                f"{portfolio_summary.get('Market Flow gate', 'OFF')}."
             )
 
             st.caption(
@@ -27716,6 +29175,64 @@ def render_candidate_v2_research(retests_df):
                     key=(
                         "candidate_v2_"
                         "room_leverage_download"
+                    ),
+                )
+
+
+            st.markdown(
+                "###### 🧭 1h Market Flow incremental lab · Room baseline"
+            )
+            st.caption(
+                "This is the clean comparison before live. Every row uses the "
+                "same selected V2 TP/SL/horizon, $ starting equity, ONE slot, "
+                "80% realized-equity margin and x3. BASELINE is pure causal "
+                "Most HTF Room → Strength. PREFERENCE changes only same-minute "
+                "ordering; HARD GATE removes signals first; HYBRID does both."
+            )
+
+            flow_incremental_table = (
+                _candidate_v2_market_flow_incremental_lab(
+                    resolved_concurrency,
+                    starting_equity=(
+                        portfolio_starting_equity
+                    ),
+                    selected_sl_pct=(
+                        selected_sl
+                    ),
+                    max_margin_pct=(
+                        portfolio_margin_cap
+                    ),
+                    leverage=3,
+                    margin_per_trade_pct=80.0,
+                )
+            )
+
+            if not flow_incremental_table.empty:
+                st.dataframe(
+                    flow_incremental_table,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_"
+                        "market_flow_incremental_lab"
+                    ),
+                )
+                st.download_button(
+                    "Download 1h Market Flow incremental lab CSV",
+                    data=flow_incremental_table.to_csv(
+                        index=False
+                    ).encode("utf-8"),
+                    file_name=(
+                        f"candidate_v2_1h_flow_incremental_"
+                        f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                        f"tp{float(selected_tp):g}_"
+                        f"sl{float(selected_sl):g}_"
+                        f"{snap_horizon}m.csv"
+                    ),
+                    mime="text/csv",
+                    key=(
+                        "candidate_v2_"
+                        "market_flow_incremental_download"
                     ),
                 )
 
