@@ -153,6 +153,15 @@ class WSClient:
         self._stale_callback_count = 0
         self._last_stale_callback_log_at = 0.0
 
+        # A ThreadedWebsocketManager can rarely get stuck alive after stop().
+        # One such manager may be force-detached so a fresh generation can
+        # recover the feed. If another manager gets stuck while the previous
+        # orphan is still alive, the process is considered contaminated and
+        # the parent service must restart cleanly.
+        self._orphaned_ws_managers = []
+        self._forced_detach_count = 0
+        self.fatal_error = None
+
 
 
         self._coverage_lock = threading.Lock()
@@ -457,904 +466,26 @@ class WSClient:
 
 
 
-            stopped = self._stop_ws()
-
-
+            stopped = self._stop_ws(
+                allow_forced_detach=True,
+            )
 
             if not stopped:
-
-                raise RuntimeError(
-
-                    "Existing WebSocket manager could not be stopped cleanly"
-
-                )
-
-
-
-        try:
-
-            ws_loop = asyncio.new_event_loop()
-
-            asyncio.set_event_loop(ws_loop)
-
-
-
-            self.twm = ThreadedWebsocketManager(
-
-                loop=ws_loop
-
-            )
-
-
-
-            self.twm.start()
-
-
-
-            time.sleep(3)
-
-
-
-            total_streams = 0
-
-
-
-            for i, symbols_chunk in enumerate(
-
-                self._chunk_list(self.symbols, self.chunk_size),
-
-                start=1
-
-            ):
-
-                streams = [
-
-                    f"{symbol.lower()}@kline_{tf}"
-
-                    for symbol in symbols_chunk
-
-                    for tf in self.timeframes
-
-                ]
-
-                kline_stream_count = len(streams)
-
-                if self.include_agg_trades:
-
-                    streams.extend(
-
-                        f"{symbol.lower()}@aggTrade"
-
-                        for symbol in symbols_chunk
-
-                    )
-
-                agg_trade_stream_count = (
-
-                    len(symbols_chunk)
-
-                    if self.include_agg_trades
-
-                    else 0
-
-                )
-
-
-
-                group_id = i
-
-                group_symbols = tuple(symbols_chunk)
-
-
-
-                self._group_symbols[group_id] = group_symbols
-
-                self._group_last_message[group_id] = 0.0
-
-                self._group_message_count[group_id] = 0
-
-
-
-                socket_key = self.twm.start_futures_multiplex_socket(
-
-                    streams=streams,
-
-                    callback=lambda msg, gid=group_id, gen=connection_generation: self._handle_message(
-
-                        msg,
-
-                        group_id=gid,
-
-                        generation=gen,
-
-                    ),
-
-                )
-
-
-
-                self._group_socket_keys[group_id] = socket_key
-
-
-
-                total_streams += len(streams)
-
-
-
-                print(
-                    f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-                    f"📡 WS group {group_id}: "
-                    f"symbols={len(group_symbols)} "
-                    f"streams={len(streams)} "
-                    f"kline_streams={kline_stream_count} "
-                    f"agg_trade_streams={agg_trade_stream_count} "
-                    f"first={group_symbols[0] if group_symbols else '-'} "
-                    f"last={group_symbols[-1] if group_symbols else '-'}"
-                )
-
-
-
-                time.sleep(1)
-
-
-
-            validation_started = time.time()
-
-
-
-            print(
-
-                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-
-                f"⏳ Waiting for all {len(self._group_symbols)} WS groups..."
-
-            )
-
-
-
-            while time.time() - validation_started < self._group_ready_timeout:
-
-                missing_groups = [
-
-                    group_id
-
-                    for group_id in self._group_symbols
-
-                    if self._group_message_count.get(group_id, 0) <= 0
-
-                ]
-
-
-
-                if not missing_groups:
-
-                    break
-
-
-
-                time.sleep(1)
-
-
-
-            else:
-
-                missing_groups = [
-
-                    group_id
-
-                    for group_id in self._group_symbols
-
-                    if self._group_message_count.get(group_id, 0) <= 0
-
-                ]
-
-
-
-                missing_details = {
-
-                    group_id: self._group_symbols.get(group_id, ())
-
-                    for group_id in missing_groups
-
-                }
-
-
-
-                raise RuntimeError(
-
-                    f"WS initialization incomplete: "
-
-                    f"groups without messages={missing_details}"
-
-                )
-
-
-
-            self._connected_at = time.time()
-            self.is_connected = True
-
-
-
-            self.retries = 0
-
-            self._is_reconnecting = False
-
-
-
-            print(
-
-                f"\n\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-
-                f"✅ WS ready "
-
-                f"groups={len(self._group_symbols)}/{len(self._group_symbols)} "
-
-                f"total_streams={total_streams}\n"
-
-            )
-
-
-
-        except Exception:
-
-            self._stop_ws()
-
-            self.is_connected = False
-
-            self.last_message_at = 0.0
-
-            raise
-
-
-
-    def _register_closed_candle_coverage(
-
-        self,
-
-        msg,
-
-    ):
-
-        if isinstance(msg, dict) and "data" in msg:
-
-            payload = msg["data"]
-
-        else:
-
-            payload = msg
-
-
-
-        if not isinstance(payload, dict):
-
-            return
-
-
-
-        if payload.get("e") not in (
-
-            "continuous_kline",
-
-            "kline",
-
-        ):
-
-            return
-
-
-
-        kline = payload.get("k")
-
-
-
-        if not isinstance(kline, dict):
-
-            return
-
-
-
-        timeframe = str(
-
-            kline.get("i", "")
-
-        ).lower()
-
-
-
-        if timeframe != COVERAGE_AUDIT_TIMEFRAME:
-
-            return
-
-
-
-        if not kline.get("x"):
-
-            return
-
-
-
-        symbol = (
-
-            payload.get("s")
-
-            or payload.get("ps")
-
-        )
-
-
-
-        if not symbol:
-
-            return
-
-
-
-        symbol = str(symbol).upper()
-
-
-
-        try:
-
-            close_ts = int(kline["T"])
-
-        except (
-
-            KeyError,
-
-            TypeError,
-
-            ValueError,
-
-        ):
-
-            return
-
-
-
-        now = time.monotonic()
-
-
-
-        with self._coverage_lock:
-
-            batch = (
-
-                self._closed_candle_coverage
-
-                .setdefault(
-
-                    close_ts,
-
-                    {
-
-                        "symbols": set(),
-
-                        "first_seen_at": now,
-
-                        "last_seen_at": now,
-
-                    },
-
-                )
-
-            )
-
-
-
-            batch["symbols"].add(symbol)
-
-            batch["last_seen_at"] = now
-
-
-
-    def _report_closed_candle_coverage(
-
-        self,
-
-    ):
-
-        now = time.monotonic()
-
-
-
-        expected_symbols = set(
-
-            str(symbol).upper()
-
-            for symbol in self.symbols
-
-        )
-
-
-
-        reports = []
-
-
-
-        with self._coverage_lock:
-
-            for close_ts in sorted(
-
-                self._closed_candle_coverage
-
-            ):
-
-                if close_ts in self._coverage_reported:
-
-                    continue
-
-
-
-                batch = (
-
-                    self._closed_candle_coverage[
-
-                        close_ts
-
-                    ]
-
-                )
-
-
-
-                age_seconds = (
-
-                    now
-
-                    - batch["first_seen_at"]
-
-                )
-
-
-
-                if (
-
-                    age_seconds
-
-                    < COVERAGE_AUDIT_SETTLE_SECONDS
-
-                ):
-
-                    continue
-
-
-
-                received_symbols = set(
-
-                    batch["symbols"]
-
-                )
-
-
-
-                missing_symbols = sorted(
-
-                    expected_symbols
-
-                    - received_symbols
-
-                )
-
-
-
-                reports.append({
-
-                    "close_ts": close_ts,
-
-                    "received": len(
-
-                        received_symbols
-
-                    ),
-
-                    "expected": len(
-
-                        expected_symbols
-
-                    ),
-
-                    "missing_symbols": (
-
-                        missing_symbols
-
-                    ),
-
-                    "age_seconds": (
-
-                        age_seconds
-
-                    ),
-
-                })
-
-
-
-                self._coverage_reported.add(
-
-                    close_ts
-
-                )
-
-
-
-            # No dejamos crecer esto indefinidamente.
-
-            if len(self._coverage_reported) > 20:
-
-                reported_sorted = sorted(
-
-                    self._coverage_reported
-
-                )
-
-
-
-                keep = set(
-
-                    reported_sorted[-10:]
-
-                )
-
-
-
-                self._coverage_reported = keep
-
-
-
-                self._closed_candle_coverage = {
-
-                    ts: batch
-
-                    for ts, batch
-
-                    in self._closed_candle_coverage.items()
-
-                    if ts in keep
-
-                    or (
-
-                        now
-
-                        - batch["first_seen_at"]
-
-                        < COVERAGE_AUDIT_SETTLE_SECONDS
-
-                    )
-
-                }
-
-
-
-        for report in reports:
-
-            missing = report[
-
-                "missing_symbols"
-
-            ]
-
-
-
-            print(
-
-                "[WS TF COVERAGE] "
-
-                f"tf={COVERAGE_AUDIT_TIMEFRAME} "
-
-                f"close_ts={report['close_ts']} "
-
-                f"received={report['received']}/"
-
-                f"{report['expected']} "
-
-                f"missing={len(missing)} "
-
-                f"missing_symbols="
-
-                f"{','.join(missing) if missing else '-'} "
-
-                f"waited="
-
-                f"{report['age_seconds']:.1f}s"
-
-            )
-
-
-
-    def _handle_message(
-        self,
-        msg,
-        group_id=None,
-        generation=None,
-    ):
-
-        try:
-
-            if (
-                generation is not None
-                and generation != self._connection_generation
-            ):
-                self._stale_callback_count += 1
-
-                now = time.time()
-                if (
-                    now - self._last_stale_callback_log_at
-                    >= 30.0
-                ):
+                if self.fatal_error:
                     print(
-                        f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-                        "ℹ️ Ignoring stale callbacks "
-                        f"count={self._stale_callback_count} "
-                        f"callback_generation={generation} "
-                        f"active_generation={self._connection_generation}"
+                        f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
+                        "❌ Reconnect escalation requested: "
+                        f"{self.fatal_error}"
                     )
-                    self._stale_callback_count = 0
-                    self._last_stale_callback_log_at = now
-
-                return
-
-            if isinstance(msg, dict) and msg.get("e") == "error":
-                now = time.time()
-                signature = (
-                    str(msg.get("type") or "error"),
-                    str(msg.get("m") or ""),
-                )
-                should_log = (
-                    signature != self._last_error_signature
-                    or now - self._last_error_log_at >= 5.0
-                )
-
-                if should_log:
-                    suppressed = self._suppressed_error_count
-                    suffix = (
-                        f" suppressed={suppressed}"
-                        if suppressed
-                        else ""
-                    )
-                    print(
-                        f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-                        f"⚠️ WS error: {msg}{suffix}"
-                    )
-                    self._last_error_signature = signature
-                    self._last_error_log_at = now
-                    self._suppressed_error_count = 0
-                else:
-                    self._suppressed_error_count += 1
-
-                self.is_connected = False
-                self._is_reconnecting = True
-                return
-
-
-
-            now = time.time()
-
-
-
-            if group_id is not None:
-
-                self._group_last_message[group_id] = now
-
-                self._group_message_count[group_id] = (
-
-                    self._group_message_count.get(group_id, 0) + 1
-
-                )
-
-
-
-            self.last_message_at = now
-
-            # Connection health is promoted only after every multiplex group
-            # has produced at least one message. During reconnect, the first
-            # group may receive data while later groups are still starting.
-            self.connect_started_at = 0.0
-
-            self.handshake_failures = 0
-
-
-
-            if not self._first_message_logged:
-
-                self._first_message_logged = True
-
-
+                    self._is_reconnecting = False
+                    return
 
                 print(
-
-                    f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-
-                    "✅ First WebSocket message received"
-
-                )
-
-
-
-            callback_started = time.perf_counter()
-
-
-
-            if self.enable_coverage_audit:
-                self._register_closed_candle_coverage(
-                    msg
-                )
-
-            self.on_message(msg)
-
-
-
-            callback_elapsed = time.perf_counter() - callback_started
-
-
-
-            self._callback_samples += 1
-
-            self._callback_total_time += callback_elapsed
-
-
-
-            if callback_elapsed > self._callback_max_time:
-
-                self._callback_max_time = callback_elapsed
-
-
-
-            if callback_elapsed >= 0.010:
-
-                self._callback_slow_10ms += 1
-
-
-
-            if callback_elapsed >= 0.050:
-
-                self._callback_slow_50ms += 1
-
-
-
-            if callback_elapsed >= 0.100:
-
-                self._callback_slow_100ms += 1
-
-
-
-            now = time.time()
-
-
-
-            if now - self._last_callback_stats_log >= 30:
-
-                avg_ms = (
-
-                    self._callback_total_time
-
-                    / max(self._callback_samples, 1)
-
-                    * 1000
-
-                )
-
-
-
-                max_ms = self._callback_max_time * 1000
-
-
-
-                print(
-
-                    f"\033[94m[WS CALLBACK:{self.client_name}]\033[0m "
-
-                    f"samples={self._callback_samples} "
-
-                    f"avg={avg_ms:.2f}ms "
-
-                    f"max={max_ms:.2f}ms "
-
-                    f"slow_10ms={self._callback_slow_10ms} "
-
-                    f"slow_50ms={self._callback_slow_50ms} "
-
-                    f"slow_100ms={self._callback_slow_100ms}"
-
-                )
-
-
-
-                self._callback_samples = 0
-
-                self._callback_total_time = 0.0
-
-                self._callback_max_time = 0.0
-
-                self._callback_slow_10ms = 0
-
-                self._callback_slow_50ms = 0
-
-                self._callback_slow_100ms = 0
-
-                self._last_callback_stats_log = now
-
-
-
-        except Exception as e:
-
-            print(
-
-                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-
-                f"❌ Callback error: {e}"
-
-            )
-
-
-
-    def _reconnect(self):
-
-        with self._reconnect_lock:
-
-            if not self.running:
-
-                return
-
-
-
-            if not self._is_reconnecting:
-
-                return
-
-
-
-            now = time.time()
-
-
-
-            remaining = self.min_reconnect_interval - (
-
-                now - self._last_reconnect
-
-            )
-
-
-
-            if remaining > 0:
-
-                time.sleep(min(remaining, 1.0))
-
-                return
-
-
-
-            self._last_reconnect = now
-
-
-
-            print(f"\033[94m[WS CLIENT:{self.client_name}]\033[0m 🔄 Starting reconnect...")
-
-
-
-            self.is_connected = False
-
-            self.last_message_at = 0.0
-
-
-
-            stopped = self._stop_ws()
-
-
-
-            if not stopped:
-
-                print(
-
                     f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
-
-                    "❌ Reconnect aborted: previous WS manager is still alive"
-
+                    "❌ Reconnect aborted: previous WS manager "
+                    "could not be stopped"
                 )
-
-
-
                 self._is_reconnecting = True
-
                 return
 
 
@@ -1425,80 +556,139 @@ class WSClient:
 
 
 
-    def _stop_ws(self):
+    def _prune_orphaned_ws_managers(self):
+        alive = []
 
-        twm = self.twm
+        for item in self._orphaned_ws_managers:
+            twm = item["manager"]
 
+            try:
+                is_alive = bool(twm.is_alive())
+            except Exception:
+                is_alive = True
 
-
-        if twm is None:
-
-            return True
-
-
-
-        try:
+            if is_alive:
+                alive.append(item)
+                continue
 
             print(
-
                 f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-
-                "🛑 Stopping WS manager..."
-
+                "✅ Detached WS manager exited "
+                f"generation={item['generation']}"
             )
 
+        self._orphaned_ws_managers = alive
+        return alive
 
+
+    def _set_fatal_error(self, message):
+        if self.fatal_error is not None:
+            return
+
+        self.fatal_error = str(message)
+        self.is_connected = False
+        self._is_reconnecting = False
+        self.last_message_at = 0.0
+
+        print(
+            f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
+            f"🛑 FATAL {self.fatal_error}"
+        )
+
+
+    def _force_detach_ws_manager(self, twm):
+        alive_orphans = self._prune_orphaned_ws_managers()
+
+        if alive_orphans:
+            generations = [
+                item["generation"]
+                for item in alive_orphans
+            ]
+            self._set_fatal_error(
+                "another WS manager failed to stop while an older "
+                "detached manager is still alive "
+                f"orphan_generations={generations}"
+            )
+            return False
+
+        detached_generation = self._connection_generation
+
+        # Invalidate callbacks immediately, before the reconnect delay. The
+        # detached manager may still emit ReadLoopClosed/error callbacks, but
+        # _handle_message() will reject them as stale.
+        self._connection_generation += 1
+
+        if self.twm is twm:
+            self.twm = None
+
+        self._orphaned_ws_managers.append(
+            {
+                "manager": twm,
+                "generation": detached_generation,
+                "detached_at": time.time(),
+            }
+        )
+        self._forced_detach_count += 1
+
+        print(
+            f"\033[93m[WS CLIENT:{self.client_name}]\033[0m "
+            "⚠️ FORCE DETACH stale WS manager "
+            f"generation={detached_generation} "
+            f"new_callback_generation={self._connection_generation} "
+            f"forced_detaches={self._forced_detach_count}"
+        )
+
+        return True
+
+
+    def _stop_ws(self, allow_forced_detach=False):
+        twm = self.twm
+
+        if twm is None:
+            self._prune_orphaned_ws_managers()
+            return True
+
+        try:
+            print(
+                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
+                "🛑 Stopping WS manager..."
+            )
 
             twm.stop()
 
-
-
             if twm.is_alive():
-
                 twm.join(timeout=15)
 
-
-
             if twm.is_alive():
-
                 print(
-
                     f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
-
                     "❌ WS manager did not stop within 15s"
-
                 )
+
+                if allow_forced_detach:
+                    return self._force_detach_ws_manager(twm)
 
                 return False
 
+            if self.twm is twm:
+                self.twm = None
 
-
-            self.twm = None
-
-
+            self._prune_orphaned_ws_managers()
 
             print(
-
                 f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-
                 "✅ WS manager stopped"
-
             )
-
-
 
             return True
 
-
-
         except Exception as e:
-
             print(
-
                 f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
-
                 f"❌ Stop error: {e}"
-
             )
+
+            if allow_forced_detach:
+                return self._force_detach_ws_manager(twm)
 
             return False

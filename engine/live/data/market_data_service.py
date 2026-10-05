@@ -482,6 +482,7 @@ class MarketDataService:
                         
                 self._check_micro_flow_ws_transport(now_ms)
 
+                self._check_ws_client_fatal_errors()
                 self._check_ws_connection_watchdog()
 
                 if not self.ws_recovery_in_progress:
@@ -2819,6 +2820,36 @@ class MarketDataService:
         self.ws_connecting_since_monotonic = None
 
 
+    def _check_ws_client_fatal_errors(self):
+        for label, client in (
+            ("core", self.ws),
+            ("micro-flow", self.micro_flow_ws),
+        ):
+            if client is None:
+                continue
+
+            fatal_error = getattr(
+                client,
+                "fatal_error",
+                None,
+            )
+
+            if not fatal_error:
+                continue
+
+            print(
+                "[MARKET DATA WS SUPERVISOR] "
+                f"FATAL client={label} "
+                f"reason={fatal_error} "
+                "forcing process restart"
+            )
+
+            raise RuntimeError(
+                f"WS client {label} requested process restart: "
+                f"{fatal_error}"
+            )
+
+
     def _check_ws_connection_watchdog(self):
         connected = bool(
             self.ws
@@ -3038,6 +3069,38 @@ class MarketDataService:
             "micro_flow_ws_connected": bool(
                 self.micro_flow_ws
                 and self.micro_flow_ws.is_connected
+            ),
+            "core_ws_fatal_error": (
+                getattr(self.ws, "fatal_error", None)
+                if self.ws is not None
+                else None
+            ),
+            "micro_flow_ws_fatal_error": (
+                getattr(
+                    self.micro_flow_ws,
+                    "fatal_error",
+                    None,
+                )
+                if self.micro_flow_ws is not None
+                else None
+            ),
+            "core_ws_forced_detaches": int(
+                getattr(
+                    self.ws,
+                    "_forced_detach_count",
+                    0,
+                )
+                if self.ws is not None
+                else 0
+            ),
+            "micro_flow_ws_forced_detaches": int(
+                getattr(
+                    self.micro_flow_ws,
+                    "_forced_detach_count",
+                    0,
+                )
+                if self.micro_flow_ws is not None
+                else 0
             ),
             "micro_flow_transport_gap_open": bool(
                 self.micro_flow_transport_gap_open
