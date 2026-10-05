@@ -23062,6 +23062,920 @@ def _candidate_v2_one_slot_selector_study(
     return pd.DataFrame(rows)
 
 
+
+def _candidate_v2_one_slot_selector_modes():
+    return [
+        "First signal / symbol tie-break",
+        "Highest Strength vs BTC 4h",
+        "Highest Return rank 4h",
+        "Highest Volume rank 4h",
+        "Best 1h alignment → Strength",
+        "Best directional Δ breadth 1h → Strength",
+    ]
+
+
+def _candidate_v2_one_slot_selector_short_name(mode):
+    mapping = {
+        "First signal / symbol tie-break": "First",
+        "Highest Strength vs BTC 4h": "Strength",
+        "Highest Return rank 4h": "Return rank",
+        "Highest Volume rank 4h": "Volume rank",
+        "Best 1h alignment → Strength": "1h align",
+        "Best directional Δ breadth 1h → Strength": "Δ breadth 1h",
+    }
+    return mapping.get(
+        str(mode),
+        str(mode),
+    )
+
+
+def _candidate_v2_one_slot_realized_path(
+    intervals,
+    *,
+    selector_mode,
+    starting_equity,
+    fixed_margin_usd,
+    leverage,
+    max_margin_pct,
+):
+    """Reconstruct the exact chronological one-slot path for one selector.
+
+    The selector only ranks candidates that are executable at the same entry
+    minute while the single slot is free. A later signal never replaces an
+    already-open trade. Realized balance is updated on each historical exit so
+    the same margin-cap behavior as the portfolio simulator is respected.
+    """
+    if intervals is None or intervals.empty:
+        return pd.DataFrame()
+
+    work = intervals.copy()
+
+    required = {
+        "_entry_ts",
+        "_effective_exit_ts",
+        "net_pnl_pct",
+    }
+    if not required.issubset(work.columns):
+        return pd.DataFrame()
+
+    work["_entry_ts"] = pd.to_numeric(
+        work["_entry_ts"],
+        errors="coerce",
+    )
+    work["_effective_exit_ts"] = pd.to_numeric(
+        work["_effective_exit_ts"],
+        errors="coerce",
+    )
+    work["_selector_net_pct"] = pd.to_numeric(
+        work["net_pnl_pct"],
+        errors="coerce",
+    )
+
+    work = work.loc[
+        work["_entry_ts"].notna()
+        & work["_effective_exit_ts"].notna()
+        & work["_selector_net_pct"].notna()
+        & work["_effective_exit_ts"].gt(
+            work["_entry_ts"]
+        )
+    ].copy()
+
+    if work.empty:
+        return pd.DataFrame()
+
+    work = work.sort_values(
+        ["_entry_ts", "symbol"],
+        kind="stable",
+    )
+
+    balance = float(starting_equity)
+    active = None
+    rows = []
+    notional_usd = (
+        float(fixed_margin_usd)
+        * float(leverage)
+    )
+
+    def close_if_due(entry_ts):
+        nonlocal active
+        nonlocal balance
+
+        if active is None:
+            return
+
+        if int(active["exit_ts"]) <= int(entry_ts):
+            balance += float(
+                active["pnl_usd"]
+            )
+            active = None
+
+    for entry_ts, group in work.groupby(
+        "_entry_ts",
+        sort=True,
+    ):
+        entry_ts = int(entry_ts)
+
+        close_if_due(entry_ts)
+
+        if active is not None:
+            continue
+
+        if balance <= 0:
+            continue
+
+        margin_limit_usd = (
+            float(balance)
+            * float(max_margin_pct)
+            / 100.0
+        )
+
+        if (
+            float(fixed_margin_usd)
+            > margin_limit_usd
+            + 1e-12
+        ):
+            continue
+
+        ranked = _candidate_v2_portfolio_priority(
+            group,
+            selector_mode,
+        )
+
+        if ranked is None or ranked.empty:
+            continue
+
+        chosen = ranked.iloc[0]
+
+        net_pct = float(
+            chosen["_selector_net_pct"]
+        )
+        pnl_usd = (
+            notional_usd
+            * net_pct
+            / 100.0
+        )
+        exit_ts = int(
+            chosen["_effective_exit_ts"]
+        )
+        hold_min = (
+            exit_ts
+            - entry_ts
+        ) / 60_000.0
+
+        event_key = (
+            chosen.get(
+                "candidate_v1_event_key"
+            )
+            if "candidate_v1_event_key"
+            in chosen.index
+            else chosen.get(
+                "candidate_v2_event_key"
+            )
+        )
+
+        row = {
+            "Selector": str(
+                selector_mode
+            ),
+            "Selector short": (
+                _candidate_v2_one_slot_selector_short_name(
+                    selector_mode
+                )
+            ),
+            "Entry timestamp": int(
+                entry_ts
+            ),
+            "Exit timestamp": int(
+                exit_ts
+            ),
+            "Symbol": str(
+                chosen.get(
+                    "symbol",
+                    "",
+                )
+            ),
+            "Side": str(
+                chosen.get(
+                    "side",
+                    "",
+                )
+            ),
+            "Outcome": str(
+                chosen.get(
+                    "Outcome",
+                    "",
+                )
+            ),
+            "Hold min": round(
+                float(hold_min),
+                2,
+            ),
+            "Trade net %": round(
+                float(net_pct),
+                4,
+            ),
+            "PnL $": round(
+                float(pnl_usd),
+                4,
+            ),
+            "Entry equity $": round(
+                float(balance),
+                4,
+            ),
+            "Margin $": round(
+                float(
+                    fixed_margin_usd
+                ),
+                4,
+            ),
+            "Notional $": round(
+                float(
+                    notional_usd
+                ),
+                4,
+            ),
+            "Strength vs BTC 4h %": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "side_adjusted_strength_vs_btc_4h",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "Return rank 4h %": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "return_rank_pct_4h",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "Volume rank 4h %": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "volume_rank_pct_4h",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "Market 1h": str(
+                chosen.get(
+                    "Market alignment 1h",
+                    "",
+                )
+            ),
+            "Breadth Δ1h pp": (
+                pd.to_numeric(
+                    pd.Series([
+                        chosen.get(
+                            "breadth_delta_1h",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0]
+            ),
+            "Event key": str(
+                event_key
+                if event_key is not None
+                else ""
+            ),
+        }
+
+        rows.append(row)
+
+        active = {
+            "exit_ts": int(
+                exit_ts
+            ),
+            "pnl_usd": float(
+                pnl_usd
+            ),
+        }
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(
+        rows
+    )
+
+    for column in [
+        "Strength vs BTC 4h %",
+        "Return rank 4h %",
+        "Volume rank 4h %",
+        "Breadth Δ1h pp",
+    ]:
+        if column in result.columns:
+            result[column] = pd.to_numeric(
+                result[column],
+                errors="coerce",
+            ).round(4)
+
+    result["Entry"] = (
+        pd.to_datetime(
+            result["Entry timestamp"],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+        .dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    )
+
+    result["Exit"] = (
+        pd.to_datetime(
+            result["Exit timestamp"],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+        .dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    )
+
+    display_order = [
+        "Selector",
+        "Entry",
+        "Exit",
+        "Symbol",
+        "Side",
+        "Outcome",
+        "Hold min",
+        "Trade net %",
+        "PnL $",
+        "Entry equity $",
+        "Strength vs BTC 4h %",
+        "Return rank 4h %",
+        "Volume rank 4h %",
+        "Market 1h",
+        "Breadth Δ1h pp",
+        "Event key",
+        "Entry timestamp",
+        "Exit timestamp",
+    ]
+
+    return result[
+        [
+            column
+            for column in display_order
+            if column in result.columns
+        ]
+    ].copy()
+
+
+def _candidate_v2_same_minute_selector_batches(
+    intervals,
+):
+    """Compare selectors on the exact same multi-candidate minute.
+
+    This isolates ranking behavior from the one-slot holding-path effect.
+    """
+    if intervals is None or intervals.empty:
+        return pd.DataFrame()
+
+    work = intervals.copy()
+    work["_entry_ts"] = pd.to_numeric(
+        work.get(
+            "_entry_ts",
+            pd.Series(np.nan, index=work.index),
+        ),
+        errors="coerce",
+    )
+    work = work.loc[
+        work["_entry_ts"].notna()
+    ].copy()
+
+    if work.empty:
+        return pd.DataFrame()
+
+    selector_modes = (
+        _candidate_v2_one_slot_selector_modes()
+    )
+    rows = []
+
+    for entry_ts, group in work.groupby(
+        "_entry_ts",
+        sort=True,
+    ):
+        if len(group) <= 1:
+            continue
+
+        picks = {}
+        for mode in selector_modes:
+            ranked = (
+                _candidate_v2_portfolio_priority(
+                    group,
+                    mode,
+                )
+            )
+            if ranked is None or ranked.empty:
+                picks[mode] = ""
+                continue
+            picks[mode] = str(
+                ranked.iloc[0].get(
+                    "symbol",
+                    "",
+                )
+            )
+
+        nonempty = [
+            symbol
+            for symbol in picks.values()
+            if symbol
+        ]
+        unique_symbols = len(
+            set(
+                nonempty
+            )
+        )
+
+        row = {
+            "Entry timestamp": int(
+                entry_ts
+            ),
+            "Candidates": int(
+                len(group)
+            ),
+            "Unique selector picks": int(
+                unique_symbols
+            ),
+            "All selectors same": bool(
+                len(nonempty)
+                == len(
+                    selector_modes
+                )
+                and unique_symbols == 1
+            ),
+        }
+
+        for mode in selector_modes:
+            row[
+                _candidate_v2_one_slot_selector_short_name(
+                    mode
+                )
+            ] = picks.get(
+                mode,
+                "",
+            )
+
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(
+        rows
+    )
+    result["Entry"] = (
+        pd.to_datetime(
+            result["Entry timestamp"],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+        .dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    )
+
+    columns = [
+        "Entry",
+        "Candidates",
+        "First",
+        "Strength",
+        "Return rank",
+        "Volume rank",
+        "1h align",
+        "Δ breadth 1h",
+        "Unique selector picks",
+        "All selectors same",
+        "Entry timestamp",
+    ]
+
+    return result[
+        [
+            column
+            for column in columns
+            if column in result.columns
+        ]
+    ].copy()
+
+
+def _candidate_v2_selector_pairwise_agreement(
+    batch_comparison,
+):
+    if (
+        batch_comparison is None
+        or batch_comparison.empty
+    ):
+        return pd.DataFrame()
+
+    selector_columns = [
+        "First",
+        "Strength",
+        "Return rank",
+        "Volume rank",
+        "1h align",
+        "Δ breadth 1h",
+    ]
+
+    selector_columns = [
+        column
+        for column in selector_columns
+        if column in batch_comparison.columns
+    ]
+
+    rows = []
+
+    for i, left in enumerate(
+        selector_columns
+    ):
+        for right in selector_columns[
+            i + 1:
+        ]:
+            shared = batch_comparison.loc[
+                batch_comparison[
+                    left
+                ].fillna("").astype(str).ne("")
+                & batch_comparison[
+                    right
+                ].fillna("").astype(str).ne("")
+            ].copy()
+
+            if shared.empty:
+                continue
+
+            same = (
+                shared[left].astype(str)
+                == shared[right].astype(str)
+            )
+
+            rows.append({
+                "Selector A": left,
+                "Selector B": right,
+                "Shared batches": int(
+                    len(shared)
+                ),
+                "Same symbol": int(
+                    same.sum()
+                ),
+                "Agreement %": round(
+                    float(
+                        same.mean()
+                        * 100.0
+                    ),
+                    2,
+                ),
+            })
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+def _candidate_v2_realized_selector_timeline(
+    path_detail,
+):
+    """Wide union timeline of actual accepted one-slot trades per selector."""
+    if path_detail is None or path_detail.empty:
+        return pd.DataFrame()
+
+    work = path_detail.copy()
+
+    required = {
+        "Selector",
+        "Entry timestamp",
+        "Symbol",
+    }
+    if not required.issubset(
+        work.columns
+    ):
+        return pd.DataFrame()
+
+    selector_modes = (
+        _candidate_v2_one_slot_selector_modes()
+    )
+
+    timestamps = sorted(
+        pd.to_numeric(
+            work[
+                "Entry timestamp"
+            ],
+            errors="coerce",
+        )
+        .dropna()
+        .astype("int64")
+        .unique()
+        .tolist()
+    )
+
+    rows = []
+
+    for entry_ts in timestamps:
+        subset = work.loc[
+            pd.to_numeric(
+                work[
+                    "Entry timestamp"
+                ],
+                errors="coerce",
+            ).eq(
+                int(entry_ts)
+            )
+        ].copy()
+
+        row = {
+            "Entry timestamp": int(
+                entry_ts
+            ),
+        }
+
+        picks = []
+
+        for mode in selector_modes:
+            short = (
+                _candidate_v2_one_slot_selector_short_name(
+                    mode
+                )
+            )
+            selected = subset.loc[
+                subset[
+                    "Selector"
+                ].astype(str).eq(
+                    mode
+                )
+            ]
+
+            symbol = (
+                str(
+                    selected.iloc[0][
+                        "Symbol"
+                    ]
+                )
+                if not selected.empty
+                else ""
+            )
+            row[short] = symbol
+
+            if symbol:
+                picks.append(
+                    symbol
+                )
+
+        row[
+            "Selectors entering"
+        ] = int(
+            len(
+                picks
+            )
+        )
+        row[
+            "Unique symbols"
+        ] = int(
+            len(
+                set(
+                    picks
+                )
+            )
+        )
+        row[
+            "Same symbol among entering"
+        ] = bool(
+            len(picks) >= 2
+            and len(
+                set(
+                    picks
+                )
+            ) == 1
+        )
+
+        rows.append(row)
+
+    result = pd.DataFrame(
+        rows
+    )
+
+    result["Entry"] = (
+        pd.to_datetime(
+            result["Entry timestamp"],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+        .dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    )
+
+    columns = [
+        "Entry",
+        "First",
+        "Strength",
+        "Return rank",
+        "Volume rank",
+        "1h align",
+        "Δ breadth 1h",
+        "Selectors entering",
+        "Unique symbols",
+        "Same symbol among entering",
+        "Entry timestamp",
+    ]
+
+    return result[
+        [
+            column
+            for column in columns
+            if column in result.columns
+        ]
+    ].copy()
+
+
+def _candidate_v2_one_slot_selector_comparison(
+    intervals,
+    *,
+    starting_equity,
+    fixed_margin_usd,
+    leverage,
+    max_margin_pct,
+):
+    if intervals is None or intervals.empty:
+        return {}
+
+    selector_modes = (
+        _candidate_v2_one_slot_selector_modes()
+    )
+
+    paths = []
+
+    for mode in selector_modes:
+        path = (
+            _candidate_v2_one_slot_realized_path(
+                intervals,
+                selector_mode=mode,
+                starting_equity=starting_equity,
+                fixed_margin_usd=fixed_margin_usd,
+                leverage=leverage,
+                max_margin_pct=max_margin_pct,
+            )
+        )
+
+        if path is not None and not path.empty:
+            paths.append(
+                path
+            )
+
+    path_detail = (
+        pd.concat(
+            paths,
+            ignore_index=True,
+            sort=False,
+        )
+        if paths
+        else pd.DataFrame()
+    )
+
+    batch_comparison = (
+        _candidate_v2_same_minute_selector_batches(
+            intervals
+        )
+    )
+
+    pairwise = (
+        _candidate_v2_selector_pairwise_agreement(
+            batch_comparison
+        )
+    )
+
+    realized_timeline = (
+        _candidate_v2_realized_selector_timeline(
+            path_detail
+        )
+    )
+
+    multi_batches = int(
+        len(
+            batch_comparison
+        )
+    )
+
+    all_same_batches = (
+        int(
+            batch_comparison[
+                "All selectors same"
+            ].fillna(False).sum()
+        )
+        if (
+            not batch_comparison.empty
+            and "All selectors same"
+            in batch_comparison.columns
+        )
+        else 0
+    )
+
+    all_same_pct = (
+        float(
+            all_same_batches
+            / multi_batches
+            * 100.0
+        )
+        if multi_batches
+        else np.nan
+    )
+
+    shared_realized = (
+        realized_timeline.loc[
+            pd.to_numeric(
+                realized_timeline.get(
+                    "Selectors entering",
+                    pd.Series(
+                        dtype=float
+                    ),
+                ),
+                errors="coerce",
+            ).ge(2)
+        ].copy()
+        if not realized_timeline.empty
+        else pd.DataFrame()
+    )
+
+    realized_same = (
+        int(
+            shared_realized[
+                "Same symbol among entering"
+            ].fillna(False).sum()
+        )
+        if (
+            not shared_realized.empty
+            and "Same symbol among entering"
+            in shared_realized.columns
+        )
+        else 0
+    )
+
+    realized_same_pct = (
+        float(
+            realized_same
+            / len(
+                shared_realized
+            )
+            * 100.0
+        )
+        if len(
+            shared_realized
+        )
+        else np.nan
+    )
+
+    path_counts = (
+        path_detail.groupby(
+            "Selector",
+            dropna=False,
+        )
+        .size()
+        .rename(
+            "Accepted trades"
+        )
+        .reset_index()
+        if not path_detail.empty
+        else pd.DataFrame()
+    )
+
+    return {
+        "path_detail": path_detail,
+        "batch_comparison": batch_comparison,
+        "pairwise": pairwise,
+        "realized_timeline": realized_timeline,
+        "path_counts": path_counts,
+        "multi_batches": multi_batches,
+        "all_same_batches": all_same_batches,
+        "all_same_pct": all_same_pct,
+        "shared_realized_timestamps": int(
+            len(
+                shared_realized
+            )
+        ),
+        "realized_same_timestamps": int(
+            realized_same
+        ),
+        "realized_same_pct": realized_same_pct,
+    }
+
+
 def _candidate_v2_one_slot_margin_leverage_grid(
     intervals,
     *,
@@ -24934,6 +25848,294 @@ def render_candidate_v2_research(retests_df):
                     mime="text/csv",
                     key="candidate_v2_one_slot_selector_download",
                 )
+
+
+            selector_comparison = (
+                _candidate_v2_one_slot_selector_comparison(
+                    resolved_concurrency,
+                    starting_equity=portfolio_starting_equity,
+                    fixed_margin_usd=one_slot_margin,
+                    leverage=one_slot_leverage,
+                    max_margin_pct=portfolio_margin_cap,
+                )
+            )
+
+            if selector_comparison:
+                st.markdown(
+                    "###### 🔬 Selector Trade Comparison"
+                )
+                st.caption(
+                    "Two complementary views are shown. Same-minute batch "
+                    "agreement isolates the ranking rules themselves, independent "
+                    "of whether a selector is already holding a trade. Realized "
+                    "one-slot paths then show the actual chronological trades each "
+                    "selector would have accepted; paths can diverge because a "
+                    "different chosen trade can hold the only slot for a different "
+                    "amount of time."
+                )
+
+                sc1, sc2, sc3, sc4 = st.columns(4)
+
+                multi_batches = int(
+                    selector_comparison.get(
+                        "multi_batches",
+                        0,
+                    )
+                )
+                same_batches = int(
+                    selector_comparison.get(
+                        "all_same_batches",
+                        0,
+                    )
+                )
+                same_pct = selector_comparison.get(
+                    "all_same_pct",
+                    np.nan,
+                )
+                shared_realized = int(
+                    selector_comparison.get(
+                        "shared_realized_timestamps",
+                        0,
+                    )
+                )
+                realized_same_pct = selector_comparison.get(
+                    "realized_same_pct",
+                    np.nan,
+                )
+
+                sc1.metric(
+                    "Multi-signal minutes",
+                    multi_batches,
+                )
+                sc2.metric(
+                    "All selectors same",
+                    (
+                        f"{float(same_pct):.1f}%"
+                        if pd.notna(same_pct)
+                        else "—"
+                    ),
+                    delta=(
+                        f"{same_batches}/{multi_batches} batches"
+                        if multi_batches
+                        else None
+                    ),
+                    help=(
+                        "Among minutes with more than one candidate, percentage "
+                        "where all selector rules independently picked the exact "
+                        "same symbol."
+                    ),
+                )
+                sc3.metric(
+                    "Shared realized entries",
+                    shared_realized,
+                    help=(
+                        "Union-timeline minutes where at least two one-slot "
+                        "selector paths actually opened a trade."
+                    ),
+                )
+                sc4.metric(
+                    "Realized same symbol",
+                    (
+                        f"{float(realized_same_pct):.1f}%"
+                        if pd.notna(
+                            realized_same_pct
+                        )
+                        else "—"
+                    ),
+                    help=(
+                        "At shared realized entry timestamps, percentage where "
+                        "the selectors that were free and entered chose the same symbol."
+                    ),
+                )
+
+                batch_comparison = (
+                    selector_comparison.get(
+                        "batch_comparison",
+                        pd.DataFrame(),
+                    )
+                )
+
+                if not batch_comparison.empty:
+                    st.markdown(
+                        "###### Same-minute ranking decisions"
+                    )
+                    st.caption(
+                        "Every row is a minute with 2+ simultaneous Candidate V2 "
+                        "signals. This table answers whether Strength, Return Rank, "
+                        "Volume Rank and the 1h rules are genuinely selecting "
+                        "different symbols before one-slot occupancy is considered."
+                    )
+                    st.dataframe(
+                        batch_comparison,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "candidate_v2_selector_"
+                            "same_minute_batch_comparison"
+                        ),
+                    )
+                    st.download_button(
+                        "Download same-minute selector decisions CSV",
+                        data=batch_comparison.to_csv(
+                            index=False
+                        ).encode(
+                            "utf-8"
+                        ),
+                        file_name=(
+                            f"candidate_v2_selector_batches_"
+                            f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                            f"tp{float(selected_tp):g}_"
+                            f"sl{float(selected_sl):g}_"
+                            f"{snap_horizon}m.csv"
+                        ),
+                        mime="text/csv",
+                        key=(
+                            "candidate_v2_selector_"
+                            "batch_download"
+                        ),
+                    )
+
+                pairwise = (
+                    selector_comparison.get(
+                        "pairwise",
+                        pd.DataFrame(),
+                    )
+                )
+
+                if not pairwise.empty:
+                    st.markdown(
+                        "###### Pairwise selector agreement"
+                    )
+                    st.dataframe(
+                        pairwise,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "candidate_v2_selector_"
+                            "pairwise_agreement"
+                        ),
+                    )
+
+                realized_timeline = (
+                    selector_comparison.get(
+                        "realized_timeline",
+                        pd.DataFrame(),
+                    )
+                )
+
+                if not realized_timeline.empty:
+                    st.markdown(
+                        "###### Actual one-slot path · selector vs selector"
+                    )
+                    st.caption(
+                        "Blank cells mean that selector was still inside another "
+                        "trade (or blocked by the margin cap) at that timestamp. "
+                        "This makes the path-dependence visible: choosing a longer "
+                        "trade now can remove several future opportunities."
+                    )
+                    st.dataframe(
+                        realized_timeline,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "candidate_v2_selector_"
+                            "realized_timeline"
+                        ),
+                    )
+                    st.download_button(
+                        "Download realized selector timeline CSV",
+                        data=realized_timeline.to_csv(
+                            index=False
+                        ).encode(
+                            "utf-8"
+                        ),
+                        file_name=(
+                            f"candidate_v2_selector_realized_timeline_"
+                            f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                            f"tp{float(selected_tp):g}_"
+                            f"sl{float(selected_sl):g}_"
+                            f"{snap_horizon}m.csv"
+                        ),
+                        mime="text/csv",
+                        key=(
+                            "candidate_v2_selector_"
+                            "realized_timeline_download"
+                        ),
+                    )
+
+                path_detail = (
+                    selector_comparison.get(
+                        "path_detail",
+                        pd.DataFrame(),
+                    )
+                )
+
+                if not path_detail.empty:
+                    st.markdown(
+                        "###### Selector trade-by-trade details"
+                    )
+                    st.caption(
+                        "Long-form table with the actual selected trade, its causal "
+                        "ranking inputs, hold duration, outcome and fixed-margin PnL."
+                    )
+
+                    path_selector_options = [
+                        "ALL"
+                    ] + _candidate_v2_one_slot_selector_modes()
+
+                    selected_path_selector = st.selectbox(
+                        "Inspect selector path",
+                        options=path_selector_options,
+                        index=0,
+                        key=(
+                            "candidate_v2_selector_"
+                            "path_filter"
+                        ),
+                    )
+
+                    display_path_detail = (
+                        path_detail
+                        if selected_path_selector
+                        == "ALL"
+                        else path_detail.loc[
+                            path_detail[
+                                "Selector"
+                            ].astype(str).eq(
+                                selected_path_selector
+                            )
+                        ].copy()
+                    )
+
+                    st.dataframe(
+                        display_path_detail,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "candidate_v2_selector_"
+                            "trade_detail"
+                        ),
+                    )
+
+                    st.download_button(
+                        "Download selector trade-by-trade CSV",
+                        data=path_detail.to_csv(
+                            index=False
+                        ).encode(
+                            "utf-8"
+                        ),
+                        file_name=(
+                            f"candidate_v2_selector_trade_details_"
+                            f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                            f"tp{float(selected_tp):g}_"
+                            f"sl{float(selected_sl):g}_"
+                            f"{snap_horizon}m.csv"
+                        ),
+                        mime="text/csv",
+                        key=(
+                            "candidate_v2_selector_"
+                            "trade_detail_download"
+                        ),
+                    )
 
             chosen_one_slot_selector = st.selectbox(
                 "Selector for margin × leverage stress grid",
