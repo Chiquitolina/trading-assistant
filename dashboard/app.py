@@ -22059,6 +22059,220 @@ def _candidate_v2_time_exit_outcome_bucket(row):
     return outcome or "UNKNOWN"
 
 
+
+def _candidate_v2_baseline_portfolio_accepted_intervals(
+    intervals,
+    portfolio_result,
+):
+    """Return the exact resolved rows that produced the current equity curve."""
+    if (
+        intervals is None
+        or intervals.empty
+        or not portfolio_result
+    ):
+        return pd.DataFrame()
+
+    ledger = portfolio_result.get(
+        "ledger",
+        pd.DataFrame(),
+    )
+    if ledger is None or ledger.empty:
+        return pd.DataFrame()
+
+    accepted_mask = (
+        ledger.get(
+            "Accepted",
+            pd.Series(
+                False,
+                index=ledger.index,
+            ),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    accepted = ledger.loc[
+        accepted_mask
+    ].copy()
+
+    if accepted.empty:
+        return pd.DataFrame()
+
+    accepted_keys = (
+        accepted.get(
+            "Event key",
+            pd.Series(
+                dtype=str
+            ),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    accepted_keys = set(
+        value
+        for value in accepted_keys
+        if value
+    )
+
+    if not accepted_keys:
+        return pd.DataFrame()
+
+    event_col = (
+        "candidate_v1_event_key"
+        if "candidate_v1_event_key"
+        in intervals.columns
+        else "candidate_v2_event_key"
+    )
+    if event_col not in intervals.columns:
+        return pd.DataFrame()
+
+    result = intervals.loc[
+        intervals[
+            event_col
+        ]
+        .fillna("")
+        .astype(str)
+        .isin(
+            accepted_keys
+        )
+    ].copy()
+
+    if result.empty:
+        return result
+
+    return (
+        result.sort_values(
+            [
+                "_entry_ts",
+                "symbol",
+            ],
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=[
+                event_col,
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def _candidate_v2_time_exit_scope_summary(
+    intervals,
+    scope_label,
+):
+    """Compact outcome summary for one TIME_EXIT analysis scope."""
+    if intervals is None or intervals.empty:
+        return {
+            "Scope": str(
+                scope_label
+            ),
+            "Resolved trades": 0,
+            "TP": 0,
+            "SL": 0,
+            "TIME_EXIT": 0,
+            "TIME_EXIT +": 0,
+            "TIME_EXIT -": 0,
+            "TIME_EXIT %": np.nan,
+            "Median TIME_EXIT net %": np.nan,
+        }
+
+    outcome = (
+        intervals.get(
+            "Outcome",
+            pd.Series(
+                "",
+                index=intervals.index,
+            ),
+        )
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    net = pd.to_numeric(
+        intervals.get(
+            "net_pnl_pct",
+            pd.Series(
+                np.nan,
+                index=intervals.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    time_mask = outcome.eq(
+        "TIME_EXIT"
+    )
+    time_net = net.loc[
+        time_mask
+    ].dropna()
+
+    resolved_n = int(
+        len(
+            intervals
+        )
+    )
+    time_n = int(
+        time_mask.sum()
+    )
+
+    return {
+        "Scope": str(
+            scope_label
+        ),
+        "Resolved trades": resolved_n,
+        "TP": int(
+            outcome.eq(
+                "TP"
+            ).sum()
+        ),
+        "SL": int(
+            outcome.isin(
+                [
+                    "SL",
+                    "SL_AMBIGUOUS",
+                ]
+            ).sum()
+        ),
+        "TIME_EXIT": time_n,
+        "TIME_EXIT +": int(
+            time_net.gt(
+                0
+            ).sum()
+        ),
+        "TIME_EXIT -": int(
+            time_net.lt(
+                0
+            ).sum()
+        ),
+        "TIME_EXIT %": (
+            round(
+                time_n
+                / resolved_n
+                * 100.0,
+                2,
+            )
+            if resolved_n
+            else np.nan
+        ),
+        "Median TIME_EXIT net %": (
+            round(
+                float(
+                    time_net.median()
+                ),
+                4,
+            )
+            if len(
+                time_net
+            )
+            else np.nan
+        ),
+    }
+
+
 def _candidate_v2_time_exit_path_metrics(
     intervals,
     path_store,
@@ -25698,7 +25912,18 @@ def _candidate_v2_portfolio_simulation(
                 )
             )
 
+            event_key = str(
+                row.get(
+                    "candidate_v1_event_key",
+                    row.get(
+                        "candidate_v2_event_key",
+                        "",
+                    ),
+                )
+            )
+
             record = {
+                "candidate_v1_event_key": event_key,
                 "entry_timestamp": int(
                     entry_ts
                 ),
@@ -26293,6 +26518,7 @@ def _candidate_v2_portfolio_simulation(
         )
 
         display_cols = [
+            "candidate_v1_event_key",
             "Entry",
             "Exit",
             "symbol",
@@ -26323,6 +26549,7 @@ def _candidate_v2_portfolio_simulation(
         ].copy()
 
         rename = {
+            "candidate_v1_event_key": "Event key",
             "symbol": "Symbol",
             "side": "Side",
             "outcome": "Outcome",
@@ -31454,13 +31681,12 @@ def render_candidate_v2_research(retests_df):
 
     st.markdown("#### 7. ⏱️ TIME_EXIT / Early Exit Lab")
     st.caption(
-        "This section studies whether trades that eventually TP, SL or TIME_EXIT "
-        "already look different while they are still open. Checkpoint MFE/MAE/"
-        "close-PnL uses only the persisted contiguous 1m path available up to that "
-        "minute; bars after the historical exit are never used. The Early Exit "
-        "replay then actually closes stalled trades at a checkpoint and reruns the "
-        "whole portfolio chronologically, so freeing a slot can allow later signals "
-        "that the baseline missed."
+        "Separates two questions that must not be mixed: (A) what TIME_EXIT looks "
+        "like across the full selected TP/SL cell, and (B) what TIME_EXIT looks like "
+        "inside the exact baseline portfolio trades that actually produced the equity "
+        "curve. Checkpoint MFE/MAE/close-PnL is causal and never reads candles after "
+        "a historical exit. The Early Exit replay below still uses the FULL candidate "
+        "universe so a released slot can admit signals that were skipped originally."
     )
 
     if not concurrency:
@@ -31505,7 +31731,14 @@ def render_candidate_v2_research(retests_df):
                 )
             ]
 
-            time_exit_detail = (
+            baseline_accepted_intervals = (
+                _candidate_v2_baseline_portfolio_accepted_intervals(
+                    resolved_concurrency,
+                    portfolio_result,
+                )
+            )
+
+            all_cell_detail = (
                 _candidate_v2_time_exit_path_metrics(
                     resolved_concurrency,
                     time_exit_paths,
@@ -31515,246 +31748,342 @@ def render_candidate_v2_research(retests_df):
                 )
             )
 
-            if time_exit_detail.empty:
-                st.info(
-                    "No resolved selected-cell paths are mature enough for "
-                    "checkpoint analysis yet."
+            accepted_detail = (
+                _candidate_v2_time_exit_path_metrics(
+                    baseline_accepted_intervals,
+                    time_exit_paths,
+                    checkpoints=(
+                        time_exit_checkpoints
+                    ),
                 )
+                if not baseline_accepted_intervals.empty
+                else pd.DataFrame()
+            )
+
+            st.markdown(
+                "##### TIME_EXIT analysis scope"
+            )
+            time_exit_scope_mode = st.radio(
+                "Scope",
+                options=[
+                    "Compare both",
+                    "All selected-cell trades",
+                    "Baseline portfolio accepted only",
+                ],
+                index=0,
+                horizontal=True,
+                key=(
+                    "candidate_v2_"
+                    "time_exit_scope"
+                ),
+                help=(
+                    "All selected-cell trades = every resolved V2 execution in the "
+                    "selected TP/SL cell. Baseline portfolio accepted only = only the "
+                    "trades actually accepted by the current portfolio controls and "
+                    "therefore represented in the equity curve."
+                ),
+            )
+
+            scope_sources = {
+                "All selected-cell trades": (
+                    resolved_concurrency,
+                    all_cell_detail,
+                ),
+                "Baseline portfolio accepted only": (
+                    baseline_accepted_intervals,
+                    accepted_detail,
+                ),
+            }
+
+            if time_exit_scope_mode == "Compare both":
+                visible_scopes = [
+                    "All selected-cell trades",
+                    "Baseline portfolio accepted only",
+                ]
             else:
-                final_outcome = (
-                    resolved_concurrency.get(
-                        "Outcome",
-                        pd.Series(
-                            "",
-                            index=(
-                                resolved_concurrency.index
-                            ),
-                        ),
-                    )
-                    .fillna("")
-                    .astype(str)
-                    .str.upper()
+                visible_scopes = [
+                    time_exit_scope_mode
+                ]
+
+            summary_rows = [
+                _candidate_v2_time_exit_scope_summary(
+                    scope_sources[
+                        scope_name
+                    ][0],
+                    scope_name,
                 )
-                final_net = pd.to_numeric(
-                    resolved_concurrency.get(
-                        "net_pnl_pct",
-                        pd.Series(
-                            np.nan,
-                            index=(
-                                resolved_concurrency.index
-                            ),
-                        ),
+                for scope_name in visible_scopes
+            ]
+            scope_summary = pd.DataFrame(
+                summary_rows
+            )
+
+            if not scope_summary.empty:
+                st.dataframe(
+                    scope_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_"
+                        "time_exit_scope_summary"
+                    ),
+                )
+
+            if (
+                baseline_accepted_intervals.empty
+                and (
+                    "Baseline portfolio accepted only"
+                    in visible_scopes
+                )
+            ):
+                st.warning(
+                    "Could not map the current portfolio ledger back to Candidate V2 "
+                    "event keys. Re-run this updated dashboard once so the ledger is "
+                    "rebuilt with Event key provenance."
+                )
+
+            if time_exit_scope_mode == "Compare both":
+                st.caption(
+                    "The equity-curve scope is intentionally much smaller: it contains "
+                    "only baseline trades marked Accepted=True by the current portfolio "
+                    "simulation. The full-cell scope contains all resolved candidates, "
+                    "including trades that never reached the portfolio because the slot "
+                    "was occupied or another same-minute signal won."
+                )
+
+            trajectory_frames = []
+            checkpoint_frames = []
+            raw_frames = []
+
+            for scope_name in visible_scopes:
+                _, scope_detail = scope_sources[
+                    scope_name
+                ]
+
+                if (
+                    scope_detail is None
+                    or scope_detail.empty
+                ):
+                    continue
+
+                trajectory = (
+                    _candidate_v2_time_exit_only_trajectory(
+                        scope_detail
+                    )
+                )
+                if not trajectory.empty:
+                    trajectory.insert(
+                        0,
+                        "Scope",
+                        scope_name,
+                    )
+                    trajectory_frames.append(
+                        trajectory
+                    )
+
+                checkpoint = (
+                    _candidate_v2_time_exit_checkpoint_summary(
+                        scope_detail
+                    )
+                )
+                if not checkpoint.empty:
+                    checkpoint.insert(
+                        0,
+                        "Scope",
+                        scope_name,
+                    )
+                    checkpoint_frames.append(
+                        checkpoint
+                    )
+
+                raw_scope = scope_detail.copy()
+                raw_scope.insert(
+                    0,
+                    "Scope",
+                    scope_name,
+                )
+                raw_frames.append(
+                    raw_scope
+                )
+
+            trajectory_compare = (
+                pd.concat(
+                    trajectory_frames,
+                    ignore_index=True,
+                    sort=False,
+                )
+                if trajectory_frames
+                else pd.DataFrame()
+            )
+
+            checkpoint_compare = (
+                pd.concat(
+                    checkpoint_frames,
+                    ignore_index=True,
+                    sort=False,
+                )
+                if checkpoint_frames
+                else pd.DataFrame()
+            )
+
+            raw_time_exit_detail = (
+                pd.concat(
+                    raw_frames,
+                    ignore_index=True,
+                    sort=False,
+                )
+                if raw_frames
+                else pd.DataFrame()
+            )
+
+            if not trajectory_compare.empty:
+                st.markdown(
+                    "##### Historical TIME_EXIT trajectory · selected scope"
+                )
+                st.caption(
+                    "For trades that eventually reached TIME_EXIT, this shows how "
+                    "much favorable/adverse movement they had accumulated at each "
+                    "checkpoint. In Compare both, the same statistic is shown for the "
+                    "full cell and for the exact trades that appeared in the baseline "
+                    "equity curve."
+                )
+                st.dataframe(
+                    trajectory_compare,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_"
+                        "time_exit_trajectory"
+                    ),
+                )
+
+                st.download_button(
+                    "Download TIME_EXIT trajectory CSV",
+                    data=trajectory_compare.to_csv(
+                        index=False
+                    ).encode(
+                        "utf-8"
+                    ),
+                    file_name=(
+                        f"candidate_v2_time_exit_trajectory_"
+                        f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                        f"tp{float(selected_tp):g}_"
+                        f"sl{float(selected_sl):g}_"
+                        f"{snap_horizon}m.csv"
+                    ),
+                    mime="text/csv",
+                    key=(
+                        "candidate_v2_"
+                        "time_exit_trajectory_download"
+                    ),
+                )
+
+            if not checkpoint_compare.empty:
+                st.markdown(
+                    "##### Still-open checkpoint anatomy · by final outcome"
+                )
+                st.caption(
+                    "Only trades that had NOT resolved by that checkpoint are "
+                    "compared. A 30m TP row therefore means the trade was still open "
+                    "after 30m and only later became TP. Compare both lets us see "
+                    "whether the portfolio-selected trades behave differently from "
+                    "the full candidate cell."
+                )
+                st.dataframe(
+                    checkpoint_compare,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=(
+                        "candidate_v2_"
+                        "time_exit_checkpoint_summary"
+                    ),
+                )
+
+                plot_frame = (
+                    checkpoint_compare.copy()
+                )
+                plot_frame[
+                    "Checkpoint min"
+                ] = pd.to_numeric(
+                    plot_frame[
+                        "Checkpoint"
+                    ]
+                    .astype(str)
+                    .str.replace(
+                        "m",
+                        "",
+                        regex=False,
                     ),
                     errors="coerce",
                 )
 
-                time_mask = final_outcome.eq(
-                    "TIME_EXIT"
-                )
-                time_net = final_net.loc[
-                    time_mask
-                ].dropna()
-
-                te1, te2, te3, te4, te5 = st.columns(
-                    5
-                )
-                te1.metric(
-                    "Resolved cell trades",
-                    int(
-                        len(
-                            resolved_concurrency
-                        )
-                    ),
-                )
-                te2.metric(
-                    "TIME_EXIT",
-                    int(
-                        time_mask.sum()
-                    ),
-                    delta=(
-                        f"{time_mask.mean() * 100.0:.1f}%"
-                        if len(
-                            final_outcome
-                        )
-                        else None
-                    ),
-                )
-                te3.metric(
-                    "TIME_EXIT +",
-                    int(
-                        time_net.gt(
-                            0
-                        ).sum()
-                    ),
-                )
-                te4.metric(
-                    "TIME_EXIT -",
-                    int(
-                        time_net.lt(
-                            0
-                        ).sum()
-                    ),
-                )
-                te5.metric(
-                    "Median TIME_EXIT net",
-                    (
-                        f"{float(time_net.median()):+.3f}%"
-                        if len(
-                            time_net
-                        )
-                        else "—"
-                    ),
-                )
-
-                time_exit_trajectory = (
-                    _candidate_v2_time_exit_only_trajectory(
-                        time_exit_detail
-                    )
-                )
-
-                if not time_exit_trajectory.empty:
-                    st.markdown(
-                        "##### Historical TIME_EXIT trajectory"
-                    )
-                    st.caption(
-                        "For trades that finally reached TIME_EXIT, this shows "
-                        "how much favorable/adverse movement they had accumulated "
-                        "by each checkpoint. The MFE-threshold columns answer "
-                        "directly how many were still effectively 'dead' at that "
-                        "minute."
-                    )
-                    st.dataframe(
-                        time_exit_trajectory,
-                        use_container_width=True,
-                        hide_index=True,
-                        key=(
-                            "candidate_v2_"
-                            "time_exit_trajectory"
-                        ),
-                    )
-
-                    st.download_button(
-                        "Download TIME_EXIT trajectory CSV",
-                        data=time_exit_trajectory.to_csv(
-                            index=False
-                        ).encode(
-                            "utf-8"
-                        ),
-                        file_name=(
-                            f"candidate_v2_time_exit_trajectory_"
-                            f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
-                            f"tp{float(selected_tp):g}_"
-                            f"sl{float(selected_sl):g}_"
-                            f"{snap_horizon}m.csv"
-                        ),
-                        mime="text/csv",
-                        key=(
-                            "candidate_v2_"
-                            "time_exit_trajectory_download"
-                        ),
-                    )
-
-                checkpoint_summary = (
-                    _candidate_v2_time_exit_checkpoint_summary(
-                        time_exit_detail
-                    )
-                )
-
-                if not checkpoint_summary.empty:
-                    st.markdown(
-                        "##### Still-open checkpoint anatomy · by final outcome"
-                    )
-                    st.caption(
-                        "Only trades that had NOT resolved by that checkpoint are "
-                        "compared. Example: the 30m TP row contains trades that were "
-                        "still open after 30 minutes but later became TP. This avoids "
-                        "comparing a future TP with candles that occurred after it "
-                        "had already closed."
-                    )
-                    st.dataframe(
-                        checkpoint_summary,
-                        use_container_width=True,
-                        hide_index=True,
-                        key=(
-                            "candidate_v2_"
-                            "time_exit_checkpoint_summary"
-                        ),
-                    )
-
-                    plot_frame = (
-                        checkpoint_summary.copy()
-                    )
-                    plot_frame[
-                        "Checkpoint min"
-                    ] = pd.to_numeric(
-                        plot_frame[
-                            "Checkpoint"
-                        ].astype(str).str.replace(
-                            "m",
-                            "",
-                            regex=False,
-                        ),
-                        errors="coerce",
-                    )
-
-                    fig_te_mfe = go.Figure()
-                    for outcome_name, group in plot_frame.groupby(
+                fig_te_mfe = go.Figure()
+                for (
+                    scope_name,
+                    outcome_name,
+                ), group in plot_frame.groupby(
+                    [
+                        "Scope",
                         "Final outcome",
-                        sort=False,
-                    ):
-                        fig_te_mfe.add_trace(
-                            go.Scatter(
-                                x=group[
-                                    "Checkpoint min"
-                                ],
-                                y=group[
-                                    "Median MFE %"
-                                ],
-                                mode=(
-                                    "lines+markers"
-                                ),
-                                name=str(
-                                    outcome_name
-                                ),
-                            )
+                    ],
+                    sort=False,
+                ):
+                    fig_te_mfe.add_trace(
+                        go.Scatter(
+                            x=group[
+                                "Checkpoint min"
+                            ],
+                            y=group[
+                                "Median MFE %"
+                            ],
+                            mode=(
+                                "lines+markers"
+                            ),
+                            name=(
+                                f"{scope_name} · "
+                                f"{outcome_name}"
+                            ),
                         )
-                    fig_te_mfe.update_layout(
-                        title=(
-                            "Median MFE while trade is still alive · "
-                            "grouped by eventual outcome"
-                        ),
-                        xaxis_title=(
-                            "Checkpoint (minutes)"
-                        ),
-                        yaxis_title=(
-                            "Median cumulative MFE %"
-                        ),
-                        height=400,
-                        margin={
-                            "l": 10,
-                            "r": 10,
-                            "t": 55,
-                            "b": 10,
-                        },
-                    )
-                    st.plotly_chart(
-                        fig_te_mfe,
-                        use_container_width=True,
-                        key=(
-                            "candidate_v2_"
-                            "time_exit_mfe_chart"
-                        ),
-                        config={
-                            "displaylogo": False
-                        },
                     )
 
+                fig_te_mfe.update_layout(
+                    title=(
+                        "Median MFE while still alive · "
+                        "full cell vs accepted equity-curve trades"
+                    ),
+                    xaxis_title=(
+                        "Checkpoint (minutes)"
+                    ),
+                    yaxis_title=(
+                        "Median cumulative MFE %"
+                    ),
+                    height=430,
+                    margin={
+                        "l": 10,
+                        "r": 10,
+                        "t": 55,
+                        "b": 10,
+                    },
+                )
+                st.plotly_chart(
+                    fig_te_mfe,
+                    use_container_width=True,
+                    key=(
+                        "candidate_v2_"
+                        "time_exit_mfe_chart"
+                    ),
+                    config={
+                        "displaylogo": False
+                    },
+                )
+
+            if not raw_time_exit_detail.empty:
                 with st.expander(
-                    "Raw checkpoint detail",
+                    "Raw checkpoint detail · selected scope",
                     expanded=False,
                 ):
                     raw_time_exit_detail = (
-                        time_exit_detail.copy()
+                        raw_time_exit_detail.copy()
                     )
                     raw_time_exit_detail[
                         "Checkpoint close"
@@ -31777,6 +32106,7 @@ def render_candidate_v2_research(retests_df):
                     )
 
                     raw_columns = [
+                        "Scope",
                         "symbol",
                         "side",
                         "Final outcome",
@@ -31808,264 +32138,277 @@ def render_candidate_v2_research(retests_df):
                         ),
                     )
 
-                st.markdown(
-                    "##### Early Exit portfolio replay · release the slot"
-                )
-                st.caption(
-                    "This is the decisive test. For every candidate still open "
-                    "after checkpoint X, an early exit is triggered when cumulative "
-                    "MFE is below the selected threshold. The stricter version also "
-                    "requires checkpoint close-PnL <= 0. The trade exits at that "
-                    "checkpoint candle close, pays the same configured execution "
-                    "cost, and the COMPLETE portfolio is rerun so newly freed slots "
-                    "can take later signals."
-                )
+            st.markdown(
+                "##### Scope interpretation"
+            )
+            st.caption(
+                "Anatomy respects the scope selector above. Early Exit replay below "
+                "does NOT: it always restarts from all resolved selected-cell "
+                "candidates, because an early close can free the slot and make a "
+                "previously skipped signal executable."
+            )
 
-                ee1, ee2 = st.columns(2)
+            st.markdown(
+                "##### Early Exit portfolio replay · release the slot"
+            )
+            st.caption(
+                "This replay ALWAYS uses the full selected-cell resolved universe, "
+                "regardless of the anatomy scope selected above. That is required "
+                "because freeing a slot can make previously skipped signals become "
+                "accepted. For every candidate still open "
+                "after checkpoint X, an early exit is triggered when cumulative "
+                "MFE is below the selected threshold. The stricter version also "
+                "requires checkpoint close-PnL <= 0. The trade exits at that "
+                "checkpoint candle close, pays the same configured execution "
+                "cost, and the COMPLETE portfolio is rerun so newly freed slots "
+                "can take later signals."
+            )
 
-                default_ee_checkpoints = [
+            ee1, ee2 = st.columns(2)
+
+            default_ee_checkpoints = [
+                value
+                for value in (
+                    15,
+                    30,
+                    45,
+                    60,
+                    90,
+                )
+                if value < int(
+                    snap_horizon
+                )
+            ]
+
+            selected_ee_checkpoints = ee1.multiselect(
+                "Early-exit checkpoints",
+                options=[
                     value
                     for value in (
+                        5,
+                        10,
                         15,
                         30,
                         45,
                         60,
                         90,
+                        120,
                     )
                     if value < int(
                         snap_horizon
                     )
-                ]
+                ],
+                default=(
+                    default_ee_checkpoints
+                ),
+                key=(
+                    "candidate_v2_"
+                    "early_exit_checkpoints"
+                ),
+                format_func=(
+                    lambda value: (
+                        f"{int(value)}m"
+                    )
+                ),
+            )
 
-                selected_ee_checkpoints = ee1.multiselect(
-                    "Early-exit checkpoints",
-                    options=[
-                        value
-                        for value in (
-                            5,
-                            10,
-                            15,
-                            30,
-                            45,
-                            60,
-                            90,
-                            120,
-                        )
-                        if value < int(
-                            snap_horizon
-                        )
-                    ],
+            early_exit_threshold_raw = ee2.text_input(
+                "Max MFE thresholds (%)",
+                value=(
+                    "0.05,0.10,0.15,0.20"
+                ),
+                key=(
+                    "candidate_v2_"
+                    "early_exit_mfe_thresholds"
+                ),
+                help=(
+                    "Example: at 30m / 0.10%, exit only if the trade "
+                    "is still open and cumulative MFE is < 0.10%."
+                ),
+            )
+
+            early_exit_thresholds = (
+                _candidate_v1_parse_grid_values(
+                    early_exit_threshold_raw,
                     default=(
-                        default_ee_checkpoints
-                    ),
-                    key=(
-                        "candidate_v2_"
-                        "early_exit_checkpoints"
-                    ),
-                    format_func=(
-                        lambda value: (
-                            f"{int(value)}m"
-                        )
+                        0.05,
+                        0.10,
+                        0.15,
+                        0.20,
                     ),
                 )
+            )
 
-                early_exit_threshold_raw = ee2.text_input(
-                    "Max MFE thresholds (%)",
-                    value=(
-                        "0.05,0.10,0.15,0.20"
-                    ),
-                    key=(
-                        "candidate_v2_"
-                        "early_exit_mfe_thresholds"
-                    ),
-                    help=(
-                        "Example: at 30m / 0.10%, exit only if the trade "
-                        "is still open and cumulative MFE is < 0.10%."
-                    ),
-                )
-
-                early_exit_thresholds = (
-                    _candidate_v1_parse_grid_values(
-                        early_exit_threshold_raw,
-                        default=(
-                            0.05,
-                            0.10,
-                            0.15,
-                            0.20,
+            if (
+                selected_ee_checkpoints
+                and early_exit_thresholds
+            ):
+                early_exit_grid = (
+                    _candidate_v2_early_exit_portfolio_grid(
+                        resolved_concurrency,
+                        time_exit_paths,
+                        checkpoints=(
+                            selected_ee_checkpoints
+                        ),
+                        mfe_thresholds=(
+                            early_exit_thresholds
+                        ),
+                        starting_equity=(
+                            portfolio_starting_equity
+                        ),
+                        leverage=(
+                            portfolio_leverage
+                        ),
+                        max_slots=(
+                            portfolio_slots
+                        ),
+                        selected_sl_pct=(
+                            selected_sl
+                        ),
+                        max_margin_pct=(
+                            portfolio_margin_cap
+                        ),
+                        compound=(
+                            portfolio_compound
+                        ),
+                        priority_mode=(
+                            portfolio_priority
+                        ),
+                        sizing_mode=(
+                            portfolio_sizing_mode
+                        ),
+                        risk_per_trade_pct=(
+                            portfolio_risk_pct
+                        ),
+                        fixed_margin_usd=(
+                            portfolio_fixed_margin
+                        ),
+                        margin_per_trade_pct=(
+                            portfolio_margin_per_trade_pct
+                        ),
+                        market_flow_gate_mode=(
+                            portfolio_market_flow_gate
                         ),
                     )
                 )
 
-                if (
-                    selected_ee_checkpoints
-                    and early_exit_thresholds
-                ):
-                    early_exit_grid = (
-                        _candidate_v2_early_exit_portfolio_grid(
-                            resolved_concurrency,
-                            time_exit_paths,
-                            checkpoints=(
-                                selected_ee_checkpoints
-                            ),
-                            mfe_thresholds=(
-                                early_exit_thresholds
-                            ),
-                            starting_equity=(
-                                portfolio_starting_equity
-                            ),
-                            leverage=(
-                                portfolio_leverage
-                            ),
-                            max_slots=(
-                                portfolio_slots
-                            ),
-                            selected_sl_pct=(
-                                selected_sl
-                            ),
-                            max_margin_pct=(
-                                portfolio_margin_cap
-                            ),
-                            compound=(
-                                portfolio_compound
-                            ),
-                            priority_mode=(
-                                portfolio_priority
-                            ),
-                            sizing_mode=(
-                                portfolio_sizing_mode
-                            ),
-                            risk_per_trade_pct=(
-                                portfolio_risk_pct
-                            ),
-                            fixed_margin_usd=(
-                                portfolio_fixed_margin
-                            ),
-                            margin_per_trade_pct=(
-                                portfolio_margin_per_trade_pct
-                            ),
-                            market_flow_gate_mode=(
-                                portfolio_market_flow_gate
-                            ),
-                        )
+                if not early_exit_grid.empty:
+                    scenario_only = (
+                        early_exit_grid.loc[
+                            ~early_exit_grid[
+                                "Rule"
+                            ]
+                            .astype(str)
+                            .str.startswith(
+                                "BASELINE"
+                            )
+                        ]
+                        .copy()
                     )
 
-                    if not early_exit_grid.empty:
-                        scenario_only = (
-                            early_exit_grid.loc[
-                                ~early_exit_grid[
-                                    "Rule"
-                                ]
-                                .astype(str)
-                                .str.startswith(
-                                    "BASELINE"
-                                )
-                            ]
-                            .copy()
+                    best_return_delta = (
+                        pd.to_numeric(
+                            scenario_only.get(
+                                "Δ Return pp"
+                            ),
+                            errors="coerce",
                         )
+                        .max()
+                        if not scenario_only.empty
+                        else np.nan
+                    )
 
-                        best_return_delta = (
-                            pd.to_numeric(
-                                scenario_only.get(
-                                    "Δ Return pp"
-                                ),
-                                errors="coerce",
+                    best_dd_delta = (
+                        pd.to_numeric(
+                            scenario_only.get(
+                                "Δ Max DD pp"
+                            ),
+                            errors="coerce",
+                        )
+                        .min()
+                        if not scenario_only.empty
+                        else np.nan
+                    )
+
+                    ex1, ex2, ex3, ex4 = st.columns(
+                        4
+                    )
+                    baseline_row = (
+                        early_exit_grid.iloc[
+                            0
+                        ]
+                    )
+                    ex1.metric(
+                        "Baseline final equity",
+                        f"${float(baseline_row['Final equity $']):,.2f}",
+                    )
+                    ex2.metric(
+                        "Baseline return",
+                        f"{float(baseline_row['Return %']):+.2f}%",
+                    )
+                    ex3.metric(
+                        "Best Δ return",
+                        (
+                            f"{float(best_return_delta):+.2f} pp"
+                            if pd.notna(
+                                best_return_delta
                             )
-                            .max()
-                            if not scenario_only.empty
-                            else np.nan
-                        )
-
-                        best_dd_delta = (
-                            pd.to_numeric(
-                                scenario_only.get(
-                                    "Δ Max DD pp"
-                                ),
-                                errors="coerce",
+                            else "—"
+                        ),
+                    )
+                    ex4.metric(
+                        "Best Δ DD",
+                        (
+                            f"{float(best_dd_delta):+.2f} pp"
+                            if pd.notna(
+                                best_dd_delta
                             )
-                            .min()
-                            if not scenario_only.empty
-                            else np.nan
-                        )
+                            else "—"
+                        ),
+                        help=(
+                            "Negative is an improvement: lower max drawdown "
+                            "than baseline."
+                        ),
+                    )
 
-                        ex1, ex2, ex3, ex4 = st.columns(
-                            4
-                        )
-                        baseline_row = (
-                            early_exit_grid.iloc[
-                                0
-                            ]
-                        )
-                        ex1.metric(
-                            "Baseline final equity",
-                            f"${float(baseline_row['Final equity $']):,.2f}",
-                        )
-                        ex2.metric(
-                            "Baseline return",
-                            f"{float(baseline_row['Return %']):+.2f}%",
-                        )
-                        ex3.metric(
-                            "Best Δ return",
-                            (
-                                f"{float(best_return_delta):+.2f} pp"
-                                if pd.notna(
-                                    best_return_delta
-                                )
-                                else "—"
-                            ),
-                        )
-                        ex4.metric(
-                            "Best Δ DD",
-                            (
-                                f"{float(best_dd_delta):+.2f} pp"
-                                if pd.notna(
-                                    best_dd_delta
-                                )
-                                else "—"
-                            ),
-                            help=(
-                                "Negative is an improvement: lower max drawdown "
-                                "than baseline."
-                            ),
-                        )
+                    st.dataframe(
+                        early_exit_grid,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "candidate_v2_"
+                            "early_exit_portfolio_grid"
+                        ),
+                    )
 
-                        st.dataframe(
-                            early_exit_grid,
-                            use_container_width=True,
-                            hide_index=True,
-                            key=(
-                                "candidate_v2_"
-                                "early_exit_portfolio_grid"
-                            ),
-                        )
+                    st.download_button(
+                        "Download Early Exit portfolio grid CSV",
+                        data=early_exit_grid.to_csv(
+                            index=False
+                        ).encode(
+                            "utf-8"
+                        ),
+                        file_name=(
+                            f"candidate_v2_early_exit_grid_"
+                            f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                            f"tp{float(selected_tp):g}_"
+                            f"sl{float(selected_sl):g}_"
+                            f"{snap_horizon}m.csv"
+                        ),
+                        mime="text/csv",
+                        key=(
+                            "candidate_v2_"
+                            "early_exit_grid_download"
+                        ),
+                    )
 
-                        st.download_button(
-                            "Download Early Exit portfolio grid CSV",
-                            data=early_exit_grid.to_csv(
-                                index=False
-                            ).encode(
-                                "utf-8"
-                            ),
-                            file_name=(
-                                f"candidate_v2_early_exit_grid_"
-                                f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
-                                f"tp{float(selected_tp):g}_"
-                                f"sl{float(selected_sl):g}_"
-                                f"{snap_horizon}m.csv"
-                            ),
-                            mime="text/csv",
-                            key=(
-                                "candidate_v2_"
-                                "early_exit_grid_download"
-                            ),
-                        )
-
-                        st.info(
-                            "Do not choose the row with the highest Return % "
-                            "automatically. Prefer a rule that improves baseline "
-                            "across Raw net pts / PF / drawdown and does so with a "
-                            "reasonable number of early exits. This grid is in-sample "
-                            "research and must be frozen before forward validation."
-                        )
+                    st.info(
+                        "Do not choose the row with the highest Return % "
+                        "automatically. Prefer a rule that improves baseline "
+                        "across Raw net pts / PF / drawdown and does so with a "
+                        "reasonable number of early exits. This grid is in-sample "
+                        "research and must be frozen before forward validation."
+                    )
 
     st.markdown("#### 8. Stability by causal 4h snapshot")
     st.caption(
