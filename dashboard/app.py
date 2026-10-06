@@ -19360,6 +19360,1926 @@ def _candidate_v1_unified_research_history(retests_df, short_config, long_config
     return history
 
 
+
+def render_candidate_v1_v2_fixed_benchmark(
+    retests_df,
+    v1_short_config,
+    v1_long_config,
+):
+    """Two-level Candidate V1 vs V2 benchmark with fixed execution semantics.
+
+    A: candidate universe before same-minute selection/portfolio.
+    B: identical one-slot Room -> Strength portfolio.
+
+    Intentionally runs only on explicit user action so the comparison does not
+    make ordinary Candidate Research reruns slower.
+    """
+    st.markdown(
+        "### ⚖️ Candidate V1 vs V2 · fixed benchmark"
+    )
+    st.caption(
+        "A answers whether the raw Candidate universe is better under the same "
+        "TP/SL/180m execution. B answers what survives after exactly the same "
+        "Room → Strength, one-slot, x3, 80% equity portfolio."
+    )
+
+    with st.expander(
+        "Benchmark definition",
+        expanded=False,
+    ):
+        st.markdown(
+            """
+**A · UNIVERSE**
+- Candidate V1 identity vs Candidate V2 identity.
+- TP **0.5%** / SL **3.0%** / horizon **180m**.
+- Entry fee **0.05%** + exit fee **0.05%**.
+- Slippage **0%**.
+- No same-minute selector, no slot limit.
+- Early Exit OFF and Position Upgrade OFF.
+
+**B · PORTFOLIO**
+- Uses those same resolved trades.
+- Starting equity **$200**.
+- **1 slot**.
+- **x3**.
+- **80% of realized equity** as margin.
+- Same-minute selector: **Most HTF Room → Strength**.
+- Market Flow hard gate OFF.
+- Early Exit OFF.
+- Position Upgrade OFF.
+            """
+        )
+
+    run_benchmark = st.button(
+        "▶ Run / refresh V1 vs V2 benchmark",
+        key="candidate_v1_v2_fixed_benchmark_run",
+        use_container_width=True,
+    )
+
+    cache_key = "candidate_v1_v2_fixed_benchmark_cache"
+    cached = st.session_state.get(cache_key)
+
+    if run_benchmark:
+        with st.spinner(
+            "Building Candidate V1 and V2 fixed benchmark..."
+        ):
+            # --------------------------------------------------
+            # Source universes
+            # --------------------------------------------------
+            v1_history = (
+                _candidate_v1_unified_research_history(
+                    retests_df,
+                    v1_short_config,
+                    v1_long_config,
+                )
+            )
+            (
+                v2_history,
+                _v2_config,
+                _v2_newly_frozen,
+            ) = _candidate_v2_load_or_freeze_universe(
+                retests_df
+            )
+
+            if (
+                v1_history is None
+                or v1_history.empty
+                or v2_history is None
+                or v2_history.empty
+            ):
+                cached = {
+                    "error": (
+                        "Candidate V1 or Candidate V2 universe is empty."
+                    ),
+                    "created_at": time.time(),
+                }
+                st.session_state[cache_key] = cached
+            else:
+                v1_history = v1_history.copy()
+                v2_history = v2_history.copy()
+
+                # Critical: each Candidate keeps its own persisted path/context store.
+                v1_history["candidate_analysis_profile"] = "v1"
+                v2_history["candidate_analysis_profile"] = "v2"
+
+                # --------------------------------------------------
+                # Same causal context machinery for both candidates
+                # --------------------------------------------------
+                v1_context, _ = _candidate_v2_build_market_context(
+                    v1_history,
+                    force=False,
+                )
+                v2_context, _ = _candidate_v2_build_market_context(
+                    v2_history,
+                    force=False,
+                )
+
+                if v1_context is not None and not v1_context.empty:
+                    v1_context = v1_context.copy()
+                    v1_context["candidate_analysis_profile"] = "v1"
+
+                if v2_context is not None and not v2_context.empty:
+                    v2_context = v2_context.copy()
+                    v2_context["candidate_analysis_profile"] = "v2"
+
+                if (
+                    v1_context is None
+                    or v1_context.empty
+                    or v2_context is None
+                    or v2_context.empty
+                ):
+                    cached = {
+                        "error": (
+                            "Could not attach causal context to both candidates."
+                        ),
+                        "created_at": time.time(),
+                    }
+                    st.session_state[cache_key] = cached
+                else:
+                    # --------------------------------------------------
+                    # Fixed 0.5 / 3 / 180 execution for BOTH
+                    # --------------------------------------------------
+                    fixed_execution = {
+                        "tp_values": (0.5,),
+                        "sl_values": (3.0,),
+                        "horizon_min": 180,
+                        "entry_fee_pct": 0.05,
+                        "exit_fee_pct": 0.05,
+                        "entry_slippage_pct": 0.0,
+                        "exit_slippage_pct": 0.0,
+                        "notional_usdt": 100.0,
+                        "force": False,
+                    }
+
+                    v1_execution = _candidate_v2_execution_grid(
+                        v1_context,
+                        **fixed_execution,
+                    )
+                    v2_execution = _candidate_v2_execution_grid(
+                        v2_context,
+                        **fixed_execution,
+                    )
+
+                    v1_exec = _candidate_v2_merge_execution_context(
+                        v1_execution,
+                        v1_context,
+                    )
+                    v2_exec = _candidate_v2_merge_execution_context(
+                        v2_execution,
+                        v2_context,
+                    )
+
+                    if (
+                        v1_exec is None
+                        or v1_exec.empty
+                        or v2_exec is None
+                        or v2_exec.empty
+                    ):
+                        cached = {
+                            "error": (
+                                "No fixed TP 0.5 / SL 3 / 180m execution paths "
+                                "are available for one of the candidates."
+                            ),
+                            "created_at": time.time(),
+                        }
+                        st.session_state[cache_key] = cached
+                    else:
+                        def summarize_universe(
+                            history,
+                            execution,
+                        ):
+                            event_col = (
+                                "candidate_v1_event_key"
+                                if "candidate_v1_event_key"
+                                in execution.columns
+                                else "candidate_v2_event_key"
+                            )
+                            history_event_col = (
+                                "candidate_v1_event_key"
+                                if "candidate_v1_event_key"
+                                in history.columns
+                                else "candidate_v2_event_key"
+                            )
+
+                            outcome = (
+                                execution.get(
+                                    "Outcome",
+                                    pd.Series(
+                                        "PENDING",
+                                        index=execution.index,
+                                    ),
+                                )
+                                .fillna("PENDING")
+                                .astype(str)
+                                .str.upper()
+                            )
+                            resolved = execution.loc[
+                                outcome.ne("PENDING")
+                            ].copy()
+                            resolved_outcome = outcome.loc[
+                                outcome.ne("PENDING")
+                            ]
+
+                            net = pd.to_numeric(
+                                resolved.get(
+                                    "net_pnl_pct",
+                                    pd.Series(dtype=float),
+                                ),
+                                errors="coerce",
+                            ).dropna()
+
+                            wins = net.loc[net.gt(0.0)]
+                            losses = net.loc[net.lt(0.0)]
+
+                            if (
+                                not losses.empty
+                                and abs(
+                                    float(losses.sum())
+                                )
+                                > 1e-12
+                            ):
+                                pf = float(
+                                    wins.sum()
+                                    / abs(
+                                        float(losses.sum())
+                                    )
+                                )
+                            elif not wins.empty:
+                                pf = np.inf
+                            else:
+                                pf = np.nan
+
+                            mfe = pd.to_numeric(
+                                resolved.get(
+                                    "mfe_until_exit_pct",
+                                    pd.Series(dtype=float),
+                                ),
+                                errors="coerce",
+                            ).dropna()
+                            mae = pd.to_numeric(
+                                resolved.get(
+                                    "mae_until_exit_pct",
+                                    pd.Series(dtype=float),
+                                ),
+                                errors="coerce",
+                            ).dropna()
+
+                            return {
+                                "Universe IDs": int(
+                                    history[
+                                        history_event_col
+                                    ]
+                                    .fillna("")
+                                    .astype(str)
+                                    .nunique()
+                                ),
+                                "Executable": int(
+                                    execution[
+                                        event_col
+                                    ]
+                                    .fillna("")
+                                    .astype(str)
+                                    .nunique()
+                                ),
+                                "Resolved": int(
+                                    outcome.ne(
+                                        "PENDING"
+                                    ).sum()
+                                ),
+                                "Pending": int(
+                                    outcome.eq(
+                                        "PENDING"
+                                    ).sum()
+                                ),
+                                "TP": int(
+                                    resolved_outcome.eq(
+                                        "TP"
+                                    ).sum()
+                                ),
+                                "SL": int(
+                                    resolved_outcome.isin(
+                                        [
+                                            "SL",
+                                            "SL_AMBIGUOUS",
+                                        ]
+                                    ).sum()
+                                ),
+                                "TIME_EXIT": int(
+                                    resolved_outcome.eq(
+                                        "TIME_EXIT"
+                                    ).sum()
+                                ),
+                                "Win rate %": (
+                                    float(
+                                        net.gt(
+                                            0.0
+                                        ).mean()
+                                        * 100.0
+                                    )
+                                    if not net.empty
+                                    else np.nan
+                                ),
+                                "Raw net pts": (
+                                    float(
+                                        net.sum()
+                                    )
+                                    if not net.empty
+                                    else 0.0
+                                ),
+                                "Avg net/trade %": (
+                                    float(
+                                        net.mean()
+                                    )
+                                    if not net.empty
+                                    else np.nan
+                                ),
+                                "PF": pf,
+                                "Avg MFE %": (
+                                    float(
+                                        mfe.mean()
+                                    )
+                                    if not mfe.empty
+                                    else np.nan
+                                ),
+                                "Avg MAE %": (
+                                    float(
+                                        mae.mean()
+                                    )
+                                    if not mae.empty
+                                    else np.nan
+                                ),
+                            }
+
+                        def summarize_portfolio(
+                            portfolio,
+                        ):
+                            if not portfolio:
+                                return {}
+
+                            summary = portfolio.get(
+                                "summary",
+                                {},
+                            )
+                            ledger = portfolio.get(
+                                "ledger",
+                                pd.DataFrame(),
+                            )
+
+                            accepted = pd.DataFrame()
+                            if (
+                                ledger is not None
+                                and not ledger.empty
+                            ):
+                                accepted = ledger.loc[
+                                    ledger.get(
+                                        "accepted",
+                                        pd.Series(
+                                            False,
+                                            index=ledger.index,
+                                        ),
+                                    )
+                                    .fillna(False)
+                                    .astype(bool)
+                                ].copy()
+
+                            accepted_outcome = (
+                                accepted.get(
+                                    "outcome",
+                                    pd.Series(
+                                        dtype=str
+                                    ),
+                                )
+                                .fillna("")
+                                .astype(str)
+                                .str.upper()
+                            )
+
+                            return {
+                                "Eligible": int(
+                                    summary.get(
+                                        "Eligible trades",
+                                        0,
+                                    )
+                                    or 0
+                                ),
+                                "Accepted": int(
+                                    summary.get(
+                                        "Accepted trades",
+                                        0,
+                                    )
+                                    or 0
+                                ),
+                                "Skipped": int(
+                                    summary.get(
+                                        "Skipped trades",
+                                        0,
+                                    )
+                                    or 0
+                                ),
+                                "TP accepted": int(
+                                    accepted_outcome.eq(
+                                        "TP"
+                                    ).sum()
+                                ),
+                                "SL accepted": int(
+                                    accepted_outcome.isin(
+                                        [
+                                            "SL",
+                                            "SL_AMBIGUOUS",
+                                        ]
+                                    ).sum()
+                                ),
+                                "TIME_EXIT accepted": int(
+                                    accepted_outcome.eq(
+                                        "TIME_EXIT"
+                                    ).sum()
+                                ),
+                                "Raw net pts": float(
+                                    summary.get(
+                                        "Raw net pts accepted",
+                                        0.0,
+                                    )
+                                    or 0.0
+                                ),
+                                "Final equity $": float(
+                                    summary.get(
+                                        "Final equity",
+                                        np.nan,
+                                    )
+                                ),
+                                "Return %": float(
+                                    summary.get(
+                                        "Return %",
+                                        np.nan,
+                                    )
+                                ),
+                                "Max DD %": float(
+                                    summary.get(
+                                        "Max drawdown %",
+                                        np.nan,
+                                    )
+                                ),
+                                "PF": (
+                                    float(
+                                        summary.get(
+                                            "Portfolio PF"
+                                        )
+                                    )
+                                    if pd.notna(
+                                        summary.get(
+                                            "Portfolio PF",
+                                            np.nan,
+                                        )
+                                    )
+                                    else np.nan
+                                ),
+                            }
+
+                        def comparison_table(
+                            v1_metrics,
+                            v2_metrics,
+                        ):
+                            rows = []
+                            for metric in dict.fromkeys(
+                                list(
+                                    v1_metrics.keys()
+                                )
+                                + list(
+                                    v2_metrics.keys()
+                                )
+                            ):
+                                v1_value = v1_metrics.get(
+                                    metric,
+                                    np.nan,
+                                )
+                                v2_value = v2_metrics.get(
+                                    metric,
+                                    np.nan,
+                                )
+
+                                v1_numeric = pd.to_numeric(
+                                    pd.Series([
+                                        v1_value
+                                    ]),
+                                    errors="coerce",
+                                ).iloc[0]
+                                v2_numeric = pd.to_numeric(
+                                    pd.Series([
+                                        v2_value
+                                    ]),
+                                    errors="coerce",
+                                ).iloc[0]
+
+                                delta = (
+                                    float(
+                                        v1_numeric
+                                        - v2_numeric
+                                    )
+                                    if (
+                                        pd.notna(
+                                            v1_numeric
+                                        )
+                                        and pd.notna(
+                                            v2_numeric
+                                        )
+                                    )
+                                    else np.nan
+                                )
+
+                                rows.append({
+                                    "Metric": metric,
+                                    "Candidate V1": (
+                                        v1_value
+                                    ),
+                                    "Candidate V2": (
+                                        v2_value
+                                    ),
+                                    "Δ V1 - V2": delta,
+                                })
+
+                            return pd.DataFrame(
+                                rows
+                            )
+
+                        # --------------------------------------------------
+                        # A · raw candidate universes
+                        # --------------------------------------------------
+                        v1_universe_metrics = (
+                            summarize_universe(
+                                v1_history,
+                                v1_exec,
+                            )
+                        )
+                        v2_universe_metrics = (
+                            summarize_universe(
+                                v2_history,
+                                v2_exec,
+                            )
+                        )
+
+                        # Identity overlap, independent from outcome.
+                        v1_keys = set(
+                            v1_history[
+                                "candidate_v1_event_key"
+                            ]
+                            .fillna("")
+                            .astype(str)
+                            .loc[
+                                lambda s: s.ne("")
+                            ]
+                            .tolist()
+                        )
+                        v2_keys = set(
+                            v2_history[
+                                "candidate_v1_event_key"
+                            ]
+                            .fillna("")
+                            .astype(str)
+                            .loc[
+                                lambda s: s.ne("")
+                            ]
+                            .tolist()
+                        )
+
+                        # --------------------------------------------------
+                        # B · exact same one-slot portfolio
+                        # --------------------------------------------------
+                        _, v1_resolved = (
+                            _candidate_v2_concurrency_source(
+                                v1_exec,
+                                variant="Candidate Base",
+                                strong_threshold=0.50,
+                            )
+                        )
+                        _, v2_resolved = (
+                            _candidate_v2_concurrency_source(
+                                v2_exec,
+                                variant="Candidate Base",
+                                strong_threshold=0.50,
+                            )
+                        )
+
+                        fixed_portfolio = {
+                            "starting_equity": 200.0,
+                            "leverage": 3.0,
+                            "max_slots": 1,
+                            "risk_per_trade_pct": 0.25,
+                            "selected_sl_pct": 3.0,
+                            "max_margin_pct": 80.0,
+                            "compound": True,
+                            "priority_mode": (
+                                "Most HTF Room → Strength"
+                            ),
+                            "sizing_mode": (
+                                "Margin % equity"
+                            ),
+                            "fixed_margin_usd": 150.0,
+                            "margin_per_trade_pct": 80.0,
+                            "market_flow_gate_mode": "OFF",
+                        }
+
+                        v1_portfolio = (
+                            _candidate_v2_portfolio_simulation(
+                                v1_resolved,
+                                **fixed_portfolio,
+                            )
+                        )
+                        v2_portfolio = (
+                            _candidate_v2_portfolio_simulation(
+                                v2_resolved,
+                                **fixed_portfolio,
+                            )
+                        )
+
+                        v1_portfolio_metrics = (
+                            summarize_portfolio(
+                                v1_portfolio
+                            )
+                        )
+                        v2_portfolio_metrics = (
+                            summarize_portfolio(
+                                v2_portfolio
+                            )
+                        )
+
+                        # --------------------------------------------------
+                        # C · Every Execution Matrix variant for V1 and V2
+                        #
+                        # Keep the exact same 0.5 / 3 / 180 execution cell.
+                        # For each variant we report BOTH:
+                        #   - raw universe NET before slot competition
+                        #   - fixed Room→Strength portfolio NET/equity
+                        #
+                        # This lets us distinguish:
+                        # "best candidate filter" from "best 1-slot strategy".
+                        # --------------------------------------------------
+                        v1_benchmark_variants = [
+                            "Candidate Base",
+                            "Candidate + Strength",
+                            "Candidate + Strong Strength",
+                            "Candidate + Strength + Flow",
+                        ]
+                        v2_benchmark_variants = [
+                            "REACTION Base",
+                            "Candidate V1 drivers",
+                            "V2 Strength",
+                            "V2 Strong Strength",
+                            "V2 Strength + Flow",
+                        ]
+
+                        def build_variant_leaderboard(
+                            execution,
+                            variants,
+                            candidate_name,
+                        ):
+                            rows = []
+                            base_n = int(
+                                execution[
+                                    "candidate_v1_event_key"
+                                ]
+                                .fillna("")
+                                .astype(str)
+                                .nunique()
+                            )
+
+                            for variant_name in variants:
+                                variant_mask = (
+                                    _candidate_v2_variant_mask(
+                                        execution,
+                                        variant_name,
+                                        strong_threshold=0.50,
+                                    )
+                                    .fillna(False)
+                                    .astype(bool)
+                                )
+                                variant_exec = (
+                                    execution.loc[
+                                        variant_mask
+                                    ].copy()
+                                )
+
+                                if variant_exec.empty:
+                                    continue
+
+                                variant_stats = (
+                                    _candidate_v1_group_stats_extended(
+                                        variant_exec
+                                    )
+                                )
+
+                                variant_n = int(
+                                    variant_exec[
+                                        "candidate_v1_event_key"
+                                    ]
+                                    .fillna("")
+                                    .astype(str)
+                                    .nunique()
+                                )
+
+                                _, variant_resolved = (
+                                    _candidate_v2_concurrency_source(
+                                        execution,
+                                        variant=variant_name,
+                                        strong_threshold=0.50,
+                                    )
+                                )
+
+                                variant_portfolio = (
+                                    _candidate_v2_portfolio_simulation(
+                                        variant_resolved,
+                                        **fixed_portfolio,
+                                    )
+                                    if (
+                                        variant_resolved is not None
+                                        and not variant_resolved.empty
+                                    )
+                                    else {}
+                                )
+
+                                variant_portfolio_stats = (
+                                    summarize_portfolio(
+                                        variant_portfolio
+                                    )
+                                    if variant_portfolio
+                                    else {}
+                                )
+
+                                display_variant = (
+                                    f"{variant_name} >= 0.5%"
+                                    if variant_name
+                                    in {
+                                        "Candidate + Strong Strength",
+                                        "V2 Strong Strength",
+                                    }
+                                    else variant_name
+                                )
+
+                                rows.append({
+                                    "Candidate": (
+                                        candidate_name
+                                    ),
+                                    "Execution matrix variant": (
+                                        display_variant
+                                    ),
+                                    "Coverage %": (
+                                        round(
+                                            variant_n
+                                            / base_n
+                                            * 100.0,
+                                            2,
+                                        )
+                                        if base_n
+                                        else np.nan
+                                    ),
+                                    "Resolved": int(
+                                        variant_stats.get(
+                                            "Resolved",
+                                            0,
+                                        )
+                                        or 0
+                                    ),
+                                    "TP": int(
+                                        variant_stats.get(
+                                            "TP",
+                                            0,
+                                        )
+                                        or 0
+                                    ),
+                                    "SL": int(
+                                        variant_stats.get(
+                                            "SL",
+                                            0,
+                                        )
+                                        or 0
+                                    ),
+                                    "TIME_EXIT": int(
+                                        variant_stats.get(
+                                            "TIME_EXIT",
+                                            0,
+                                        )
+                                        or 0
+                                    ),
+                                    "Universe NET pts": (
+                                        float(
+                                            variant_stats.get(
+                                                "Net pts",
+                                                0.0,
+                                            )
+                                            or 0.0
+                                        )
+                                    ),
+                                    "Universe Avg %": (
+                                        variant_stats.get(
+                                            "Avg %",
+                                            np.nan,
+                                        )
+                                    ),
+                                    "Universe PF": (
+                                        variant_stats.get(
+                                            "PF",
+                                            np.nan,
+                                        )
+                                    ),
+                                    "Universe WR %": (
+                                        variant_stats.get(
+                                            "WR %",
+                                            np.nan,
+                                        )
+                                    ),
+                                    "Avg MFE %": (
+                                        variant_stats.get(
+                                            "Avg MFE %",
+                                            np.nan,
+                                        )
+                                    ),
+                                    "Avg MAE %": (
+                                        variant_stats.get(
+                                            "Avg MAE %",
+                                            np.nan,
+                                        )
+                                    ),
+                                    "Portfolio accepted": int(
+                                        variant_portfolio_stats.get(
+                                            "Accepted",
+                                            0,
+                                        )
+                                        or 0
+                                    ),
+                                    "Portfolio NET pts": (
+                                        float(
+                                            variant_portfolio_stats.get(
+                                                "Raw net pts",
+                                                0.0,
+                                            )
+                                            or 0.0
+                                        )
+                                    ),
+                                    "Final equity $": (
+                                        variant_portfolio_stats.get(
+                                            "Final equity $",
+                                            np.nan,
+                                        )
+                                    ),
+                                    "Return %": (
+                                        variant_portfolio_stats.get(
+                                            "Return %",
+                                            np.nan,
+                                        )
+                                    ),
+                                    "Max DD %": (
+                                        variant_portfolio_stats.get(
+                                            "Max DD %",
+                                            np.nan,
+                                        )
+                                    ),
+                                    "Portfolio PF": (
+                                        variant_portfolio_stats.get(
+                                            "PF",
+                                            np.nan,
+                                        )
+                                    ),
+                                })
+
+                            table = pd.DataFrame(
+                                rows
+                            )
+                            if table.empty:
+                                return table
+
+                            # Two explicit ranks:
+                            #   1) best raw candidate-filter NET
+                            #   2) best final one-slot strategy NET
+                            table[
+                                "Universe NET rank"
+                            ] = (
+                                pd.to_numeric(
+                                    table[
+                                        "Universe NET pts"
+                                    ],
+                                    errors="coerce",
+                                )
+                                .rank(
+                                    method="min",
+                                    ascending=False,
+                                )
+                                .astype(
+                                    "Int64"
+                                )
+                            )
+
+                            table[
+                                "Portfolio NET rank"
+                            ] = (
+                                pd.to_numeric(
+                                    table[
+                                        "Portfolio NET pts"
+                                    ],
+                                    errors="coerce",
+                                )
+                                .rank(
+                                    method="min",
+                                    ascending=False,
+                                )
+                                .astype(
+                                    "Int64"
+                                )
+                            )
+
+                            best_universe = (
+                                pd.to_numeric(
+                                    table[
+                                        "Universe NET pts"
+                                    ],
+                                    errors="coerce",
+                                )
+                                .max()
+                            )
+                            best_portfolio = (
+                                pd.to_numeric(
+                                    table[
+                                        "Portfolio NET pts"
+                                    ],
+                                    errors="coerce",
+                                )
+                                .max()
+                            )
+
+                            table[
+                                "Best raw NET"
+                            ] = np.where(
+                                np.isclose(
+                                    pd.to_numeric(
+                                        table[
+                                            "Universe NET pts"
+                                        ],
+                                        errors="coerce",
+                                    ),
+                                    float(
+                                        best_universe
+                                    ),
+                                    equal_nan=False,
+                                ),
+                                "🏆",
+                                "",
+                            )
+                            table[
+                                "Best portfolio NET"
+                            ] = np.where(
+                                np.isclose(
+                                    pd.to_numeric(
+                                        table[
+                                            "Portfolio NET pts"
+                                        ],
+                                        errors="coerce",
+                                    ),
+                                    float(
+                                        best_portfolio
+                                    ),
+                                    equal_nan=False,
+                                ),
+                                "🏆",
+                                "",
+                            )
+
+                            return (
+                                table.sort_values(
+                                    [
+                                        "Universe NET rank",
+                                        "Portfolio NET rank",
+                                        "Execution matrix variant",
+                                    ],
+                                    kind="stable",
+                                )
+                                .reset_index(
+                                    drop=True
+                                )
+                            )
+
+                        v1_variant_leaderboard = (
+                            build_variant_leaderboard(
+                                v1_exec,
+                                v1_benchmark_variants,
+                                "Candidate V1",
+                            )
+                        )
+                        v2_variant_leaderboard = (
+                            build_variant_leaderboard(
+                                v2_exec,
+                                v2_benchmark_variants,
+                                "Candidate V2",
+                            )
+                        )
+
+                        combined_variant_leaderboard = (
+                            pd.concat(
+                                [
+                                    v1_variant_leaderboard,
+                                    v2_variant_leaderboard,
+                                ],
+                                ignore_index=True,
+                                sort=False,
+                            )
+                            if (
+                                not v1_variant_leaderboard.empty
+                                or not v2_variant_leaderboard.empty
+                            )
+                            else pd.DataFrame()
+                        )
+
+                        if (
+                            combined_variant_leaderboard
+                            is not None
+                            and not combined_variant_leaderboard.empty
+                        ):
+                            combined_variant_leaderboard[
+                                "Overall Universe NET rank"
+                            ] = (
+                                pd.to_numeric(
+                                    combined_variant_leaderboard[
+                                        "Universe NET pts"
+                                    ],
+                                    errors="coerce",
+                                )
+                                .rank(
+                                    method="min",
+                                    ascending=False,
+                                )
+                                .astype(
+                                    "Int64"
+                                )
+                            )
+                            combined_variant_leaderboard[
+                                "Overall Portfolio NET rank"
+                            ] = (
+                                pd.to_numeric(
+                                    combined_variant_leaderboard[
+                                        "Portfolio NET pts"
+                                    ],
+                                    errors="coerce",
+                                )
+                                .rank(
+                                    method="min",
+                                    ascending=False,
+                                )
+                                .astype(
+                                    "Int64"
+                                )
+                            )
+                            combined_variant_leaderboard = (
+                                combined_variant_leaderboard
+                                .sort_values(
+                                    [
+                                        "Overall Universe NET rank",
+                                        "Overall Portfolio NET rank",
+                                    ],
+                                    kind="stable",
+                                )
+                                .reset_index(
+                                    drop=True
+                                )
+                            )
+
+                        def accepted_keys(
+                            portfolio,
+                        ):
+                            if not portfolio:
+                                return set()
+
+                            ledger = portfolio.get(
+                                "ledger",
+                                pd.DataFrame(),
+                            )
+                            if (
+                                ledger is None
+                                or ledger.empty
+                            ):
+                                return set()
+
+                            accepted = ledger.loc[
+                                ledger.get(
+                                    "accepted",
+                                    pd.Series(
+                                        False,
+                                        index=ledger.index,
+                                    ),
+                                )
+                                .fillna(False)
+                                .astype(bool)
+                            ].copy()
+
+                            if (
+                                "candidate_v1_event_key"
+                                not in accepted.columns
+                            ):
+                                return set()
+
+                            return set(
+                                accepted[
+                                    "candidate_v1_event_key"
+                                ]
+                                .fillna("")
+                                .astype(str)
+                                .loc[
+                                    lambda s: s.ne("")
+                                ]
+                                .tolist()
+                            )
+
+                        v1_accepted = accepted_keys(
+                            v1_portfolio
+                        )
+                        v2_accepted = accepted_keys(
+                            v2_portfolio
+                        )
+
+                        def accepted_detail(
+                            execution,
+                            keys,
+                            bucket,
+                        ):
+                            if not keys:
+                                return pd.DataFrame()
+
+                            work = execution.loc[
+                                execution[
+                                    "candidate_v1_event_key"
+                                ]
+                                .fillna("")
+                                .astype(str)
+                                .isin(keys)
+                            ].copy()
+
+                            if work.empty:
+                                return work
+
+                            work = (
+                                work.sort_values(
+                                    [
+                                        "entry_timestamp",
+                                        "symbol",
+                                    ],
+                                    kind="stable",
+                                    na_position="last",
+                                )
+                                .drop_duplicates(
+                                    subset=[
+                                        "candidate_v1_event_key"
+                                    ],
+                                    keep="last",
+                                )
+                            )
+
+                            return pd.DataFrame({
+                                "Bucket": bucket,
+                                "Event key": (
+                                    work[
+                                        "candidate_v1_event_key"
+                                    ]
+                                    .fillna("")
+                                    .astype(str)
+                                ),
+                                "Symbol": work.get(
+                                    "symbol",
+                                    pd.Series(
+                                        "",
+                                        index=work.index,
+                                    ),
+                                ),
+                                "Side": work.get(
+                                    "side",
+                                    pd.Series(
+                                        "",
+                                        index=work.index,
+                                    ),
+                                ),
+                                "Entry timestamp": pd.to_numeric(
+                                    work.get(
+                                        "entry_timestamp",
+                                        pd.Series(
+                                            np.nan,
+                                            index=work.index,
+                                        ),
+                                    ),
+                                    errors="coerce",
+                                ),
+                                "Outcome": work.get(
+                                    "Outcome",
+                                    pd.Series(
+                                        "",
+                                        index=work.index,
+                                    ),
+                                ),
+                                "Net %": pd.to_numeric(
+                                    work.get(
+                                        "net_pnl_pct",
+                                        pd.Series(
+                                            np.nan,
+                                            index=work.index,
+                                        ),
+                                    ),
+                                    errors="coerce",
+                                ),
+                                "HTF Room %": pd.to_numeric(
+                                    work.get(
+                                        "nearest_opposing_room_pct",
+                                        pd.Series(
+                                            np.nan,
+                                            index=work.index,
+                                        ),
+                                    ),
+                                    errors="coerce",
+                                ),
+                                "Strength vs BTC 4h %": pd.to_numeric(
+                                    work.get(
+                                        "side_adjusted_strength_vs_btc_4h",
+                                        pd.Series(
+                                            np.nan,
+                                            index=work.index,
+                                        ),
+                                    ),
+                                    errors="coerce",
+                                ),
+                            }).reset_index(
+                                drop=True
+                            )
+
+                        cached = {
+                            "created_at": time.time(),
+                            "universe_table": comparison_table(
+                                v1_universe_metrics,
+                                v2_universe_metrics,
+                            ),
+                            "portfolio_table": comparison_table(
+                                v1_portfolio_metrics,
+                                v2_portfolio_metrics,
+                            ),
+                            "v1_variant_leaderboard": (
+                                v1_variant_leaderboard
+                            ),
+                            "v2_variant_leaderboard": (
+                                v2_variant_leaderboard
+                            ),
+                            "combined_variant_leaderboard": (
+                                combined_variant_leaderboard
+                            ),
+                            "variant_strong_threshold_pct": 0.50,
+                            "overlap": {
+                                "V1 ∩ V2": int(
+                                    len(
+                                        v1_keys
+                                        & v2_keys
+                                    )
+                                ),
+                                "V1 only": int(
+                                    len(
+                                        v1_keys
+                                        - v2_keys
+                                    )
+                                ),
+                                "V2 only": int(
+                                    len(
+                                        v2_keys
+                                        - v1_keys
+                                    )
+                                ),
+                                "V1 in V2 %": (
+                                    float(
+                                        len(
+                                            v1_keys
+                                            & v2_keys
+                                        )
+                                        / len(
+                                            v1_keys
+                                        )
+                                        * 100.0
+                                    )
+                                    if v1_keys
+                                    else np.nan
+                                ),
+                            },
+                            "accepted": {
+                                "common_n": int(
+                                    len(
+                                        v1_accepted
+                                        & v2_accepted
+                                    )
+                                ),
+                                "v1_only_n": int(
+                                    len(
+                                        v1_accepted
+                                        - v2_accepted
+                                    )
+                                ),
+                                "v2_only_n": int(
+                                    len(
+                                        v2_accepted
+                                        - v1_accepted
+                                    )
+                                ),
+                                "v1_only": accepted_detail(
+                                    v1_exec,
+                                    v1_accepted
+                                    - v2_accepted,
+                                    "V1 accepted only",
+                                ),
+                                "v2_only": accepted_detail(
+                                    v2_exec,
+                                    v2_accepted
+                                    - v1_accepted,
+                                    "V2 accepted only",
+                                ),
+                                "common_v1": accepted_detail(
+                                    v1_exec,
+                                    v1_accepted
+                                    & v2_accepted,
+                                    "Accepted by both · V1",
+                                ),
+                                "common_v2": accepted_detail(
+                                    v2_exec,
+                                    v1_accepted
+                                    & v2_accepted,
+                                    "Accepted by both · V2",
+                                ),
+                            },
+                        }
+                        st.session_state[
+                            cache_key
+                        ] = cached
+
+    if not isinstance(
+        cached,
+        dict,
+    ):
+        st.info(
+            "Press **Run / refresh V1 vs V2 benchmark** when you want the "
+            "cross-candidate comparison. It is intentionally not computed on "
+            "every Streamlit rerun."
+        )
+        return
+
+    if cached.get("error"):
+        st.warning(
+            str(
+                cached.get(
+                    "error"
+                )
+            )
+        )
+        return
+
+    created_at = pd.to_datetime(
+        cached.get(
+            "created_at",
+            np.nan,
+        ),
+        unit="s",
+        utc=True,
+        errors="coerce",
+    )
+    if pd.notna(created_at):
+        st.caption(
+            "Comparison snapshot: "
+            + created_at.tz_convert(
+                TZ
+            ).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            + f" ({TZ})"
+        )
+
+    # ======================================================
+    # A · Universe
+    # ======================================================
+    st.markdown(
+        "#### A. UNIVERSE · V1 vs V2 before selector / portfolio"
+    )
+    st.caption(
+        "Every candidate gets the same TP 0.5% / SL 3% / 180m first-touch "
+        "execution. There is no one-slot competition here."
+    )
+
+    universe_table = cached.get(
+        "universe_table",
+        pd.DataFrame(),
+    )
+    if (
+        universe_table is not None
+        and not universe_table.empty
+    ):
+        st.dataframe(
+            universe_table,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v1_v2_universe_comparison",
+        )
+
+    overlap = cached.get(
+        "overlap",
+        {},
+    )
+    o1, o2, o3, o4 = st.columns(
+        4
+    )
+    o1.metric(
+        "V1 ∩ V2",
+        int(
+            overlap.get(
+                "V1 ∩ V2",
+                0,
+            )
+        ),
+    )
+    o2.metric(
+        "V1 only",
+        int(
+            overlap.get(
+                "V1 only",
+                0,
+            )
+        ),
+    )
+    o3.metric(
+        "V2 only",
+        int(
+            overlap.get(
+                "V2 only",
+                0,
+            )
+        ),
+    )
+    v1_in_v2 = pd.to_numeric(
+        pd.Series([
+            overlap.get(
+                "V1 in V2 %",
+                np.nan,
+            )
+        ]),
+        errors="coerce",
+    ).iloc[0]
+    o4.metric(
+        "V1 IDs also in V2",
+        (
+            f"{float(v1_in_v2):.1f}%"
+            if pd.notna(
+                v1_in_v2
+            )
+            else "—"
+        ),
+    )
+
+    # ======================================================
+    # B · Portfolio
+    # ======================================================
+    st.markdown(
+        "#### B. PORTFOLIO · Room → Strength · 1 slot · x3 · 80%"
+    )
+    st.caption(
+        "Same raw candidate executions as A. The only difference is portfolio "
+        "competition: $200 start, Most HTF Room → Strength, one slot, x3 and "
+        "80% realized-equity margin."
+    )
+
+    portfolio_table = cached.get(
+        "portfolio_table",
+        pd.DataFrame(),
+    )
+    if (
+        portfolio_table is not None
+        and not portfolio_table.empty
+    ):
+        st.dataframe(
+            portfolio_table,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_v1_v2_portfolio_comparison",
+        )
+
+    accepted = cached.get(
+        "accepted",
+        {},
+    )
+    a1, a2, a3 = st.columns(
+        3
+    )
+    a1.metric(
+        "Accepted by both",
+        int(
+            accepted.get(
+                "common_n",
+                0,
+            )
+        ),
+    )
+    a2.metric(
+        "Accepted only by V1",
+        int(
+            accepted.get(
+                "v1_only_n",
+                0,
+            )
+        ),
+    )
+    a3.metric(
+        "Accepted only by V2",
+        int(
+            accepted.get(
+                "v2_only_n",
+                0,
+            )
+        ),
+    )
+
+    with st.expander(
+        "🔎 Which accepted trades explain the difference?",
+        expanded=False,
+    ):
+        tabs = st.tabs([
+            "V1 accepted only",
+            "V2 accepted only",
+            "Common · V1",
+            "Common · V2",
+        ])
+        frames = [
+            accepted.get(
+                "v1_only",
+                pd.DataFrame(),
+            ),
+            accepted.get(
+                "v2_only",
+                pd.DataFrame(),
+            ),
+            accepted.get(
+                "common_v1",
+                pd.DataFrame(),
+            ),
+            accepted.get(
+                "common_v2",
+                pd.DataFrame(),
+            ),
+        ]
+
+        for tab, frame in zip(
+            tabs,
+            frames,
+        ):
+            with tab:
+                if (
+                    frame is None
+                    or frame.empty
+                ):
+                    st.info(
+                        "No trades in this bucket."
+                    )
+                    continue
+
+                display = frame.copy()
+                if (
+                    "Entry timestamp"
+                    in display.columns
+                ):
+                    display[
+                        "Entry local"
+                    ] = (
+                        pd.to_datetime(
+                            pd.to_numeric(
+                                display[
+                                    "Entry timestamp"
+                                ],
+                                errors="coerce",
+                            ),
+                            unit="ms",
+                            utc=True,
+                            errors="coerce",
+                        )
+                        .dt.tz_convert(
+                            TZ
+                        )
+                        .dt.strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                    )
+
+                st.dataframe(
+                    display,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    # ======================================================
+    # C · All Execution Matrix variants
+    # ======================================================
+    st.markdown(
+        "#### C. EXECUTION MATRIX VARIANTS · which one has the best NET?"
+    )
+    st.caption(
+        "Same fixed TP 0.5% / SL 3% / 180m for every row. "
+        "**Universe NET pts** is before slot competition. "
+        "**Portfolio NET pts** reruns that exact variant with the same "
+        "Room → Strength · 1 slot · x3 · 80% portfolio. "
+        "Strong Strength is fixed at **>= 0.50%** in this benchmark."
+    )
+
+    v1_variant_leaderboard = cached.get(
+        "v1_variant_leaderboard",
+        pd.DataFrame(),
+    )
+    v2_variant_leaderboard = cached.get(
+        "v2_variant_leaderboard",
+        pd.DataFrame(),
+    )
+    combined_variant_leaderboard = cached.get(
+        "combined_variant_leaderboard",
+        pd.DataFrame(),
+    )
+
+    variant_tab_v1, variant_tab_v2, variant_tab_all = st.tabs(
+        [
+            "🧊 Candidate V1 variants",
+            "🧪 Candidate V2 variants",
+            "🏆 All variants combined",
+        ]
+    )
+
+    def render_variant_table(
+        frame,
+        key,
+    ):
+        if (
+            frame is None
+            or frame.empty
+        ):
+            st.info(
+                "No variant results are available in this benchmark snapshot."
+            )
+            return
+
+        preferred = [
+            "Best raw NET",
+            "Universe NET rank",
+            "Execution matrix variant",
+            "Coverage %",
+            "Resolved",
+            "TP",
+            "SL",
+            "TIME_EXIT",
+            "Universe NET pts",
+            "Universe Avg %",
+            "Universe PF",
+            "Universe WR %",
+            "Avg MFE %",
+            "Avg MAE %",
+            "Best portfolio NET",
+            "Portfolio NET rank",
+            "Portfolio accepted",
+            "Portfolio NET pts",
+            "Final equity $",
+            "Return %",
+            "Max DD %",
+            "Portfolio PF",
+        ]
+        cols = [
+            column
+            for column in preferred
+            if column in frame.columns
+        ]
+        extras = [
+            column
+            for column in frame.columns
+            if column not in cols
+            and column != "Candidate"
+        ]
+
+        display = frame[
+            cols + extras
+        ].copy()
+
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+            key=key,
+        )
+
+        universe_net = pd.to_numeric(
+            frame.get(
+                "Universe NET pts",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        )
+        portfolio_net = pd.to_numeric(
+            frame.get(
+                "Portfolio NET pts",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        )
+
+        if universe_net.notna().any():
+            best_raw_idx = universe_net.idxmax()
+            best_raw = frame.loc[
+                best_raw_idx
+            ]
+            st.caption(
+                "🏆 Best raw NET: "
+                f"**{best_raw.get('Execution matrix variant', '—')}** · "
+                f"{float(best_raw.get('Universe NET pts', 0.0)):+.4f} pts"
+            )
+
+        if portfolio_net.notna().any():
+            best_port_idx = portfolio_net.idxmax()
+            best_port = frame.loc[
+                best_port_idx
+            ]
+            st.caption(
+                "🏆 Best portfolio NET: "
+                f"**{best_port.get('Execution matrix variant', '—')}** · "
+                f"{float(best_port.get('Portfolio NET pts', 0.0)):+.4f} pts · "
+                f"equity ${float(best_port.get('Final equity $', np.nan)):.2f}"
+                if pd.notna(
+                    pd.to_numeric(
+                        pd.Series([
+                            best_port.get(
+                                "Final equity $",
+                                np.nan,
+                            )
+                        ]),
+                        errors="coerce",
+                    ).iloc[0]
+                )
+                else (
+                    "🏆 Best portfolio NET: "
+                    f"**{best_port.get('Execution matrix variant', '—')}** · "
+                    f"{float(best_port.get('Portfolio NET pts', 0.0)):+.4f} pts"
+                )
+            )
+
+    with variant_tab_v1:
+        render_variant_table(
+            v1_variant_leaderboard,
+            "candidate_v1_variant_leaderboard",
+        )
+
+    with variant_tab_v2:
+        render_variant_table(
+            v2_variant_leaderboard,
+            "candidate_v2_variant_leaderboard",
+        )
+
+    with variant_tab_all:
+        if (
+            combined_variant_leaderboard
+            is None
+            or combined_variant_leaderboard.empty
+        ):
+            st.info(
+                "No combined variant results are available."
+            )
+        else:
+            combined_preferred = [
+                "Overall Universe NET rank",
+                "Overall Portfolio NET rank",
+                "Candidate",
+                "Execution matrix variant",
+                "Coverage %",
+                "Resolved",
+                "Universe NET pts",
+                "Universe Avg %",
+                "Universe PF",
+                "Universe WR %",
+                "Portfolio accepted",
+                "Portfolio NET pts",
+                "Final equity $",
+                "Return %",
+                "Max DD %",
+                "Portfolio PF",
+            ]
+            combined_cols = [
+                column
+                for column in combined_preferred
+                if column
+                in combined_variant_leaderboard.columns
+            ]
+
+            st.dataframe(
+                combined_variant_leaderboard[
+                    combined_cols
+                ].copy(),
+                use_container_width=True,
+                hide_index=True,
+                key="candidate_all_variant_leaderboard",
+            )
+
+            best_all_raw = (
+                combined_variant_leaderboard
+                .sort_values(
+                    "Overall Universe NET rank",
+                    kind="stable",
+                )
+                .iloc[0]
+            )
+            best_all_portfolio = (
+                combined_variant_leaderboard
+                .sort_values(
+                    "Overall Portfolio NET rank",
+                    kind="stable",
+                )
+                .iloc[0]
+            )
+
+            c1, c2 = st.columns(2)
+            c1.metric(
+                "🏆 Overall best raw NET",
+                (
+                    f"{best_all_raw.get('Candidate', '')} · "
+                    f"{best_all_raw.get('Execution matrix variant', '')}"
+                ),
+                (
+                    f"{float(best_all_raw.get('Universe NET pts', 0.0)):+.4f} pts"
+                ),
+            )
+            c2.metric(
+                "🏆 Overall best portfolio NET",
+                (
+                    f"{best_all_portfolio.get('Candidate', '')} · "
+                    f"{best_all_portfolio.get('Execution matrix variant', '')}"
+                ),
+                (
+                    f"{float(best_all_portfolio.get('Portfolio NET pts', 0.0)):+.4f} pts"
+                ),
+            )
+
+    export_sections = []
+    if (
+        universe_table is not None
+        and not universe_table.empty
+    ):
+        export_sections.append(
+            "A_UNIVERSE\n"
+            + universe_table.to_csv(
+                index=False
+            )
+        )
+    if (
+        portfolio_table is not None
+        and not portfolio_table.empty
+    ):
+        export_sections.append(
+            "B_PORTFOLIO\n"
+            + portfolio_table.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        v1_variant_leaderboard is not None
+        and not v1_variant_leaderboard.empty
+    ):
+        export_sections.append(
+            "C_V1_EXECUTION_MATRIX_VARIANTS\n"
+            + v1_variant_leaderboard.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        v2_variant_leaderboard is not None
+        and not v2_variant_leaderboard.empty
+    ):
+        export_sections.append(
+            "C_V2_EXECUTION_MATRIX_VARIANTS\n"
+            + v2_variant_leaderboard.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        combined_variant_leaderboard is not None
+        and not combined_variant_leaderboard.empty
+    ):
+        export_sections.append(
+            "C_ALL_VARIANTS_COMBINED\n"
+            + combined_variant_leaderboard.to_csv(
+                index=False
+            )
+        )
+
+    if export_sections:
+        st.download_button(
+            "Download V1 vs V2 fixed benchmark CSV",
+            data="\n\n".join(
+                export_sections
+            ).encode(
+                "utf-8"
+            ),
+            file_name=(
+                "candidate_v1_vs_v2_fixed_benchmark.csv"
+            ),
+            mime="text/csv",
+            key="candidate_v1_v2_fixed_benchmark_download",
+        )
+
+
 def _candidate_v2_atomic_write_json(payload, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -59584,6 +61504,14 @@ if selected_section == "reaction_swing_lab":
                     ),
                     max_retest_age_minutes=4320,
                 )
+
+            render_candidate_v1_v2_fixed_benchmark(
+                retests_df=candidate_shared_retests_df,
+                v1_short_config=candidate_v1_config,
+                v1_long_config=candidate_v1_long_config,
+            )
+
+            st.divider()
 
             selected_candidate_label = (
                 "Candidate V1" if "V1" in candidate_version else "Candidate V2"
