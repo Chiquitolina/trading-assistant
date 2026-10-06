@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import hashlib
 from pathlib import Path
 
 import plotly.graph_objects as go
@@ -282,6 +283,9 @@ CANDIDATE_V2_MARKET_TRANSITION_FILE = (
 )
 CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE = (
     BASE_DIR / "reports" / "candidate_v2_analysis" / "selected_cell_history.csv"
+)
+CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE = (
+    BASE_DIR / "reports" / "candidate_v1_analysis" / "selected_cell_history.csv"
 )
 CANDIDATE_V2_STRENGTH_THRESHOLDS = (
     0.00, 0.25, 0.50, 0.75, 1.00, 1.50,
@@ -8371,6 +8375,36 @@ if (
     st.info("📭 No trades yet")
     st.stop()
     
+
+@st.cache_data(show_spinner=False)
+def _load_volume_exhaustion_symbol_universe_cached(path_text, modified_ns):
+    try:
+        frame = pd.read_csv(path_text, usecols=["symbol"])
+    except Exception:
+        return tuple()
+    if frame.empty or "symbol" not in frame.columns:
+        return tuple()
+    return tuple(
+        sorted(
+            frame["symbol"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+    )
+
+
+def load_volume_exhaustion_symbol_universe():
+    modified_ns = get_file_modified_ns(VOLUME_EXHAUSTION_EVENTS_FILE)
+    if modified_ns is None:
+        return tuple()
+    return _load_volume_exhaustion_symbol_universe_cached(
+        str(VOLUME_EXHAUSTION_EVENTS_FILE),
+        int(modified_ns),
+    )
+
+
 def load_volume_exhaustion_events():
     modified_ns = get_file_modified_ns(
         VOLUME_EXHAUSTION_EVENTS_FILE
@@ -19121,6 +19155,211 @@ def _candidate_v1_read_history_csv_cached(path_text, mtime_ns):
 
 
 
+
+def _candidate_analysis_profile_id(frame, fallback="v2"):
+    if frame is None or frame.empty:
+        return str(fallback).lower()
+    profile = frame.get(
+        "candidate_analysis_profile",
+        pd.Series(str(fallback).lower(), index=frame.index),
+    )
+    profile = profile.fillna(str(fallback).lower()).astype(str).str.lower()
+    return "v1" if profile.eq("v1").any() else "v2"
+
+
+def _candidate_analysis_path_store_file(frame=None, profile_id=None):
+    profile = (
+        str(profile_id).lower()
+        if profile_id is not None
+        else _candidate_analysis_profile_id(frame, fallback="v2")
+    )
+    return CANDIDATE_V1_PATH_STORE_FILE if profile == "v1" else CANDIDATE_V2_PATH_STORE_FILE
+
+
+def _candidate_analysis_market_context_file(frame=None, profile_id=None):
+    profile = (
+        str(profile_id).lower()
+        if profile_id is not None
+        else _candidate_analysis_profile_id(frame, fallback="v2")
+    )
+    return (
+        CANDIDATE_V1_MARKET_REGIME_STORE_FILE
+        if profile == "v1"
+        else CANDIDATE_V2_MARKET_CONTEXT_FILE
+    )
+
+
+def _candidate_analysis_selected_cell_history_file(profile_id):
+    return (
+        CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE
+        if str(profile_id).lower() == "v1"
+        else CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
+    )
+
+
+def _candidate_analysis_path_store_mtime_ns(path):
+    try:
+        return int(Path(path).stat().st_mtime_ns)
+    except Exception:
+        return 0
+
+
+@st.cache_data(ttl=60, max_entries=6, show_spinner=False)
+def _candidate_analysis_load_path_store_cached(path_text, mtime_ns):
+    # mtime_ns participates in the cache key so a refreshed pickle invalidates
+    # immediately without rereading the same large store several times per rerun.
+    _ = int(mtime_ns)
+    try:
+        return candidate_v1_fast_load_path_store(Path(path_text))
+    except Exception:
+        return pd.DataFrame()
+
+
+def _candidate_analysis_source_signature(frame, profile_id="v2"):
+    """Compact deterministic source signature for Streamlit/session caches."""
+    if frame is None or frame.empty:
+        return (str(profile_id).lower(), 0, "", None)
+    event_col = (
+        "candidate_v2_event_key"
+        if "candidate_v2_event_key" in frame.columns
+        else "candidate_v1_event_key"
+    )
+    if event_col in frame.columns:
+        keys = (
+            frame[event_col]
+            .fillna("")
+            .astype(str)
+            .drop_duplicates()
+            .sort_values(kind="stable")
+        )
+        digest = hashlib.sha1("\n".join(keys.tolist()).encode("utf-8")).hexdigest()[:16]
+        n = int(len(keys))
+    else:
+        digest = ""
+        n = int(len(frame))
+    known = pd.to_numeric(
+        frame.get(
+            "candidate_v1_reaction_known_ts",
+            frame.get("retest_timestamp", pd.Series(np.nan, index=frame.index)),
+        ),
+        errors="coerce",
+    )
+    max_known = int(known.max()) if known.notna().any() else None
+    return (str(profile_id).lower(), n, digest, max_known)
+
+
+
+def _candidate_analysis_retests_signature(retests_df):
+    """Compact signature of the shared scanner output for in-session universe caches."""
+    if retests_df is None or retests_df.empty:
+        return (0, "", None)
+    work = retests_df
+    if "status" in work.columns:
+        status = work["status"].fillna("").astype(str)
+        reaction = work.loc[status.eq("REACTION")]
+        if not reaction.empty:
+            work = reaction
+    ts = pd.to_numeric(
+        work.get("retest_timestamp", pd.Series(np.nan, index=work.index)),
+        errors="coerce",
+    )
+    symbols = work.get("symbol", pd.Series("", index=work.index)).fillna("").astype(str)
+    sides = work.get("signal", pd.Series("", index=work.index)).fillna("").astype(str)
+    keys = (
+        symbols
+        + "|"
+        + sides
+        + "|"
+        + ts.fillna(-1).astype("int64").astype(str)
+    ).drop_duplicates().sort_values(kind="stable")
+    digest = hashlib.sha1("\n".join(keys.tolist()).encode("utf-8")).hexdigest()[:16]
+    max_ts = int(ts.max()) if ts.notna().any() else None
+    return (int(len(keys)), digest, max_ts)
+
+
+@st.cache_data(ttl=90, max_entries=6, show_spinner=False)
+def _reaction_lab_shared_candidate_scan_cached(
+    symbols,
+    swing_timeframe,
+    swing_detector,
+    min_swing_prominence_pct,
+    retest_tolerance_pct,
+    min_departure_pct,
+    max_age_minutes,
+    max_retest_age_minutes,
+):
+    """One all-symbol structural scan shared by Candidate V1 and Candidate V2."""
+    return scan_confirmed_swing_retests_all_symbols(
+        symbols=tuple(str(symbol) for symbol in symbols),
+        swing_timeframes=(str(swing_timeframe),),
+        swing_detector_items=((str(swing_timeframe), str(swing_detector)),),
+        min_swing_prominence_pct=float(min_swing_prominence_pct),
+        retest_tolerance_pct=float(retest_tolerance_pct),
+        min_departure_pct=float(min_departure_pct),
+        max_age_minutes=int(max_age_minutes),
+        max_retest_age_minutes=int(max_retest_age_minutes),
+    )
+
+
+def _candidate_v1_unified_research_history(retests_df, short_config, long_config):
+    """Persist/combine official frozen V1 SHORT+LONG rows for the shared engine."""
+    short_current = _candidate_v1_build_current_monitor(
+        retests_df=retests_df,
+        config=short_config,
+    )
+    long_current = _candidate_v1_long_build_current_monitor(
+        retests_df=retests_df,
+        config=long_config,
+    )
+    short_history = _candidate_v1_persist_history(short_current)
+    long_history = _candidate_v1_long_persist_history(long_current)
+    frames = []
+    if short_history is not None and not short_history.empty:
+        sh = short_history.copy()
+        sh["Candidate side"] = "SHORT"
+        frames.append(sh)
+    if long_history is not None and not long_history.empty:
+        lh = long_history.copy()
+        lh["Candidate side"] = "LONG"
+        frames.append(lh)
+    if not frames:
+        return pd.DataFrame()
+    history = pd.concat(frames, ignore_index=True, sort=False)
+    sort_cols = [c for c in ["candidate_v1_reaction_known_ts", "symbol"] if c in history.columns]
+    if sort_cols:
+        history = history.sort_values(sort_cols, kind="stable", na_position="last")
+    history = history.drop_duplicates(subset=["candidate_v1_event_key"], keep="last").reset_index(drop=True)
+    history["candidate_analysis_profile"] = "v1"
+    history["candidate_v2_event_key"] = history["candidate_v1_event_key"].fillna("").astype(str)
+    history["candidate_v2_cohort"] = history.get(
+        "candidate_v1_cohort", pd.Series("FORWARD", index=history.index)
+    ).fillna("FORWARD").astype(str)
+    if "side" not in history.columns:
+        history["side"] = history.get(
+            "signal",
+            history.get("Candidate side", pd.Series("", index=history.index)),
+        )
+    history["side"] = history["side"].fillna("").astype(str).str.upper()
+    history["is_candidate_v1_driver"] = True
+    alias_map = {
+        "candidate_v1_outcome_180m": "candidate_v2_outcome_180m",
+        "candidate_v1_outcome_240m": "candidate_v2_outcome_240m",
+        "candidate_v1_outcome_360m": "candidate_v2_outcome_360m",
+        "candidate_v1_mfe_180m_pct": "candidate_v2_mfe_180m_pct",
+        "candidate_v1_mae_180m_pct": "candidate_v2_mae_180m_pct",
+        "candidate_v1_mfe_240m_pct": "candidate_v2_mfe_240m_pct",
+        "candidate_v1_mae_240m_pct": "candidate_v2_mae_240m_pct",
+        "candidate_v1_mfe_360m_pct": "candidate_v2_mfe_360m_pct",
+        "candidate_v1_mae_360m_pct": "candidate_v2_mae_360m_pct",
+        "candidate_v1_first_hit_2pct_min_360": "candidate_v2_first_hit_2pct_min_360",
+        "candidate_v1_hit_timing_bucket": "candidate_v2_hit_timing_bucket",
+    }
+    for source, target in alias_map.items():
+        if source in history.columns:
+            history[target] = history[source]
+    return history
+
+
 def _candidate_v2_atomic_write_json(payload, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -19365,9 +19604,10 @@ def _candidate_v2_path_store(candidate_rows, force=False):
     rows = _candidate_v2_prepare_generic_rows(candidate_rows)
     if rows.empty:
         return pd.DataFrame()
+    active_store_path = _candidate_analysis_path_store_file(rows)
     return candidate_v1_fast_refresh_path_store(
         candidate_rows=rows,
-        store_path=CANDIDATE_V2_PATH_STORE_FILE,
+        store_path=active_store_path,
         candle_loader=load_volume_exhaustion_research_candles,
         prepare_candles=_prepare_confirmed_swing_retest_candles,
         candle_limit=VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT,
@@ -19740,9 +19980,10 @@ def _candidate_v2_build_market_context(candidate_rows, force=False):
         return pd.DataFrame(), None
 
     sector_map, sector_error = _candidate_v1_market_sector_metadata()
+    active_market_store = _candidate_analysis_market_context_file(rows)
     store = candidate_v1_refresh_market_regime_store(
         candidate_rows=rows,
-        store_path=CANDIDATE_V2_MARKET_CONTEXT_FILE,
+        store_path=active_market_store,
         redis_client=market_flow_dashboard_service.redis,
         universe_symbols=CANDIDATE_V1_MARKET_SYMBOLS,
         sector_map=sector_map,
@@ -19870,6 +20111,8 @@ def _candidate_v2_variant_mask(frame, variant, strong_threshold=0.50):
         pd.Series("UNKNOWN", index=frame.index),
     ).fillna("UNKNOWN").astype(str)
 
+    if variant == "Candidate Base":
+        return pd.Series(True, index=frame.index, dtype=bool)
     if variant == "REACTION Base":
         return strength.notna()
     if variant == "Candidate V1 drivers":
@@ -19889,11 +20132,11 @@ def _candidate_v2_variant_mask(frame, variant, strong_threshold=0.50):
                 .isin(["true", "1", "yes"])
             )
         return driver_mask & strength.notna()
-    if variant == "V2 Strength":
+    if variant in {"V2 Strength", "Candidate + Strength"}:
         return strength.gt(0.0)
-    if variant == "V2 Strong Strength":
+    if variant in {"V2 Strong Strength", "Candidate + Strong Strength"}:
         return strength.ge(float(strong_threshold))
-    if variant == "V2 Strength + Flow":
+    if variant in {"V2 Strength + Flow", "Candidate + Strength + Flow"}:
         return strength.gt(0.0) & market.eq("TAILWIND")
     return pd.Series(False, index=frame.index)
 
@@ -20062,18 +20305,19 @@ def _candidate_v2_directional_bucket_series(frame):
     )
 
 
-def _candidate_v2_monitor_table(frame, strong_threshold):
+def _candidate_v2_monitor_table(frame, strong_threshold, variants=None):
     if frame is None or frame.empty:
         return pd.DataFrame()
 
     rows = []
-    variants = [
-        "REACTION Base",
-        "Candidate V1 drivers",
-        "V2 Strength",
-        "V2 Strong Strength",
-        "V2 Strength + Flow",
-    ]
+    if variants is None:
+        variants = [
+            "REACTION Base",
+            "Candidate V1 drivers",
+            "V2 Strength",
+            "V2 Strong Strength",
+            "V2 Strength + Flow",
+        ]
     for variant in variants:
         subset = frame.loc[
             _candidate_v2_variant_mask(
@@ -20127,8 +20371,8 @@ def _candidate_v2_monitor_table(frame, strong_threshold):
         resolved_n = int(resolved.sum())
         rows.append({
             "Variant": (
-                f"V2 Strong >= {float(strong_threshold):g}%"
-                if variant == "V2 Strong Strength"
+                f"{variant} >= {float(strong_threshold):g}%"
+                if variant in {"V2 Strong Strength", "Candidate + Strong Strength"}
                 else variant
             ),
             "N": int(subset["candidate_v2_event_key"].astype(str).nunique()),
@@ -20176,18 +20420,20 @@ def _candidate_v2_selected_pair(frame, tp, sl):
 def _candidate_v2_variant_comparison_table(
     selected_pair,
     strong_threshold,
+    variants=None,
 ):
     if selected_pair is None or selected_pair.empty:
         return pd.DataFrame()
 
     rows = []
-    variants = [
-        "REACTION Base",
-        "Candidate V1 drivers",
-        "V2 Strength",
-        "V2 Strong Strength",
-        "V2 Strength + Flow",
-    ]
+    if variants is None:
+        variants = [
+            "REACTION Base",
+            "Candidate V1 drivers",
+            "V2 Strength",
+            "V2 Strong Strength",
+            "V2 Strength + Flow",
+        ]
     base_n = int(
         selected_pair["candidate_v1_event_key"]
         .astype(str)
@@ -20207,8 +20453,8 @@ def _candidate_v2_variant_comparison_table(
         n = int(subset["candidate_v1_event_key"].astype(str).nunique())
         rows.append({
             "Variant": (
-                f"V2 Strong >= {float(strong_threshold):g}%"
-                if variant == "V2 Strong Strength"
+                f"{variant} >= {float(strong_threshold):g}%"
+                if variant in {"V2 Strong Strength", "Candidate + Strong Strength"}
                 else variant
             ),
             "Coverage %": round(n / base_n * 100.0, 2) if base_n else np.nan,
@@ -20768,8 +21014,8 @@ def _candidate_v2_mature_snapshot_summary(selected_pair, min_maturity=80.0):
 
 
 
-def _candidate_v2_load_selected_cell_history():
-    path = CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
+def _candidate_v2_load_selected_cell_history(store_path=None):
+    path = Path(store_path) if store_path is not None else CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
     if not path.exists():
         return pd.DataFrame()
     try:
@@ -20788,6 +21034,8 @@ def _candidate_v2_append_selected_cell_history(
     horizon_min,
     source_candidates,
     snapshot_created_at,
+    store_path=None,
+    candidate_profile="v2",
 ):
     """Persist one selected-cell checkpoint only when the matrix is rebuilt."""
     if cell_anatomy is None or cell_anatomy.empty:
@@ -20811,6 +21059,7 @@ def _candidate_v2_append_selected_cell_history(
                 errors="coerce",
             ).isoformat()
         ),
+        "Candidate profile": str(candidate_profile).upper(),
         "Variant": str(variant),
         "TP %": float(selected_tp),
         "SL %": float(selected_sl),
@@ -20840,13 +21089,13 @@ def _candidate_v2_append_selected_cell_history(
         ).iloc[0],
     }
 
-    path = CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
+    path = Path(store_path) if store_path is not None else CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
     path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    history = _candidate_v2_load_selected_cell_history()
+    history = _candidate_v2_load_selected_cell_history(store_path=path)
     history = pd.concat(
         [
             history,
@@ -20874,8 +21123,10 @@ def _candidate_v2_selected_cell_history_view(
     selected_tp,
     selected_sl,
     horizon_min,
+    store_path=None,
+    candidate_profile=None,
 ):
-    history = _candidate_v2_load_selected_cell_history()
+    history = _candidate_v2_load_selected_cell_history(store_path=store_path)
     if history.empty:
         return pd.DataFrame()
 
@@ -20890,8 +21141,16 @@ def _candidate_v2_selected_cell_history_view(
                 errors="coerce",
             )
 
+    profile_mask = pd.Series(True, index=history.index, dtype=bool)
+    if candidate_profile is not None and "Candidate profile" in history.columns:
+        profile_mask = (
+            history["Candidate profile"].fillna("").astype(str).str.upper()
+            .eq(str(candidate_profile).upper())
+        )
+
     mask = (
-        history.get(
+        profile_mask
+        & history.get(
             "Variant",
             pd.Series("", index=history.index),
         ).astype(str).eq(str(variant))
@@ -23659,26 +23918,16 @@ def _candidate_v2_early_exit_trade_impact(
             )
         )
 
+        # Classify by what ACTUALLY happened in the replay first.
+        # A baseline trade that is no longer accepted after chronology changes
+        # is a dropped baseline trade, even if its hypothetical candidate path
+        # would also satisfy the early-exit rule.
         if (
             baseline_accepted
-            and historical_outcome == "TP"
-            and early_triggered
+            and not scenario_accepted
         ):
             role = (
-                "Sacrificed baseline TP"
-            )
-        elif (
-            baseline_accepted
-            and historical_outcome
-            in {
-                "SL",
-                "SL_AMBIGUOUS",
-                "TIME_EXIT",
-            }
-            and early_triggered
-        ):
-            role = (
-                "Early-exited baseline loser"
+                "Dropped baseline trade"
             )
         elif (
             scenario_accepted
@@ -23689,10 +23938,26 @@ def _candidate_v2_early_exit_trade_impact(
             )
         elif (
             baseline_accepted
-            and not scenario_accepted
+            and scenario_accepted
+            and historical_outcome == "TP"
+            and early_triggered
         ):
             role = (
-                "Dropped baseline trade"
+                "Sacrificed baseline TP"
+            )
+        elif (
+            baseline_accepted
+            and scenario_accepted
+            and historical_outcome
+            in {
+                "SL",
+                "SL_AMBIGUOUS",
+                "TIME_EXIT",
+            }
+            and early_triggered
+        ):
+            role = (
+                "Early-exited baseline loser"
             )
         elif (
             baseline_accepted
@@ -24385,6 +24650,1637 @@ def _candidate_v2_early_exit_portfolio_grid(
     return pd.DataFrame(
         rows
     )
+
+
+
+def _candidate_v2_slot_upgrade_mode_options():
+    return [
+        "OFF",
+        "Any better causal Room",
+        "Room improvement ≥ X pp",
+        "Room ratio ≥ X",
+    ]
+
+
+def _candidate_v2_slot_upgrade_path_snapshot(
+    row,
+    event_path,
+    decision_ts,
+):
+    """Causal state of the currently-open trade immediately before decision_ts.
+
+    MFE/MAE only uses fully observed 1m bars with timestamp < decision_ts.
+    Replacement execution uses the OPEN of decision_ts, because the new
+    Candidate V2 entry is executable at that same 1m open.
+    """
+    if (
+        event_path is None
+        or event_path.empty
+    ):
+        return None
+
+    path = (
+        event_path.sort_values(
+            "bar_offset",
+            kind="stable",
+        )
+        .drop_duplicates(
+            "bar_offset",
+            keep="last",
+        )
+        .copy()
+    )
+
+    path_ts = pd.to_numeric(
+        path.get(
+            "timestamp",
+            pd.Series(
+                np.nan,
+                index=path.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    execution_rows = path.loc[
+        path_ts.eq(
+            int(
+                decision_ts
+            )
+        )
+    ].copy()
+
+    if execution_rows.empty:
+        return None
+
+    execution_row = execution_rows.iloc[
+        0
+    ]
+
+    observed = path.loc[
+        path_ts.lt(
+            int(
+                decision_ts
+            )
+        )
+    ].copy()
+
+    entry_price = pd.to_numeric(
+        pd.Series([
+            row.get(
+                "entry_price",
+                np.nan,
+            )
+        ]),
+        errors="coerce",
+    ).iloc[0]
+
+    if (
+        pd.isna(
+            entry_price
+        )
+        or float(
+            entry_price
+        ) <= 0
+    ):
+        first_open = pd.to_numeric(
+            path.get(
+                "open",
+                pd.Series(
+                    dtype=float
+                ),
+            ),
+            errors="coerce",
+        ).dropna()
+
+        if first_open.empty:
+            return None
+
+        entry_price = float(
+            first_open.iloc[
+                0
+            ]
+        )
+
+    replacement_price = pd.to_numeric(
+        pd.Series([
+            execution_row.get(
+                "open",
+                np.nan,
+            )
+        ]),
+        errors="coerce",
+    ).iloc[0]
+
+    if (
+        pd.isna(
+            replacement_price
+        )
+        or float(
+            replacement_price
+        ) <= 0
+    ):
+        return None
+
+    side = str(
+        row.get(
+            "side",
+            row.get(
+                "signal",
+                "",
+            ),
+        )
+    ).upper()
+
+    if side not in {
+        "LONG",
+        "SHORT",
+    }:
+        return None
+
+    mfe = 0.0
+    mae = 0.0
+
+    if not observed.empty:
+        highs = pd.to_numeric(
+            observed.get(
+                "high",
+                pd.Series(
+                    np.nan,
+                    index=observed.index,
+                ),
+            ),
+            errors="coerce",
+        ).dropna()
+
+        lows = pd.to_numeric(
+            observed.get(
+                "low",
+                pd.Series(
+                    np.nan,
+                    index=observed.index,
+                ),
+            ),
+            errors="coerce",
+        ).dropna()
+
+        if side == "LONG":
+            if not highs.empty:
+                mfe = max(
+                    0.0,
+                    float(
+                        (
+                            highs.max()
+                            / float(
+                                entry_price
+                            )
+                            - 1.0
+                        )
+                        * 100.0
+                    ),
+                )
+            if not lows.empty:
+                mae = max(
+                    0.0,
+                    float(
+                        (
+                            1.0
+                            - lows.min()
+                            / float(
+                                entry_price
+                            )
+                        )
+                        * 100.0
+                    ),
+                )
+        else:
+            if not lows.empty:
+                mfe = max(
+                    0.0,
+                    float(
+                        (
+                            1.0
+                            - lows.min()
+                            / float(
+                                entry_price
+                            )
+                        )
+                        * 100.0
+                    ),
+                )
+            if not highs.empty:
+                mae = max(
+                    0.0,
+                    float(
+                        (
+                            highs.max()
+                            / float(
+                                entry_price
+                            )
+                            - 1.0
+                        )
+                        * 100.0
+                    ),
+                )
+
+    if side == "LONG":
+        gross = (
+            float(
+                replacement_price
+            )
+            / float(
+                entry_price
+            )
+            - 1.0
+        ) * 100.0
+    else:
+        gross = (
+            1.0
+            - float(
+                replacement_price
+            )
+            / float(
+                entry_price
+            )
+        ) * 100.0
+
+    return {
+        "entry_price": float(
+            entry_price
+        ),
+        "replacement_price": float(
+            replacement_price
+        ),
+        "mfe_pct": float(
+            mfe
+        ),
+        "mae_pct": float(
+            mae
+        ),
+        "gross_pct": float(
+            gross
+        ),
+    }
+
+
+def _candidate_v2_apply_slot_upgrade_rule(
+    intervals,
+    path_store,
+    *,
+    priority_mode,
+    market_flow_gate_mode="OFF",
+    upgrade_mode="OFF",
+    min_room_improvement_pp=0.50,
+    min_room_ratio=1.25,
+    min_hold_min=0,
+    require_current_stalled=False,
+    max_current_mfe_pct=0.05,
+):
+    """One-slot causal position replacement using frozen HTF Room snapshots.
+
+    The current position keeps the causal Room captured on its own Candidate V2
+    row. A later candidate is evaluated with the Room known on ITS entry row.
+    Future structures never rewrite either Room value.
+
+    This is intentionally a one-slot transformation. The returned interval table
+    can then be replayed by the normal portfolio simulator, so PnL/equity/slot
+    chronology all change naturally.
+    """
+    if intervals is None or intervals.empty:
+        return pd.DataFrame(), {}
+
+    work = intervals.copy()
+
+    mode = str(
+        upgrade_mode
+        or "OFF"
+    )
+
+    if mode == "OFF":
+        return work, {
+            "upgrade_mode": "OFF",
+            "replacements": 0,
+        }
+
+    required = {
+        "_entry_ts",
+        "_effective_exit_ts",
+    }
+    if not required.issubset(
+        work.columns
+    ):
+        return work, {
+            "upgrade_mode": mode,
+            "replacements": 0,
+            "error": (
+                "missing interval timestamps"
+            ),
+        }
+
+    event_col = (
+        "candidate_v1_event_key"
+        if "candidate_v1_event_key"
+        in work.columns
+        else "candidate_v2_event_key"
+    )
+
+    if event_col not in work.columns:
+        return work, {
+            "upgrade_mode": mode,
+            "replacements": 0,
+            "error": "missing event key",
+        }
+
+    if (
+        path_store is None
+        or path_store.empty
+    ):
+        return work, {
+            "upgrade_mode": mode,
+            "replacements": 0,
+            "error": (
+                "missing 1m path store"
+            ),
+        }
+
+    work["_entry_ts"] = pd.to_numeric(
+        work["_entry_ts"],
+        errors="coerce",
+    )
+    work["_effective_exit_ts"] = pd.to_numeric(
+        work[
+            "_effective_exit_ts"
+        ],
+        errors="coerce",
+    )
+
+    work[
+        "_slot_historical_outcome"
+    ] = (
+        work.get(
+            "Outcome",
+            work.get(
+                "_outcome",
+                pd.Series(
+                    "",
+                    index=work.index,
+                ),
+            ),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    work[
+        "_slot_historical_net_pct"
+    ] = pd.to_numeric(
+        work.get(
+            "net_pnl_pct",
+            work.get(
+                "_net",
+                pd.Series(
+                    np.nan,
+                    index=work.index,
+                ),
+            ),
+        ),
+        errors="coerce",
+    )
+
+    for column, default in [
+        (
+            "_slot_upgrade_triggered",
+            False,
+        ),
+        (
+            "_slot_upgrade_entry",
+            False,
+        ),
+        (
+            "_slot_upgrade_old_event_key",
+            "",
+        ),
+        (
+            "_slot_upgrade_new_event_key",
+            "",
+        ),
+        (
+            "_slot_upgrade_new_symbol",
+            "",
+        ),
+        (
+            "_slot_upgrade_old_room_pct",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_new_room_pct",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_room_delta_pp",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_room_ratio",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_hold_min",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_current_mfe_pct",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_current_mae_pct",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_exit_price",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_exit_gross_pct",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_exit_net_pct",
+            np.nan,
+        ),
+        (
+            "_slot_upgrade_timestamp",
+            np.nan,
+        ),
+    ]:
+        work[
+            column
+        ] = default
+
+    valid = work.loc[
+        work["_entry_ts"].notna()
+        & work[
+            "_effective_exit_ts"
+        ].notna()
+        & work[
+            "_effective_exit_ts"
+        ].gt(
+            work["_entry_ts"]
+        )
+    ].copy()
+
+    if valid.empty:
+        return work, {
+            "upgrade_mode": mode,
+            "replacements": 0,
+        }
+
+    gate_mask = (
+        _candidate_v2_market_flow_gate_mask(
+            valid,
+            market_flow_gate_mode,
+        )
+        .reindex(
+            valid.index,
+            fill_value=False,
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    eligible = valid.loc[
+        gate_mask
+    ].copy()
+
+    if eligible.empty:
+        return work, {
+            "upgrade_mode": mode,
+            "replacements": 0,
+        }
+
+    room_components = (
+        _candidate_v2_room_causality_components(
+            eligible
+        )
+    )
+
+    eligible[
+        "_slot_room_verified"
+    ] = (
+        room_components[
+            "room_causal_verified"
+        ]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    eligible[
+        "_slot_room_pct"
+    ] = pd.to_numeric(
+        eligible.get(
+            "nearest_opposing_room_pct",
+            pd.Series(
+                np.nan,
+                index=eligible.index,
+            ),
+        ),
+        errors="coerce",
+    ).where(
+        eligible[
+            "_slot_room_verified"
+        ]
+    )
+
+    work.loc[
+        eligible.index,
+        "_slot_room_verified",
+    ] = eligible[
+        "_slot_room_verified"
+    ]
+    work.loc[
+        eligible.index,
+        "_slot_room_pct",
+    ] = eligible[
+        "_slot_room_pct"
+    ]
+
+    path_groups = {
+        str(
+            event_key
+        ): (
+            group.sort_values(
+                "bar_offset",
+                kind="stable",
+            )
+            .drop_duplicates(
+                "bar_offset",
+                keep="last",
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+        for (
+            event_key,
+            group,
+        ) in path_store.groupby(
+            "candidate_v1_event_key",
+            sort=False,
+        )
+    }
+
+    fallback_execution_cost = pd.to_numeric(
+        eligible.get(
+            "execution_cost_pct",
+            pd.Series(
+                np.nan,
+                index=eligible.index,
+            ),
+        ),
+        errors="coerce",
+    ).dropna()
+
+    fallback_execution_cost = (
+        float(
+            fallback_execution_cost.median()
+        )
+        if not fallback_execution_cost.empty
+        else 0.0
+    )
+
+    active_idx = None
+    replacements = []
+    no_room_new = 0
+    hold_rejections = 0
+    room_rejections = 0
+    stall_rejections = 0
+    missing_path = 0
+
+    min_hold_min = max(
+        0.0,
+        float(
+            min_hold_min
+        ),
+    )
+    max_current_mfe_pct = max(
+        0.0,
+        float(
+            max_current_mfe_pct
+        ),
+    )
+    min_room_improvement_pp = max(
+        0.0,
+        float(
+            min_room_improvement_pp
+        ),
+    )
+    min_room_ratio = max(
+        1.0,
+        float(
+            min_room_ratio
+        ),
+    )
+
+    for (
+        entry_ts,
+        raw_group,
+    ) in eligible.groupby(
+        "_entry_ts",
+        sort=True,
+    ):
+        entry_ts = int(
+            entry_ts
+        )
+
+        if active_idx is not None:
+            current_exit = pd.to_numeric(
+                pd.Series([
+                    work.at[
+                        active_idx,
+                        "_effective_exit_ts",
+                    ]
+                ]),
+                errors="coerce",
+            ).iloc[0]
+
+            if (
+                pd.isna(
+                    current_exit
+                )
+                or float(
+                    current_exit
+                ) <= float(
+                    entry_ts
+                )
+            ):
+                active_idx = None
+
+        ordered = (
+            _candidate_v2_portfolio_priority(
+                raw_group,
+                priority_mode,
+            )
+        )
+
+        if ordered is None or ordered.empty:
+            continue
+
+        new_row = ordered.iloc[
+            0
+        ]
+        new_idx = new_row.name
+
+        if active_idx is None:
+            active_idx = new_idx
+            continue
+
+        current_row = work.loc[
+            active_idx
+        ]
+
+        current_event = str(
+            current_row.get(
+                event_col,
+                "",
+            )
+        )
+        new_event = str(
+            new_row.get(
+                event_col,
+                "",
+            )
+        )
+
+        if (
+            not new_event
+            or new_event
+            == current_event
+        ):
+            continue
+
+        new_room = pd.to_numeric(
+            pd.Series([
+                work.at[
+                    new_idx,
+                    "_slot_room_pct",
+                ]
+                if (
+                    "_slot_room_pct"
+                    in work.columns
+                )
+                else np.nan
+            ]),
+            errors="coerce",
+        ).iloc[0]
+
+        if pd.isna(
+            new_room
+        ):
+            no_room_new += 1
+            continue
+
+        current_room = pd.to_numeric(
+            pd.Series([
+                work.at[
+                    active_idx,
+                    "_slot_room_pct",
+                ]
+                if (
+                    "_slot_room_pct"
+                    in work.columns
+                )
+                else np.nan
+            ]),
+            errors="coerce",
+        ).iloc[0]
+
+        current_entry_ts = pd.to_numeric(
+            pd.Series([
+                current_row.get(
+                    "_entry_ts",
+                    np.nan,
+                )
+            ]),
+            errors="coerce",
+        ).iloc[0]
+
+        if pd.isna(
+            current_entry_ts
+        ):
+            continue
+
+        hold_min = (
+            float(
+                entry_ts
+            )
+            - float(
+                current_entry_ts
+            )
+        ) / 60_000.0
+
+        if hold_min < min_hold_min:
+            hold_rejections += 1
+            continue
+
+        if pd.isna(
+            current_room
+        ):
+            room_delta = np.inf
+            room_ratio = np.inf
+            room_ok = True
+        else:
+            room_delta = (
+                float(
+                    new_room
+                )
+                - float(
+                    current_room
+                )
+            )
+            room_ratio = (
+                float(
+                    new_room
+                )
+                / float(
+                    current_room
+                )
+                if float(
+                    current_room
+                ) > 0
+                else np.inf
+            )
+
+            if mode == (
+                "Any better causal Room"
+            ):
+                room_ok = (
+                    room_delta
+                    > 1e-12
+                )
+            elif mode == (
+                "Room improvement ≥ X pp"
+            ):
+                room_ok = (
+                    room_delta
+                    >= min_room_improvement_pp
+                    - 1e-12
+                )
+            elif mode == (
+                "Room ratio ≥ X"
+            ):
+                room_ok = (
+                    room_ratio
+                    >= min_room_ratio
+                    - 1e-12
+                )
+            else:
+                room_ok = False
+
+        if not room_ok:
+            room_rejections += 1
+            continue
+
+        current_path = path_groups.get(
+            current_event
+        )
+
+        snapshot = (
+            _candidate_v2_slot_upgrade_path_snapshot(
+                current_row,
+                current_path,
+                entry_ts,
+            )
+        )
+
+        if snapshot is None:
+            missing_path += 1
+            continue
+
+        if (
+            require_current_stalled
+            and float(
+                snapshot[
+                    "mfe_pct"
+                ]
+            )
+            >= max_current_mfe_pct
+        ):
+            stall_rejections += 1
+            continue
+
+        execution_cost_pct = pd.to_numeric(
+            pd.Series([
+                current_row.get(
+                    "execution_cost_pct",
+                    fallback_execution_cost,
+                )
+            ]),
+            errors="coerce",
+        ).fillna(
+            fallback_execution_cost
+        ).iloc[0]
+
+        replacement_net = (
+            float(
+                snapshot[
+                    "gross_pct"
+                ]
+            )
+            - float(
+                execution_cost_pct
+            )
+        )
+
+        historical_outcome = str(
+            current_row.get(
+                "_slot_historical_outcome",
+                current_row.get(
+                    "Outcome",
+                    "",
+                ),
+            )
+        ).upper()
+
+        historical_net = pd.to_numeric(
+            pd.Series([
+                current_row.get(
+                    "_slot_historical_net_pct",
+                    current_row.get(
+                        "net_pnl_pct",
+                        np.nan,
+                    ),
+                )
+            ]),
+            errors="coerce",
+        ).iloc[0]
+
+        # Close current position exactly at the new candidate's executable 1m
+        # open. The normal portfolio replay can then admit the new candidate.
+        work.at[
+            active_idx,
+            "Outcome",
+        ] = "REPLACED"
+        work.at[
+            active_idx,
+            "_outcome",
+        ] = "REPLACED"
+        work.at[
+            active_idx,
+            "exit_timestamp",
+        ] = int(
+            entry_ts
+        )
+        work.at[
+            active_idx,
+            "_exit_ts",
+        ] = int(
+            entry_ts
+        )
+        work.at[
+            active_idx,
+            "_effective_exit_ts",
+        ] = int(
+            entry_ts
+        )
+        work.at[
+            active_idx,
+            "exit_price",
+        ] = float(
+            snapshot[
+                "replacement_price"
+            ]
+        )
+        work.at[
+            active_idx,
+            "gross_pnl_pct",
+        ] = float(
+            snapshot[
+                "gross_pct"
+            ]
+        )
+        work.at[
+            active_idx,
+            "net_pnl_pct",
+        ] = float(
+            replacement_net
+        )
+        work.at[
+            active_idx,
+            "_net",
+        ] = float(
+            replacement_net
+        )
+        work.at[
+            active_idx,
+            "mfe_until_exit_pct",
+        ] = float(
+            snapshot[
+                "mfe_pct"
+            ]
+        )
+        work.at[
+            active_idx,
+            "mae_until_exit_pct",
+        ] = float(
+            snapshot[
+                "mae_pct"
+            ]
+        )
+        work.at[
+            active_idx,
+            "_hold_min",
+        ] = float(
+            hold_min
+        )
+
+        work.at[
+            active_idx,
+            "_slot_upgrade_triggered",
+        ] = True
+        work.at[
+            active_idx,
+            "_slot_upgrade_new_event_key",
+        ] = new_event
+        work.at[
+            active_idx,
+            "_slot_upgrade_new_symbol",
+        ] = str(
+            new_row.get(
+                "symbol",
+                "",
+            )
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_old_room_pct",
+        ] = (
+            float(
+                current_room
+            )
+            if pd.notna(
+                current_room
+            )
+            else np.nan
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_new_room_pct",
+        ] = float(
+            new_room
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_room_delta_pp",
+        ] = (
+            float(
+                room_delta
+            )
+            if np.isfinite(
+                room_delta
+            )
+            else np.nan
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_room_ratio",
+        ] = (
+            float(
+                room_ratio
+            )
+            if np.isfinite(
+                room_ratio
+            )
+            else np.nan
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_hold_min",
+        ] = float(
+            hold_min
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_current_mfe_pct",
+        ] = float(
+            snapshot[
+                "mfe_pct"
+            ]
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_current_mae_pct",
+        ] = float(
+            snapshot[
+                "mae_pct"
+            ]
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_exit_price",
+        ] = float(
+            snapshot[
+                "replacement_price"
+            ]
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_exit_gross_pct",
+        ] = float(
+            snapshot[
+                "gross_pct"
+            ]
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_exit_net_pct",
+        ] = float(
+            replacement_net
+        )
+        work.at[
+            active_idx,
+            "_slot_upgrade_timestamp",
+        ] = int(
+            entry_ts
+        )
+
+        work.at[
+            new_idx,
+            "_slot_upgrade_entry",
+        ] = True
+        work.at[
+            new_idx,
+            "_slot_upgrade_old_event_key",
+        ] = current_event
+
+        replacements.append({
+            "Replacement time": int(
+                entry_ts
+            ),
+            "Old event key": current_event,
+            "Old symbol": str(
+                current_row.get(
+                    "symbol",
+                    "",
+                )
+            ),
+            "Old side": str(
+                current_row.get(
+                    "side",
+                    "",
+                )
+            ),
+            "Old frozen Room %": (
+                float(
+                    current_room
+                )
+                if pd.notna(
+                    current_room
+                )
+                else np.nan
+            ),
+            "Old hold min": float(
+                hold_min
+            ),
+            "Old MFE %": float(
+                snapshot[
+                    "mfe_pct"
+                ]
+            ),
+            "Old MAE %": float(
+                snapshot[
+                    "mae_pct"
+                ]
+            ),
+            "Old exit gross %": float(
+                snapshot[
+                    "gross_pct"
+                ]
+            ),
+            "Old replacement net %": float(
+                replacement_net
+            ),
+            "Old historical outcome": (
+                historical_outcome
+            ),
+            "Old historical net %": (
+                float(
+                    historical_net
+                )
+                if pd.notna(
+                    historical_net
+                )
+                else np.nan
+            ),
+            "New event key": new_event,
+            "New symbol": str(
+                new_row.get(
+                    "symbol",
+                    "",
+                )
+            ),
+            "New side": str(
+                new_row.get(
+                    "side",
+                    "",
+                )
+            ),
+            "New frozen Room %": float(
+                new_room
+            ),
+            "Room improvement pp": (
+                float(
+                    room_delta
+                )
+                if np.isfinite(
+                    room_delta
+                )
+                else np.nan
+            ),
+            "Room ratio": (
+                float(
+                    room_ratio
+                )
+                if np.isfinite(
+                    room_ratio
+                )
+                else np.nan
+            ),
+            "New historical outcome": str(
+                new_row.get(
+                    "Outcome",
+                    "",
+                )
+            ).upper(),
+            "New historical net %": pd.to_numeric(
+                pd.Series([
+                    new_row.get(
+                        "net_pnl_pct",
+                        np.nan,
+                    )
+                ]),
+                errors="coerce",
+            ).iloc[0],
+        })
+
+        active_idx = new_idx
+
+    details = pd.DataFrame(
+        replacements
+    )
+
+    return work, {
+        "upgrade_mode": mode,
+        "replacements": int(
+            len(
+                replacements
+            )
+        ),
+        "no_room_new": int(
+            no_room_new
+        ),
+        "hold_rejections": int(
+            hold_rejections
+        ),
+        "room_rejections": int(
+            room_rejections
+        ),
+        "stall_rejections": int(
+            stall_rejections
+        ),
+        "missing_path": int(
+            missing_path
+        ),
+        "details": details,
+    }
+
+
+def _candidate_v2_slot_upgrade_impact(
+    original_intervals,
+    upgraded_intervals,
+    no_upgrade_result,
+    upgrade_result,
+    upgrade_stats,
+):
+    """Portfolio-level explanation of slot upgrades."""
+    empty = {
+        "summary": {},
+        "replacements": pd.DataFrame(),
+        "newly_admitted": pd.DataFrame(),
+        "dropped_baseline": pd.DataFrame(),
+    }
+
+    if (
+        original_intervals is None
+        or original_intervals.empty
+        or upgraded_intervals is None
+        or upgraded_intervals.empty
+        or not no_upgrade_result
+        or not upgrade_result
+    ):
+        return empty
+
+    no_ledger = no_upgrade_result.get(
+        "ledger",
+        pd.DataFrame(),
+    )
+    up_ledger = upgrade_result.get(
+        "ledger",
+        pd.DataFrame(),
+    )
+
+    if (
+        no_ledger is None
+        or no_ledger.empty
+        or up_ledger is None
+        or up_ledger.empty
+    ):
+        return empty
+
+    def accepted_keys(ledger):
+        accepted = ledger.loc[
+            ledger.get(
+                "Accepted",
+                pd.Series(
+                    False,
+                    index=ledger.index,
+                ),
+            )
+            .fillna(False)
+            .astype(bool)
+        ].copy()
+
+        return set(
+            accepted.get(
+                "Event key",
+                pd.Series(dtype=str),
+            )
+            .fillna("")
+            .astype(str)
+            .loc[
+                lambda s: s.ne("")
+            ]
+            .tolist()
+        )
+
+    baseline_keys = accepted_keys(
+        no_ledger
+    )
+    upgrade_keys = accepted_keys(
+        up_ledger
+    )
+
+    event_col = (
+        "candidate_v1_event_key"
+        if "candidate_v1_event_key"
+        in upgraded_intervals.columns
+        else "candidate_v2_event_key"
+    )
+
+    upgraded_map = (
+        upgraded_intervals.copy()
+        .drop_duplicates(
+            subset=[event_col],
+            keep="last",
+        )
+    )
+    upgraded_map[
+        event_col
+    ] = (
+        upgraded_map[
+            event_col
+        ]
+        .fillna("")
+        .astype(str)
+    )
+    upgraded_map = upgraded_map.set_index(
+        event_col,
+        drop=False,
+    )
+
+    original_map = (
+        original_intervals.copy()
+        .drop_duplicates(
+            subset=[event_col],
+            keep="last",
+        )
+    )
+    original_map[
+        event_col
+    ] = (
+        original_map[
+            event_col
+        ]
+        .fillna("")
+        .astype(str)
+    )
+    original_map = original_map.set_index(
+        event_col,
+        drop=False,
+    )
+
+    newly_keys = sorted(
+        upgrade_keys
+        - baseline_keys
+    )
+    dropped_keys = sorted(
+        baseline_keys
+        - upgrade_keys
+    )
+
+    def rows_for_keys(keys, source_map):
+        rows = []
+        for key in keys:
+            if key not in source_map.index:
+                continue
+            row = source_map.loc[
+                key
+            ]
+            if isinstance(
+                row,
+                pd.DataFrame,
+            ):
+                row = row.iloc[-1]
+            rows.append({
+                "Event key": key,
+                "Symbol": str(
+                    row.get(
+                        "symbol",
+                        "",
+                    )
+                ),
+                "Side": str(
+                    row.get(
+                        "side",
+                        "",
+                    )
+                ),
+                "Outcome": str(
+                    row.get(
+                        "Outcome",
+                        row.get(
+                            "_outcome",
+                            "",
+                        ),
+                    )
+                ),
+                "Net %": pd.to_numeric(
+                    pd.Series([
+                        row.get(
+                            "net_pnl_pct",
+                            row.get(
+                                "_net",
+                                np.nan,
+                            ),
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0],
+                "Room %": pd.to_numeric(
+                    pd.Series([
+                        row.get(
+                            "nearest_opposing_room_pct",
+                            np.nan,
+                        )
+                    ]),
+                    errors="coerce",
+                ).iloc[0],
+            })
+        return pd.DataFrame(
+            rows
+        )
+
+    newly = rows_for_keys(
+        newly_keys,
+        upgraded_map,
+    )
+    dropped = rows_for_keys(
+        dropped_keys,
+        original_map,
+    )
+
+    replacements = (
+        upgrade_stats.get(
+            "details",
+            pd.DataFrame(),
+        )
+        if upgrade_stats
+        else pd.DataFrame()
+    )
+
+    if replacements is None:
+        replacements = pd.DataFrame()
+
+    no_summary = no_upgrade_result.get(
+        "summary",
+        {},
+    )
+    up_summary = upgrade_result.get(
+        "summary",
+        {},
+    )
+
+    replaced_tp = 0
+    replaced_sl = 0
+    replaced_time = 0
+
+    if not replacements.empty:
+        old_outcome = (
+            replacements.get(
+                "Old historical outcome",
+                pd.Series(
+                    "",
+                    index=replacements.index,
+                ),
+            )
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+        replaced_tp = int(
+            old_outcome.eq(
+                "TP"
+            ).sum()
+        )
+        replaced_sl = int(
+            old_outcome.isin(
+                [
+                    "SL",
+                    "SL_AMBIGUOUS",
+                ]
+            ).sum()
+        )
+        replaced_time = int(
+            old_outcome.eq(
+                "TIME_EXIT"
+            ).sum()
+        )
+
+    new_tp = 0
+    new_sl = 0
+    new_time = 0
+
+    if not replacements.empty:
+        new_outcome = (
+            replacements.get(
+                "New historical outcome",
+                pd.Series(
+                    "",
+                    index=replacements.index,
+                ),
+            )
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+        new_tp = int(
+            new_outcome.eq(
+                "TP"
+            ).sum()
+        )
+        new_sl = int(
+            new_outcome.isin(
+                [
+                    "SL",
+                    "SL_AMBIGUOUS",
+                ]
+            ).sum()
+        )
+        new_time = int(
+            new_outcome.eq(
+                "TIME_EXIT"
+            ).sum()
+        )
+
+    summary = {
+        "Replacements": int(
+            len(
+                replacements
+            )
+        ),
+        "Replaced historical TP": int(
+            replaced_tp
+        ),
+        "Replaced historical SL": int(
+            replaced_sl
+        ),
+        "Replaced historical TIME_EXIT": int(
+            replaced_time
+        ),
+        "Replacement winners historical TP": int(
+            new_tp
+        ),
+        "Replacement winners historical SL": int(
+            new_sl
+        ),
+        "Replacement winners historical TIME_EXIT": int(
+            new_time
+        ),
+        "Newly admitted": int(
+            len(
+                newly
+            )
+        ),
+        "Dropped baseline": int(
+            len(
+                dropped
+            )
+        ),
+        "Δ raw pts": float(
+            up_summary.get(
+                "Raw net pts accepted",
+                0.0,
+            )
+            - no_summary.get(
+                "Raw net pts accepted",
+                0.0,
+            )
+        ),
+        "Δ final equity $": float(
+            up_summary.get(
+                "Final equity",
+                np.nan,
+            )
+            - no_summary.get(
+                "Final equity",
+                np.nan,
+            )
+        ),
+        "Δ return pp": float(
+            up_summary.get(
+                "Return %",
+                np.nan,
+            )
+            - no_summary.get(
+                "Return %",
+                np.nan,
+            )
+        ),
+        "Δ max DD pp": float(
+            up_summary.get(
+                "Max drawdown %",
+                np.nan,
+            )
+            - no_summary.get(
+                "Max drawdown %",
+                np.nan,
+            )
+        ),
+        "Δ accepted trades": int(
+            up_summary.get(
+                "Accepted trades",
+                0,
+            )
+            - no_summary.get(
+                "Accepted trades",
+                0,
+            )
+        ),
+    }
+
+    return {
+        "summary": summary,
+        "replacements": replacements,
+        "newly_admitted": newly,
+        "dropped_baseline": dropped,
+    }
 
 
 def _candidate_v2_portfolio_stop_loss_pct(
@@ -26162,6 +28058,7 @@ def _candidate_v2_portfolio_priority(
         kind="stable",
     )
 
+@st.cache_data(ttl=120, max_entries=256, show_spinner=False)
 def _candidate_v2_portfolio_simulation(
     intervals,
     *,
@@ -29361,20 +31258,73 @@ def _candidate_v2_render_matrix(summary, key_prefix, metric):
     )
 
 
-def render_candidate_v2_research(retests_df):
-    st.markdown("### 🧪 Candidate V2 · REACTION + Relative Strength Research")
+def render_candidate_research(
+    retests_df,
+    candidate_version="Candidate V2",
+    v1_short_config=None,
+    v1_long_config=None,
+):
+    candidate_version = str(candidate_version)
+    profile_id = "v1" if "V1" in candidate_version else "v2"
+    candidate_label = "Candidate V1" if profile_id == "v1" else "Candidate V2"
+    candidate_slug = "candidate_v1" if profile_id == "v1" else "candidate_v2"
+
+    st.markdown(f"### 🧬 {candidate_label} · Unified Candidate Research")
     st.caption(
-        "V2 does not replace V1. Its frozen universe is every unique 15m causal "
-        "REACTION present when V2 is first run, plus future REACTIONs as FORWARD. "
-        "Thresholds never change cohort membership. RSI and HTF room are retained "
-        "as research fields but are not required by any V2 definition."
+        "The analysis engine below is shared by Candidate V1 and Candidate V2. "
+        "Switching Candidate changes only the source universe; execution matrix, "
+        "equity curve, same-minute selectors, Market Flow gates, Early Exit, "
+        "TIME_EXIT analysis and Position Upgrade remain available in both modes."
     )
 
-    history, config, newly_frozen = _candidate_v2_load_or_freeze_universe(
-        retests_df
+    newly_frozen = False
+    # Re-evaluate candidate follow-up at most once per minute even when no new
+    # REACTION ID appears; pending paths can mature from PENDING to resolved.
+    retests_signature = (
+        _candidate_analysis_retests_signature(retests_df),
+        int(time.time() // 60),
     )
+    universe_cache_key = f"candidate_analysis_universe_{profile_id}"
+    universe_cache = st.session_state.get(universe_cache_key)
+    use_cached_universe = (
+        isinstance(universe_cache, dict)
+        and universe_cache.get("signature") == retests_signature
+    )
+
+    if use_cached_universe:
+        history = universe_cache.get("history", pd.DataFrame())
+        config = universe_cache.get("config")
+    elif profile_id == "v1":
+        if v1_short_config is None or v1_long_config is None:
+            st.error("Candidate V1 unified research needs frozen SHORT and LONG configs.")
+            return
+        history = _candidate_v1_unified_research_history(
+            retests_df,
+            v1_short_config,
+            v1_long_config,
+        )
+        config = {
+            "name": "Candidate V1",
+            "frozen_at_utc": str(v1_short_config.get("created_at_utc", CANDIDATE_V1_FREEZE_TS_UTC)),
+        }
+        st.session_state[universe_cache_key] = {
+            "signature": retests_signature,
+            "history": history.copy() if history is not None else pd.DataFrame(),
+            "config": config,
+        }
+    else:
+        history, config, newly_frozen = _candidate_v2_load_or_freeze_universe(retests_df)
+        if history is not None and not history.empty:
+            history = history.copy()
+            history["candidate_analysis_profile"] = "v2"
+        st.session_state[universe_cache_key] = {
+            "signature": retests_signature,
+            "history": history.copy() if history is not None else pd.DataFrame(),
+            "config": config,
+        }
+
     if history is None or history.empty or config is None:
-        st.info("No 15m causal REACTIONs are available for Candidate V2 yet.")
+        st.info(f"No causal REACTIONs are available for {candidate_label} yet.")
         return
 
     if newly_frozen:
@@ -29383,20 +31333,43 @@ def render_candidate_v2_research(retests_df):
             "REACTION IDs. Strength/Flow thresholds did not participate in the freeze."
         )
 
+    history_signature = _candidate_analysis_source_signature(
+        history,
+        profile_id=profile_id,
+    )
+    market_cache_key = f"candidate_analysis_market_context_{profile_id}"
+    market_cache = st.session_state.get(market_cache_key)
+
     force_market = st.button(
-        "🔄 Rebuild V2 causal 4h + 1h transition contexts",
-        key="candidate_v2_force_market",
+        f"🔄 Rebuild {candidate_label} causal 4h + 1h contexts",
+        key=f"candidate_analysis_force_market_{profile_id}",
         use_container_width=True,
     )
-    with st.spinner("Attaching causal Market Flow to Candidate V2 REACTIONs..."):
-        context, sector_error = _candidate_v2_build_market_context(
-            history,
-            force=bool(force_market),
-        )
+
+    use_cached_market = (
+        isinstance(market_cache, dict)
+        and market_cache.get("signature") == history_signature
+        and not force_market
+    )
+
+    if use_cached_market:
+        context = market_cache.get("context", pd.DataFrame())
+        sector_error = market_cache.get("sector_error")
+    else:
+        with st.spinner(f"Attaching causal Market Flow to {candidate_label}..."):
+            context, sector_error = _candidate_v2_build_market_context(
+                history,
+                force=bool(force_market),
+            )
+        st.session_state[market_cache_key] = {
+            "signature": history_signature,
+            "context": context.copy() if context is not None and not context.empty else pd.DataFrame(),
+            "sector_error": sector_error,
+        }
     if sector_error:
         st.caption(f"Sector metadata note: {sector_error}")
     if context is None or context.empty:
-        st.warning("Candidate V2 market context is not available yet.")
+        st.warning(f"{candidate_label} market context is not available yet.")
         return
 
     market_ok = context.get(
@@ -29407,13 +31380,22 @@ def render_candidate_v2_research(retests_df):
         context.get("side_adjusted_strength_vs_btc_4h"),
         errors="coerce",
     ).notna()
-    study = context.loc[market_ok & valid_strength].copy()
+    study = (
+        context.copy()
+        if profile_id == "v1"
+        else context.loc[market_ok & valid_strength].copy()
+    )
 
     if study.empty:
-        st.info("No V2 REACTION has both causal Market Flow and directional strength yet.")
+        st.info(f"No {candidate_label} REACTION is available for the unified study yet.")
         return
 
-    frozen_at = str(config.get("frozen_at_utc", "—"))
+    frozen_at = str(
+        config.get(
+            "frozen_at_utc",
+            config.get("created_at_utc", "—"),
+        )
+    )
     discovery_n = int(
         history["candidate_v2_cohort"].astype(str).eq("DISCOVERY").sum()
     )
@@ -29428,14 +31410,15 @@ def render_candidate_v2_research(retests_df):
     )
 
     h1, h2, h3, h4, h5 = st.columns(5)
-    h1.metric("REACTION universe", int(len(history)))
+    h1.metric(f"{candidate_label} universe", int(len(history)))
     h2.metric("Discovery", discovery_n)
     h3.metric("Forward", forward_n)
     h4.metric("Causal strength", f"{len(study)}/{len(history)}")
     h5.metric("4h boundaries", boundaries)
     st.caption(
-        f"V2 universe frozen at {frozen_at}. Discovery membership is ID-based and "
-        "threshold-agnostic; late backfills are FORWARD."
+        f"{candidate_label} source frozen/identified from persisted IDs. "
+        f"Reference timestamp: {frozen_at}. Discovery/Forward membership remains "
+        "ID-based and is not rewritten by the analysis filters below."
     )
     one_h_available = pd.to_numeric(
         study.get("market_breadth_1h", pd.Series(np.nan, index=study.index)),
@@ -29463,25 +31446,25 @@ def render_candidate_v2_research(retests_df):
     scope1, scope2, scope3 = st.columns(3)
     with scope1:
         side_scope = st.selectbox(
-            "V2 side",
+            "Candidate side",
             ["TOTAL", "LONG", "SHORT"],
             index=0,
-            key="candidate_v2_side_scope",
+            key="candidate_analysis_side_scope",
         )
     with scope2:
         cohort_scope = st.selectbox(
-            "V2 cohort",
+            "Candidate cohort",
             ["TOTAL", "DISCOVERY", "FORWARD"],
             index=0,
-            key="candidate_v2_cohort_scope",
+            key="candidate_analysis_cohort_scope",
         )
     with scope3:
         strong_threshold = st.selectbox(
-            "V2 Strong threshold",
+            "Strong threshold",
             options=[0.25, 0.50, 0.75, 1.00, 1.50],
             index=1,
             format_func=lambda value: f">= {value:g}%",
-            key="candidate_v2_strong_threshold",
+            key="candidate_analysis_strong_threshold",
         )
 
     scoped = study.copy()
@@ -29494,13 +31477,37 @@ def render_candidate_v2_research(retests_df):
             scoped["candidate_v2_cohort"].astype(str).eq(cohort_scope)
         ].copy()
     if scoped.empty:
-        st.info("No V2 rows match this side/cohort selection.")
+        st.info(f"No {candidate_label} rows match this side/cohort selection.")
         return
 
-    st.markdown("#### 1. V2 Monitor · same REACTION universe")
+    scoped["candidate_analysis_profile"] = profile_id
+    active_path_store_file = _candidate_analysis_path_store_file(
+        scoped,
+        profile_id=profile_id,
+    )
+    active_selected_history_file = _candidate_analysis_selected_cell_history_file(profile_id)
+    active_variants = (
+        [
+            "Candidate Base",
+            "Candidate + Strength",
+            "Candidate + Strong Strength",
+            "Candidate + Strength + Flow",
+        ]
+        if profile_id == "v1"
+        else [
+            "REACTION Base",
+            "Candidate V1 drivers",
+            "V2 Strength",
+            "V2 Strong Strength",
+            "V2 Strength + Flow",
+        ]
+    )
+
+    st.markdown(f"#### 1. {candidate_label} Monitor · same candidate universe")
     monitor = _candidate_v2_monitor_table(
         scoped,
         strong_threshold=strong_threshold,
+        variants=active_variants,
     )
     if not monitor.empty:
         st.dataframe(
@@ -29515,47 +31522,47 @@ def render_candidate_v2_research(retests_df):
         "uses chronological next-1m-open TP/SL first touch with explicit costs."
     )
 
-    st.markdown("#### 2. Execution research · one engine for every V2 variant")
-    with st.form("candidate_v2_execution_form", clear_on_submit=False):
+    st.markdown("#### 2. Execution research · shared engine for selected Candidate")
+    with st.form("candidate_analysis_execution_form", clear_on_submit=False):
         e1, e2, e3 = st.columns(3)
         horizon_min = e1.selectbox(
             "Execution horizon",
             [60, 120, 180, 240, 360],
             index=2,
             format_func=lambda value: f"{value} min",
-            key="candidate_v2_horizon",
+            key="candidate_analysis_horizon",
         )
         tp_raw = e2.text_input(
             "TP grid %",
             value="0.5,1.0,1.5,2.0,2.5,3.0",
-            key="candidate_v2_tp_grid",
+            key="candidate_analysis_tp_grid",
         )
         sl_raw = e3.text_input(
             "SL grid %",
             value="0.5,1.0,1.5,2.0,2.5,3.0",
-            key="candidate_v2_sl_grid",
+            key="candidate_analysis_sl_grid",
         )
 
         c1, c2, c3, c4, c5 = st.columns(5)
         entry_fee = c1.number_input(
             "Entry fee %", min_value=0.0, value=0.05, step=0.01,
-            format="%.3f", key="candidate_v2_entry_fee"
+            format="%.3f", key="candidate_analysis_entry_fee"
         )
         exit_fee = c2.number_input(
             "Exit fee %", min_value=0.0, value=0.05, step=0.01,
-            format="%.3f", key="candidate_v2_exit_fee"
+            format="%.3f", key="candidate_analysis_exit_fee"
         )
         entry_slippage = c3.number_input(
             "Entry slippage %", min_value=0.0, value=0.0, step=0.01,
-            format="%.3f", key="candidate_v2_entry_slippage"
+            format="%.3f", key="candidate_analysis_entry_slippage"
         )
         exit_slippage = c4.number_input(
             "Exit slippage %", min_value=0.0, value=0.0, step=0.01,
-            format="%.3f", key="candidate_v2_exit_slippage"
+            format="%.3f", key="candidate_analysis_exit_slippage"
         )
         notional = c5.number_input(
             "Notional / trade USDT", min_value=1.0, value=100.0, step=10.0,
-            key="candidate_v2_notional"
+            key="candidate_analysis_notional"
         )
         st.caption(
             "TP grid now includes 0.25% and 0.35% for micro-target research. "
@@ -29564,36 +31571,35 @@ def render_candidate_v2_research(retests_df):
             "smallest targets mainly as execution-sensitivity research."
         )
         recalc = st.form_submit_button(
-            "Apply / recalculate V2 matrix",
+            "Apply / recalculate Candidate matrix",
             use_container_width=True,
         )
 
     force_paths = st.button(
-        "🔄 Refresh V2 1m paths + recalculate",
-        key="candidate_v2_force_paths",
+        "🔄 Refresh selected Candidate 1m paths + recalculate",
+        key=f"candidate_analysis_force_paths_{profile_id}",
         use_container_width=True,
     )
     tp_values = _candidate_v1_parse_grid_values(tp_raw, default=(2.0,))
     sl_values = _candidate_v1_parse_grid_values(sl_raw, default=(2.0,))
 
-    snapshot_key = "candidate_v2_execution_snapshot_v1"
+    snapshot_key = f"candidate_analysis_execution_snapshot_{profile_id}_v2"
     snapshot = st.session_state.get(snapshot_key)
     source_signature = (
-        len(scoped),
-        tuple(sorted(scoped["candidate_v2_event_key"].astype(str).tolist())),
+        _candidate_analysis_source_signature(scoped, profile_id=profile_id),
         str(side_scope),
         str(cohort_scope),
     )
     should_build = bool(recalc or force_paths)
     if not isinstance(snapshot, dict) and not should_build:
         st.info(
-            "V2 execution paths are intentionally not materialized on page load. "
-            "Press Apply / recalculate V2 matrix to build the first persisted "
-            "1m snapshot. After that, completed 360m paths are reused from disk."
+            f"{candidate_label} execution paths are intentionally not materialized "
+            "on page load. Press Apply / recalculate Candidate matrix to build the "
+            "first persisted 1m snapshot. Completed 360m paths are then reused from disk."
         )
         return
     if should_build:
-        with st.spinner("Building shared V2 REACTION execution paths..."):
+        with st.spinner(f"Building shared {candidate_label} execution paths..."):
             execution = _candidate_v2_execution_grid(
                 scoped,
                 tp_values=tp_values,
@@ -29611,7 +31617,7 @@ def render_candidate_v2_research(retests_df):
                 scoped,
             )
         if exec_context is None or exec_context.empty:
-            st.warning("No contiguous V2 1m execution paths are available yet.")
+            st.warning(f"No contiguous {candidate_label} 1m execution paths are available yet.")
             return
         snapshot = {
             "exec_context": exec_context.copy(),
@@ -29633,21 +31639,16 @@ def render_candidate_v2_research(retests_df):
     snap_horizon = int(snapshot.get("horizon", horizon_min))
     if snapshot.get("source_signature") != source_signature:
         st.info(
-            "The V2 side/cohort universe changed after this matrix snapshot. "
+            f"The {candidate_label} side/cohort universe changed after this matrix snapshot. "
             "Press Apply / recalculate to move the snapshot."
         )
 
+    default_variant = "Candidate + Strength" if profile_id == "v1" else "V2 Strength"
     variant = st.selectbox(
         "Execution matrix variant",
-        [
-            "REACTION Base",
-            "Candidate V1 drivers",
-            "V2 Strength",
-            "V2 Strong Strength",
-            "V2 Strength + Flow",
-        ],
-        index=2,
-        key="candidate_v2_matrix_variant",
+        active_variants,
+        index=(active_variants.index(default_variant) if default_variant in active_variants else 0),
+        key=f"candidate_analysis_matrix_variant_{profile_id}",
     )
     variant_mask = _candidate_v2_variant_mask(
         exec_context,
@@ -29666,11 +31667,12 @@ def render_candidate_v2_research(retests_df):
     m3.metric(
         "Strong threshold",
         f">= {float(strong_threshold):g}%"
-        if variant == "V2 Strong Strength" else "—",
+        if variant in {"V2 Strong Strength", "Candidate + Strong Strength"}
+        else "—",
     )
 
     metric = st.selectbox(
-        "V2 matrix metric",
+        "Candidate matrix metric",
         [
             "Net PnL % pts",
             "Net PnL USDT",
@@ -29682,11 +31684,11 @@ def render_candidate_v2_research(retests_df):
             "Resolved",
         ],
         index=0,
-        key="candidate_v2_matrix_metric",
+        key="candidate_analysis_matrix_metric",
     )
     _candidate_v2_render_matrix(
         variant_summary,
-        key_prefix="candidate_v2_execution",
+        key_prefix=f"candidate_analysis_execution_{profile_id}",
         metric=metric,
     )
 
@@ -29696,18 +31698,18 @@ def render_candidate_v2_research(retests_df):
     tp_index = min(range(len(tp_list)), key=lambda i: abs(tp_list[i] - 0.5))
     sl_index = min(range(len(sl_list)), key=lambda i: abs(sl_list[i] - 2.0))
     selected_tp = p1.selectbox(
-        "Inspect V2 TP",
+        "Inspect TP",
         tp_list,
         index=tp_index,
         format_func=lambda value: f"{value:g}%",
-        key="candidate_v2_inspect_tp",
+        key="candidate_analysis_inspect_tp",
     )
     selected_sl = p2.selectbox(
-        "Inspect V2 SL",
+        "Inspect SL",
         sl_list,
         index=sl_index,
         format_func=lambda value: f"{value:g}%",
-        key="candidate_v2_inspect_sl",
+        key="candidate_analysis_inspect_sl",
     )
     selected_pair = _candidate_v2_selected_pair(
         exec_context,
@@ -29743,7 +31745,7 @@ def render_candidate_v2_research(retests_df):
             "Download selected-cell anatomy CSV",
             data=cell_anatomy.to_csv(index=False).encode("utf-8"),
             file_name=(
-                f"candidate_v2_cell_anatomy_{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
+                f"{candidate_slug}_cell_anatomy_{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
                 f"tp{float(selected_tp):g}_sl{float(selected_sl):g}_{snap_horizon}m.csv"
             ),
             mime="text/csv",
@@ -29769,6 +31771,8 @@ def render_candidate_v2_research(retests_df):
                     time.time(),
                 )
             ),
+            store_path=active_selected_history_file,
+            candidate_profile=profile_id,
         )
 
     if cell_anatomy is not None and not cell_anatomy.empty:
@@ -29828,6 +31832,8 @@ def render_candidate_v2_research(retests_df):
                     selected_tp=selected_tp,
                     selected_sl=selected_sl,
                     horizon_min=snap_horizon,
+                    store_path=active_selected_history_file,
+                    candidate_profile=profile_id,
                 )
             )
 
@@ -29921,7 +31927,7 @@ def render_candidate_v2_research(retests_df):
                             "utf-8"
                         ),
                         file_name=(
-                            f"candidate_v2_cell_history_"
+                            f"{candidate_slug}_cell_history_"
                             f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
                             f"tp{float(selected_tp):g}_"
                             f"sl{float(selected_sl):g}_"
@@ -30038,7 +32044,7 @@ def render_candidate_v2_research(retests_df):
                             index=False
                         ).encode("utf-8"),
                         file_name=(
-                            f"candidate_v2_pending_"
+                            f"{candidate_slug}_pending_"
                             f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
                             f"tp{float(selected_tp):g}_"
                             f"sl{float(selected_sl):g}_"
@@ -30191,7 +32197,7 @@ def render_candidate_v2_research(retests_df):
             ),
             help=(
                 "Time-weighted average while at least one selected "
-                "V2 position is open."
+                "selected Candidate position is open."
             ),
         )
         cc5.metric(
@@ -30382,7 +32388,7 @@ def render_candidate_v2_research(retests_df):
                 ),
             )
             st.download_button(
-                "Download V2 capacity simulation CSV",
+                "Download capacity simulation CSV",
                 data=capacity.to_csv(
                     index=False
                 ).encode("utf-8"),
@@ -30430,7 +32436,7 @@ def render_candidate_v2_research(retests_df):
                 "###### Trade-by-trade execution ledger"
             )
             st.caption(
-                "One row per resolved trade in this exact V2 variant + TP/SL "
+                "One row per resolved trade in this exact Candidate variant + TP/SL "
                 "cell. Entry/exit are shown in Argentina time, together with "
                 "actual hold, crowding at entry, PnL, MFE/MAE and the causal "
                 "1h/4h context when those columns are available."
@@ -30447,7 +32453,7 @@ def render_candidate_v2_research(retests_df):
             )
 
             st.download_button(
-                "Download V2 trade-by-trade CSV",
+                "Download trade-by-trade CSV",
                 data=trade_ledger.to_csv(
                     index=False
                 ).encode("utf-8"),
@@ -30586,11 +32592,11 @@ def render_candidate_v2_research(retests_df):
     if concurrency:
         st.markdown("###### 💰 Portfolio Execution Simulator")
         st.caption(
-            "Chronological account-level simulation for this exact V2 variant + "
+            "Chronological account-level simulation for this exact Candidate variant + "
             "TP/SL cell. Defaults are $200 starting equity and x3 leverage. "
             "Sizing can use margin as % of equity, risk as % of equity, or "
             "fixed USDT margin. In Margin % equity mode, each new position margin "
-            "tracks realized equity; notional = margin × leverage. The V2 trade PnL is "
+            "tracks realized equity; notional = margin × leverage. Candidate trade PnL is "
             "already net of the configured execution costs. Leverage changes "
             "initial margin requirement only; it does not multiply a fixed "
             "notional's PnL."
@@ -30692,6 +32698,162 @@ def render_candidate_v2_research(retests_df):
 - **Market 1h → Room / Room → Market 1h:** TAILWIND/MIXED/HEADWIND preference combined with Room.
 - **1h modes:** market-state preference only; they never remove a signal unless a hard gate is selected separately.
                 """
+            )
+
+        st.markdown(
+            "###### 🔁 Position Upgrade / Slot Preemption"
+        )
+        st.caption(
+            "One-slot research: while a position is open, later selected-Candidate "
+            "signals continue competing. If a new candidate has sufficiently "
+            "better **causal HTF Room**, the current position can be closed at "
+            "that new candidate's executable 1m OPEN and the slot is handed to "
+            "the new signal. The current trade keeps its Room frozen from its "
+            "own entry; it is never recalculated with future structures."
+        )
+
+        su1, su2, su3, su4 = st.columns(4)
+
+        portfolio_slot_upgrade_mode = su1.selectbox(
+            "Position upgrade",
+            options=(
+                _candidate_v2_slot_upgrade_mode_options()
+            ),
+            index=0,
+            key=(
+                "candidate_v2_"
+                "portfolio_slot_upgrade_mode"
+            ),
+        )
+
+        portfolio_slot_upgrade_delta = su2.number_input(
+            "Min Room improvement (pp)",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.50,
+            step=0.05,
+            format="%.2f",
+            key=(
+                "candidate_v2_"
+                "portfolio_slot_upgrade_delta"
+            ),
+            disabled=(
+                portfolio_slot_upgrade_mode
+                != "Room improvement ≥ X pp"
+            ),
+        )
+
+        portfolio_slot_upgrade_ratio = su3.number_input(
+            "Min Room ratio",
+            min_value=1.00,
+            max_value=10.00,
+            value=1.25,
+            step=0.05,
+            format="%.2f",
+            key=(
+                "candidate_v2_"
+                "portfolio_slot_upgrade_ratio"
+            ),
+            disabled=(
+                portfolio_slot_upgrade_mode
+                != "Room ratio ≥ X"
+            ),
+        )
+
+        portfolio_slot_upgrade_min_hold = su4.number_input(
+            "Min hold before upgrade (min)",
+            min_value=0,
+            max_value=180,
+            value=15,
+            step=5,
+            key=(
+                "candidate_v2_"
+                "portfolio_slot_upgrade_min_hold"
+            ),
+            disabled=(
+                portfolio_slot_upgrade_mode
+                == "OFF"
+            ),
+        )
+
+        sg1, sg2 = st.columns(2)
+
+        portfolio_slot_upgrade_require_stall = sg1.checkbox(
+            "Only replace if current trade is stalled",
+            value=False,
+            key=(
+                "candidate_v2_"
+                "portfolio_slot_upgrade_require_stall"
+            ),
+            disabled=(
+                portfolio_slot_upgrade_mode
+                == "OFF"
+            ),
+            help=(
+                "Uses only fully closed 1m candles BEFORE the replacement minute. "
+                "This prevents replacing a trade that has already shown useful MFE."
+            ),
+        )
+
+        portfolio_slot_upgrade_max_mfe = sg2.number_input(
+            "Current trade MFE must be < (%)",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.05,
+            step=0.01,
+            format="%.3f",
+            key=(
+                "candidate_v2_"
+                "portfolio_slot_upgrade_max_mfe"
+            ),
+            disabled=(
+                portfolio_slot_upgrade_mode
+                == "OFF"
+                or not portfolio_slot_upgrade_require_stall
+            ),
+        )
+
+        with st.expander(
+            "Position Upgrade semantics",
+            expanded=False,
+        ):
+            st.markdown(
+                """
+- **Any better causal Room:** replace only when the new signal has a strictly larger verified HTF Room than the current trade.
+- **Room improvement ≥ X pp:** require an absolute Room improvement, e.g. current 1.20% → new ≥1.70% for X=0.50 pp.
+- **Room ratio ≥ X:** require a relative improvement, e.g. 1.50×.
+- **Min hold:** prevents immediate churn after entry.
+- **Only if stalled:** additionally requires current cumulative MFE to stay below the selected threshold.
+- Replacement closes the current trade at the **OPEN of the new candidate's executable minute**, pays the normal round-trip execution cost, and immediately releases the one slot.
+- A current TP/SL/early-exit that has already resolved before the new candidate appears always wins.
+- This research feature is intentionally limited to **1 slot** so the replacement rule is unambiguous.
+                """
+            )
+
+        if (
+            portfolio_slot_upgrade_mode
+            != "OFF"
+            and int(
+                portfolio_slots
+            )
+            != 1
+        ):
+            st.warning(
+                "Position Upgrade is a one-slot research rule. With more than "
+                "1 slot selected it will be disabled and the portfolio will run "
+                "with Position Upgrade OFF."
+            )
+
+        if (
+            portfolio_slot_upgrade_mode
+            != "OFF"
+            and portfolio_priority
+            != "Most HTF Room → Strength"
+        ):
+            st.info(
+                "Position Upgrade always compares causal HTF Room. For the "
+                "cleanest experiment keep Same-minute priority = "
+                "'Most HTF Room → Strength'."
             )
 
         st.markdown(
@@ -30933,7 +33095,7 @@ def render_candidate_v2_research(retests_df):
             ):
                 st.success(
                     "HTF Room causal audit PASS: every room used by this selected "
-                    "V2 cell can be traced to an opposing swing that was fully "
+                    "selected Candidate cell can be traced to an opposing swing that was fully "
                     "confirmed and actionable before the REACTION became known."
                 )
             else:
@@ -30978,7 +33140,7 @@ def render_candidate_v2_research(retests_df):
                         "utf-8"
                     ),
                     file_name=(
-                        f"candidate_v2_room_causality_"
+                        f"{candidate_slug}_room_causality_"
                         f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
                         f"tp{float(selected_tp):g}_"
                         f"sl{float(selected_sl):g}_"
@@ -30992,7 +33154,7 @@ def render_candidate_v2_research(retests_df):
                 )
         else:
             st.info(
-                "No HTF Room provenance is available in this selected V2 cell."
+                "No HTF Room provenance is available in this selected Candidate cell."
             )
 
 
@@ -31000,7 +33162,7 @@ def render_candidate_v2_research(retests_df):
             "###### 1h Market Flow · hard gate"
         )
         st.caption(
-            "OFF keeps the current V2 Strength + Flow universe. A hard gate "
+            "OFF keeps the current selected Candidate variant universe. A hard gate "
             "removes candidates BEFORE the same-minute selector. Preference "
             "selectors above do not remove candidates; they only decide which "
             "signal wins when several arrive together."
@@ -31072,8 +33234,9 @@ def render_candidate_v2_research(retests_df):
         ):
             try:
                 portfolio_early_exit_paths = (
-                    candidate_v1_fast_load_path_store(
-                        CANDIDATE_V2_PATH_STORE_FILE
+                    _candidate_analysis_load_path_store_cached(
+                        str(active_path_store_file),
+                        _candidate_analysis_path_store_mtime_ns(active_path_store_file),
                     )
                 )
             except Exception:
@@ -31110,7 +33273,119 @@ def render_candidate_v2_research(retests_df):
                     ),
                 )
 
-        # Always retain the identical no-early-exit replay as the control.
+        # Strategy stack order:
+        #   raw resolved candidates
+        #   -> optional Early Exit mutation
+        #   -> optional one-slot Position Upgrade mutation
+        #   -> chronological portfolio replay
+        #
+        # We keep a replay BEFORE Position Upgrade so its incremental effect can
+        # be measured exactly even when Early Exit is also enabled.
+        portfolio_pre_upgrade_intervals = (
+            portfolio_execution_intervals.copy()
+        )
+
+        portfolio_slot_upgrade_stats = {}
+        portfolio_slot_upgrade_paths = pd.DataFrame()
+        portfolio_slot_upgrade_effective_mode = (
+            portfolio_slot_upgrade_mode
+        )
+
+        if (
+            portfolio_slot_upgrade_mode
+            != "OFF"
+            and int(
+                portfolio_slots
+            )
+            != 1
+        ):
+            portfolio_slot_upgrade_effective_mode = (
+                "OFF"
+            )
+
+        portfolio_no_upgrade_result = (
+            _candidate_v2_portfolio_simulation(
+                portfolio_pre_upgrade_intervals,
+                starting_equity=portfolio_starting_equity,
+                leverage=portfolio_leverage,
+                max_slots=portfolio_slots,
+                risk_per_trade_pct=portfolio_risk_pct,
+                selected_sl_pct=selected_sl,
+                max_margin_pct=portfolio_margin_cap,
+                compound=portfolio_compound,
+                priority_mode=portfolio_priority,
+                sizing_mode=portfolio_sizing_mode,
+                fixed_margin_usd=portfolio_fixed_margin,
+                margin_per_trade_pct=portfolio_margin_per_trade_pct,
+                market_flow_gate_mode=(
+                    portfolio_market_flow_gate
+                ),
+            )
+        )
+
+        if (
+            portfolio_slot_upgrade_effective_mode
+            != "OFF"
+        ):
+            try:
+                portfolio_slot_upgrade_paths = (
+                    _candidate_analysis_load_path_store_cached(
+                        str(active_path_store_file),
+                        _candidate_analysis_path_store_mtime_ns(active_path_store_file),
+                    )
+                )
+            except Exception:
+                portfolio_slot_upgrade_paths = (
+                    pd.DataFrame()
+                )
+
+            if (
+                portfolio_slot_upgrade_paths
+                is None
+                or portfolio_slot_upgrade_paths.empty
+            ):
+                st.warning(
+                    "Position Upgrade is enabled but the persisted 1m path store "
+                    "is unavailable. The main portfolio is falling back to OFF."
+                )
+                portfolio_slot_upgrade_effective_mode = (
+                    "OFF"
+                )
+            else:
+                (
+                    portfolio_execution_intervals,
+                    portfolio_slot_upgrade_stats,
+                ) = _candidate_v2_apply_slot_upgrade_rule(
+                    portfolio_pre_upgrade_intervals,
+                    portfolio_slot_upgrade_paths,
+                    priority_mode=(
+                        portfolio_priority
+                    ),
+                    market_flow_gate_mode=(
+                        portfolio_market_flow_gate
+                    ),
+                    upgrade_mode=(
+                        portfolio_slot_upgrade_effective_mode
+                    ),
+                    min_room_improvement_pp=(
+                        portfolio_slot_upgrade_delta
+                    ),
+                    min_room_ratio=(
+                        portfolio_slot_upgrade_ratio
+                    ),
+                    min_hold_min=(
+                        portfolio_slot_upgrade_min_hold
+                    ),
+                    require_current_stalled=(
+                        portfolio_slot_upgrade_require_stall
+                    ),
+                    max_current_mfe_pct=(
+                        portfolio_slot_upgrade_max_mfe
+                    ),
+                )
+
+        # Always retain the identical no-early-exit / no-upgrade replay as the
+        # global control used by the existing Early Exit diagnostics.
         portfolio_baseline_result = (
             _candidate_v2_portfolio_simulation(
                 resolved_concurrency,
@@ -31375,6 +33650,70 @@ def render_candidate_v2_research(retests_df):
                         ),
                     )
 
+            if (
+                portfolio_slot_upgrade_effective_mode
+                != "OFF"
+                and portfolio_slot_upgrade_stats
+            ):
+                st.caption(
+                    f"Position Upgrade ACTIVE · "
+                    f"{portfolio_slot_upgrade_effective_mode} · "
+                    f"min hold {int(portfolio_slot_upgrade_min_hold)}m · "
+                    f"replacements: "
+                    f"{int(portfolio_slot_upgrade_stats.get('replacements', 0))}"
+                    + (
+                        (
+                            f" · current MFE < "
+                            f"{float(portfolio_slot_upgrade_max_mfe):.3f}%"
+                        )
+                        if portfolio_slot_upgrade_require_stall
+                        else ""
+                    )
+                    + "."
+                )
+
+                no_upgrade_summary = (
+                    portfolio_no_upgrade_result.get(
+                        "summary",
+                        {},
+                    )
+                    if portfolio_no_upgrade_result
+                    else {}
+                )
+
+                if no_upgrade_summary:
+                    su_m1, su_m2, su_m3, su_m4 = st.columns(
+                        4
+                    )
+                    su_m1.metric(
+                        "Upgrade Δ final equity",
+                        (
+                            f"${float(portfolio_summary.get('Final equity', 0.0) - no_upgrade_summary.get('Final equity', 0.0)):+.2f}"
+                        ),
+                    )
+                    su_m2.metric(
+                        "Upgrade Δ return",
+                        (
+                            f"{float(portfolio_summary.get('Return %', 0.0) - no_upgrade_summary.get('Return %', 0.0)):+.2f} pp"
+                        ),
+                    )
+                    su_m3.metric(
+                        "Upgrade Δ max DD",
+                        (
+                            f"{float(portfolio_summary.get('Max drawdown %', 0.0) - no_upgrade_summary.get('Max drawdown %', 0.0)):+.2f} pp"
+                        ),
+                        help=(
+                            "Negative is better: Position Upgrade reduced drawdown "
+                            "versus the same strategy with Upgrade OFF."
+                        ),
+                    )
+                    su_m4.metric(
+                        "Upgrade Δ accepted",
+                        (
+                            f"{int(portfolio_summary.get('Accepted trades', 0) - no_upgrade_summary.get('Accepted trades', 0)):+d}"
+                        ),
+                    )
+
             st.caption(
                 f"Skipped by slot limit: "
                 f"{int(portfolio_summary.get('Skipped slot limit', 0))} · "
@@ -31443,6 +33782,17 @@ def render_candidate_v2_research(retests_df):
                             )
                             else ""
                         )
+                        + (
+                            (
+                                f" · UP {portfolio_slot_upgrade_effective_mode}"
+                            )
+                            if (
+                                portfolio_slot_upgrade_effective_mode
+                                != "OFF"
+                                and portfolio_slot_upgrade_stats
+                            )
+                            else ""
+                        )
                     ),
                     xaxis_title=f"Time ({TZ})",
                     yaxis_title="Realized equity (USDT)",
@@ -31488,11 +33838,12 @@ def render_candidate_v2_research(retests_df):
                     )
                     st.caption(
                         "Exact Event-key comparison against the same portfolio with "
-                        "Early Exit OFF. 'Sacrificed TP' means a baseline-accepted "
-                        "trade historically reached TP but the selected early-exit "
-                        "rule would close it first. 'Newly admitted' means the trade "
-                        "was skipped in the OFF portfolio but entered after a slot "
-                        "was released."
+                        "Early Exit OFF. 'Sacrificed TP' means the trade is accepted "
+                        "in BOTH portfolios and Early Exit closes it before its "
+                        "historical TP. If chronology changes and the baseline trade "
+                        "is no longer entered at all, it is classified as Dropped "
+                        "baseline instead. 'Newly admitted' means it was skipped with "
+                        "OFF but entered after a slot was released."
                     )
 
                     ei1, ei2, ei3, ei4, ei5, ei6 = st.columns(
@@ -31638,6 +33989,211 @@ def render_candidate_v2_research(retests_df):
                             key=(
                                 "candidate_v2_"
                                 "early_exit_trade_impact_download"
+                            ),
+                        )
+
+            if (
+                portfolio_slot_upgrade_effective_mode
+                != "OFF"
+                and portfolio_slot_upgrade_stats
+                and portfolio_no_upgrade_result
+            ):
+                slot_upgrade_impact = (
+                    _candidate_v2_slot_upgrade_impact(
+                        portfolio_pre_upgrade_intervals,
+                        portfolio_execution_intervals,
+                        portfolio_no_upgrade_result,
+                        portfolio_result,
+                        portfolio_slot_upgrade_stats,
+                    )
+                )
+
+                slot_upgrade_summary = (
+                    slot_upgrade_impact.get(
+                        "summary",
+                        {},
+                    )
+                )
+
+                if slot_upgrade_summary:
+                    st.markdown(
+                        "###### 🔁 Position Upgrade impact · old slot vs new candidate"
+                    )
+                    st.caption(
+                        "Exact causal comparison against the same strategy with "
+                        "Position Upgrade OFF. Old Room is frozen at the original "
+                        "entry. New Room is the causal snapshot attached to the later "
+                        "selected-Candidate signal. Replacement PnL uses the current trade's "
+                        "1m OPEN at the new candidate's executable minute."
+                    )
+
+                    ui1, ui2, ui3, ui4, ui5, ui6 = st.columns(
+                        6
+                    )
+                    ui1.metric(
+                        "Replacements",
+                        int(
+                            slot_upgrade_summary.get(
+                                "Replacements",
+                                0,
+                            )
+                        ),
+                    )
+                    ui2.metric(
+                        "Replaced TP",
+                        int(
+                            slot_upgrade_summary.get(
+                                "Replaced historical TP",
+                                0,
+                            )
+                        ),
+                    )
+                    ui3.metric(
+                        "Replaced SL",
+                        int(
+                            slot_upgrade_summary.get(
+                                "Replaced historical SL",
+                                0,
+                            )
+                        ),
+                    )
+                    ui4.metric(
+                        "Replaced TIME_EXIT",
+                        int(
+                            slot_upgrade_summary.get(
+                                "Replaced historical TIME_EXIT",
+                                0,
+                            )
+                        ),
+                    )
+                    ui5.metric(
+                        "Newly admitted",
+                        int(
+                            slot_upgrade_summary.get(
+                                "Newly admitted",
+                                0,
+                            )
+                        ),
+                    )
+                    ui6.metric(
+                        "Dropped baseline",
+                        int(
+                            slot_upgrade_summary.get(
+                                "Dropped baseline",
+                                0,
+                            )
+                        ),
+                    )
+
+                    st.caption(
+                        f"Replacement winners · historical TP: "
+                        f"{int(slot_upgrade_summary.get('Replacement winners historical TP', 0))} · "
+                        f"SL: {int(slot_upgrade_summary.get('Replacement winners historical SL', 0))} · "
+                        f"TIME_EXIT: {int(slot_upgrade_summary.get('Replacement winners historical TIME_EXIT', 0))} · "
+                        f"Δ raw pts: {float(slot_upgrade_summary.get('Δ raw pts', 0.0)):+.4f} · "
+                        f"Δ final equity: ${float(slot_upgrade_summary.get('Δ final equity $', 0.0)):+.2f} · "
+                        f"Δ return: {float(slot_upgrade_summary.get('Δ return pp', 0.0)):+.2f} pp · "
+                        f"Δ DD: {float(slot_upgrade_summary.get('Δ max DD pp', 0.0)):+.2f} pp."
+                    )
+
+                    replacement_tabs = st.tabs([
+                        "Replacements",
+                        "Newly admitted",
+                        "Dropped baseline",
+                    ])
+
+                    replacement_frames = [
+                        slot_upgrade_impact.get(
+                            "replacements",
+                            pd.DataFrame(),
+                        ),
+                        slot_upgrade_impact.get(
+                            "newly_admitted",
+                            pd.DataFrame(),
+                        ),
+                        slot_upgrade_impact.get(
+                            "dropped_baseline",
+                            pd.DataFrame(),
+                        ),
+                    ]
+
+                    for (
+                        replacement_tab,
+                        replacement_frame,
+                    ) in zip(
+                        replacement_tabs,
+                        replacement_frames,
+                    ):
+                        with replacement_tab:
+                            if (
+                                replacement_frame
+                                is None
+                                or replacement_frame.empty
+                            ):
+                                st.info(
+                                    "No trades in this category for the selected "
+                                    "Position Upgrade rule."
+                                )
+                            else:
+                                display_frame = (
+                                    replacement_frame.copy()
+                                )
+
+                                if (
+                                    "Replacement time"
+                                    in display_frame.columns
+                                ):
+                                    display_frame[
+                                        "Replacement local"
+                                    ] = (
+                                        pd.to_datetime(
+                                            pd.to_numeric(
+                                                display_frame[
+                                                    "Replacement time"
+                                                ],
+                                                errors="coerce",
+                                            ),
+                                            unit="ms",
+                                            utc=True,
+                                            errors="coerce",
+                                        )
+                                        .dt.tz_convert(TZ)
+                                        .dt.strftime(
+                                            "%Y-%m-%d %H:%M"
+                                        )
+                                    )
+
+                                st.dataframe(
+                                    display_frame,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+
+                    replacements_df = (
+                        slot_upgrade_impact.get(
+                            "replacements",
+                            pd.DataFrame(),
+                        )
+                    )
+
+                    if (
+                        replacements_df is not None
+                        and not replacements_df.empty
+                    ):
+                        st.download_button(
+                            "Download Position Upgrade replacements CSV",
+                            data=replacements_df.to_csv(
+                                index=False
+                            ).encode(
+                                "utf-8"
+                            ),
+                            file_name=(
+                                "candidate_v2_position_upgrade_replacements.csv"
+                            ),
+                            mime="text/csv",
+                            key=(
+                                "candidate_v2_"
+                                "position_upgrade_replacements_download"
                             ),
                         )
 
@@ -31993,7 +34549,7 @@ def render_candidate_v2_research(retests_df):
                         "utf-8"
                     ),
                     file_name=(
-                        f"candidate_v2_room_x3_x5_x10_"
+                        f"{candidate_slug}_room_x3_x5_x10_"
                         f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
                         f"tp{float(selected_tp):g}_"
                         f"sl{float(selected_sl):g}_"
@@ -32012,7 +34568,7 @@ def render_candidate_v2_research(retests_df):
             )
             st.caption(
                 "This is the clean comparison before live. Every row uses the "
-                "same selected V2 TP/SL/horizon, $ starting equity, ONE slot, "
+                "same selected Candidate TP/SL/horizon, $ starting equity, ONE slot, "
                 "80% realized-equity margin and x3. BASELINE is pure causal "
                 "Most HTF Room → Strength. PREFERENCE changes only same-minute "
                 "ordering; HARD GATE removes signals first; HYBRID does both."
@@ -32051,7 +34607,7 @@ def render_candidate_v2_research(retests_df):
                         index=False
                     ).encode("utf-8"),
                     file_name=(
-                        f"candidate_v2_1h_flow_incremental_"
+                        f"{candidate_slug}_1h_flow_incremental_"
                         f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
                         f"tp{float(selected_tp):g}_"
                         f"sl{float(selected_sl):g}_"
@@ -32362,7 +34918,7 @@ def render_candidate_v2_research(retests_df):
                         "###### Same-minute ranking decisions"
                     )
                     st.caption(
-                        "Every row is a minute with 2+ simultaneous Candidate V2 "
+                        "Every row is a minute with 2+ simultaneous selected-Candidate "
                         "signals. This table compares all symbol, sector, room, "
                         "RSI, V1-driver, consensus and 1h ranking rules before "
                         "one-slot occupancy is considered."
@@ -32590,9 +35146,9 @@ def render_candidate_v2_research(retests_df):
 
             st.info(
                 "Micro Flow is not used as a selector in this table yet because "
-                "the current Candidate V2 execution rows do not carry a causal "
+                "the current selected-Candidate execution rows do not carry a causal "
                 "Micro Flow feature per REACTION. The dashboard has Micro Flow "
-                "research, but wiring future Micro Flow data into old V2 trades "
+                "research, but wiring future Micro Flow data into historical Candidate trades "
                 "would be look-ahead unless we first persist/reconstruct it at "
                 "REACTION time."
             )
@@ -32608,13 +35164,14 @@ def render_candidate_v2_research(retests_df):
 
     st.markdown("#### 3. Permanent comparison · same execution pair")
     st.caption(
-        "REACTION Base, frozen V1 drivers and the three V2 variants are compared "
-        "inside the exact same V2 REACTION universe, with the same TP/SL, horizon "
-        "and costs. This avoids giving a variant a different market window."
+        "Every variant is compared inside the exact same selected-Candidate "
+        "universe, with the same TP/SL, horizon and costs. This avoids giving a "
+        "filter or strength layer a different market window."
     )
     comparison = _candidate_v2_variant_comparison_table(
         selected_pair,
         strong_threshold=strong_threshold,
+        variants=active_variants,
     )
     if not comparison.empty:
         st.dataframe(
@@ -32624,10 +35181,10 @@ def render_candidate_v2_research(retests_df):
             key="candidate_v2_permanent_comparison",
         )
         st.download_button(
-            "Download V2 variant comparison CSV",
+            "Download Candidate variant comparison CSV",
             data=comparison.to_csv(index=False).encode("utf-8"),
             file_name=(
-                f"candidate_v2_variants_tp{float(selected_tp):g}_"
+                f"{candidate_slug}_variants_tp{float(selected_tp):g}_"
                 f"sl{float(selected_sl):g}_{snap_horizon}m.csv"
             ),
             mime="text/csv",
@@ -32649,10 +35206,10 @@ def render_candidate_v2_research(retests_df):
             key="candidate_v2_threshold_table",
         )
         st.download_button(
-            "Download V2 threshold study CSV",
+            "Download strength-threshold study CSV",
             data=threshold_table.to_csv(index=False).encode("utf-8"),
             file_name=(
-                f"candidate_v2_strength_thresholds_tp{float(selected_tp):g}_"
+                f"{candidate_slug}_strength_thresholds_tp{float(selected_tp):g}_"
                 f"sl{float(selected_sl):g}_{snap_horizon}m.csv"
             ),
             mime="text/csv",
@@ -32671,8 +35228,8 @@ def render_candidate_v2_research(retests_df):
 
     st.markdown("#### 5. Strength × Market Flow")
     st.caption(
-        "This is intentionally a second layer. V2 Strength tests relative strength "
-        "alone; V2 Strength + Flow asks whether TAILWIND adds information after "
+        "This is intentionally a second layer. Strength tests relative strength "
+        "alone; Strength + Flow asks whether TAILWIND adds information after "
         "directional strength is already positive."
     )
     cross = _candidate_v2_strength_flow_table(selected_pair)
@@ -32696,7 +35253,7 @@ def render_candidate_v2_research(retests_df):
 
     st.markdown("#### 6. Market Flow transition · causal 1h + 4h")
     st.caption(
-        "The 4h Market Flow snapshot is still preserved, but V2 now also reconstructs "
+        "The 4h Market Flow snapshot is still preserved, and the shared engine also reconstructs "
         "the latest fully closed 1h cross-sectional snapshot available when each "
         "REACTION became known. Breadth deltas compare with the immediately previous "
         "closed 1h/4h boundary. EXPANDING/CONTRACTING use ±5 percentage points only "
@@ -32766,8 +35323,9 @@ def render_candidate_v2_research(retests_df):
     else:
         try:
             time_exit_paths = (
-                candidate_v1_fast_load_path_store(
-                    CANDIDATE_V2_PATH_STORE_FILE
+                _candidate_analysis_load_path_store_cached(
+                    str(active_path_store_file),
+                    _candidate_analysis_path_store_mtime_ns(active_path_store_file),
                 )
             )
         except Exception:
@@ -32778,7 +35336,7 @@ def render_candidate_v2_research(retests_df):
             or time_exit_paths.empty
         ):
             st.warning(
-                "No persisted Candidate V2 1m paths are available. Use "
+                "No persisted selected-Candidate 1m paths are available. Use "
                 "'Refresh stored 1m paths' above and recalculate the matrix."
             )
         else:
@@ -32846,7 +35404,7 @@ def render_candidate_v2_research(retests_df):
                     "time_exit_scope"
                 ),
                 help=(
-                    "All selected-cell trades = every resolved V2 execution in the "
+                    "All selected-cell trades = every resolved selected-Candidate execution in the "
                     "selected TP/SL cell. Baseline portfolio accepted only = only the "
                     "trades actually accepted by the current portfolio controls and "
                     "therefore represented in the equity curve."
@@ -32906,7 +35464,7 @@ def render_candidate_v2_research(retests_df):
                 )
             ):
                 st.warning(
-                    "Could not map the current portfolio ledger back to Candidate V2 "
+                    "Could not map the current portfolio ledger back to Candidate event keys "
                     "event keys. Re-run this updated dashboard once so the ledger is "
                     "rebuilt with Event key provenance."
                 )
@@ -33034,7 +35592,7 @@ def render_candidate_v2_research(retests_df):
                         "utf-8"
                     ),
                     file_name=(
-                        f"candidate_v2_time_exit_trajectory_"
+                        f"{candidate_slug}_time_exit_trajectory_"
                         f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
                         f"tp{float(selected_tp):g}_"
                         f"sl{float(selected_sl):g}_"
@@ -33458,7 +36016,7 @@ def render_candidate_v2_research(retests_df):
                             "utf-8"
                         ),
                         file_name=(
-                            f"candidate_v2_early_exit_grid_"
+                            f"{candidate_slug}_early_exit_grid_"
                             f"{variant.lower().replace(' ', '_').replace('+', 'plus')}_"
                             f"tp{float(selected_tp):g}_"
                             f"sl{float(selected_sl):g}_"
@@ -33507,7 +36065,7 @@ def render_candidate_v2_research(retests_df):
             )
 
         st.download_button(
-            "Download V2 snapshot stability CSV",
+            "Download snapshot stability CSV",
             data=snapshot_stability.to_csv(index=False).encode("utf-8"),
             file_name=(
                 f"candidate_v2_snapshot_stability_tp{float(selected_tp):g}_"
@@ -33553,7 +36111,7 @@ def render_candidate_v2_research(retests_df):
                 )
 
             st.download_button(
-                "Download V2 mature snapshot summary CSV",
+                "Download mature snapshot summary CSV",
                 data=mature_summary.to_csv(index=False).encode("utf-8"),
                 file_name=(
                     f"candidate_v2_mature_snapshot_summary_"
@@ -33570,7 +36128,7 @@ def render_candidate_v2_research(retests_df):
             "It keeps the static 4h state, then adds the faster causal 1h breadth/BTC "
             "state, 1h and 4h deltas, divergence, strength, return rank and relative "
             "volume. The goal is to explain why two apparently similar TAILWIND "
-            "snapshots can produce opposite execution results without changing V2."
+            "snapshots can produce opposite execution results without changing the Candidate definition."
         )
         regime_rows = _candidate_v2_winning_losing_regimes(
             selected_pair,
@@ -33595,7 +36153,7 @@ def render_candidate_v2_research(retests_df):
                     key="candidate_v2_winning_losing_feature_summary",
                 )
             st.download_button(
-                "Download V2 winning vs losing regimes CSV",
+                "Download winning vs losing regimes CSV",
                 data=regime_rows.to_csv(index=False).encode("utf-8"),
                 file_name=(
                     f"candidate_v2_winning_losing_regimes_"
@@ -33606,9 +36164,9 @@ def render_candidate_v2_research(retests_df):
                 key="candidate_v2_winning_losing_regimes_download",
             )
 
-    st.markdown("#### 9. Full V2 causal journal")
+    st.markdown(f"#### 9. Full {candidate_label} causal journal")
     show_journal = st.toggle(
-        "Show/export full V2 REACTION context",
+        "Show/export full Candidate REACTION context",
         value=False,
         key="candidate_v2_show_journal",
     )
@@ -33679,9 +36237,9 @@ def render_candidate_v2_research(retests_df):
             key="candidate_v2_full_journal",
         )
         st.download_button(
-            "Download full Candidate V2 causal journal CSV",
+            "Download full Candidate causal journal CSV",
             data=export.to_csv(index=False).encode("utf-8"),
-            file_name="candidate_v2_causal_journal.csv",
+            file_name=f"{candidate_slug}_causal_journal.csv",
             mime="text/csv",
             key="candidate_v2_journal_download",
         )
@@ -56902,575 +59460,810 @@ if selected_section == "reaction_swing_lab":
     )
     st.caption(
         "Structural research separated from Volume Exhaustion: "
-        "Candidate V1, confirmed-swing REACTIONs/retests, "
+        "unified Candidate V1/V2 research, confirmed-swing REACTIONs/retests, "
         "pivot → confirmation studies and future swing labels. "
         "Research definitions and persisted Candidate cohorts are unchanged."
     )
 
-    events = load_volume_exhaustion_events()
+    # Reaction Lab usually needs only the symbol universe. Reading only the
+    # symbol CSV column avoids parsing the full Volume Exhaustion event file on
+    # every Candidate/Retest/Pivot rerun. Full events are loaded lazily only by
+    # the two event-specific research views below.
+    structural_symbols = load_volume_exhaustion_symbol_universe()
 
-    if (
-        events is None
-        or events.empty
-        or "symbol" not in events.columns
-    ):
+    if not structural_symbols:
         st.info(
             "No symbol universe is available yet. "
-            "The current structural scanner keeps using the "
-            "same persisted symbol universe as before so this "
-            "UI move does not change Candidate V1 membership."
+            "The structural scanner keeps using the same source universe, so "
+            "this optimization does not change Candidate membership."
         )
     else:
-        structural_symbols = tuple(
-            sorted(
-                events["symbol"]
+        lab_mode = st.radio(
+            "Research view",
+            options=[
+                "🧬 Candidate Research",
+                "🔁 REACTION / Retests",
+                "🎯 Pivots / Confirmations",
+                "📍 Event swing structure",
+                "🧬 Volume → future swings",
+            ],
+            horizontal=True,
+            key="reaction_swing_lab_mode",
+        )
+
+        st.caption(
+            "Only the selected research view is rendered. Candidate V1/V2 "
+            "share one cached all-symbol structural scan; causal market context "
+            "is cached per Candidate in-session, and completed 1m paths remain "
+            "persisted on disk. This avoids repeating the heaviest data work on "
+            "every Streamlit widget rerun."
+        )
+
+        if lab_mode == "🧬 Candidate Research":
+            candidate_version = st.radio(
+                "Candidate",
+                options=[
+                    "🧊 Candidate V1",
+                    "🧪 Candidate V2",
+                ],
+                horizontal=True,
+                key="reaction_lab_candidate_version",
+            )
+
+            candidate_v1_config = _candidate_v1_load_or_freeze_config(
+                detector="3x3",
+                min_swing_prominence_pct=0.0,
+                retest_tolerance_pct=float(
+                    CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT
+                ),
+                min_departure_pct=float(
+                    CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
+                ),
+                max_retest_age_minutes=int(
+                    CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
+                ),
+            )
+
+            candidate_v1_long_config = _candidate_v1_long_load_or_freeze_config(
+                detector=str(candidate_v1_config.get("swing_detector", "3x3")),
+                min_swing_prominence_pct=float(
+                    candidate_v1_config.get("min_swing_prominence_pct", 0.0)
+                ),
+                retest_tolerance_pct=float(
+                    candidate_v1_config.get(
+                        "retest_tolerance_pct",
+                        CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
+                    )
+                ),
+                min_departure_pct=float(
+                    candidate_v1_config.get(
+                        "min_departure_pct",
+                        CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
+                    )
+                ),
+                max_retest_age_minutes=int(
+                    candidate_v1_config.get(
+                        "max_confirmation_to_retest_min",
+                        CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
+                    )
+                ),
+            )
+
+            st.caption(
+                "V1 and V2 now share the same cached structural scan and the "
+                "same analysis engine. Switching Candidate preserves TP/SL, "
+                "portfolio and selector controls while loading that Candidate's "
+                "own cohort, path store and execution snapshot."
+            )
+
+            with st.spinner("Loading shared cached 15m causal REACTION scan..."):
+                candidate_shared_retests_df = _reaction_lab_shared_candidate_scan_cached(
+                    symbols=structural_symbols,
+                    swing_timeframe=str(candidate_v1_config.get("swing_timeframe", "15m")),
+                    swing_detector=str(candidate_v1_config.get("swing_detector", "3x3")),
+                    min_swing_prominence_pct=float(
+                        candidate_v1_config.get("min_swing_prominence_pct", 0.0)
+                    ),
+                    retest_tolerance_pct=float(
+                        candidate_v1_config.get(
+                            "retest_tolerance_pct",
+                            CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
+                        )
+                    ),
+                    min_departure_pct=float(
+                        candidate_v1_config.get(
+                            "min_departure_pct",
+                            CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
+                        )
+                    ),
+                    max_age_minutes=int(
+                        candidate_v1_config.get(
+                            "max_confirmation_to_retest_min",
+                            CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
+                        )
+                    ),
+                    max_retest_age_minutes=4320,
+                )
+
+            selected_candidate_label = (
+                "Candidate V1" if "V1" in candidate_version else "Candidate V2"
+            )
+
+            render_candidate_research(
+                retests_df=candidate_shared_retests_df,
+                candidate_version=selected_candidate_label,
+                v1_short_config=candidate_v1_config,
+                v1_long_config=candidate_v1_long_config,
+            )
+
+            if selected_candidate_label == "Candidate V1":
+                show_legacy_v1 = st.checkbox(
+                    "Show legacy V1 frozen-monitor UI",
+                    value=False,
+                    key="reaction_lab_show_legacy_v1",
+                    help=(
+                        "Compatibility view only. OFF by default because the "
+                        "unified Candidate Research engine above already exposes "
+                        "execution/equity/selectors without rendering duplicate "
+                        "heavy V1 monitor blocks."
+                    ),
+                )
+
+                if show_legacy_v1:
+                    short_monitor_tab, long_monitor_tab, total_monitor_tab = st.tabs(
+                        [
+                            "🔴 Legacy V1 SHORT",
+                            "🟢 Legacy V1 LONG",
+                            "🟣 Legacy V1 TOTAL",
+                        ]
+                    )
+                    with short_monitor_tab:
+                        render_candidate_v1_frozen_monitor(
+                            retests_df=candidate_shared_retests_df,
+                            config=candidate_v1_config,
+                        )
+                    with long_monitor_tab:
+                        render_candidate_v1_long_frozen_monitor(
+                            retests_df=candidate_shared_retests_df,
+                            config=candidate_v1_long_config,
+                        )
+                    with total_monitor_tab:
+                        render_candidate_v1_total_monitor(
+                            retests_df=candidate_shared_retests_df,
+                        )
+
+        elif lab_mode == "🔁 REACTION / Retests":
+            control_1, control_2, control_3 = (
+                st.columns(3)
+            )
+
+            with control_1:
+                retest_scope = st.selectbox(
+                    "Scanner scope",
+                    [
+                        "All symbols",
+                        "Selected symbol",
+                    ],
+                    key=(
+                        "reaction_lab_retest_scope"
+                    ),
+                )
+
+            with control_2:
+                selected_retest_symbol = (
+                    st.selectbox(
+                        "Selected symbol",
+                        options=list(
+                            structural_symbols
+                        ),
+                        key=(
+                            "reaction_lab_retest_symbol"
+                        ),
+                    )
+                )
+
+            with control_3:
+                retest_detector = st.selectbox(
+                    "15m swing detector",
+                    ["2x2", "3x3", "5x5"],
+                    index=1,
+                    key=(
+                        "reaction_lab_retest_detector"
+                    ),
+                )
+
+            control_4, control_5, control_6 = (
+                st.columns(3)
+            )
+
+            with control_4:
+                retest_prominence = (
+                    st.number_input(
+                        "Min swing prominence %",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.05,
+                        format="%.2f",
+                        key=(
+                            "reaction_lab_retest_prominence"
+                        ),
+                    )
+                )
+
+            with control_5:
+                retest_tolerance_pct = (
+                    st.number_input(
+                        "Retest tolerance %",
+                        min_value=0.0,
+                        value=(
+                            CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT
+                        ),
+                        step=0.01,
+                        format="%.3f",
+                        key=(
+                            "reaction_lab_retest_tolerance"
+                        ),
+                    )
+                )
+
+            with control_6:
+                min_retest_departure_pct = (
+                    st.number_input(
+                        "Min move-away before retest %",
+                        min_value=0.0,
+                        value=(
+                            CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
+                        ),
+                        step=0.05,
+                        format="%.3f",
+                        key=(
+                            "reaction_lab_retest_departure"
+                        ),
+                    )
+                )
+
+            control_7, control_8, control_9 = (
+                st.columns(3)
+            )
+
+            with control_7:
+                retest_max_age_minutes = (
+                    st.number_input(
+                        "Max minutes confirmation → retest",
+                        min_value=15,
+                        max_value=2880,
+                        value=(
+                            CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
+                        ),
+                        step=30,
+                        key=(
+                            "reaction_lab_retest_max_age"
+                        ),
+                    )
+                )
+
+            with control_8:
+                retest_reaction_filter = (
+                    st.selectbox(
+                        "Retest type",
+                        [
+                            "All retests",
+                            "Reaction only",
+                            "Non-reaction touches",
+                            "Failed only",
+                            "Indecisive only",
+                        ],
+                        key=(
+                            "reaction_lab_retest_type"
+                        ),
+                    )
+                )
+
+            with control_9:
+                retest_side_filter = (
+                    st.selectbox(
+                        "Retest side",
+                        ["ALL", "LONG", "SHORT"],
+                        key=(
+                            "reaction_lab_retest_side"
+                        ),
+                    )
+                )
+
+            retest_recent_minutes = (
+                st.number_input(
+                    "Max age since retest (minutes)",
+                    min_value=1,
+                    max_value=10080,
+                    value=1440,
+                    step=60,
+                    key=(
+                        "reaction_lab_retest_recent"
+                    ),
+                )
+            )
+
+            retest_symbols = (
+                structural_symbols
+                if retest_scope == "All symbols"
+                else (
+                    str(
+                        selected_retest_symbol
+                    ),
+                )
+            )
+
+            with st.spinner(
+                "Scanning 15m confirmed swing "
+                f"retests across "
+                f"{len(retest_symbols)} symbol(s)..."
+            ):
+                confirmed_swing_retests_df = (
+                    scan_confirmed_swing_retests_all_symbols(
+                        symbols=retest_symbols,
+                        swing_timeframes=("15m",),
+                        swing_detector_items=(
+                            (
+                                "15m",
+                                str(
+                                    retest_detector
+                                ),
+                            ),
+                        ),
+                        min_swing_prominence_pct=float(
+                            retest_prominence
+                        ),
+                        retest_tolerance_pct=float(
+                            retest_tolerance_pct
+                        ),
+                        min_departure_pct=float(
+                            min_retest_departure_pct
+                        ),
+                        max_age_minutes=int(
+                            retest_max_age_minutes
+                        ),
+                        max_retest_age_minutes=int(
+                            retest_recent_minutes
+                        ),
+                    )
+                )
+
+            render_confirmed_swing_retest_scanner(
+                retests_df=(
+                    confirmed_swing_retests_df
+                ),
+                reaction_filter=(
+                    retest_reaction_filter
+                ),
+                side_filter=(
+                    retest_side_filter
+                ),
+                timeframe_filter="15m",
+                max_retest_age_minutes=int(
+                    retest_recent_minutes
+                ),
+            )
+
+        elif lab_mode == "🎯 Pivots / Confirmations":
+            control_1, control_2, control_3 = (
+                st.columns(3)
+            )
+
+            with control_1:
+                pivot_scope = st.selectbox(
+                    "Study scope",
+                    [
+                        "Selected symbol",
+                        "All symbols",
+                    ],
+                    key=(
+                        "reaction_lab_pivot_scope"
+                    ),
+                )
+
+            with control_2:
+                selected_pivot_symbol = (
+                    st.selectbox(
+                        "Selected symbol",
+                        options=list(
+                            structural_symbols
+                        ),
+                        key=(
+                            "reaction_lab_pivot_symbol"
+                        ),
+                    )
+                )
+
+            with control_3:
+                pivot_prominence = (
+                    st.number_input(
+                        "Min swing prominence %",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.05,
+                        format="%.2f",
+                        key=(
+                            "reaction_lab_pivot_prominence"
+                        ),
+                    )
+                )
+
+            swing_timeframes = st.multiselect(
+                "Swing timeframes",
+                options=[
+                    "1m",
+                    "5m",
+                    "15m",
+                    "30m",
+                    "1h",
+                ],
+                default=[
+                    "1m",
+                    "5m",
+                    "15m",
+                ],
+                key=(
+                    "reaction_lab_pivot_timeframes"
+                ),
+            )
+
+            default_swing_detectors = {
+                "1m": "5x5",
+                "5m": "5x5",
+                "15m": "3x3",
+                "30m": "3x3",
+                "1h": "2x2",
+            }
+
+            swing_detector_windows = {}
+
+            if swing_timeframes:
+                detector_columns = st.columns(
+                    len(
+                        swing_timeframes
+                    )
+                )
+
+                for (
+                    detector_column,
+                    swing_timeframe,
+                ) in zip(
+                    detector_columns,
+                    swing_timeframes,
+                ):
+                    detector_options = [
+                        "2x2",
+                        "3x3",
+                        "5x5",
+                    ]
+                    default_detector = (
+                        default_swing_detectors.get(
+                            swing_timeframe,
+                            "5x5",
+                        )
+                    )
+
+                    with detector_column:
+                        swing_detector_windows[
+                            swing_timeframe
+                        ] = st.selectbox(
+                            (
+                                f"{swing_timeframe} "
+                                "detector"
+                            ),
+                            detector_options,
+                            index=(
+                                detector_options.index(
+                                    default_detector
+                                )
+                            ),
+                            key=(
+                                "reaction_lab_"
+                                "pivot_detector_"
+                                f"{swing_timeframe}"
+                            ),
+                        )
+
+            filter_1, filter_2 = st.columns(
+                [1.5, 2.0]
+            )
+
+            with filter_1:
+                filter_by_confirmation_move = (
+                    st.checkbox(
+                        "Filter by pivot → confirmation move",
+                        value=False,
+                        key=(
+                            "reaction_lab_"
+                            "pivot_filter_move"
+                        ),
+                    )
+                )
+
+            with filter_2:
+                max_confirmation_move_pct = (
+                    st.number_input(
+                        "Max pivot → confirmation move %",
+                        min_value=0.0,
+                        value=1.0,
+                        step=0.05,
+                        format="%.2f",
+                        key=(
+                            "reaction_lab_"
+                            "pivot_max_move"
+                        ),
+                    )
+                )
+
+            if not swing_timeframes:
+                st.info(
+                    "Select at least one swing timeframe."
+                )
+            else:
+                research_symbols = (
+                    (
+                        str(
+                            selected_pivot_symbol
+                        ),
+                    )
+                    if (
+                        pivot_scope
+                        == "Selected symbol"
+                    )
+                    else structural_symbols
+                )
+
+                max_move = (
+                    float(
+                        max_confirmation_move_pct
+                    )
+                    if (
+                        filter_by_confirmation_move
+                    )
+                    else None
+                )
+
+                with st.spinner(
+                    "Building causal pivot → "
+                    "confirmation research..."
+                ):
+                    control_study_df = (
+                        build_volume_exhaustion_confirmation_study_all_symbols(
+                            symbols=(
+                                research_symbols
+                            ),
+                            candle_limit=(
+                                VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+                            ),
+                            swing_timeframes=tuple(
+                                swing_timeframes
+                            ),
+                            swing_detector_items=tuple(
+                                swing_detector_windows.items()
+                            ),
+                            min_swing_prominence_pct=float(
+                                pivot_prominence
+                            ),
+                            max_confirmation_move_pct=(
+                                max_move
+                            ),
+                        )
+                    )
+
+                render_volume_exhaustion_confirmation_edge_study(
+                    study_df=(
+                        control_study_df
+                    ),
+                    candle_limit=(
+                        VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+                    ),
+                    max_confirmation_move_pct=(
+                        float(
+                            max_confirmation_move_pct
+                        )
+                        if (
+                            filter_by_confirmation_move
+                        )
+                        else 999.0
+                    ),
+                )
+
+                st.markdown("---")
+
+                scope_label = (
+                    str(
+                        selected_pivot_symbol
+                    )
+                    if (
+                        pivot_scope
+                        == "Selected symbol"
+                    )
+                    else (
+                        "All symbols "
+                        f"({len(research_symbols)})"
+                    )
+                )
+
+                render_volume_exhaustion_confirmation_bucket_study(
+                    study_df=(
+                        control_study_df
+                    ),
+                    candle_limit=(
+                        VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
+                    ),
+                    scope_label=(
+                        scope_label
+                    ),
+                    max_confirmation_move_pct=(
+                        max_move
+                    ),
+                )
+
+                render_volume_exhaustion_first_touch_replay(
+                    filtered_study_df=(
+                        control_study_df
+                    ),
+                    control_study_df=(
+                        control_study_df
+                    ),
+                    max_confirmation_move_pct=(
+                        max_move
+                    ),
+                )
+
+        elif lab_mode == "📍 Event swing structure":
+            events = load_volume_exhaustion_events()
+            if events is None or events.empty:
+                st.info("No Volume Exhaustion events are available yet.")
+                events = pd.DataFrame(columns=["symbol"])
+
+            event_side = st.selectbox(
+                "Event side",
+                ["ALL", "LONG", "SHORT"],
+                key=(
+                    "reaction_lab_event_side"
+                ),
+            )
+
+            event_view = events.copy()
+
+            if (
+                event_side != "ALL"
+                and "potential_side"
+                in event_view.columns
+            ):
+                event_view = event_view[
+                    event_view[
+                        "potential_side"
+                    ].eq(event_side)
+                ].copy()
+
+            event_symbols = sorted(
+                event_view["symbol"]
                 .dropna()
                 .astype(str)
                 .unique()
                 .tolist()
             )
-        )
 
-        if not structural_symbols:
-            st.info(
-                "No symbols are available for structural research."
-            )
-        else:
-            lab_mode = st.radio(
-                "Research view",
-                options=[
-                    "🧊 Candidate V1",
-                    "🧪 Candidate V2",
-                    "🔁 REACTION / Retests",
-                    "🎯 Pivots / Confirmations",
-                    "📍 Event swing structure",
-                    "🧬 Volume → future swings",
-                ],
-                horizontal=True,
-                key="reaction_swing_lab_mode",
-            )
-
-            st.caption(
-                "Only the selected research view is rendered. "
-                "This keeps the heavy all-symbol scans from running "
-                "when you are inspecting another part of the lab."
-            )
-
-            if lab_mode == "🧊 Candidate V1":
-                candidate_v1_config = (
-                    _candidate_v1_load_or_freeze_config(
-                        detector="3x3",
-                        min_swing_prominence_pct=0.0,
-                        retest_tolerance_pct=float(
-                            CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT
-                        ),
-                        min_departure_pct=float(
-                            CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
-                        ),
-                        max_retest_age_minutes=int(
-                            CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
+            if not event_symbols:
+                st.info(
+                    "No events match this side."
+                )
+            else:
+                selected_event_symbol = (
+                    st.selectbox(
+                        "Event symbol",
+                        event_symbols,
+                        key=(
+                            "reaction_lab_event_symbol"
                         ),
                     )
                 )
 
-                candidate_v1_long_config = (
-                    _candidate_v1_long_load_or_freeze_config(
-                        detector=str(
-                            candidate_v1_config.get(
-                                "swing_detector",
-                                "3x3",
-                            )
-                        ),
-                        min_swing_prominence_pct=float(
-                            candidate_v1_config.get(
-                                "min_swing_prominence_pct",
-                                0.0,
-                            )
-                        ),
-                        retest_tolerance_pct=float(
-                            candidate_v1_config.get(
-                                "retest_tolerance_pct",
-                                CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
-                            )
-                        ),
-                        min_departure_pct=float(
-                            candidate_v1_config.get(
-                                "min_departure_pct",
-                                CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
-                            )
-                        ),
-                        max_retest_age_minutes=int(
-                            candidate_v1_config.get(
-                                "max_confirmation_to_retest_min",
-                                CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
-                            )
-                        ),
+                symbol_events = event_view[
+                    event_view["symbol"].eq(
+                        selected_event_symbol
                     )
-                )
+                ].copy()
 
-                with st.spinner(
-                    "Updating frozen Candidate V1 "
-                    "SHORT + LONG monitors..."
+                if (
+                    "event_time_utc"
+                    in symbol_events.columns
                 ):
-                    candidate_v1_retests_df = (
-                        scan_confirmed_swing_retests_all_symbols(
-                            symbols=structural_symbols,
-                            swing_timeframes=(
-                                str(
-                                    candidate_v1_config.get(
-                                        "swing_timeframe",
-                                        "15m",
-                                    )
-                                ),
-                            ),
-                            swing_detector_items=(
-                                (
-                                    str(
-                                        candidate_v1_config.get(
-                                            "swing_timeframe",
-                                            "15m",
-                                        )
-                                    ),
-                                    str(
-                                        candidate_v1_config.get(
-                                            "swing_detector",
-                                            "3x3",
-                                        )
-                                    ),
-                                ),
-                            ),
-                            min_swing_prominence_pct=float(
-                                candidate_v1_config.get(
-                                    "min_swing_prominence_pct",
-                                    0.0,
-                                )
-                            ),
-                            retest_tolerance_pct=float(
-                                candidate_v1_config.get(
-                                    "retest_tolerance_pct",
-                                    CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
-                                )
-                            ),
-                            min_departure_pct=float(
-                                candidate_v1_config.get(
-                                    "min_departure_pct",
-                                    CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
-                                )
-                            ),
-                            max_age_minutes=int(
-                                candidate_v1_config.get(
-                                    "max_confirmation_to_retest_min",
-                                    CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
-                                )
-                            ),
-                            max_retest_age_minutes=4320,
+                    symbol_events = (
+                        symbol_events.sort_values(
+                            "event_time_utc",
+                            ascending=False,
                         )
                     )
 
-                (
-                    short_monitor_tab,
-                    long_monitor_tab,
-                    total_monitor_tab,
-                ) = st.tabs(
-                    [
-                        "🔴 Candidate V1 SHORT",
-                        "🟢 Candidate V1 LONG",
-                        "🟣 Candidate V1 TOTAL",
+                labels = []
+                lookup = {}
+
+                for (
+                    row_index,
+                    row,
+                ) in symbol_events.iterrows():
+                    event_time = row.get(
+                        "event_time_local"
+                    )
+                    label = (
+                        f"{event_time} · "
+                        f"{row.get('potential_side', '—')} · "
+                        f"{row.get('event_id', row_index)}"
+                    )
+                    labels.append(label)
+                    lookup[label] = row_index
+
+                selected_event_label = (
+                    st.selectbox(
+                        "Volume event",
+                        labels,
+                        key=(
+                            "reaction_lab_event_select"
+                        ),
+                    )
+                )
+                selected_event = (
+                    symbol_events.loc[
+                        lookup[
+                            selected_event_label
+                        ]
                     ]
                 )
 
-                with short_monitor_tab:
-                    render_candidate_v1_frozen_monitor(
-                        retests_df=(
-                            candidate_v1_retests_df
-                        ),
-                        config=candidate_v1_config,
-                    )
-
-                with long_monitor_tab:
-                    render_candidate_v1_long_frozen_monitor(
-                        retests_df=(
-                            candidate_v1_retests_df
-                        ),
-                        config=(
-                            candidate_v1_long_config
-                        ),
-                    )
-
-                with total_monitor_tab:
-                    render_candidate_v1_total_monitor(
-                        retests_df=candidate_v1_retests_df,
-                    )
-
-            elif lab_mode == "🧪 Candidate V2":
-                # V2 deliberately reuses the exact same 15m structural scanner
-                # parameters as frozen V1 so only the downstream selection
-                # hypothesis changes. The V2 universe itself is all REACTIONs.
-                candidate_v1_config = (
-                    _candidate_v1_load_or_freeze_config(
-                        detector="3x3",
-                        min_swing_prominence_pct=0.0,
-                        retest_tolerance_pct=float(
-                            CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT
-                        ),
-                        min_departure_pct=float(
-                            CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
-                        ),
-                        max_retest_age_minutes=int(
-                            CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
-                        ),
-                    )
-                )
-                with st.spinner(
-                    "Scanning the shared 15m causal REACTION universe for V2..."
-                ):
-                    candidate_v2_retests_df = (
-                        scan_confirmed_swing_retests_all_symbols(
-                            symbols=structural_symbols,
-                            swing_timeframes=(
-                                str(
-                                    candidate_v1_config.get(
-                                        "swing_timeframe",
-                                        "15m",
-                                    )
-                                ),
-                            ),
-                            swing_detector_items=(
-                                (
-                                    str(
-                                        candidate_v1_config.get(
-                                            "swing_timeframe",
-                                            "15m",
-                                        )
-                                    ),
-                                    str(
-                                        candidate_v1_config.get(
-                                            "swing_detector",
-                                            "3x3",
-                                        )
-                                    ),
-                                ),
-                            ),
-                            min_swing_prominence_pct=float(
-                                candidate_v1_config.get(
-                                    "min_swing_prominence_pct",
-                                    0.0,
-                                )
-                            ),
-                            retest_tolerance_pct=float(
-                                candidate_v1_config.get(
-                                    "retest_tolerance_pct",
-                                    CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
-                                )
-                            ),
-                            min_departure_pct=float(
-                                candidate_v1_config.get(
-                                    "min_departure_pct",
-                                    CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
-                                )
-                            ),
-                            max_age_minutes=int(
-                                candidate_v1_config.get(
-                                    "max_confirmation_to_retest_min",
-                                    CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
-                                )
-                            ),
-                            max_retest_age_minutes=4320,
-                        )
-                    )
-                render_candidate_v2_research(
-                    retests_df=candidate_v2_retests_df,
-                )
-
-            elif lab_mode == "🔁 REACTION / Retests":
-                control_1, control_2, control_3 = (
-                    st.columns(3)
-                )
-
-                with control_1:
-                    retest_scope = st.selectbox(
-                        "Scanner scope",
+                structure_timeframes = (
+                    st.multiselect(
+                        "Swing timeframes",
                         [
-                            "All symbols",
-                            "Selected symbol",
+                            "1m",
+                            "5m",
+                            "15m",
+                            "30m",
+                            "1h",
+                        ],
+                        default=[
+                            "1m",
+                            "5m",
+                            "15m",
                         ],
                         key=(
-                            "reaction_lab_retest_scope"
+                            "reaction_lab_"
+                            "event_timeframes"
                         ),
                     )
-
-                with control_2:
-                    selected_retest_symbol = (
-                        st.selectbox(
-                            "Selected symbol",
-                            options=list(
-                                structural_symbols
-                            ),
-                            key=(
-                                "reaction_lab_retest_symbol"
-                            ),
-                        )
-                    )
-
-                with control_3:
-                    retest_detector = st.selectbox(
-                        "15m swing detector",
-                        ["2x2", "3x3", "5x5"],
-                        index=1,
-                        key=(
-                            "reaction_lab_retest_detector"
-                        ),
-                    )
-
-                control_4, control_5, control_6 = (
-                    st.columns(3)
                 )
 
-                with control_4:
-                    retest_prominence = (
-                        st.number_input(
-                            "Min swing prominence %",
-                            min_value=0.0,
-                            value=0.0,
-                            step=0.05,
-                            format="%.2f",
-                            key=(
-                                "reaction_lab_retest_prominence"
-                            ),
-                        )
-                    )
-
-                with control_5:
-                    retest_tolerance_pct = (
-                        st.number_input(
-                            "Retest tolerance %",
-                            min_value=0.0,
-                            value=(
-                                CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT
-                            ),
-                            step=0.01,
-                            format="%.3f",
-                            key=(
-                                "reaction_lab_retest_tolerance"
-                            ),
-                        )
-                    )
-
-                with control_6:
-                    min_retest_departure_pct = (
-                        st.number_input(
-                            "Min move-away before retest %",
-                            min_value=0.0,
-                            value=(
-                                CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT
-                            ),
-                            step=0.05,
-                            format="%.3f",
-                            key=(
-                                "reaction_lab_retest_departure"
-                            ),
-                        )
-                    )
-
-                control_7, control_8, control_9 = (
-                    st.columns(3)
-                )
-
-                with control_7:
-                    retest_max_age_minutes = (
-                        st.number_input(
-                            "Max minutes confirmation → retest",
-                            min_value=15,
-                            max_value=2880,
-                            value=(
-                                CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES
-                            ),
-                            step=30,
-                            key=(
-                                "reaction_lab_retest_max_age"
-                            ),
-                        )
-                    )
-
-                with control_8:
-                    retest_reaction_filter = (
-                        st.selectbox(
-                            "Retest type",
-                            [
-                                "All retests",
-                                "Reaction only",
-                                "Non-reaction touches",
-                                "Failed only",
-                                "Indecisive only",
-                            ],
-                            key=(
-                                "reaction_lab_retest_type"
-                            ),
-                        )
-                    )
-
-                with control_9:
-                    retest_side_filter = (
-                        st.selectbox(
-                            "Retest side",
-                            ["ALL", "LONG", "SHORT"],
-                            key=(
-                                "reaction_lab_retest_side"
-                            ),
-                        )
-                    )
-
-                retest_recent_minutes = (
+                event_prominence = (
                     st.number_input(
-                        "Max age since retest (minutes)",
-                        min_value=1,
-                        max_value=10080,
-                        value=1440,
-                        step=60,
+                        "Min swing prominence %",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.05,
+                        format="%.2f",
                         key=(
-                            "reaction_lab_retest_recent"
+                            "reaction_lab_"
+                            "event_prominence"
                         ),
                     )
                 )
 
-                retest_symbols = (
-                    structural_symbols
-                    if retest_scope == "All symbols"
-                    else (
-                        str(
-                            selected_retest_symbol
-                        ),
-                    )
-                )
-
-                with st.spinner(
-                    "Scanning 15m confirmed swing "
-                    f"retests across "
-                    f"{len(retest_symbols)} symbol(s)..."
-                ):
-                    confirmed_swing_retests_df = (
-                        scan_confirmed_swing_retests_all_symbols(
-                            symbols=retest_symbols,
-                            swing_timeframes=("15m",),
-                            swing_detector_items=(
-                                (
-                                    "15m",
-                                    str(
-                                        retest_detector
-                                    ),
-                                ),
-                            ),
-                            min_swing_prominence_pct=float(
-                                retest_prominence
-                            ),
-                            retest_tolerance_pct=float(
-                                retest_tolerance_pct
-                            ),
-                            min_departure_pct=float(
-                                min_retest_departure_pct
-                            ),
-                            max_age_minutes=int(
-                                retest_max_age_minutes
-                            ),
-                            max_retest_age_minutes=int(
-                                retest_recent_minutes
-                            ),
-                        )
-                    )
-
-                render_confirmed_swing_retest_scanner(
-                    retests_df=(
-                        confirmed_swing_retests_df
-                    ),
-                    reaction_filter=(
-                        retest_reaction_filter
-                    ),
-                    side_filter=(
-                        retest_side_filter
-                    ),
-                    timeframe_filter="15m",
-                    max_retest_age_minutes=int(
-                        retest_recent_minutes
-                    ),
-                )
-
-            elif lab_mode == "🎯 Pivots / Confirmations":
-                control_1, control_2, control_3 = (
-                    st.columns(3)
-                )
-
-                with control_1:
-                    pivot_scope = st.selectbox(
-                        "Study scope",
-                        [
-                            "Selected symbol",
-                            "All symbols",
-                        ],
-                        key=(
-                            "reaction_lab_pivot_scope"
-                        ),
-                    )
-
-                with control_2:
-                    selected_pivot_symbol = (
-                        st.selectbox(
-                            "Selected symbol",
-                            options=list(
-                                structural_symbols
-                            ),
-                            key=(
-                                "reaction_lab_pivot_symbol"
-                            ),
-                        )
-                    )
-
-                with control_3:
-                    pivot_prominence = (
-                        st.number_input(
-                            "Min swing prominence %",
-                            min_value=0.0,
-                            value=0.0,
-                            step=0.05,
-                            format="%.2f",
-                            key=(
-                                "reaction_lab_pivot_prominence"
-                            ),
-                        )
-                    )
-
-                swing_timeframes = st.multiselect(
-                    "Swing timeframes",
-                    options=[
-                        "1m",
-                        "5m",
-                        "15m",
-                        "30m",
-                        "1h",
-                    ],
-                    default=[
-                        "1m",
-                        "5m",
-                        "15m",
-                    ],
-                    key=(
-                        "reaction_lab_pivot_timeframes"
-                    ),
-                )
-
-                default_swing_detectors = {
+                default_detectors = {
                     "1m": "5x5",
                     "5m": "5x5",
                     "15m": "3x3",
                     "30m": "3x3",
                     "1h": "2x2",
                 }
+                detector_windows = {}
 
-                swing_detector_windows = {}
-
-                if swing_timeframes:
-                    detector_columns = st.columns(
-                        len(
-                            swing_timeframes
+                if structure_timeframes:
+                    detector_columns = (
+                        st.columns(
+                            len(
+                                structure_timeframes
+                            )
                         )
                     )
 
@@ -57479,666 +60272,332 @@ if selected_section == "reaction_swing_lab":
                         swing_timeframe,
                     ) in zip(
                         detector_columns,
-                        swing_timeframes,
+                        structure_timeframes,
                     ):
-                        detector_options = [
+                        options = [
                             "2x2",
                             "3x3",
                             "5x5",
                         ]
-                        default_detector = (
-                            default_swing_detectors.get(
+                        default_value = (
+                            default_detectors.get(
                                 swing_timeframe,
                                 "5x5",
                             )
                         )
 
                         with detector_column:
-                            swing_detector_windows[
+                            detector_windows[
                                 swing_timeframe
                             ] = st.selectbox(
                                 (
                                     f"{swing_timeframe} "
                                     "detector"
                                 ),
-                                detector_options,
+                                options,
                                 index=(
-                                    detector_options.index(
-                                        default_detector
+                                    options.index(
+                                        default_value
                                     )
                                 ),
                                 key=(
                                     "reaction_lab_"
-                                    "pivot_detector_"
+                                    "event_detector_"
                                     f"{swing_timeframe}"
                                 ),
                             )
 
-                filter_1, filter_2 = st.columns(
-                    [1.5, 2.0]
-                )
-
-                with filter_1:
-                    filter_by_confirmation_move = (
-                        st.checkbox(
-                            "Filter by pivot → confirmation move",
-                            value=False,
-                            key=(
-                                "reaction_lab_"
-                                "pivot_filter_move"
-                            ),
-                        )
-                    )
-
-                with filter_2:
-                    max_confirmation_move_pct = (
-                        st.number_input(
-                            "Max pivot → confirmation move %",
-                            min_value=0.0,
-                            value=1.0,
-                            step=0.05,
-                            format="%.2f",
-                            key=(
-                                "reaction_lab_"
-                                "pivot_max_move"
-                            ),
-                        )
-                    )
-
-                if not swing_timeframes:
-                    st.info(
-                        "Select at least one swing timeframe."
-                    )
-                else:
-                    research_symbols = (
-                        (
-                            str(
-                                selected_pivot_symbol
-                            ),
-                        )
-                        if (
-                            pivot_scope
-                            == "Selected symbol"
-                        )
-                        else structural_symbols
-                    )
-
-                    max_move = (
-                        float(
-                            max_confirmation_move_pct
-                        )
-                        if (
-                            filter_by_confirmation_move
-                        )
-                        else None
-                    )
-
-                    with st.spinner(
-                        "Building causal pivot → "
-                        "confirmation research..."
-                    ):
-                        control_study_df = (
-                            build_volume_exhaustion_confirmation_study_all_symbols(
-                                symbols=(
-                                    research_symbols
-                                ),
-                                candle_limit=(
-                                    VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
-                                ),
-                                swing_timeframes=tuple(
-                                    swing_timeframes
-                                ),
-                                swing_detector_items=tuple(
-                                    swing_detector_windows.items()
-                                ),
-                                min_swing_prominence_pct=float(
-                                    pivot_prominence
-                                ),
-                                max_confirmation_move_pct=(
-                                    max_move
-                                ),
-                            )
-                        )
-
-                    render_volume_exhaustion_confirmation_edge_study(
-                        study_df=(
-                            control_study_df
-                        ),
-                        candle_limit=(
-                            VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
-                        ),
-                        max_confirmation_move_pct=(
-                            float(
-                                max_confirmation_move_pct
-                            )
-                            if (
-                                filter_by_confirmation_move
-                            )
-                            else 999.0
-                        ),
-                    )
-
-                    st.markdown("---")
-
-                    scope_label = (
-                        str(
-                            selected_pivot_symbol
-                        )
-                        if (
-                            pivot_scope
-                            == "Selected symbol"
-                        )
-                        else (
-                            "All symbols "
-                            f"({len(research_symbols)})"
-                        )
-                    )
-
-                    render_volume_exhaustion_confirmation_bucket_study(
-                        study_df=(
-                            control_study_df
-                        ),
-                        candle_limit=(
-                            VOLUME_EXHAUSTION_RESEARCH_CANDLE_LIMIT
-                        ),
-                        scope_label=(
-                            scope_label
-                        ),
-                        max_confirmation_move_pct=(
-                            max_move
-                        ),
-                    )
-
-                    render_volume_exhaustion_first_touch_replay(
-                        filtered_study_df=(
-                            control_study_df
-                        ),
-                        control_study_df=(
-                            control_study_df
-                        ),
-                        max_confirmation_move_pct=(
-                            max_move
-                        ),
-                    )
-
-            elif lab_mode == "📍 Event swing structure":
-                event_side = st.selectbox(
-                    "Event side",
-                    ["ALL", "LONG", "SHORT"],
+                event_chart_limit = st.slider(
+                    "Chart 1m candles",
+                    min_value=60,
+                    max_value=2000,
+                    value=240,
+                    step=20,
                     key=(
-                        "reaction_lab_event_side"
+                        "reaction_lab_"
+                        "event_chart_limit"
                     ),
                 )
 
-                event_view = events.copy()
-
-                if (
-                    event_side != "ALL"
-                    and "potential_side"
-                    in event_view.columns
-                ):
-                    event_view = event_view[
-                        event_view[
-                            "potential_side"
-                        ].eq(event_side)
-                    ].copy()
-
-                event_symbols = sorted(
-                    event_view["symbol"]
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                    .tolist()
+                event_candles = (
+                    geometry_scanner_data_service
+                    .get_closed_candles(
+                        symbol=(
+                            selected_event_symbol
+                        ),
+                        timeframe="1m",
+                        limit=int(
+                            event_chart_limit
+                        ),
+                    )
                 )
 
-                if not event_symbols:
+                if (
+                    event_candles is None
+                    or event_candles.empty
+                ):
                     st.info(
-                        "No events match this side."
+                        "No 1m candles are available "
+                        "for this event."
                     )
                 else:
-                    selected_event_symbol = (
-                        st.selectbox(
-                            "Event symbol",
-                            event_symbols,
-                            key=(
-                                "reaction_lab_event_symbol"
-                            ),
-                        )
+                    event_ts = selected_event.get(
+                        "candle_open_timestamp"
                     )
-
-                    symbol_events = event_view[
-                        event_view["symbol"].eq(
-                            selected_event_symbol
+                    if pd.notna(event_ts):
+                        event_ts = int(
+                            event_ts
                         )
-                    ].copy()
 
-                    if (
-                        "event_time_utc"
-                        in symbol_events.columns
+                    swing_points_by_timeframe = {}
+                    swing_candles_by_timeframe = {}
+                    structure_rows = []
+
+                    for swing_timeframe in (
+                        structure_timeframes
                     ):
-                        symbol_events = (
-                            symbol_events.sort_values(
-                                "event_time_utc",
-                                ascending=False,
-                            )
-                        )
-
-                    labels = []
-                    lookup = {}
-
-                    for (
-                        row_index,
-                        row,
-                    ) in symbol_events.iterrows():
-                        event_time = row.get(
-                            "event_time_local"
-                        )
-                        label = (
-                            f"{event_time} · "
-                            f"{row.get('potential_side', '—')} · "
-                            f"{row.get('event_id', row_index)}"
-                        )
-                        labels.append(label)
-                        lookup[label] = row_index
-
-                    selected_event_label = (
-                        st.selectbox(
-                            "Volume event",
-                            labels,
-                            key=(
-                                "reaction_lab_event_select"
-                            ),
-                        )
-                    )
-                    selected_event = (
-                        symbol_events.loc[
-                            lookup[
-                                selected_event_label
-                            ]
-                        ]
-                    )
-
-                    structure_timeframes = (
-                        st.multiselect(
-                            "Swing timeframes",
-                            [
-                                "1m",
-                                "5m",
-                                "15m",
-                                "30m",
-                                "1h",
-                            ],
-                            default=[
-                                "1m",
-                                "5m",
-                                "15m",
-                            ],
-                            key=(
-                                "reaction_lab_"
-                                "event_timeframes"
-                            ),
-                        )
-                    )
-
-                    event_prominence = (
-                        st.number_input(
-                            "Min swing prominence %",
-                            min_value=0.0,
-                            value=0.0,
-                            step=0.05,
-                            format="%.2f",
-                            key=(
-                                "reaction_lab_"
-                                "event_prominence"
-                            ),
-                        )
-                    )
-
-                    default_detectors = {
-                        "1m": "5x5",
-                        "5m": "5x5",
-                        "15m": "3x3",
-                        "30m": "3x3",
-                        "1h": "2x2",
-                    }
-                    detector_windows = {}
-
-                    if structure_timeframes:
-                        detector_columns = (
-                            st.columns(
-                                len(
-                                    structure_timeframes
-                                )
-                            )
-                        )
-
-                        for (
-                            detector_column,
-                            swing_timeframe,
-                        ) in zip(
-                            detector_columns,
-                            structure_timeframes,
-                        ):
-                            options = [
-                                "2x2",
-                                "3x3",
-                                "5x5",
-                            ]
-                            default_value = (
+                        detector_name = (
+                            detector_windows.get(
+                                swing_timeframe,
                                 default_detectors.get(
                                     swing_timeframe,
                                     "5x5",
-                                )
+                                ),
                             )
-
-                            with detector_column:
-                                detector_windows[
-                                    swing_timeframe
-                                ] = st.selectbox(
-                                    (
-                                        f"{swing_timeframe} "
-                                        "detector"
-                                    ),
-                                    options,
-                                    index=(
-                                        options.index(
-                                            default_value
-                                        )
-                                    ),
-                                    key=(
-                                        "reaction_lab_"
-                                        "event_detector_"
-                                        f"{swing_timeframe}"
-                                    ),
-                                )
-
-                    event_chart_limit = st.slider(
-                        "Chart 1m candles",
-                        min_value=60,
-                        max_value=2000,
-                        value=240,
-                        step=20,
-                        key=(
-                            "reaction_lab_"
-                            "event_chart_limit"
-                        ),
-                    )
-
-                    event_candles = (
-                        geometry_scanner_data_service
-                        .get_closed_candles(
-                            symbol=(
-                                selected_event_symbol
-                            ),
-                            timeframe="1m",
-                            limit=int(
-                                event_chart_limit
+                        )
+                        swing_bars = int(
+                            detector_name.split(
+                                "x"
+                            )[0]
+                        )
+                        detector = SwingDetector(
+                            left_bars=swing_bars,
+                            right_bars=swing_bars,
+                            min_prominence_pct=float(
+                                event_prominence
                             ),
                         )
-                    )
 
-                    if (
-                        event_candles is None
-                        or event_candles.empty
-                    ):
-                        st.info(
-                            "No 1m candles are available "
-                            "for this event."
-                        )
-                    else:
-                        event_ts = selected_event.get(
-                            "candle_open_timestamp"
-                        )
-                        if pd.notna(event_ts):
-                            event_ts = int(
-                                event_ts
-                            )
-
-                        swing_points_by_timeframe = {}
-                        swing_candles_by_timeframe = {}
-                        structure_rows = []
-
-                        for swing_timeframe in (
-                            structure_timeframes
+                        if (
+                            swing_timeframe
+                            == "1m"
                         ):
-                            detector_name = (
-                                detector_windows.get(
-                                    swing_timeframe,
-                                    default_detectors.get(
-                                        swing_timeframe,
-                                        "5x5",
-                                    ),
-                                )
-                            )
-                            swing_bars = int(
-                                detector_name.split(
-                                    "x"
-                                )[0]
-                            )
-                            detector = SwingDetector(
-                                left_bars=swing_bars,
-                                right_bars=swing_bars,
-                                min_prominence_pct=float(
-                                    event_prominence
-                                ),
-                            )
-
-                            if (
-                                swing_timeframe
-                                == "1m"
-                            ):
-                                timeframe_candles = (
-                                    event_candles
-                                )
-                            else:
-                                timeframe_candles = (
-                                    geometry_scanner_data_service
-                                    .get_closed_candles(
-                                        symbol=(
-                                            selected_event_symbol
-                                        ),
-                                        timeframe=(
-                                            swing_timeframe
-                                        ),
-                                        limit=400,
-                                    )
-                                )
-
-                            if (
-                                timeframe_candles
-                                is None
-                                or timeframe_candles.empty
-                            ):
-                                continue
-
-                            swing_candles_by_timeframe[
-                                swing_timeframe
-                            ] = (
-                                timeframe_candles.copy()
-                            )
-                            records = (
-                                timeframe_candles
-                                .to_dict(
-                                    orient="records"
-                                )
-                            )
-                            points = (
-                                detector.detect_all(
-                                    records
-                                )
-                            )
-                            swing_points_by_timeframe[
-                                swing_timeframe
-                            ] = points
-
-                            if pd.notna(event_ts):
-                                for (
-                                    side_label,
-                                    point,
-                                ) in [
-                                    (
-                                        "LOW",
-                                        detector.last_confirmed_low(
-                                            records,
-                                            as_of_timestamp=int(
-                                                event_ts
-                                            ),
-                                        ),
-                                    ),
-                                    (
-                                        "HIGH",
-                                        detector.last_confirmed_high(
-                                            records,
-                                            as_of_timestamp=int(
-                                                event_ts
-                                            ),
-                                        ),
-                                    ),
-                                ]:
-                                    if point is None:
-                                        continue
-
-                                    event_price = pd.to_numeric(
-                                        selected_event.get(
-                                            "close"
-                                        ),
-                                        errors="coerce",
-                                    )
-                                    if pd.isna(
-                                        event_price
-                                    ):
-                                        continue
-
-                                    swing_price = float(
-                                        point.price
-                                    )
-                                    distance_pct = (
-                                        (
-                                            float(
-                                                event_price
-                                            )
-                                            - swing_price
-                                        )
-                                        / swing_price
-                                        * 100.0
-                                    )
-
-                                    structure_rows.append(
-                                        {
-                                            "timeframe": (
-                                                swing_timeframe
-                                            ),
-                                            "side": (
-                                                side_label
-                                            ),
-                                            "swing_price": (
-                                                swing_price
-                                            ),
-                                            "distance_pct": (
-                                                distance_pct
-                                            ),
-                                            "pivot_time": (
-                                                pd.to_datetime(
-                                                    int(
-                                                        point.pivot_timestamp
-                                                    ),
-                                                    unit="ms",
-                                                    utc=True,
-                                                )
-                                                .tz_convert(
-                                                    TZ
-                                                )
-                                                .strftime(
-                                                    "%Y-%m-%d %H:%M"
-                                                )
-                                            ),
-                                            "confirmed_time": (
-                                                pd.to_datetime(
-                                                    int(
-                                                        point.confirmed_timestamp
-                                                    ),
-                                                    unit="ms",
-                                                    utc=True,
-                                                )
-                                                .tz_convert(
-                                                    TZ
-                                                )
-                                                .strftime(
-                                                    "%Y-%m-%d %H:%M"
-                                                )
-                                            ),
-                                        }
-                                    )
-
-                        event_fig = (
-                            build_volume_exhaustion_chart(
-                                candles=(
-                                    event_candles
-                                ),
-                                event_row=(
-                                    selected_event
-                                ),
-                                swing_points_by_timeframe=(
-                                    swing_points_by_timeframe
-                                ),
-                                swing_candles_by_timeframe=(
-                                    swing_candles_by_timeframe
-                                ),
-                            )
-                        )
-
-                        st.plotly_chart(
-                            event_fig,
-                            use_container_width=True,
-                            key=(
-                                "reaction_lab_"
-                                "event_structure_chart"
-                            ),
-                            config={
-                                "displaylogo": False,
-                                "scrollZoom": True,
-                            },
-                        )
-
-                        if structure_rows:
-                            structure_df = (
-                                pd.DataFrame(
-                                    structure_rows
-                                )
-                            )
-                            structure_df[
-                                "swing_price"
-                            ] = (
-                                pd.to_numeric(
-                                    structure_df[
-                                        "swing_price"
-                                    ],
-                                    errors="coerce",
-                                ).round(8)
-                            )
-                            structure_df[
-                                "distance_pct"
-                            ] = (
-                                pd.to_numeric(
-                                    structure_df[
-                                        "distance_pct"
-                                    ],
-                                    errors="coerce",
-                                ).round(4)
-                            )
-
-                            st.dataframe(
-                                structure_df,
-                                use_container_width=True,
-                                hide_index=True,
+                            timeframe_candles = (
+                                event_candles
                             )
                         else:
-                            st.info(
-                                "No confirmed swing "
-                                "structure was available "
-                                "at this event timestamp."
+                            timeframe_candles = (
+                                geometry_scanner_data_service
+                                .get_closed_candles(
+                                    symbol=(
+                                        selected_event_symbol
+                                    ),
+                                    timeframe=(
+                                        swing_timeframe
+                                    ),
+                                    limit=400,
+                                )
                             )
 
+                        if (
+                            timeframe_candles
+                            is None
+                            or timeframe_candles.empty
+                        ):
+                            continue
+
+                        swing_candles_by_timeframe[
+                            swing_timeframe
+                        ] = (
+                            timeframe_candles.copy()
+                        )
+                        records = (
+                            timeframe_candles
+                            .to_dict(
+                                orient="records"
+                            )
+                        )
+                        points = (
+                            detector.detect_all(
+                                records
+                            )
+                        )
+                        swing_points_by_timeframe[
+                            swing_timeframe
+                        ] = points
+
+                        if pd.notna(event_ts):
+                            for (
+                                side_label,
+                                point,
+                            ) in [
+                                (
+                                    "LOW",
+                                    detector.last_confirmed_low(
+                                        records,
+                                        as_of_timestamp=int(
+                                            event_ts
+                                        ),
+                                    ),
+                                ),
+                                (
+                                    "HIGH",
+                                    detector.last_confirmed_high(
+                                        records,
+                                        as_of_timestamp=int(
+                                            event_ts
+                                        ),
+                                    ),
+                                ),
+                            ]:
+                                if point is None:
+                                    continue
+
+                                event_price = pd.to_numeric(
+                                    selected_event.get(
+                                        "close"
+                                    ),
+                                    errors="coerce",
+                                )
+                                if pd.isna(
+                                    event_price
+                                ):
+                                    continue
+
+                                swing_price = float(
+                                    point.price
+                                )
+                                distance_pct = (
+                                    (
+                                        float(
+                                            event_price
+                                        )
+                                        - swing_price
+                                    )
+                                    / swing_price
+                                    * 100.0
+                                )
+
+                                structure_rows.append(
+                                    {
+                                        "timeframe": (
+                                            swing_timeframe
+                                        ),
+                                        "side": (
+                                            side_label
+                                        ),
+                                        "swing_price": (
+                                            swing_price
+                                        ),
+                                        "distance_pct": (
+                                            distance_pct
+                                        ),
+                                        "pivot_time": (
+                                            pd.to_datetime(
+                                                int(
+                                                    point.pivot_timestamp
+                                                ),
+                                                unit="ms",
+                                                utc=True,
+                                            )
+                                            .tz_convert(
+                                                TZ
+                                            )
+                                            .strftime(
+                                                "%Y-%m-%d %H:%M"
+                                            )
+                                        ),
+                                        "confirmed_time": (
+                                            pd.to_datetime(
+                                                int(
+                                                    point.confirmed_timestamp
+                                                ),
+                                                unit="ms",
+                                                utc=True,
+                                            )
+                                            .tz_convert(
+                                                TZ
+                                            )
+                                            .strftime(
+                                                "%Y-%m-%d %H:%M"
+                                            )
+                                        ),
+                                    }
+                                )
+
+                    event_fig = (
+                        build_volume_exhaustion_chart(
+                            candles=(
+                                event_candles
+                            ),
+                            event_row=(
+                                selected_event
+                            ),
+                            swing_points_by_timeframe=(
+                                swing_points_by_timeframe
+                            ),
+                            swing_candles_by_timeframe=(
+                                swing_candles_by_timeframe
+                            ),
+                        )
+                    )
+
+                    st.plotly_chart(
+                        event_fig,
+                        use_container_width=True,
+                        key=(
+                            "reaction_lab_"
+                            "event_structure_chart"
+                        ),
+                        config={
+                            "displaylogo": False,
+                            "scrollZoom": True,
+                        },
+                    )
+
+                    if structure_rows:
+                        structure_df = (
+                            pd.DataFrame(
+                                structure_rows
+                            )
+                        )
+                        structure_df[
+                            "swing_price"
+                        ] = (
+                            pd.to_numeric(
+                                structure_df[
+                                    "swing_price"
+                                ],
+                                errors="coerce",
+                            ).round(8)
+                        )
+                        structure_df[
+                            "distance_pct"
+                        ] = (
+                            pd.to_numeric(
+                                structure_df[
+                                    "distance_pct"
+                                ],
+                                errors="coerce",
+                            ).round(4)
+                        )
+
+                        st.dataframe(
+                            structure_df,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    else:
+                        st.info(
+                            "No confirmed swing "
+                            "structure was available "
+                            "at this event timestamp."
+                        )
+
+        else:
+            events = load_volume_exhaustion_events()
+            if events is None or events.empty:
+                st.info("No Volume Exhaustion events are available yet.")
             else:
                 render_volume_exhaustion_outcome_research(
                     events=events,
