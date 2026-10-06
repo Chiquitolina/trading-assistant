@@ -22970,6 +22970,37 @@ def _candidate_v2_apply_early_exit_rule(
     if event_col not in work.columns:
         return work, {}
 
+    # Preserve the original historical execution before any research
+    # early-exit mutation. This lets the dashboard quantify exactly which
+    # historical TP/SL/TIME_EXIT paths the rule changes.
+    work["_historical_outcome"] = (
+        work.get(
+            "Outcome",
+            work.get(
+                "_outcome",
+                pd.Series("", index=work.index),
+            ),
+        )
+        .fillna("")
+        .astype(str)
+    )
+    work["_historical_net_pnl_pct"] = pd.to_numeric(
+        work.get(
+            "net_pnl_pct",
+            work.get(
+                "_net",
+                pd.Series(np.nan, index=work.index),
+            ),
+        ),
+        errors="coerce",
+    )
+    work["_early_exit_triggered"] = False
+    work["_early_exit_checkpoint_min"] = np.nan
+    work["_early_exit_mfe_pct"] = np.nan
+    work["_early_exit_mae_pct"] = np.nan
+    work["_early_exit_close_gross_pct"] = np.nan
+    work["_early_exit_net_pct"] = np.nan
+
     path_groups = {
         str(
             event_key
@@ -23341,6 +23372,40 @@ def _candidate_v2_apply_early_exit_rule(
         ] = float(
             checkpoint
         )
+        work.at[
+            idx,
+            "_early_exit_triggered",
+        ] = True
+        work.at[
+            idx,
+            "_early_exit_checkpoint_min",
+        ] = float(
+            checkpoint
+        )
+        work.at[
+            idx,
+            "_early_exit_mfe_pct",
+        ] = float(
+            mfe
+        )
+        work.at[
+            idx,
+            "_early_exit_mae_pct",
+        ] = float(
+            mae
+        )
+        work.at[
+            idx,
+            "_early_exit_close_gross_pct",
+        ] = float(
+            gross
+        )
+        work.at[
+            idx,
+            "_early_exit_net_pct",
+        ] = float(
+            net
+        )
 
         triggered += 1
 
@@ -23363,6 +23428,570 @@ def _candidate_v2_apply_early_exit_rule(
         "missing_path": int(
             skipped_missing_path
         ),
+    }
+
+
+
+def _candidate_v2_early_exit_trade_impact(
+    original_intervals,
+    adjusted_intervals,
+    baseline_result,
+    scenario_result,
+):
+    """Explain exactly what an active early-exit rule changed.
+
+    Uses Candidate V2 Event key provenance, never symbol/time approximation.
+
+    Key questions:
+    - Which baseline TP paths were cut before their historical TP?
+    - Which baseline SL/TIME_EXIT losers were cut earlier?
+    - Which previously skipped signals entered because a slot was released?
+    - Which baseline accepted signals disappeared after chronology changed?
+    """
+    empty = {
+        "summary": {},
+        "detail": pd.DataFrame(),
+        "sacrificed_tp": pd.DataFrame(),
+        "rescued_losers": pd.DataFrame(),
+        "newly_admitted": pd.DataFrame(),
+        "dropped_baseline": pd.DataFrame(),
+    }
+
+    if (
+        original_intervals is None
+        or original_intervals.empty
+        or adjusted_intervals is None
+        or adjusted_intervals.empty
+        or not baseline_result
+        or not scenario_result
+    ):
+        return empty
+
+    event_col = (
+        "candidate_v1_event_key"
+        if "candidate_v1_event_key"
+        in original_intervals.columns
+        else "candidate_v2_event_key"
+    )
+    if (
+        event_col not in original_intervals.columns
+        or event_col not in adjusted_intervals.columns
+    ):
+        return empty
+
+    baseline_ledger = baseline_result.get(
+        "ledger",
+        pd.DataFrame(),
+    )
+    scenario_ledger = scenario_result.get(
+        "ledger",
+        pd.DataFrame(),
+    )
+
+    if (
+        baseline_ledger is None
+        or baseline_ledger.empty
+        or scenario_ledger is None
+        or scenario_ledger.empty
+    ):
+        return empty
+
+    def accepted_keys(ledger):
+        accepted = ledger.loc[
+            ledger.get(
+                "Accepted",
+                pd.Series(
+                    False,
+                    index=ledger.index,
+                ),
+            )
+            .fillna(False)
+            .astype(bool)
+        ].copy()
+        return set(
+            accepted.get(
+                "Event key",
+                pd.Series(dtype=str),
+            )
+            .fillna("")
+            .astype(str)
+            .loc[
+                lambda s: s.ne("")
+            ]
+            .tolist()
+        )
+
+    baseline_keys = accepted_keys(
+        baseline_ledger
+    )
+    scenario_keys = accepted_keys(
+        scenario_ledger
+    )
+
+    original = (
+        original_intervals.copy()
+        .drop_duplicates(
+            subset=[event_col],
+            keep="last",
+        )
+    )
+    adjusted = (
+        adjusted_intervals.copy()
+        .drop_duplicates(
+            subset=[event_col],
+            keep="last",
+        )
+    )
+
+    original[event_col] = (
+        original[event_col]
+        .fillna("")
+        .astype(str)
+    )
+    adjusted[event_col] = (
+        adjusted[event_col]
+        .fillna("")
+        .astype(str)
+    )
+
+    original_map = original.set_index(
+        event_col,
+        drop=False,
+    )
+    adjusted_map = adjusted.set_index(
+        event_col,
+        drop=False,
+    )
+
+    relevant_keys = sorted(
+        baseline_keys
+        | scenario_keys
+    )
+
+    rows = []
+
+    for event_key in relevant_keys:
+        original_row = (
+            original_map.loc[event_key]
+            if event_key in original_map.index
+            else pd.Series(dtype=object)
+        )
+        adjusted_row = (
+            adjusted_map.loc[event_key]
+            if event_key in adjusted_map.index
+            else pd.Series(dtype=object)
+        )
+
+        if isinstance(
+            original_row,
+            pd.DataFrame,
+        ):
+            original_row = (
+                original_row.iloc[-1]
+            )
+        if isinstance(
+            adjusted_row,
+            pd.DataFrame,
+        ):
+            adjusted_row = (
+                adjusted_row.iloc[-1]
+            )
+
+        baseline_accepted = (
+            event_key
+            in baseline_keys
+        )
+        scenario_accepted = (
+            event_key
+            in scenario_keys
+        )
+
+        historical_outcome = str(
+            original_row.get(
+                "Outcome",
+                original_row.get(
+                    "_outcome",
+                    "",
+                ),
+            )
+        ).upper()
+
+        historical_net = pd.to_numeric(
+            pd.Series([
+                original_row.get(
+                    "net_pnl_pct",
+                    original_row.get(
+                        "_net",
+                        np.nan,
+                    ),
+                )
+            ]),
+            errors="coerce",
+        ).iloc[0]
+
+        scenario_outcome = str(
+            adjusted_row.get(
+                "Outcome",
+                adjusted_row.get(
+                    "_outcome",
+                    historical_outcome,
+                ),
+            )
+        ).upper()
+
+        scenario_net = pd.to_numeric(
+            pd.Series([
+                adjusted_row.get(
+                    "net_pnl_pct",
+                    adjusted_row.get(
+                        "_net",
+                        historical_net,
+                    ),
+                )
+            ]),
+            errors="coerce",
+        ).iloc[0]
+
+        early_triggered = bool(
+            adjusted_row.get(
+                "_early_exit_triggered",
+                False,
+            )
+        )
+
+        if (
+            baseline_accepted
+            and historical_outcome == "TP"
+            and early_triggered
+        ):
+            role = (
+                "Sacrificed baseline TP"
+            )
+        elif (
+            baseline_accepted
+            and historical_outcome
+            in {
+                "SL",
+                "SL_AMBIGUOUS",
+                "TIME_EXIT",
+            }
+            and early_triggered
+        ):
+            role = (
+                "Early-exited baseline loser"
+            )
+        elif (
+            scenario_accepted
+            and not baseline_accepted
+        ):
+            role = (
+                "Newly admitted after slot release"
+            )
+        elif (
+            baseline_accepted
+            and not scenario_accepted
+        ):
+            role = (
+                "Dropped baseline trade"
+            )
+        elif (
+            baseline_accepted
+            and scenario_accepted
+        ):
+            role = (
+                "Accepted in both"
+            )
+        else:
+            role = "Other"
+
+        rows.append({
+            "Role": role,
+            "Event key": event_key,
+            "Symbol": str(
+                adjusted_row.get(
+                    "symbol",
+                    original_row.get(
+                        "symbol",
+                        "",
+                    ),
+                )
+            ),
+            "Side": str(
+                adjusted_row.get(
+                    "side",
+                    original_row.get(
+                        "side",
+                        "",
+                    ),
+                )
+            ),
+            "Baseline accepted": bool(
+                baseline_accepted
+            ),
+            "Scenario accepted": bool(
+                scenario_accepted
+            ),
+            "Historical outcome": (
+                historical_outcome
+            ),
+            "Historical net %": (
+                float(
+                    historical_net
+                )
+                if pd.notna(
+                    historical_net
+                )
+                else np.nan
+            ),
+            "Early exit triggered": bool(
+                early_triggered
+            ),
+            "Early exit checkpoint": pd.to_numeric(
+                pd.Series([
+                    adjusted_row.get(
+                        "_early_exit_checkpoint_min",
+                        np.nan,
+                    )
+                ]),
+                errors="coerce",
+            ).iloc[0],
+            "MFE at exit %": pd.to_numeric(
+                pd.Series([
+                    adjusted_row.get(
+                        "_early_exit_mfe_pct",
+                        np.nan,
+                    )
+                ]),
+                errors="coerce",
+            ).iloc[0],
+            "MAE at exit %": pd.to_numeric(
+                pd.Series([
+                    adjusted_row.get(
+                        "_early_exit_mae_pct",
+                        np.nan,
+                    )
+                ]),
+                errors="coerce",
+            ).iloc[0],
+            "Scenario outcome": (
+                scenario_outcome
+            ),
+            "Scenario net %": (
+                float(
+                    scenario_net
+                )
+                if pd.notna(
+                    scenario_net
+                )
+                else np.nan
+            ),
+            "Δ trade net pts": (
+                float(
+                    scenario_net
+                    - historical_net
+                )
+                if (
+                    pd.notna(
+                        scenario_net
+                    )
+                    and pd.notna(
+                        historical_net
+                    )
+                )
+                else np.nan
+            ),
+        })
+
+    detail = pd.DataFrame(
+        rows
+    )
+
+    if detail.empty:
+        return empty
+
+    for column in [
+        "Historical net %",
+        "MFE at exit %",
+        "MAE at exit %",
+        "Scenario net %",
+        "Δ trade net pts",
+    ]:
+        if column in detail.columns:
+            detail[column] = pd.to_numeric(
+                detail[column],
+                errors="coerce",
+            ).round(4)
+
+    sacrificed = detail.loc[
+        detail["Role"].eq(
+            "Sacrificed baseline TP"
+        )
+    ].copy()
+
+    rescued = detail.loc[
+        detail["Role"].eq(
+            "Early-exited baseline loser"
+        )
+    ].copy()
+
+    newly = detail.loc[
+        detail["Role"].eq(
+            "Newly admitted after slot release"
+        )
+    ].copy()
+
+    dropped = detail.loc[
+        detail["Role"].eq(
+            "Dropped baseline trade"
+        )
+    ].copy()
+
+    newly_net = pd.to_numeric(
+        newly.get(
+            "Scenario net %",
+            pd.Series(dtype=float),
+        ),
+        errors="coerce",
+    ).dropna()
+
+    sacrificed_delta = pd.to_numeric(
+        sacrificed.get(
+            "Δ trade net pts",
+            pd.Series(dtype=float),
+        ),
+        errors="coerce",
+    ).dropna()
+
+    rescued_delta = pd.to_numeric(
+        rescued.get(
+            "Δ trade net pts",
+            pd.Series(dtype=float),
+        ),
+        errors="coerce",
+    ).dropna()
+
+    scenario_summary = scenario_result.get(
+        "summary",
+        {},
+    )
+    baseline_summary = baseline_result.get(
+        "summary",
+        {},
+    )
+
+    summary = {
+        "Baseline accepted": int(
+            baseline_summary.get(
+                "Accepted trades",
+                len(
+                    baseline_keys
+                ),
+            )
+        ),
+        "Scenario accepted": int(
+            scenario_summary.get(
+                "Accepted trades",
+                len(
+                    scenario_keys
+                ),
+            )
+        ),
+        "Newly admitted": int(
+            len(
+                newly
+            )
+        ),
+        "Dropped baseline": int(
+            len(
+                dropped
+            )
+        ),
+        "Sacrificed baseline TP": int(
+            len(
+                sacrificed
+            )
+        ),
+        "Early-exited baseline losers": int(
+            len(
+                rescued
+            )
+        ),
+        "Newly admitted net pts": (
+            float(
+                newly_net.sum()
+            )
+            if len(
+                newly_net
+            )
+            else 0.0
+        ),
+        "Sacrificed TP Δ pts": (
+            float(
+                sacrificed_delta.sum()
+            )
+            if len(
+                sacrificed_delta
+            )
+            else 0.0
+        ),
+        "Rescued loser Δ pts": (
+            float(
+                rescued_delta.sum()
+            )
+            if len(
+                rescued_delta
+            )
+            else 0.0
+        ),
+        "Portfolio Δ raw pts": float(
+            scenario_summary.get(
+                "Raw net pts accepted",
+                0.0,
+            )
+            - baseline_summary.get(
+                "Raw net pts accepted",
+                0.0,
+            )
+        ),
+        "Portfolio Δ final equity $": float(
+            scenario_summary.get(
+                "Final equity",
+                np.nan,
+            )
+            - baseline_summary.get(
+                "Final equity",
+                np.nan,
+            )
+        ),
+        "Portfolio Δ return pp": float(
+            scenario_summary.get(
+                "Return %",
+                np.nan,
+            )
+            - baseline_summary.get(
+                "Return %",
+                np.nan,
+            )
+        ),
+        "Portfolio Δ max DD pp": float(
+            scenario_summary.get(
+                "Max drawdown %",
+                np.nan,
+            )
+            - baseline_summary.get(
+                "Max drawdown %",
+                np.nan,
+            )
+        ),
+    }
+
+    return {
+        "summary": summary,
+        "detail": detail,
+        "sacrificed_tp": sacrificed,
+        "rescued_losers": rescued,
+        "newly_admitted": newly,
+        "dropped_baseline": dropped,
     }
 
 
@@ -30065,6 +30694,125 @@ def render_candidate_v2_research(retests_df):
                 """
             )
 
+        st.markdown(
+            "###### ⏱️ Early Exit strategy selector"
+        )
+        st.caption(
+            "Optional causal strategy rule applied to every resolved candidate "
+            "BEFORE the chronological portfolio replay. When enabled, it can close "
+            "a stalled trade at X minutes, release the slot, and therefore change "
+            "accepted trades, total PnL, drawdown and the equity curve below."
+        )
+
+        ee_strategy_1, ee_strategy_2, ee_strategy_3 = st.columns(3)
+
+        portfolio_early_exit_mode = ee_strategy_1.selectbox(
+            "Early exit",
+            options=[
+                "OFF",
+                "MFE stall",
+                "MFE stall + PnL<=0",
+            ],
+            index=0,
+            key=(
+                "candidate_v2_"
+                "portfolio_early_exit_mode"
+            ),
+            help=(
+                "MFE stall: exit at the checkpoint close if cumulative favorable "
+                "excursion is below the threshold. The PnL<=0 version additionally "
+                "requires the checkpoint close PnL to be non-positive."
+            ),
+        )
+
+        early_exit_checkpoint_options = [
+            value
+            for value in (
+                5,
+                10,
+                15,
+                30,
+                45,
+                60,
+                90,
+                120,
+            )
+            if value < int(
+                snap_horizon
+            )
+        ]
+        if not early_exit_checkpoint_options:
+            early_exit_checkpoint_options = [
+                max(
+                    1,
+                    int(
+                        snap_horizon
+                    )
+                    - 1,
+                )
+            ]
+
+        portfolio_early_exit_checkpoint = ee_strategy_2.selectbox(
+            "Early exit checkpoint",
+            options=(
+                early_exit_checkpoint_options
+            ),
+            index=(
+                early_exit_checkpoint_options.index(
+                    30
+                )
+                if 30
+                in early_exit_checkpoint_options
+                else 0
+            ),
+            format_func=lambda value: (
+                f"{int(value)}m"
+            ),
+            key=(
+                "candidate_v2_"
+                "portfolio_early_exit_checkpoint"
+            ),
+            disabled=(
+                portfolio_early_exit_mode
+                == "OFF"
+            ),
+        )
+
+        portfolio_early_exit_mfe = ee_strategy_3.number_input(
+            "Max MFE before exit (%)",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.05,
+            step=0.01,
+            format="%.3f",
+            key=(
+                "candidate_v2_"
+                "portfolio_early_exit_mfe"
+            ),
+            disabled=(
+                portfolio_early_exit_mode
+                == "OFF"
+            ),
+            help=(
+                "Example: 30m + 0.05% means the position is closed after the "
+                "30-minute candle only if it has never achieved 0.05% cumulative "
+                "MFE by then."
+            ),
+        )
+
+        with st.expander(
+            "Early Exit strategy semantics",
+            expanded=False,
+        ):
+            st.markdown(
+                """
+- **OFF:** historical TP / SL / 180m TIME_EXIT behavior is unchanged.
+- **MFE stall:** if the trade is still open after the selected checkpoint and cumulative MFE is below the threshold, exit at that checkpoint close.
+- **MFE stall + PnL<=0:** same rule, but only exits when checkpoint close-PnL is also ≤ 0.
+- A historical TP/SL that already happened before the checkpoint always wins; the early-exit rule cannot rewrite the past.
+- When an early exit releases the only slot, later signals are replayed normally and may become accepted.
+                """
+            )
 
         st.markdown(
             "###### 🧪 HTF Room causality audit"
@@ -30312,8 +31060,79 @@ def render_candidate_v2_research(retests_df):
             ),
         )
 
+        portfolio_execution_intervals = (
+            resolved_concurrency.copy()
+        )
+        portfolio_early_exit_stats = {}
+        portfolio_early_exit_paths = pd.DataFrame()
+
+        if (
+            portfolio_early_exit_mode
+            != "OFF"
+        ):
+            try:
+                portfolio_early_exit_paths = (
+                    candidate_v1_fast_load_path_store(
+                        CANDIDATE_V2_PATH_STORE_FILE
+                    )
+                )
+            except Exception:
+                portfolio_early_exit_paths = (
+                    pd.DataFrame()
+                )
+
+            if (
+                portfolio_early_exit_paths
+                is None
+                or portfolio_early_exit_paths.empty
+            ):
+                st.warning(
+                    "Early Exit strategy is enabled but the persisted 1m path "
+                    "store is unavailable. The main portfolio is falling back to "
+                    "OFF. Refresh stored 1m paths above to use the rule."
+                )
+            else:
+                (
+                    portfolio_execution_intervals,
+                    portfolio_early_exit_stats,
+                ) = _candidate_v2_apply_early_exit_rule(
+                    resolved_concurrency,
+                    portfolio_early_exit_paths,
+                    checkpoint_min=(
+                        portfolio_early_exit_checkpoint
+                    ),
+                    max_mfe_pct=(
+                        portfolio_early_exit_mfe
+                    ),
+                    require_nonpositive_pnl=(
+                        portfolio_early_exit_mode
+                        == "MFE stall + PnL<=0"
+                    ),
+                )
+
+        # Always retain the identical no-early-exit replay as the control.
+        portfolio_baseline_result = (
+            _candidate_v2_portfolio_simulation(
+                resolved_concurrency,
+                starting_equity=portfolio_starting_equity,
+                leverage=portfolio_leverage,
+                max_slots=portfolio_slots,
+                risk_per_trade_pct=portfolio_risk_pct,
+                selected_sl_pct=selected_sl,
+                max_margin_pct=portfolio_margin_cap,
+                compound=portfolio_compound,
+                priority_mode=portfolio_priority,
+                sizing_mode=portfolio_sizing_mode,
+                fixed_margin_usd=portfolio_fixed_margin,
+                margin_per_trade_pct=portfolio_margin_per_trade_pct,
+                market_flow_gate_mode=(
+                    portfolio_market_flow_gate
+                ),
+            )
+        )
+
         portfolio_result = _candidate_v2_portfolio_simulation(
-            resolved_concurrency,
+            portfolio_execution_intervals,
             starting_equity=portfolio_starting_equity,
             leverage=portfolio_leverage,
             max_slots=portfolio_slots,
@@ -30499,6 +31318,63 @@ def render_candidate_v2_research(retests_df):
                 f"{portfolio_summary.get('Market Flow gate', 'OFF')}."
             )
 
+            if (
+                portfolio_early_exit_mode
+                != "OFF"
+                and portfolio_early_exit_stats
+            ):
+                st.caption(
+                    f"Early Exit ACTIVE · {portfolio_early_exit_mode} · "
+                    f"{int(portfolio_early_exit_checkpoint)}m · "
+                    f"MFE < {float(portfolio_early_exit_mfe):.3f}% · "
+                    f"eligible at checkpoint: "
+                    f"{int(portfolio_early_exit_stats.get('eligible_at_checkpoint', 0))} · "
+                    f"candidate paths modified: "
+                    f"{int(portfolio_early_exit_stats.get('early_exit_candidates', 0))}."
+                )
+
+                baseline_summary_for_delta = (
+                    portfolio_baseline_result.get(
+                        "summary",
+                        {},
+                    )
+                    if portfolio_baseline_result
+                    else {}
+                )
+
+                if baseline_summary_for_delta:
+                    ed1, ed2, ed3, ed4 = st.columns(
+                        4
+                    )
+                    ed1.metric(
+                        "Δ final equity vs OFF",
+                        (
+                            f"${float(portfolio_summary.get('Final equity', 0.0) - baseline_summary_for_delta.get('Final equity', 0.0)):+.2f}"
+                        ),
+                    )
+                    ed2.metric(
+                        "Δ return vs OFF",
+                        (
+                            f"{float(portfolio_summary.get('Return %', 0.0) - baseline_summary_for_delta.get('Return %', 0.0)):+.2f} pp"
+                        ),
+                    )
+                    ed3.metric(
+                        "Δ max DD vs OFF",
+                        (
+                            f"{float(portfolio_summary.get('Max drawdown %', 0.0) - baseline_summary_for_delta.get('Max drawdown %', 0.0)):+.2f} pp"
+                        ),
+                        help=(
+                            "Negative is better: the selected Early Exit rule "
+                            "reduced maximum drawdown versus OFF."
+                        ),
+                    )
+                    ed4.metric(
+                        "Δ accepted trades",
+                        (
+                            f"{int(portfolio_summary.get('Accepted trades', 0) - baseline_summary_for_delta.get('Accepted trades', 0)):+d}"
+                        ),
+                    )
+
             st.caption(
                 f"Skipped by slot limit: "
                 f"{int(portfolio_summary.get('Skipped slot limit', 0))} · "
@@ -30555,6 +31431,18 @@ def render_candidate_v2_research(retests_df):
                             )
                         )
                         + f"x{portfolio_leverage}"
+                        + (
+                            (
+                                f" · EE {int(portfolio_early_exit_checkpoint)}m "
+                                f"MFE<{float(portfolio_early_exit_mfe):g}%"
+                            )
+                            if (
+                                portfolio_early_exit_mode
+                                != "OFF"
+                                and portfolio_early_exit_stats
+                            )
+                            else ""
+                        )
                     ),
                     xaxis_title=f"Time ({TZ})",
                     yaxis_title="Realized equity (USDT)",
@@ -30573,15 +31461,196 @@ def render_candidate_v2_research(retests_df):
                     config={"displaylogo": False},
                 )
 
+            if (
+                portfolio_early_exit_mode
+                != "OFF"
+                and portfolio_early_exit_stats
+                and portfolio_baseline_result
+            ):
+                early_exit_impact = (
+                    _candidate_v2_early_exit_trade_impact(
+                        resolved_concurrency,
+                        portfolio_execution_intervals,
+                        portfolio_baseline_result,
+                        portfolio_result,
+                    )
+                )
+                impact_summary = (
+                    early_exit_impact.get(
+                        "summary",
+                        {},
+                    )
+                )
+
+                if impact_summary:
+                    st.markdown(
+                        "###### 🔬 Early Exit trade impact · TP sacrificed vs slot released"
+                    )
+                    st.caption(
+                        "Exact Event-key comparison against the same portfolio with "
+                        "Early Exit OFF. 'Sacrificed TP' means a baseline-accepted "
+                        "trade historically reached TP but the selected early-exit "
+                        "rule would close it first. 'Newly admitted' means the trade "
+                        "was skipped in the OFF portfolio but entered after a slot "
+                        "was released."
+                    )
+
+                    ei1, ei2, ei3, ei4, ei5, ei6 = st.columns(
+                        6
+                    )
+                    ei1.metric(
+                        "Baseline accepted",
+                        int(
+                            impact_summary.get(
+                                "Baseline accepted",
+                                0,
+                            )
+                        ),
+                    )
+                    ei2.metric(
+                        "Strategy accepted",
+                        int(
+                            impact_summary.get(
+                                "Scenario accepted",
+                                0,
+                            )
+                        ),
+                    )
+                    ei3.metric(
+                        "Sacrificed TP",
+                        int(
+                            impact_summary.get(
+                                "Sacrificed baseline TP",
+                                0,
+                            )
+                        ),
+                    )
+                    ei4.metric(
+                        "Early-exited losers",
+                        int(
+                            impact_summary.get(
+                                "Early-exited baseline losers",
+                                0,
+                            )
+                        ),
+                    )
+                    ei5.metric(
+                        "Newly admitted",
+                        int(
+                            impact_summary.get(
+                                "Newly admitted",
+                                0,
+                            )
+                        ),
+                    )
+                    ei6.metric(
+                        "Dropped baseline",
+                        int(
+                            impact_summary.get(
+                                "Dropped baseline",
+                                0,
+                            )
+                        ),
+                    )
+
+                    st.caption(
+                        f"Portfolio Δ raw pts: "
+                        f"{float(impact_summary.get('Portfolio Δ raw pts', 0.0)):+.4f} · "
+                        f"newly admitted net pts: "
+                        f"{float(impact_summary.get('Newly admitted net pts', 0.0)):+.4f} · "
+                        f"sacrificed-TP trade delta: "
+                        f"{float(impact_summary.get('Sacrificed TP Δ pts', 0.0)):+.4f} · "
+                        f"rescued-loser trade delta: "
+                        f"{float(impact_summary.get('Rescued loser Δ pts', 0.0)):+.4f}."
+                    )
+
+                    impact_tabs = st.tabs([
+                        "Sacrificed TP",
+                        "Early-exited losers",
+                        "Newly admitted",
+                        "Dropped baseline",
+                        "All changed/accepted",
+                    ])
+
+                    impact_frames = [
+                        early_exit_impact.get(
+                            "sacrificed_tp",
+                            pd.DataFrame(),
+                        ),
+                        early_exit_impact.get(
+                            "rescued_losers",
+                            pd.DataFrame(),
+                        ),
+                        early_exit_impact.get(
+                            "newly_admitted",
+                            pd.DataFrame(),
+                        ),
+                        early_exit_impact.get(
+                            "dropped_baseline",
+                            pd.DataFrame(),
+                        ),
+                        early_exit_impact.get(
+                            "detail",
+                            pd.DataFrame(),
+                        ),
+                    ]
+
+                    for impact_tab, impact_frame in zip(
+                        impact_tabs,
+                        impact_frames,
+                    ):
+                        with impact_tab:
+                            if (
+                                impact_frame is None
+                                or impact_frame.empty
+                            ):
+                                st.info(
+                                    "No trades in this category for the selected rule."
+                                )
+                            else:
+                                st.dataframe(
+                                    impact_frame,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+
+                    impact_detail = early_exit_impact.get(
+                        "detail",
+                        pd.DataFrame(),
+                    )
+                    if (
+                        impact_detail is not None
+                        and not impact_detail.empty
+                    ):
+                        st.download_button(
+                            "Download Early Exit trade-impact CSV",
+                            data=impact_detail.to_csv(
+                                index=False
+                            ).encode(
+                                "utf-8"
+                            ),
+                            file_name=(
+                                f"candidate_v2_early_exit_trade_impact_"
+                                f"{int(portfolio_early_exit_checkpoint)}m_"
+                                f"mfe{float(portfolio_early_exit_mfe):g}.csv"
+                            ),
+                            mime="text/csv",
+                            key=(
+                                "candidate_v2_"
+                                "early_exit_trade_impact_download"
+                            ),
+                        )
+
             st.markdown("###### Portfolio scenario grid · slots × risk/trade")
             st.caption(
                 "Uses the same $ starting equity, leverage, margin cap, compounding "
                 "choice and same-minute priority selected above. This lets us compare "
-                "how much of the edge is captured versus account drawdown and margin."
+                "how much of the edge is captured versus account drawdown and margin. "
+                "If Early Exit is active above, this grid inherits that selected rule."
             )
 
             portfolio_grid = _candidate_v2_portfolio_scenario_grid(
-                resolved_concurrency,
+                portfolio_execution_intervals,
                 starting_equity=portfolio_starting_equity,
                 leverage=portfolio_leverage,
                 selected_sl_pct=selected_sl,
@@ -30700,7 +31769,7 @@ def render_candidate_v2_research(retests_df):
 
             one_slot_selector_table = (
                 _candidate_v2_one_slot_selector_study(
-                    resolved_concurrency,
+                    portfolio_execution_intervals,
                     starting_equity=portfolio_starting_equity,
                     margin_per_trade_pct=one_slot_margin_pct,
                     leverage=one_slot_leverage,
@@ -30753,7 +31822,7 @@ def render_candidate_v2_research(retests_df):
             ):
                 room_lev_result = (
                     _candidate_v2_portfolio_simulation(
-                        resolved_concurrency,
+                        portfolio_execution_intervals,
                         starting_equity=(
                             portfolio_starting_equity
                         ),
@@ -30951,7 +32020,7 @@ def render_candidate_v2_research(retests_df):
 
             flow_incremental_table = (
                 _candidate_v2_market_flow_incremental_lab(
-                    resolved_concurrency,
+                    portfolio_execution_intervals,
                     starting_equity=(
                         portfolio_starting_equity
                     ),
@@ -31028,7 +32097,7 @@ def render_candidate_v2_research(retests_df):
             ) in quick_specs:
                 quick_result = (
                     _candidate_v2_portfolio_simulation(
-                        resolved_concurrency,
+                        portfolio_execution_intervals,
                         starting_equity=portfolio_starting_equity,
                         leverage=quick_leverage,
                         max_slots=1,
@@ -31734,7 +32803,7 @@ def render_candidate_v2_research(retests_df):
             baseline_accepted_intervals = (
                 _candidate_v2_baseline_portfolio_accepted_intervals(
                     resolved_concurrency,
-                    portfolio_result,
+                    portfolio_baseline_result,
                 )
             )
 
