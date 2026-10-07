@@ -271,13 +271,6 @@ CANDIDATE_V2_CONFIG_FILE = (
 CANDIDATE_V2_HISTORY_FILE = (
     BASE_DIR / "candidate_v2_monitor.csv"
 )
-# Canonical threshold-agnostic REACTION source shared by Candidate V1/V2.
-# Candidate V1 is now a deterministic mask over this same universe instead of
-# maintaining a second independently persisted candidate universe.
-CANDIDATE_CANONICAL_REACTION_LEDGER_FILE = (
-    BASE_DIR / "candidate_reaction_causal_ledger.csv"
-)
-CANDIDATE_CANONICAL_CONTEXT_VERSION = "canonical_shared_reaction_v1"
 CANDIDATE_V2_PATH_STORE_FILE = (
     BASE_DIR / "reports" / "candidate_v2_analysis" / "paths_1m.pkl"
 )
@@ -295,12 +288,6 @@ CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE = (
 )
 CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE = (
     BASE_DIR / "reports" / "candidate_v1_analysis" / "selected_cell_history.csv"
-)
-CANDIDATE_V1_CAUSAL_SELECTED_CELL_HISTORY_FILE = (
-    BASE_DIR
-    / "reports"
-    / "candidate_v1_causal_analysis"
-    / "selected_cell_history.csv"
 )
 CANDIDATE_V2_STRENGTH_THRESHOLDS = (
     0.00, 0.25, 0.50, 0.75, 1.00, 1.50,
@@ -19183,18 +19170,6 @@ def _candidate_analysis_profile_id(frame, fallback="v2"):
 
 
 def _candidate_analysis_path_store_file(frame=None, profile_id=None):
-    if (
-        frame is not None
-        and not frame.empty
-        and _candidate_canonical_bool_series(
-            frame,
-            "canonical_reaction_source",
-        ).any()
-    ):
-        # One REACTION identity -> one persisted 1m path store.
-        # Candidate V1 is a subset view and must not duplicate V2 path work.
-        return CANDIDATE_V2_PATH_STORE_FILE
-
     profile = (
         str(profile_id).lower()
         if profile_id is not None
@@ -19204,18 +19179,6 @@ def _candidate_analysis_path_store_file(frame=None, profile_id=None):
 
 
 def _candidate_analysis_market_context_file(frame=None, profile_id=None):
-    if (
-        frame is not None
-        and not frame.empty
-        and _candidate_canonical_bool_series(
-            frame,
-            "canonical_reaction_source",
-        ).any()
-    ):
-        # Market context is attached once to the shared canonical REACTION
-        # universe; V1/V2 consume the same causal market snapshot.
-        return CANDIDATE_V2_MARKET_CONTEXT_FILE
-
     profile = (
         str(profile_id).lower()
         if profile_id is not None
@@ -19228,31 +19191,11 @@ def _candidate_analysis_market_context_file(frame=None, profile_id=None):
     )
 
 
-def _candidate_analysis_selected_cell_history_file(
-    profile_id,
-    candidate_mode=None,
-):
-    mode = str(
-        candidate_mode
-        or profile_id
-        or ""
-    ).lower()
-
-    if mode == "v1_causal":
-        return (
-            CANDIDATE_V1_CAUSAL_SELECTED_CELL_HISTORY_FILE
-        )
-
-    if mode in {
-        "v1",
-        "v1_legacy",
-    }:
-        return (
-            CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE
-        )
-
+def _candidate_analysis_selected_cell_history_file(profile_id):
     return (
-        CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
+        CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE
+        if str(profile_id).lower() == "v1"
+        else CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
     )
 
 
@@ -19419,979 +19362,6 @@ def _candidate_v1_unified_research_history(retests_df, short_config, long_config
     return history
 
 
-_CANDIDATE_CANONICAL_CONTEXT_FIELDS = [
-    # RSI / V1 driver fields
-    "rsi14_1m",
-    "rsi14_5m",
-    "rsi14_15m",
-    "rsi14_1h",
-    "aligned_rsi_extreme_1m",
-    "aligned_rsi_extreme_5m",
-    "aligned_rsi_extreme_15m",
-    "aligned_rsi_extreme_1h",
-    "aligned_rsi_extreme_count",
-    "rel_volume_5m",
-    "rel_volume_15m",
-    "rel_volume_1h",
-    # HTF structural room
-    "same_swing_dist_30m_pct",
-    "same_swing_dist_1h_pct",
-    "same_swing_dist_4h_pct",
-    "opposing_room_30m_pct",
-    "opposing_room_1h_pct",
-    "opposing_room_4h_pct",
-    "opposing_swing_price_30m",
-    "opposing_swing_price_1h",
-    "opposing_swing_price_4h",
-    "opposing_swing_pivot_timestamp_30m",
-    "opposing_swing_pivot_timestamp_1h",
-    "opposing_swing_pivot_timestamp_4h",
-    "opposing_swing_confirmed_timestamp_30m",
-    "opposing_swing_confirmed_timestamp_1h",
-    "opposing_swing_confirmed_timestamp_4h",
-    "opposing_swing_actionable_timestamp_30m",
-    "opposing_swing_actionable_timestamp_1h",
-    "opposing_swing_actionable_timestamp_4h",
-    "htf_confluence_count_0_50",
-    "nearest_htf_same_swing_pct",
-    "nearest_htf_same_swing_tf",
-    "nearest_opposing_room_pct",
-    "nearest_opposing_swing_tf",
-    "nearest_opposing_swing_price",
-    "nearest_opposing_swing_pivot_timestamp",
-    "nearest_opposing_swing_confirmed_timestamp",
-    "nearest_opposing_swing_actionable_timestamp",
-    "run_driver_tags",
-]
-
-_CANDIDATE_CANONICAL_IDENTITY_FIELDS = [
-    "candidate_v1_event_key",
-    "candidate_v2_event_key",
-    "symbol",
-    "signal",
-    "side",
-    "timeframe",
-    "detector",
-    "status",
-    "pivot_timestamp",
-    "actionable_timestamp",
-    "departure_timestamp",
-    "retest_timestamp",
-    "candidate_v1_reaction_known_ts",
-    "pivot_price",
-    "swing_price",
-    "entry_price",
-    "departure_price",
-    "retest_price",
-    "retest_close",
-    "retest_distance_pct",
-    "pivot_to_confirmation_pct",
-    "pivot_to_retest_min",
-    "confirmed_to_retest_min",
-    "max_departure_pct",
-    "triggering_swing_count",
-]
-
-
-def _candidate_canonical_bool_series(frame, column):
-    if (
-        frame is None
-        or frame.empty
-        or column not in frame.columns
-    ):
-        return pd.Series(
-            False,
-            index=getattr(
-                frame,
-                "index",
-                None,
-            ),
-            dtype=bool,
-        )
-
-    raw = frame[
-        column
-    ]
-
-    if pd.api.types.is_bool_dtype(
-        raw
-    ):
-        return raw.fillna(
-            False
-        ).astype(
-            bool
-        )
-
-    return (
-        raw.fillna("")
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .isin(
-            [
-                "true",
-                "1",
-                "yes",
-            ]
-        )
-    )
-
-
-def _candidate_canonical_driver_mask(frame):
-    """Candidate V1 Base = shared REACTION + Room>=1% + aligned RSI>=1."""
-    if (
-        frame is None
-        or frame.empty
-    ):
-        return pd.Series(
-            False,
-            index=getattr(
-                frame,
-                "index",
-                None,
-            ),
-            dtype=bool,
-        )
-
-    room = pd.to_numeric(
-        frame.get(
-            "nearest_opposing_room_pct",
-            pd.Series(
-                np.nan,
-                index=frame.index,
-            ),
-        ),
-        errors="coerce",
-    )
-
-    rsi_count = pd.to_numeric(
-        frame.get(
-            "aligned_rsi_extreme_count",
-            pd.Series(
-                np.nan,
-                index=frame.index,
-            ),
-        ),
-        errors="coerce",
-    )
-
-    return (
-        room.ge(
-            1.0
-        )
-        & rsi_count.ge(
-            1
-        )
-    )
-
-
-def _candidate_canonical_reject_reason(frame):
-    if (
-        frame is None
-        or frame.empty
-    ):
-        return pd.Series(
-            dtype=str
-        )
-
-    room = pd.to_numeric(
-        frame.get(
-            "nearest_opposing_room_pct",
-            pd.Series(
-                np.nan,
-                index=frame.index,
-            ),
-        ),
-        errors="coerce",
-    )
-
-    rsi_count = pd.to_numeric(
-        frame.get(
-            "aligned_rsi_extreme_count",
-            pd.Series(
-                np.nan,
-                index=frame.index,
-            ),
-        ),
-        errors="coerce",
-    )
-
-    missing = (
-        room.isna()
-        | rsi_count.isna()
-    )
-    no_room = (
-        room.notna()
-        & room.lt(
-            1.0
-        )
-    )
-    no_rsi = (
-        rsi_count.notna()
-        & rsi_count.lt(
-            1
-        )
-    )
-
-    return pd.Series(
-        np.select(
-            [
-                missing,
-                no_room
-                & no_rsi,
-                no_room,
-                no_rsi,
-            ],
-            [
-                "MISSING_CONTEXT",
-                "FAIL_ROOM+RSI",
-                "FAIL_ROOM",
-                "FAIL_RSI",
-            ],
-            default=(
-                "CANDIDATE_V1_BASE"
-            ),
-        ),
-        index=frame.index,
-    )
-
-
-def _candidate_canonical_load_ledger():
-    try:
-        if CANDIDATE_CANONICAL_REACTION_LEDGER_FILE.exists():
-            ledger = pd.read_csv(
-                CANDIDATE_CANONICAL_REACTION_LEDGER_FILE
-            )
-        else:
-            ledger = pd.DataFrame()
-    except Exception:
-        ledger = pd.DataFrame()
-
-    if (
-        ledger is None
-        or ledger.empty
-    ):
-        return pd.DataFrame()
-
-    if (
-        "candidate_v1_event_key"
-        not in ledger.columns
-        and "candidate_v2_event_key"
-        in ledger.columns
-    ):
-        ledger[
-            "candidate_v1_event_key"
-        ] = (
-            ledger[
-                "candidate_v2_event_key"
-            ]
-            .fillna("")
-            .astype(str)
-        )
-
-    if (
-        "candidate_v2_event_key"
-        not in ledger.columns
-        and "candidate_v1_event_key"
-        in ledger.columns
-    ):
-        ledger[
-            "candidate_v2_event_key"
-        ] = (
-            ledger[
-                "candidate_v1_event_key"
-            ]
-            .fillna("")
-            .astype(str)
-        )
-
-    if (
-        "candidate_v1_event_key"
-        not in ledger.columns
-    ):
-        return pd.DataFrame()
-
-    return (
-        ledger.sort_values(
-            [
-                column
-                for column
-                in [
-                    "retest_timestamp",
-                    "symbol",
-                ]
-                if column
-                in ledger.columns
-            ],
-            kind="stable",
-            na_position="last",
-        )
-        .drop_duplicates(
-            subset=[
-                "candidate_v1_event_key"
-            ],
-            keep="first",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-
-def _candidate_canonical_context_source_rows(
-    retests_df,
-    v2_history,
-):
-    """Prefer the current shared REACTION scan, then seed legacy V2 rows.
-
-    Current-scan rows are the forward contract: Room/RSI are frozen once when
-    the REACTION is visible. Historical V2 rows are used only for migration of
-    already-existing Event IDs so the old research history remains accessible.
-    """
-    current = (
-        _candidate_v1_build_reaction_control_source(
-            retests_df
-        )
-    )
-
-    if current is None:
-        current = pd.DataFrame()
-
-    current = current.copy()
-
-    if not current.empty:
-        if (
-            "candidate_v1_event_key"
-            not in current.columns
-        ):
-            return pd.DataFrame()
-
-        current[
-            "_canonical_context_source"
-        ] = (
-            "CAUSAL_CURRENT_SCAN"
-        )
-        current[
-            "_canonical_source_priority"
-        ] = 2
-
-    legacy = (
-        v2_history.copy()
-        if (
-            v2_history is not None
-            and not v2_history.empty
-        )
-        else pd.DataFrame()
-    )
-
-    if not legacy.empty:
-        if (
-            "candidate_v1_event_key"
-            not in legacy.columns
-            and "candidate_v2_event_key"
-            in legacy.columns
-        ):
-            legacy[
-                "candidate_v1_event_key"
-            ] = (
-                legacy[
-                    "candidate_v2_event_key"
-                ]
-                .fillna("")
-                .astype(str)
-            )
-
-        legacy[
-            "_canonical_context_source"
-        ] = (
-            "LEGACY_V2_HISTORY_SEED"
-        )
-        legacy[
-            "_canonical_source_priority"
-        ] = 1
-
-    pieces = [
-        frame
-        for frame
-        in [
-            legacy,
-            current,
-        ]
-        if (
-            frame is not None
-            and not frame.empty
-        )
-    ]
-
-    if not pieces:
-        return pd.DataFrame()
-
-    source = pd.concat(
-        pieces,
-        ignore_index=True,
-        sort=False,
-    )
-
-    if (
-        "candidate_v1_event_key"
-        not in source.columns
-    ):
-        return pd.DataFrame()
-
-    return (
-        source.sort_values(
-            [
-                "_canonical_source_priority"
-            ],
-            kind="stable",
-        )
-        .drop_duplicates(
-            subset=[
-                "candidate_v1_event_key"
-            ],
-            keep="last",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-
-def _candidate_canonical_freeze_new_context(
-    retests_df,
-    v2_history,
-):
-    """Append only new Event IDs to the immutable shared driver-context ledger."""
-    ledger = (
-        _candidate_canonical_load_ledger()
-    )
-
-    source = (
-        _candidate_canonical_context_source_rows(
-            retests_df,
-            v2_history,
-        )
-    )
-
-    if (
-        source is None
-        or source.empty
-    ):
-        return ledger
-
-    existing_keys = (
-        set(
-            ledger[
-                "candidate_v1_event_key"
-            ]
-            .fillna("")
-            .astype(str)
-            .tolist()
-        )
-        if (
-            ledger is not None
-            and not ledger.empty
-        )
-        else set()
-    )
-
-    source_keys = (
-        source[
-            "candidate_v1_event_key"
-        ]
-        .fillna("")
-        .astype(str)
-    )
-
-    fresh = source.loc[
-        source_keys.ne("")
-        & ~source_keys.isin(
-            existing_keys
-        )
-    ].copy()
-
-    if fresh.empty:
-        return ledger
-
-    keep_columns = list(
-        dict.fromkeys(
-            _CANDIDATE_CANONICAL_IDENTITY_FIELDS
-            + _CANDIDATE_CANONICAL_CONTEXT_FIELDS
-            + [
-                "_canonical_context_source",
-            ]
-        )
-    )
-
-    keep_columns = [
-        column
-        for column
-        in keep_columns
-        if column
-        in fresh.columns
-    ]
-
-    frozen = fresh[
-        keep_columns
-    ].copy()
-
-    if (
-        "candidate_v2_event_key"
-        not in frozen.columns
-    ):
-        frozen[
-            "candidate_v2_event_key"
-        ] = (
-            frozen[
-                "candidate_v1_event_key"
-            ]
-            .fillna("")
-            .astype(str)
-        )
-
-    if (
-        "side"
-        not in frozen.columns
-    ):
-        frozen[
-            "side"
-        ] = frozen.get(
-            "signal",
-            pd.Series(
-                "",
-                index=frozen.index,
-            ),
-        )
-
-    frozen[
-        "side"
-    ] = (
-        frozen[
-            "side"
-        ]
-        .fillna("")
-        .astype(str)
-        .str.upper()
-    )
-
-    frozen[
-        "canonical_context_version"
-    ] = (
-        CANDIDATE_CANONICAL_CONTEXT_VERSION
-    )
-
-    frozen[
-        "canonical_context_frozen_at_utc"
-    ] = (
-        pd.Timestamp.now(
-            tz="UTC"
-        ).isoformat()
-    )
-
-    source_kind = (
-        frozen.get(
-            "_canonical_context_source",
-            pd.Series(
-                "",
-                index=frozen.index,
-            ),
-        )
-        .fillna("")
-        .astype(str)
-    )
-
-    frozen[
-        "canonical_context_quality"
-    ] = np.where(
-        source_kind.eq(
-            "CAUSAL_CURRENT_SCAN"
-        ),
-        "CAUSAL_FROZEN",
-        "LEGACY_SEEDED",
-    )
-
-    frozen[
-        "is_candidate_v1_driver"
-    ] = (
-        _candidate_canonical_driver_mask(
-            frozen
-        )
-    )
-
-    frozen[
-        "canonical_v1_reject_reason"
-    ] = (
-        _candidate_canonical_reject_reason(
-            frozen
-        )
-    )
-
-    frozen = frozen.drop(
-        columns=[
-            "_canonical_context_source",
-        ],
-        errors="ignore",
-    )
-
-    combined = pd.concat(
-        [
-            ledger,
-            frozen,
-        ],
-        ignore_index=True,
-        sort=False,
-    )
-
-    combined = (
-        combined.drop_duplicates(
-            subset=[
-                "candidate_v1_event_key"
-            ],
-            keep="first",
-        )
-        .sort_values(
-            [
-                column
-                for column
-                in [
-                    "retest_timestamp",
-                    "symbol",
-                ]
-                if column
-                in combined.columns
-            ],
-            kind="stable",
-            na_position="last",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    try:
-        _candidate_v2_atomic_write_csv(
-            combined,
-            CANDIDATE_CANONICAL_REACTION_LEDGER_FILE,
-        )
-    except Exception:
-        pass
-
-    return combined
-
-
-def _candidate_canonical_reaction_universe(
-    retests_df,
-):
-    """Single source of truth for Candidate V1 and Candidate V2.
-
-    V2 defines the threshold-agnostic REACTION identity universe.
-    V1 is a pure deterministic mask over the same Event IDs.
-    """
-    v2_history, config, newly_frozen = (
-        _candidate_v2_load_or_freeze_universe(
-            retests_df
-        )
-    )
-
-    if (
-        v2_history is None
-        or v2_history.empty
-    ):
-        return (
-            pd.DataFrame(),
-            config,
-            newly_frozen,
-        )
-
-    ledger = (
-        _candidate_canonical_freeze_new_context(
-            retests_df,
-            v2_history,
-        )
-    )
-
-    base = v2_history.copy()
-
-    if (
-        "candidate_v1_event_key"
-        not in base.columns
-    ):
-        base[
-            "candidate_v1_event_key"
-        ] = (
-            base[
-                "candidate_v2_event_key"
-            ]
-            .fillna("")
-            .astype(str)
-        )
-
-    if (
-        ledger is not None
-        and not ledger.empty
-    ):
-        ledger_fields = [
-            column
-            for column
-            in ledger.columns
-            if column
-            not in {
-                "candidate_v2_event_key",
-                "symbol",
-                "signal",
-                "side",
-                "timeframe",
-                "detector",
-                "status",
-                "pivot_timestamp",
-                "actionable_timestamp",
-                "departure_timestamp",
-                "retest_timestamp",
-                "candidate_v1_reaction_known_ts",
-                "pivot_price",
-                "swing_price",
-                "entry_price",
-                "departure_price",
-                "retest_price",
-                "retest_close",
-                "retest_distance_pct",
-                "pivot_to_confirmation_pct",
-                "pivot_to_retest_min",
-                "confirmed_to_retest_min",
-                "max_departure_pct",
-                "triggering_swing_count",
-            }
-        ]
-
-        frozen_context_columns = [
-            column
-            for column
-            in ledger_fields
-            if column
-            != "candidate_v1_event_key"
-        ]
-
-        base = base.drop(
-            columns=[
-                column
-                for column
-                in frozen_context_columns
-                if column
-                in base.columns
-            ],
-            errors="ignore",
-        ).merge(
-            ledger[
-                [
-                    "candidate_v1_event_key",
-                ]
-                + frozen_context_columns
-            ].drop_duplicates(
-                "candidate_v1_event_key",
-                keep="first",
-            ),
-            on="candidate_v1_event_key",
-            how="left",
-            validate="many_to_one",
-        )
-
-    base[
-        "candidate_v2_event_key"
-    ] = (
-        base[
-            "candidate_v1_event_key"
-        ]
-        .fillna("")
-        .astype(str)
-    )
-
-    if (
-        "candidate_v2_cohort"
-        not in base.columns
-    ):
-        base[
-            "candidate_v2_cohort"
-        ] = "FORWARD"
-
-    # Discovery / Forward is now the same canonical REACTION cohort in both
-    # views. V1 does not maintain a second competing cohort identity.
-    base[
-        "candidate_v1_cohort"
-    ] = (
-        base[
-            "candidate_v2_cohort"
-        ]
-        .fillna(
-            "FORWARD"
-        )
-        .astype(str)
-    )
-
-    if (
-        "side"
-        not in base.columns
-    ):
-        base[
-            "side"
-        ] = base.get(
-            "signal",
-            pd.Series(
-                "",
-                index=base.index,
-            ),
-        )
-
-    base[
-        "side"
-    ] = (
-        base[
-            "side"
-        ]
-        .fillna("")
-        .astype(str)
-        .str.upper()
-    )
-
-    # Always recompute the mask from the frozen fields, never from a legacy
-    # V1 monitor membership flag.
-    base[
-        "is_candidate_v1_driver"
-    ] = (
-        _candidate_canonical_driver_mask(
-            base
-        )
-    )
-
-    base[
-        "control_reason"
-    ] = (
-        _candidate_canonical_reject_reason(
-            base
-        )
-    )
-
-    base[
-        "canonical_reaction_source"
-    ] = True
-    base[
-        "candidate_analysis_profile"
-    ] = "v2"
-
-    return (
-        base.reset_index(
-            drop=True
-        ),
-        config,
-        newly_frozen,
-    )
-
-
-def _candidate_canonical_candidate_view(
-    canonical,
-    profile_id,
-):
-    if (
-        canonical is None
-        or canonical.empty
-    ):
-        return pd.DataFrame()
-
-    profile_id = str(
-        profile_id
-    ).lower()
-
-    if profile_id == "v1":
-        selected = canonical.loc[
-            _candidate_canonical_driver_mask(
-                canonical
-            )
-        ].copy()
-    else:
-        selected = canonical.copy()
-
-    selected[
-        "candidate_analysis_profile"
-    ] = profile_id
-    selected[
-        "canonical_reaction_source"
-    ] = True
-
-    return selected.reset_index(
-        drop=True
-    )
-
-
-def _candidate_canonical_status_table(
-    canonical,
-):
-    if (
-        canonical is None
-        or canonical.empty
-    ):
-        return pd.DataFrame()
-
-    quality = (
-        canonical.get(
-            "canonical_context_quality",
-            pd.Series(
-                "MISSING",
-                index=canonical.index,
-            ),
-        )
-        .fillna(
-            "MISSING"
-        )
-        .astype(str)
-    )
-
-    v1_mask = (
-        _candidate_canonical_driver_mask(
-            canonical
-        )
-    )
-
-    return pd.DataFrame([
-        {
-            "Canonical REACTIONs": int(
-                canonical[
-                    "candidate_v1_event_key"
-                ]
-                .fillna("")
-                .astype(str)
-                .nunique()
-            ),
-            "V1 Base": int(
-                v1_mask.sum()
-            ),
-            "V1 rejected": int(
-                (
-                    ~v1_mask
-                ).sum()
-            ),
-            "Causal-frozen context": int(
-                quality.eq(
-                    "CAUSAL_FROZEN"
-                ).sum()
-            ),
-            "Legacy-seeded context": int(
-                quality.eq(
-                    "LEGACY_SEEDED"
-                ).sum()
-            ),
-            "Missing context": int(
-                quality.eq(
-                    "MISSING"
-                ).sum()
-            ),
-            "V1 subset of V2": (
-                "100%"
-            ),
-        }
-    ])
-
-
-
-
 
 def render_candidate_v1_v2_fixed_benchmark(
     retests_df,
@@ -20407,7 +19377,7 @@ def render_candidate_v1_v2_fixed_benchmark(
     make ordinary Candidate Research reruns slower.
     """
     st.markdown(
-        "### ⚖️ Candidate V1 Causal vs V2 · fixed benchmark"
+        "### ⚖️ Candidate V1 vs V2 · fixed benchmark"
     )
     st.caption(
         "A answers whether the raw Candidate universe is better under the same "
@@ -20415,12 +19385,13 @@ def render_candidate_v1_v2_fixed_benchmark(
         "Room → Strength, one-slot, x3, 80% equity portfolio."
     )
     st.info(
-        "**Shared source architecture:** Candidate V1 and Candidate V2 now start "
-        "from the exact same canonical REACTION Event IDs. V2 Base keeps the full "
-        "REACTION universe. V1 Base is only the deterministic mask "
-        "**HTF Room >= 1.00% AND aligned RSI-extreme count >= 1** over those same "
-        "rows. Therefore V1 is always a subset of V2 by construction; differences "
-        "can no longer come from two independently persisted universes."
+        "**Why V1 is smaller:** V1 is not stale by design. On each refresh it "
+        "rebuilds the currently visible SHORT/LONG candidates and appends new "
+        "qualifying Event IDs to its persisted history as FORWARD. But V1 only "
+        "admits 15m REACTIONs with **causal opposing HTF Room >= 1.00%** and "
+        "**>=1 aligned RSI-extreme timeframe**. V2 persists every causal 15m "
+        "REACTION first and applies Strength/Flow later as variants. Therefore "
+        "V1 is expected to contain materially fewer trades."
     )
 
     with st.expander(
@@ -20466,25 +19437,19 @@ def render_candidate_v1_v2_fixed_benchmark(
             # --------------------------------------------------
             # Source universes
             # --------------------------------------------------
-            (
-                canonical_history,
-                _canonical_config,
-                _canonical_newly_frozen,
-            ) = _candidate_canonical_reaction_universe(
-                retests_df
-            )
-
             v1_history = (
-                _candidate_canonical_candidate_view(
-                    canonical_history,
-                    "v1",
+                _candidate_v1_unified_research_history(
+                    retests_df,
+                    v1_short_config,
+                    v1_long_config,
                 )
             )
-            v2_history = (
-                _candidate_canonical_candidate_view(
-                    canonical_history,
-                    "v2",
-                )
+            (
+                v2_history,
+                _v2_config,
+                _v2_newly_frozen,
+            ) = _candidate_v2_load_or_freeze_universe(
+                retests_df
             )
 
             if (
@@ -20509,45 +19474,24 @@ def render_candidate_v1_v2_fixed_benchmark(
                 v2_history["candidate_analysis_profile"] = "v2"
 
                 # --------------------------------------------------
-                # One causal market-context build for the shared universe.
-                # Candidate V1 is selected only after the shared context exists.
+                # Same causal context machinery for both candidates
                 # --------------------------------------------------
-                canonical_for_market = (
-                    canonical_history.copy()
+                v1_context, _ = _candidate_v2_build_market_context(
+                    v1_history,
+                    force=False,
                 )
-                canonical_for_market[
-                    "candidate_analysis_profile"
-                ] = "v2"
-
-                canonical_context, _ = (
-                    _candidate_v2_build_market_context(
-                        canonical_for_market,
-                        force=False,
-                    )
+                v2_context, _ = _candidate_v2_build_market_context(
+                    v2_history,
+                    force=False,
                 )
 
-                v2_context = (
-                    _candidate_canonical_candidate_view(
-                        canonical_context,
-                        "v2",
-                    )
-                    if (
-                        canonical_context is not None
-                        and not canonical_context.empty
-                    )
-                    else pd.DataFrame()
-                )
-                v1_context = (
-                    _candidate_canonical_candidate_view(
-                        canonical_context,
-                        "v1",
-                    )
-                    if (
-                        canonical_context is not None
-                        and not canonical_context.empty
-                    )
-                    else pd.DataFrame()
-                )
+                if v1_context is not None and not v1_context.empty:
+                    v1_context = v1_context.copy()
+                    v1_context["candidate_analysis_profile"] = "v1"
+
+                if v2_context is not None and not v2_context.empty:
+                    v2_context = v2_context.copy()
+                    v2_context["candidate_analysis_profile"] = "v2"
 
                 if (
                     v1_context is None
@@ -28722,25 +27666,17 @@ def _lh_fidelity_current_sources(
     start_ms,
     end_ms,
 ):
-    # Fidelity now compares historical reconstruction against the same canonical
-    # source used by both Candidate views. Legacy V1 monitor files are no longer
-    # treated as Candidate V1 ground truth.
-    canonical, _, _ = (
-        _candidate_canonical_reaction_universe(
+    v2_history, _, _ = (
+        _candidate_v2_load_or_freeze_universe(
             retests_df
         )
     )
 
-    v2_history = (
-        _candidate_canonical_candidate_view(
-            canonical,
-            "v2",
-        )
-    )
     v1_history = (
-        _candidate_canonical_candidate_view(
-            canonical,
-            "v1",
+        _candidate_v1_unified_research_history(
+            retests_df,
+            v1_short_config,
+            v1_long_config,
         )
     )
 
@@ -28758,6 +27694,24 @@ def _lh_fidelity_current_sources(
             end_ms,
         )
     )
+
+    if (
+        v2_history is not None
+        and not v2_history.empty
+    ):
+        v2_history = v2_history.copy()
+        v2_history[
+            "candidate_analysis_profile"
+        ] = "v2"
+
+    if (
+        v1_history is not None
+        and not v1_history.empty
+    ):
+        v1_history = v1_history.copy()
+        v1_history[
+            "candidate_analysis_profile"
+        ] = "v1"
 
     return (
         v1_history,
@@ -29968,6 +28922,3972 @@ def _lh_fidelity_read_csv(
         return pd.DataFrame()
 
 
+
+# ============================================================
+# V1 LEGACY HISTORICAL RECONSTRUCTOR
+# ============================================================
+
+CANDIDATE_V1_LEGACY_RECON_ROOT = (
+    BASE_DIR
+    / "reports"
+    / "candidate_v1_legacy_reconstructor"
+)
+CANDIDATE_V1_LEGACY_CALIBRATION_DIR = (
+    CANDIDATE_V1_LEGACY_RECON_ROOT
+    / "calibration"
+)
+CANDIDATE_V1_LEGACY_RUNS_DIR = (
+    CANDIDATE_V1_LEGACY_RECON_ROOT
+    / "runs"
+)
+
+CANDIDATE_V1_LEGACY_RECON_VERSION = (
+    "legacy_buffer_semantics_v1"
+)
+
+CANDIDATE_V1_LEGACY_LAG_CHOICES = (
+    0,
+    15,
+    30,
+    45,
+    60,
+    90,
+    120,
+    180,
+    240,
+    300,
+    360,
+)
+
+
+def _legacy_v1_load_persisted_reference():
+    """Load V1 Legacy exactly from its original persisted SHORT/LONG monitors.
+
+    This does NOT call the live monitor builders, so opening the reconstructor
+    cannot mutate or append the Legacy reference while we are measuring it.
+    """
+    frames = []
+
+    for (
+        path,
+        side,
+    ) in [
+        (
+            CANDIDATE_V1_HISTORY_FILE,
+            "SHORT",
+        ),
+        (
+            CANDIDATE_V1_LONG_HISTORY_FILE,
+            "LONG",
+        ),
+    ]:
+        try:
+            if not Path(
+                path
+            ).exists():
+                continue
+
+            frame = pd.read_csv(
+                path
+            )
+        except Exception:
+            continue
+
+        if (
+            frame is None
+            or frame.empty
+        ):
+            continue
+
+        frame = frame.copy()
+        frame[
+            "Candidate side"
+        ] = side
+
+        if (
+            "signal"
+            not in frame.columns
+        ):
+            frame[
+                "signal"
+            ] = side
+
+        frame[
+            "signal"
+        ] = (
+            frame[
+                "signal"
+            ]
+            .fillna(
+                side
+            )
+            .astype(str)
+            .str.upper()
+        )
+
+        if (
+            "side"
+            not in frame.columns
+        ):
+            frame[
+                "side"
+            ] = frame[
+                "signal"
+            ]
+
+        if (
+            "candidate_v1_event_key"
+            not in frame.columns
+        ):
+            if {
+                "symbol",
+                "retest_timestamp",
+            }.issubset(
+                frame.columns
+            ):
+                frame[
+                    "candidate_v1_event_key"
+                ] = (
+                    frame[
+                        "symbol"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                    + "|"
+                    + frame[
+                        "signal"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                    + "|"
+                    + pd.to_numeric(
+                        frame[
+                            "retest_timestamp"
+                        ],
+                        errors="coerce",
+                    )
+                    .fillna(
+                        -1
+                    )
+                    .astype(
+                        "int64"
+                    )
+                    .astype(str)
+                )
+
+        frames.append(
+            frame
+        )
+
+    if not frames:
+        return pd.DataFrame()
+
+    reference = pd.concat(
+        frames,
+        ignore_index=True,
+        sort=False,
+    )
+
+    if (
+        "candidate_v1_event_key"
+        not in reference.columns
+    ):
+        return pd.DataFrame()
+
+    reference = (
+        reference.loc[
+            reference[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+            .ne("")
+        ]
+        .drop_duplicates(
+            subset=[
+                "candidate_v1_event_key"
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return reference
+
+
+def _legacy_v1_filter_reference_window(
+    reference,
+    start_ms,
+    end_ms,
+    symbols=None,
+):
+    if (
+        reference is None
+        or reference.empty
+    ):
+        return pd.DataFrame()
+
+    work = reference.copy()
+
+    retest_ts = pd.to_numeric(
+        work.get(
+            "retest_timestamp",
+            pd.Series(
+                np.nan,
+                index=work.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    work = work.loc[
+        retest_ts.between(
+            int(
+                start_ms
+            ),
+            int(
+                end_ms
+            ),
+            inclusive="both",
+        )
+    ].copy()
+
+    if symbols is not None:
+        symbol_set = {
+            str(
+                symbol
+            ).upper()
+            for symbol in symbols
+        }
+
+        work = work.loc[
+            work.get(
+                "symbol",
+                pd.Series(
+                    "",
+                    index=work.index,
+                ),
+            )
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            .isin(
+                symbol_set
+            )
+        ].copy()
+
+    return work.reset_index(
+        drop=True
+    )
+
+
+def _legacy_v1_config_thresholds(
+    short_config,
+    long_config,
+):
+    short_config = (
+        short_config
+        or {}
+    )
+    long_config = (
+        long_config
+        or {}
+    )
+
+    room_min = float(
+        short_config.get(
+            "opposing_htf_room_min_pct",
+            long_config.get(
+                "opposing_htf_room_min_pct",
+                1.0,
+            ),
+        )
+    )
+
+    rsi_min = int(
+        short_config.get(
+            "aligned_rsi_min_tf",
+            long_config.get(
+                "aligned_rsi_min_tf",
+                1,
+            ),
+        )
+    )
+
+    max_age = int(
+        short_config.get(
+            "max_confirmation_to_retest_min",
+            long_config.get(
+                "max_confirmation_to_retest_min",
+                CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
+            ),
+        )
+    )
+
+    retest_tolerance = float(
+        short_config.get(
+            "retest_tolerance_pct",
+            long_config.get(
+                "retest_tolerance_pct",
+                CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
+            ),
+        )
+    )
+
+    min_departure = float(
+        short_config.get(
+            "min_departure_pct",
+            long_config.get(
+                "min_departure_pct",
+                CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
+            ),
+        )
+    )
+
+    return {
+        "room_min_pct": room_min,
+        "rsi_min_tf": rsi_min,
+        "max_age_minutes": max_age,
+        "retest_tolerance_pct": (
+            retest_tolerance
+        ),
+        "min_departure_pct": (
+            min_departure
+        ),
+    }
+
+
+def _legacy_v1_context_fetch_frames(
+    symbol,
+    min_known_ts,
+    max_known_ts,
+    max_observation_lag_min,
+):
+    """Fetch enough native candles to emulate the original bounded Redis reads.
+
+    The original Legacy driver did:
+      load latest N closed candles at dashboard observation time
+      -> calculate RSI only from bars closed by REACTION-known time
+      -> detect 5x5 HTF swings inside that same bounded Redis buffer
+      -> keep only swings actionable by REACTION-known time.
+
+    We reconstruct exactly that buffer shape by shifting only the buffer END.
+    """
+    symbol = str(
+        symbol
+    ).upper()
+
+    frames = {}
+
+    for tf, limit in _LH_CONTEXT_LIMITS.items():
+        tf_ms = _lh_interval_ms(
+            tf
+        )
+
+        start_ms = int(
+            min_known_ts
+            - (
+                int(
+                    limit
+                )
+                + 30
+            )
+            * int(
+                tf_ms
+            )
+        )
+
+        end_ms = int(
+            max_known_ts
+            + int(
+                max_observation_lag_min
+            )
+            * 60_000
+            + 2
+            * int(
+                tf_ms
+            )
+        )
+
+        frames[
+            tf
+        ] = _lh_fetch_klines_range(
+            symbol,
+            tf,
+            start_ms,
+            end_ms,
+        )
+
+    return frames
+
+
+def _legacy_v1_buffer_for_observation(
+    candles,
+    observation_ts,
+    timeframe,
+    limit,
+):
+    """Equivalent of Redis `get_closed_candles(..., limit=N)` at observation_ts."""
+    return _lh_closed_tail(
+        candles,
+        int(
+            observation_ts
+        ),
+        str(
+            timeframe
+        ),
+        int(
+            limit
+        ),
+    )
+
+
+def _legacy_v1_precompute_swings(
+    frames,
+):
+    """Full native swing catalog; each event later applies its exact buffer edges."""
+    result = {}
+
+    for tf in [
+        "30m",
+        "1h",
+        "4h",
+    ]:
+        candles = frames.get(
+            tf,
+            pd.DataFrame(),
+        )
+
+        if (
+            candles is None
+            or candles.empty
+        ):
+            result[
+                tf
+            ] = []
+            continue
+
+        detector = SwingDetector(
+            left_bars=5,
+            right_bars=5,
+            min_prominence_pct=0.0,
+        )
+
+        try:
+            result[
+                tf
+            ] = detector.detect_all(
+                candles.to_dict(
+                    orient="records"
+                )
+            )
+        except Exception:
+            result[
+                tf
+            ] = []
+
+    return result
+
+
+def _legacy_v1_swings_inside_buffer(
+    points,
+    buffer,
+    timeframe,
+):
+    """Keep only 5x5 pivots that could exist in the exact Legacy Redis buffer."""
+    if (
+        not points
+        or buffer is None
+        or buffer.empty
+    ):
+        return []
+
+    timestamp = pd.to_numeric(
+        buffer.get(
+            "timestamp"
+        ),
+        errors="coerce",
+    ).dropna()
+
+    if timestamp.empty:
+        return []
+
+    first_ts = int(
+        timestamp.iloc[
+            0
+        ]
+    )
+    last_ts = int(
+        timestamp.iloc[
+            -1
+        ]
+    )
+    tf_ms = _lh_interval_ms(
+        timeframe
+    )
+
+    # 5 left bars must exist inside the bounded buffer.
+    earliest_pivot = (
+        first_ts
+        + 5
+        * int(
+            tf_ms
+        )
+    )
+
+    kept = []
+
+    for point in points:
+        pivot_ts = getattr(
+            point,
+            "pivot_timestamp",
+            None,
+        )
+        confirmed_ts = getattr(
+            point,
+            "confirmed_timestamp",
+            None,
+        )
+
+        if (
+            pivot_ts is None
+            or confirmed_ts is None
+        ):
+            continue
+
+        if int(
+            pivot_ts
+        ) < int(
+            earliest_pivot
+        ):
+            continue
+
+        if int(
+            confirmed_ts
+        ) > int(
+            last_ts
+        ):
+            continue
+
+        kept.append(
+            point
+        )
+
+    return kept
+
+
+def _legacy_v1_context_one(
+    row,
+    frames,
+    swing_catalog,
+    observation_lag_min,
+):
+    reaction_ts = pd.to_numeric(
+        row.get(
+            "retest_timestamp"
+        ),
+        errors="coerce",
+    )
+
+    reaction_price = pd.to_numeric(
+        row.get(
+            "retest_close",
+            row.get(
+                "retest_price"
+            ),
+        ),
+        errors="coerce",
+    )
+
+    side = str(
+        row.get(
+            "signal",
+            row.get(
+                "side",
+                "",
+            ),
+        )
+    ).upper()
+
+    if (
+        pd.isna(
+            reaction_ts
+        )
+        or pd.isna(
+            reaction_price
+        )
+        or side
+        not in {
+            "LONG",
+            "SHORT",
+        }
+    ):
+        return {}
+
+    known_ts = (
+        int(
+            reaction_ts
+        )
+        + 60_000
+    )
+
+    observation_ts = (
+        int(
+            known_ts
+        )
+        + int(
+            observation_lag_min
+        )
+        * 60_000
+    )
+
+    context = {
+        "legacy_reaction_known_ts": (
+            int(
+                known_ts
+            )
+        ),
+        "legacy_observation_lag_min": (
+            int(
+                observation_lag_min
+            )
+        ),
+        "legacy_observation_ts": (
+            int(
+                observation_ts
+            )
+        ),
+    }
+
+    # --------------------------------------------------------
+    # Exact Legacy RSI semantics.
+    # Buffer ends at observation_ts, but RSI itself cuts back to known_ts.
+    # --------------------------------------------------------
+    aligned_count = 0
+
+    for tf in [
+        "1m",
+        "5m",
+        "15m",
+        "1h",
+    ]:
+        buffer = (
+            _legacy_v1_buffer_for_observation(
+                frames.get(
+                    tf,
+                    pd.DataFrame(),
+                ),
+                observation_ts,
+                tf,
+                _LH_CONTEXT_LIMITS[
+                    tf
+                ],
+            )
+        )
+
+        ts_values = pd.to_numeric(
+            buffer.get(
+                "timestamp",
+                pd.Series(
+                    dtype=float
+                ),
+            ),
+            errors="coerce",
+        ).dropna()
+
+        context[
+            f"legacy_buffer_bars_{tf}"
+        ] = int(
+            len(
+                buffer
+            )
+        )
+        context[
+            f"legacy_buffer_first_ts_{tf}"
+        ] = (
+            int(
+                ts_values.iloc[
+                    0
+                ]
+            )
+            if not ts_values.empty
+            else np.nan
+        )
+        context[
+            f"legacy_buffer_last_ts_{tf}"
+        ] = (
+            int(
+                ts_values.iloc[
+                    -1
+                ]
+            )
+            if not ts_values.empty
+            else np.nan
+        )
+
+        rsi_value = (
+            _reaction_driver_rsi_from_candles(
+                buffer,
+                known_ts,
+                _lh_interval_ms(
+                    tf
+                ),
+                period=14,
+            )
+        )
+
+        context[
+            f"rsi14_{tf}"
+        ] = rsi_value
+
+        aligned = (
+            pd.notna(
+                rsi_value
+            )
+            and (
+                (
+                    side
+                    == "LONG"
+                    and float(
+                        rsi_value
+                    )
+                    <= 30.0
+                )
+                or (
+                    side
+                    == "SHORT"
+                    and float(
+                        rsi_value
+                    )
+                    >= 70.0
+                )
+            )
+        )
+
+        context[
+            f"aligned_rsi_extreme_{tf}"
+        ] = bool(
+            aligned
+        )
+        aligned_count += int(
+            aligned
+        )
+
+    context[
+        "aligned_rsi_extreme_count"
+    ] = int(
+        aligned_count
+    )
+
+    # --------------------------------------------------------
+    # Exact Legacy Room semantics.
+    # SwingDetector saw the bounded observation-time buffer, while
+    # _reaction_driver_swing_distances allowed only actionable<=known_ts.
+    # --------------------------------------------------------
+    opposing_candidates = []
+    same_distances = []
+    confluence_count = 0
+    nearest_same_tf = None
+    nearest_same_value = np.nan
+
+    for tf in [
+        "30m",
+        "1h",
+        "4h",
+    ]:
+        buffer = (
+            _legacy_v1_buffer_for_observation(
+                frames.get(
+                    tf,
+                    pd.DataFrame(),
+                ),
+                observation_ts,
+                tf,
+                _LH_CONTEXT_LIMITS[
+                    tf
+                ],
+            )
+        )
+
+        ts_values = pd.to_numeric(
+            buffer.get(
+                "timestamp",
+                pd.Series(
+                    dtype=float
+                ),
+            ),
+            errors="coerce",
+        ).dropna()
+
+        context[
+            f"legacy_buffer_bars_{tf}"
+        ] = int(
+            len(
+                buffer
+            )
+        )
+        context[
+            f"legacy_buffer_first_ts_{tf}"
+        ] = (
+            int(
+                ts_values.iloc[
+                    0
+                ]
+            )
+            if not ts_values.empty
+            else np.nan
+        )
+        context[
+            f"legacy_buffer_last_ts_{tf}"
+        ] = (
+            int(
+                ts_values.iloc[
+                    -1
+                ]
+            )
+            if not ts_values.empty
+            else np.nan
+        )
+
+        points = (
+            _legacy_v1_swings_inside_buffer(
+                swing_catalog.get(
+                    tf,
+                    [],
+                ),
+                buffer,
+                tf,
+            )
+        )
+
+        distances = (
+            _reaction_driver_swing_distances(
+                points,
+                known_ts,
+                _lh_interval_ms(
+                    tf
+                ),
+                float(
+                    reaction_price
+                ),
+                side,
+            )
+        )
+
+        same_distance = distances.get(
+            "same_side_distance_pct",
+            np.nan,
+        )
+        opposing_room = distances.get(
+            "opposing_room_pct",
+            np.nan,
+        )
+
+        context[
+            f"same_swing_dist_{tf}_pct"
+        ] = same_distance
+        context[
+            f"opposing_room_{tf}_pct"
+        ] = opposing_room
+
+        for field in [
+            "opposing_swing_price",
+            "opposing_swing_pivot_timestamp",
+            "opposing_swing_confirmed_timestamp",
+            "opposing_swing_actionable_timestamp",
+        ]:
+            context[
+                f"{field}_{tf}"
+            ] = distances.get(
+                field,
+                np.nan,
+            )
+
+        if pd.notna(
+            same_distance
+        ):
+            same_distances.append(
+                float(
+                    same_distance
+                )
+            )
+
+            if float(
+                same_distance
+            ) <= 0.50:
+                confluence_count += 1
+
+            if (
+                pd.isna(
+                    nearest_same_value
+                )
+                or float(
+                    same_distance
+                )
+                < float(
+                    nearest_same_value
+                )
+            ):
+                nearest_same_value = float(
+                    same_distance
+                )
+                nearest_same_tf = tf
+
+        if pd.notna(
+            opposing_room
+        ):
+            opposing_candidates.append({
+                "room_pct": float(
+                    opposing_room
+                ),
+                "timeframe": tf,
+                "price": distances.get(
+                    "opposing_swing_price",
+                    np.nan,
+                ),
+                "pivot_timestamp": distances.get(
+                    "opposing_swing_pivot_timestamp",
+                    np.nan,
+                ),
+                "confirmed_timestamp": distances.get(
+                    "opposing_swing_confirmed_timestamp",
+                    np.nan,
+                ),
+                "actionable_timestamp": distances.get(
+                    "opposing_swing_actionable_timestamp",
+                    np.nan,
+                ),
+            })
+
+    context[
+        "htf_confluence_count_0_50"
+    ] = int(
+        confluence_count
+    )
+    context[
+        "nearest_htf_same_swing_pct"
+    ] = (
+        min(
+            same_distances
+        )
+        if same_distances
+        else np.nan
+    )
+    context[
+        "nearest_htf_same_swing_tf"
+    ] = nearest_same_tf
+
+    nearest_opposing = (
+        min(
+            opposing_candidates,
+            key=lambda item: item[
+                "room_pct"
+            ],
+        )
+        if opposing_candidates
+        else None
+    )
+
+    context[
+        "nearest_opposing_room_pct"
+    ] = (
+        nearest_opposing[
+            "room_pct"
+        ]
+        if nearest_opposing
+        else np.nan
+    )
+    context[
+        "nearest_opposing_swing_tf"
+    ] = (
+        nearest_opposing[
+            "timeframe"
+        ]
+        if nearest_opposing
+        else None
+    )
+    context[
+        "nearest_opposing_swing_price"
+    ] = (
+        nearest_opposing[
+            "price"
+        ]
+        if nearest_opposing
+        else np.nan
+    )
+    context[
+        "nearest_opposing_swing_pivot_timestamp"
+    ] = (
+        nearest_opposing[
+            "pivot_timestamp"
+        ]
+        if nearest_opposing
+        else np.nan
+    )
+    context[
+        "nearest_opposing_swing_confirmed_timestamp"
+    ] = (
+        nearest_opposing[
+            "confirmed_timestamp"
+        ]
+        if nearest_opposing
+        else np.nan
+    )
+    context[
+        "nearest_opposing_swing_actionable_timestamp"
+    ] = (
+        nearest_opposing[
+            "actionable_timestamp"
+        ]
+        if nearest_opposing
+        else np.nan
+    )
+
+    return context
+
+
+def _legacy_v1_reconstruct_context_multi_lag(
+    events,
+    observation_lags,
+):
+    if (
+        events is None
+        or events.empty
+    ):
+        return pd.DataFrame()
+
+    lags = tuple(
+        sorted({
+            int(
+                value
+            )
+            for value
+            in observation_lags
+            if int(
+                value
+            )
+            >= 0
+        })
+    )
+
+    if not lags:
+        return pd.DataFrame()
+
+    work = events.copy()
+
+    if (
+        "candidate_v1_event_key"
+        not in work.columns
+    ):
+        work[
+            "candidate_v1_event_key"
+        ] = (
+            work.get(
+                "symbol",
+                pd.Series(
+                    "",
+                    index=work.index,
+                ),
+            )
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            + "|"
+            + work.get(
+                "signal",
+                work.get(
+                    "side",
+                    pd.Series(
+                        "",
+                        index=work.index,
+                    ),
+                ),
+            )
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            + "|"
+            + pd.to_numeric(
+                work.get(
+                    "retest_timestamp",
+                    pd.Series(
+                        np.nan,
+                        index=work.index,
+                    ),
+                ),
+                errors="coerce",
+            )
+            .fillna(
+                -1
+            )
+            .astype(
+                "int64"
+            )
+            .astype(str)
+        )
+
+    rows = []
+
+    for (
+        symbol,
+        symbol_rows,
+    ) in work.groupby(
+        "symbol",
+        sort=False,
+    ):
+        reaction_ts = pd.to_numeric(
+            symbol_rows.get(
+                "retest_timestamp"
+            ),
+            errors="coerce",
+        ).dropna()
+
+        if reaction_ts.empty:
+            continue
+
+        min_known_ts = int(
+            reaction_ts.min()
+        ) + 60_000
+        max_known_ts = int(
+            reaction_ts.max()
+        ) + 60_000
+
+        frames = (
+            _legacy_v1_context_fetch_frames(
+                symbol,
+                min_known_ts,
+                max_known_ts,
+                max(
+                    lags
+                ),
+            )
+        )
+
+        swing_catalog = (
+            _legacy_v1_precompute_swings(
+                frames
+            )
+        )
+
+        for _, event in symbol_rows.iterrows():
+            event_dict = event.to_dict()
+
+            for lag in lags:
+                context = (
+                    _legacy_v1_context_one(
+                        event,
+                        frames,
+                        swing_catalog,
+                        lag,
+                    )
+                )
+
+                if not context:
+                    continue
+
+                row = {
+                    **event_dict,
+                    **context,
+                }
+
+                rows.append(
+                    row
+                )
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(
+        rows
+    ).reset_index(
+        drop=True
+    )
+
+
+def _legacy_v1_apply_driver_rule(
+    frame,
+    room_min_pct,
+    rsi_min_tf,
+):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return pd.Series(
+            False,
+            index=getattr(
+                frame,
+                "index",
+                None,
+            ),
+            dtype=bool,
+        )
+
+    room = pd.to_numeric(
+        frame.get(
+            "nearest_opposing_room_pct",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+    rsi_count = pd.to_numeric(
+        frame.get(
+            "aligned_rsi_extreme_count",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    return (
+        room.ge(
+            float(
+                room_min_pct
+            )
+        )
+        & rsi_count.ge(
+            int(
+                rsi_min_tf
+            )
+        )
+    )
+
+
+def _legacy_v1_calibration_summary(
+    reconstructed,
+    reference,
+    room_min_pct,
+    rsi_min_tf,
+):
+    if (
+        reconstructed is None
+        or reconstructed.empty
+        or reference is None
+        or reference.empty
+    ):
+        return pd.DataFrame()
+
+    ref_columns = [
+        "candidate_v1_event_key",
+        "nearest_opposing_room_pct",
+        "aligned_rsi_extreme_count",
+        "rsi14_1m",
+        "rsi14_5m",
+        "rsi14_15m",
+        "rsi14_1h",
+    ]
+
+    ref_columns = [
+        column
+        for column
+        in ref_columns
+        if column
+        in reference.columns
+    ]
+
+    ref = (
+        reference[
+            ref_columns
+        ]
+        .drop_duplicates(
+            "candidate_v1_event_key",
+            keep="last",
+        )
+        .copy()
+    )
+
+    merged = reconstructed.merge(
+        ref,
+        on="candidate_v1_event_key",
+        how="inner",
+        suffixes=(
+            "_recon",
+            "_stored",
+        ),
+        validate="many_to_one",
+    )
+
+    if merged.empty:
+        return pd.DataFrame()
+
+    rows = []
+
+    for (
+        lag,
+        group,
+    ) in merged.groupby(
+        "legacy_observation_lag_min",
+        sort=True,
+    ):
+        recon_room = pd.to_numeric(
+            group.get(
+                "nearest_opposing_room_pct_recon"
+            ),
+            errors="coerce",
+        )
+        stored_room = pd.to_numeric(
+            group.get(
+                "nearest_opposing_room_pct_stored"
+            ),
+            errors="coerce",
+        )
+
+        room_comparable = (
+            recon_room.notna()
+            & stored_room.notna()
+        )
+
+        recon_rsi_count = pd.to_numeric(
+            group.get(
+                "aligned_rsi_extreme_count_recon"
+            ),
+            errors="coerce",
+        )
+        stored_rsi_count = pd.to_numeric(
+            group.get(
+                "aligned_rsi_extreme_count_stored"
+            ),
+            errors="coerce",
+        )
+
+        rsi_comparable = (
+            recon_rsi_count.notna()
+            & stored_rsi_count.notna()
+        )
+
+        recon_gate = (
+            recon_room.ge(
+                float(
+                    room_min_pct
+                )
+            )
+            & recon_rsi_count.ge(
+                int(
+                    rsi_min_tf
+                )
+            )
+        )
+
+        stored_gate = (
+            stored_room.ge(
+                float(
+                    room_min_pct
+                )
+            )
+            & stored_rsi_count.ge(
+                int(
+                    rsi_min_tf
+                )
+            )
+        )
+
+        gate_comparable = (
+            recon_room.notna()
+            & stored_room.notna()
+            & recon_rsi_count.notna()
+            & stored_rsi_count.notna()
+        )
+
+        rsi_abs_values = []
+
+        for tf in [
+            "1m",
+            "5m",
+            "15m",
+            "1h",
+        ]:
+            recon_col = (
+                f"rsi14_{tf}_recon"
+            )
+            stored_col = (
+                f"rsi14_{tf}_stored"
+            )
+
+            if (
+                recon_col
+                not in group.columns
+                or stored_col
+                not in group.columns
+            ):
+                continue
+
+            left = pd.to_numeric(
+                group[
+                    recon_col
+                ],
+                errors="coerce",
+            )
+            right = pd.to_numeric(
+                group[
+                    stored_col
+                ],
+                errors="coerce",
+            )
+
+            comparable = (
+                left.notna()
+                & right.notna()
+            )
+
+            if comparable.any():
+                rsi_abs_values.extend(
+                    (
+                        left.loc[
+                            comparable
+                        ]
+                        - right.loc[
+                            comparable
+                        ]
+                    )
+                    .abs()
+                    .tolist()
+                )
+
+        room_abs = (
+            (
+                recon_room.loc[
+                    room_comparable
+                ]
+                - stored_room.loc[
+                    room_comparable
+                ]
+            ).abs()
+            if room_comparable.any()
+            else pd.Series(
+                dtype=float
+            )
+        )
+
+        rows.append({
+            "Legacy lag min": int(
+                lag
+            ),
+            "Matched reference events": int(
+                group[
+                    "candidate_v1_event_key"
+                ].nunique()
+            ),
+            "V1 gate match %": (
+                float(
+                    recon_gate.loc[
+                        gate_comparable
+                    ]
+                    .eq(
+                        stored_gate.loc[
+                            gate_comparable
+                        ]
+                    )
+                    .mean()
+                    * 100.0
+                )
+                if gate_comparable.any()
+                else np.nan
+            ),
+            "Reconstructed V1 pass %": float(
+                recon_gate.mean()
+                * 100.0
+            ),
+            "Room gate match %": (
+                float(
+                    recon_room.loc[
+                        room_comparable
+                    ]
+                    .ge(
+                        float(
+                            room_min_pct
+                        )
+                    )
+                    .eq(
+                        stored_room.loc[
+                            room_comparable
+                        ]
+                        .ge(
+                            float(
+                                room_min_pct
+                            )
+                        )
+                    )
+                    .mean()
+                    * 100.0
+                )
+                if room_comparable.any()
+                else np.nan
+            ),
+            "Room median abs Δ pp": (
+                float(
+                    room_abs.median()
+                )
+                if not room_abs.empty
+                else np.nan
+            ),
+            "Room <=0.01pp %": (
+                float(
+                    room_abs.le(
+                        0.01
+                    ).mean()
+                    * 100.0
+                )
+                if not room_abs.empty
+                else np.nan
+            ),
+            "RSI count exact %": (
+                float(
+                    recon_rsi_count.loc[
+                        rsi_comparable
+                    ]
+                    .eq(
+                        stored_rsi_count.loc[
+                            rsi_comparable
+                        ]
+                    )
+                    .mean()
+                    * 100.0
+                )
+                if rsi_comparable.any()
+                else np.nan
+            ),
+            "RSI gate match %": (
+                float(
+                    recon_rsi_count.loc[
+                        rsi_comparable
+                    ]
+                    .ge(
+                        int(
+                            rsi_min_tf
+                        )
+                    )
+                    .eq(
+                        stored_rsi_count.loc[
+                            rsi_comparable
+                        ]
+                        .ge(
+                            int(
+                                rsi_min_tf
+                            )
+                        )
+                    )
+                    .mean()
+                    * 100.0
+                )
+                if rsi_comparable.any()
+                else np.nan
+            ),
+            "RSI mean abs Δ": (
+                float(
+                    np.mean(
+                        rsi_abs_values
+                    )
+                )
+                if rsi_abs_values
+                else np.nan
+            ),
+        })
+
+    result = pd.DataFrame(
+        rows
+    )
+
+    if result.empty:
+        return result
+
+    return (
+        result.sort_values(
+            [
+                "V1 gate match %",
+                "RSI count exact %",
+                "Room gate match %",
+                "Room median abs Δ pp",
+                "RSI mean abs Δ",
+            ],
+            ascending=[
+                False,
+                False,
+                False,
+                True,
+                True,
+            ],
+            kind="stable",
+            na_position="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def _legacy_v1_best_lag_per_event(
+    reconstructed,
+    reference,
+    room_min_pct,
+    rsi_min_tf,
+):
+    if (
+        reconstructed is None
+        or reconstructed.empty
+        or reference is None
+        or reference.empty
+    ):
+        return pd.DataFrame()
+
+    reference_fields = [
+        "candidate_v1_event_key",
+        "nearest_opposing_room_pct",
+        "aligned_rsi_extreme_count",
+        "rsi14_1m",
+        "rsi14_5m",
+        "rsi14_15m",
+        "rsi14_1h",
+    ]
+
+    reference_fields = [
+        field
+        for field in reference_fields
+        if field
+        in reference.columns
+    ]
+
+    merged = reconstructed.merge(
+        reference[
+            reference_fields
+        ].drop_duplicates(
+            "candidate_v1_event_key",
+            keep="last",
+        ),
+        on="candidate_v1_event_key",
+        how="inner",
+        suffixes=(
+            "_recon",
+            "_stored",
+        ),
+    )
+
+    if merged.empty:
+        return pd.DataFrame()
+
+    recon_room = pd.to_numeric(
+        merged.get(
+            "nearest_opposing_room_pct_recon"
+        ),
+        errors="coerce",
+    )
+    stored_room = pd.to_numeric(
+        merged.get(
+            "nearest_opposing_room_pct_stored"
+        ),
+        errors="coerce",
+    )
+
+    room_delta = (
+        recon_room
+        - stored_room
+    ).abs()
+
+    recon_count = pd.to_numeric(
+        merged.get(
+            "aligned_rsi_extreme_count_recon"
+        ),
+        errors="coerce",
+    )
+    stored_count = pd.to_numeric(
+        merged.get(
+            "aligned_rsi_extreme_count_stored"
+        ),
+        errors="coerce",
+    )
+
+    count_delta = (
+        recon_count
+        - stored_count
+    ).abs()
+
+    recon_gate = (
+        recon_room.ge(
+            float(
+                room_min_pct
+            )
+        )
+        & recon_count.ge(
+            int(
+                rsi_min_tf
+            )
+        )
+    )
+    stored_gate = (
+        stored_room.ge(
+            float(
+                room_min_pct
+            )
+        )
+        & stored_count.ge(
+            int(
+                rsi_min_tf
+            )
+        )
+    )
+
+    # Gate mismatch dominates; numeric deltas break ties.
+    merged[
+        "_legacy_fit_score"
+    ] = (
+        (~recon_gate.eq(
+            stored_gate
+        )).astype(float)
+        * 10_000.0
+        + count_delta.fillna(
+            10.0
+        )
+        * 100.0
+        + room_delta.fillna(
+            100.0
+        )
+    )
+
+    best = (
+        merged.sort_values(
+            [
+                "candidate_v1_event_key",
+                "_legacy_fit_score",
+                "legacy_observation_lag_min",
+            ],
+            kind="stable",
+        )
+        .drop_duplicates(
+            "candidate_v1_event_key",
+            keep="first",
+        )
+        .copy()
+    )
+
+    return best[
+        [
+            column
+            for column
+            in [
+                "candidate_v1_event_key",
+                "symbol",
+                "signal",
+                "retest_timestamp",
+                "legacy_observation_lag_min",
+                "_legacy_fit_score",
+                "nearest_opposing_room_pct_recon",
+                "nearest_opposing_room_pct_stored",
+                "aligned_rsi_extreme_count_recon",
+                "aligned_rsi_extreme_count_stored",
+            ]
+            if column
+            in best.columns
+        ]
+    ].reset_index(
+        drop=True
+    )
+
+
+def _legacy_v1_calibration_id(
+    start_ms,
+    end_ms,
+    event_keys,
+    lags,
+):
+    payload = {
+        "start_ms": int(
+            start_ms
+        ),
+        "end_ms": int(
+            end_ms
+        ),
+        "event_keys": sorted(
+            str(
+                value
+            )
+            for value
+            in event_keys
+        ),
+        "lags": sorted(
+            int(
+                value
+            )
+            for value
+            in lags
+        ),
+        "version": (
+            CANDIDATE_V1_LEGACY_RECON_VERSION
+        ),
+    }
+
+    digest = hashlib.sha1(
+        json.dumps(
+            payload,
+            sort_keys=True,
+        ).encode(
+            "utf-8"
+        )
+    ).hexdigest()[
+        :12
+    ]
+
+    return (
+        f"{pd.Timestamp(start_ms, unit='ms', tz='UTC').strftime('%Y%m%d')}"
+        f"_"
+        f"{pd.Timestamp(end_ms, unit='ms', tz='UTC').strftime('%Y%m%d')}"
+        f"_"
+        f"{digest}"
+    )
+
+
+def _legacy_v1_save_csv(
+    frame,
+    path,
+):
+    path = Path(
+        path
+    )
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    tmp = path.with_suffix(
+        path.suffix
+        + ".tmp"
+    )
+
+    frame.to_csv(
+        tmp,
+        index=False,
+    )
+
+    tmp.replace(
+        path
+    )
+
+
+def _legacy_v1_read_csv(
+    path,
+):
+    path = Path(
+        path
+    )
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    try:
+        return pd.read_csv(
+            path
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def _legacy_v1_replay_run_id(
+    start_ms,
+    end_ms,
+    symbols,
+    legacy_lag_min,
+    thresholds,
+):
+    payload = {
+        "start_ms": int(
+            start_ms
+        ),
+        "end_ms": int(
+            end_ms
+        ),
+        "symbols": sorted(
+            str(
+                symbol
+            ).upper()
+            for symbol
+            in symbols
+        ),
+        "legacy_lag_min": int(
+            legacy_lag_min
+        ),
+        "room_min_pct": float(
+            thresholds[
+                "room_min_pct"
+            ]
+        ),
+        "rsi_min_tf": int(
+            thresholds[
+                "rsi_min_tf"
+            ]
+        ),
+        "max_age_minutes": int(
+            thresholds[
+                "max_age_minutes"
+            ]
+        ),
+        "retest_tolerance_pct": float(
+            thresholds[
+                "retest_tolerance_pct"
+            ]
+        ),
+        "min_departure_pct": float(
+            thresholds[
+                "min_departure_pct"
+            ]
+        ),
+        "version": (
+            CANDIDATE_V1_LEGACY_RECON_VERSION
+        ),
+    }
+
+    digest = hashlib.sha1(
+        json.dumps(
+            payload,
+            sort_keys=True,
+        ).encode(
+            "utf-8"
+        )
+    ).hexdigest()[
+        :12
+    ]
+
+    return (
+        f"{pd.Timestamp(start_ms, unit='ms', tz='UTC').strftime('%Y%m%d')}"
+        f"_"
+        f"{pd.Timestamp(end_ms, unit='ms', tz='UTC').strftime('%Y%m%d')}"
+        f"_lag{int(legacy_lag_min)}_"
+        f"{digest}"
+    )
+
+
+def _legacy_v1_replay_paths(
+    run_id,
+):
+    run_dir = (
+        CANDIDATE_V1_LEGACY_RUNS_DIR
+        / str(
+            run_id
+        )
+    )
+
+    return {
+        "dir": run_dir,
+        "state": (
+            run_dir
+            / "state.json"
+        ),
+        "events": (
+            run_dir
+            / "events.csv"
+        ),
+        "config": (
+            run_dir
+            / "config.json"
+        ),
+    }
+
+
+def _legacy_v1_append_events(
+    path,
+    fresh,
+):
+    if (
+        fresh is None
+        or fresh.empty
+    ):
+        return _legacy_v1_read_csv(
+            path
+        )
+
+    existing = (
+        _legacy_v1_read_csv(
+            path
+        )
+    )
+
+    merged = pd.concat(
+        [
+            existing,
+            fresh,
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+
+    if (
+        "candidate_v1_event_key"
+        in merged.columns
+    ):
+        merged = (
+            merged.drop_duplicates(
+                subset=[
+                    "candidate_v1_event_key"
+                ],
+                keep="last",
+            )
+        )
+
+    sort_columns = [
+        column
+        for column
+        in [
+            "entry_timestamp",
+            "retest_timestamp",
+            "symbol",
+        ]
+        if column
+        in merged.columns
+    ]
+
+    if sort_columns:
+        merged = merged.sort_values(
+            sort_columns,
+            kind="stable",
+            na_position="last",
+        )
+
+    _legacy_v1_save_csv(
+        merged,
+        path,
+    )
+
+    return merged.reset_index(
+        drop=True
+    )
+
+
+def _legacy_v1_prepare_replay_symbol_month(
+    symbol,
+    month_start_ms,
+    month_end_ms,
+    legacy_lag_min,
+    thresholds,
+):
+    base_events = (
+        _lh_symbol_month_events(
+            symbol,
+            month_start_ms,
+            month_end_ms,
+            room_warmup_days=120,
+            max_age_minutes=int(
+                thresholds[
+                    "max_age_minutes"
+                ]
+            ),
+            retest_tolerance_pct=float(
+                thresholds[
+                    "retest_tolerance_pct"
+                ]
+            ),
+            min_departure_pct=float(
+                thresholds[
+                    "min_departure_pct"
+                ]
+            ),
+        )
+    )
+
+    if (
+        base_events is None
+        or base_events.empty
+    ):
+        return pd.DataFrame()
+
+    # Preserve execution + historical 4h Strength from the structural replay,
+    # but replace Room/RSI driver fields with Legacy-buffer reconstruction.
+    legacy_context = (
+        _legacy_v1_reconstruct_context_multi_lag(
+            base_events,
+            (
+                int(
+                    legacy_lag_min
+                ),
+            ),
+        )
+    )
+
+    if (
+        legacy_context is None
+        or legacy_context.empty
+    ):
+        return pd.DataFrame()
+
+    base_mask = (
+        _legacy_v1_apply_driver_rule(
+            legacy_context,
+            thresholds[
+                "room_min_pct"
+            ],
+            thresholds[
+                "rsi_min_tf"
+            ],
+        )
+    )
+
+    strength = pd.to_numeric(
+        legacy_context.get(
+            "side_adjusted_strength_vs_btc_4h",
+            pd.Series(
+                np.nan,
+                index=legacy_context.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    legacy_context[
+        "legacy_v1_base"
+    ] = base_mask
+    legacy_context[
+        "legacy_v1_strength"
+    ] = (
+        base_mask
+        & strength.gt(
+            0.0
+        )
+    )
+    legacy_context[
+        "legacy_reconstruction_version"
+    ] = (
+        CANDIDATE_V1_LEGACY_RECON_VERSION
+    )
+
+    return legacy_context.reset_index(
+        drop=True
+    )
+
+
+def _legacy_v1_variant_frames(
+    events,
+):
+    if (
+        events is None
+        or events.empty
+    ):
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+    prepared = (
+        _lh_prepare_portfolio_rows(
+            events
+        )
+    )
+
+    if (
+        prepared is None
+        or prepared.empty
+    ):
+        return (
+            prepared,
+            prepared,
+        )
+
+    base_mask = (
+        prepared.get(
+            "legacy_v1_base",
+            pd.Series(
+                False,
+                index=prepared.index,
+            ),
+        )
+        .fillna(
+            False
+        )
+        .astype(
+            bool
+        )
+    )
+
+    strength_mask = (
+        prepared.get(
+            "legacy_v1_strength",
+            pd.Series(
+                False,
+                index=prepared.index,
+            ),
+        )
+        .fillna(
+            False
+        )
+        .astype(
+            bool
+        )
+    )
+
+    return (
+        prepared.loc[
+            base_mask
+        ].copy(),
+        prepared.loc[
+            strength_mask
+        ].copy(),
+    )
+
+
+def _legacy_v1_variant_summary(
+    label,
+    frame,
+    portfolio,
+):
+    raw = (
+        _lh_raw_summary(
+            frame
+        )
+    )
+
+    summary = (
+        portfolio.get(
+            "summary",
+            {},
+        )
+        if portfolio
+        else {}
+    )
+
+    return {
+        "Variant": label,
+        **raw,
+        "Accepted": int(
+            summary.get(
+                "Accepted trades",
+                0,
+            )
+            or 0
+        ),
+        "Portfolio NET pts": float(
+            summary.get(
+                "Raw net pts accepted",
+                0.0,
+            )
+            or 0.0
+        ),
+        "Final equity $": summary.get(
+            "Final equity",
+            np.nan,
+        ),
+        "Return %": summary.get(
+            "Return %",
+            np.nan,
+        ),
+        "Max DD %": summary.get(
+            "Max drawdown %",
+            np.nan,
+        ),
+        "Portfolio PF": summary.get(
+            "Portfolio PF",
+            np.nan,
+        ),
+    }
+
+
+def _legacy_v1_reference_key_comparison(
+    reconstructed,
+    reference,
+    *,
+    reconstructed_mask=None,
+    reference_mask=None,
+):
+    recon = (
+        reconstructed.copy()
+        if (
+            reconstructed is not None
+            and not reconstructed.empty
+        )
+        else pd.DataFrame()
+    )
+
+    ref = (
+        reference.copy()
+        if (
+            reference is not None
+            and not reference.empty
+        )
+        else pd.DataFrame()
+    )
+
+    if (
+        reconstructed_mask is not None
+        and not recon.empty
+    ):
+        recon = recon.loc[
+            reconstructed_mask.reindex(
+                recon.index,
+                fill_value=False,
+            )
+            .fillna(
+                False
+            )
+            .astype(
+                bool
+            )
+        ].copy()
+
+    if (
+        reference_mask is not None
+        and not ref.empty
+    ):
+        ref = ref.loc[
+            reference_mask.reindex(
+                ref.index,
+                fill_value=False,
+            )
+            .fillna(
+                False
+            )
+            .astype(
+                bool
+            )
+        ].copy()
+
+    recon_keys = set(
+        recon.get(
+            "candidate_v1_event_key",
+            pd.Series(
+                dtype=str
+            ),
+        )
+        .fillna("")
+        .astype(str)
+        .loc[
+            lambda series: series.ne("")
+        ]
+        .tolist()
+    )
+
+    ref_keys = set(
+        ref.get(
+            "candidate_v1_event_key",
+            pd.Series(
+                dtype=str
+            ),
+        )
+        .fillna("")
+        .astype(str)
+        .loc[
+            lambda series: series.ne("")
+        ]
+        .tolist()
+    )
+
+    matched = (
+        recon_keys
+        & ref_keys
+    )
+
+    return {
+        "Reconstructed N": int(
+            len(
+                recon_keys
+            )
+        ),
+        "Persisted Legacy N": int(
+            len(
+                ref_keys
+            )
+        ),
+        "Matched": int(
+            len(
+                matched
+            )
+        ),
+        "Historical only": int(
+            len(
+                recon_keys
+                - ref_keys
+            )
+        ),
+        "Reference only": int(
+            len(
+                ref_keys
+                - recon_keys
+            )
+        ),
+        "Reference recall %": (
+            float(
+                len(
+                    matched
+                )
+                / len(
+                    ref_keys
+                )
+                * 100.0
+            )
+            if ref_keys
+            else np.nan
+        ),
+        "matched_keys": matched,
+        "historical_only_keys": (
+            recon_keys
+            - ref_keys
+        ),
+        "reference_only_keys": (
+            ref_keys
+            - recon_keys
+        ),
+    }
+
+
+def _legacy_v1_reference_enriched(
+    reference,
+):
+    if (
+        reference is None
+        or reference.empty
+    ):
+        return pd.DataFrame()
+
+    work = reference.copy()
+    work[
+        "candidate_analysis_profile"
+    ] = "v1"
+
+    return (
+        _lh_fidelity_reference_enriched(
+            work,
+            "v1",
+        )
+    )
+
+
+def _legacy_v1_replay_equity_frame(
+    portfolio,
+    label,
+):
+    if not portfolio:
+        return pd.DataFrame()
+
+    curve = portfolio.get(
+        "equity_curve",
+        pd.DataFrame(),
+    )
+
+    if (
+        curve is None
+        or curve.empty
+    ):
+        return pd.DataFrame()
+
+    result = curve.copy()
+    result[
+        "time"
+    ] = (
+        pd.to_datetime(
+            pd.to_numeric(
+                result.get(
+                    "timestamp"
+                ),
+                errors="coerce",
+            ),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(
+            TZ
+        )
+    )
+    result[
+        "Series"
+    ] = str(
+        label
+    )
+
+    return result[
+        [
+            "time",
+            "equity",
+            "Series",
+        ]
+    ]
+
+
+def render_candidate_v1_legacy_historical_reconstructor(
+    v1_short_config,
+    v1_long_config,
+):
+    st.markdown(
+        "### 🧊 F. V1 LEGACY Historical Reconstructor"
+    )
+    st.caption(
+        "This module reconstructs the ORIGINAL persisted Candidate V1 semantics "
+        "instead of replacing V1 with a new causal/canonical candidate. "
+        "The structural REACTION/entry/outcome engine stays historical and exact; "
+        "Room + RSI are rebuilt with the old bounded Redis-buffer behavior."
+    )
+
+    thresholds = (
+        _legacy_v1_config_thresholds(
+            v1_short_config,
+            v1_long_config,
+        )
+    )
+
+    st.info(
+        "**Legacy rule kept unchanged:** 15m 3x3 REACTION · "
+        f"Room >= {thresholds['room_min_pct']:.2f}% · "
+        f"aligned RSI extreme on >= {thresholds['rsi_min_tf']} TF. "
+        "For the current champion, add **Strength > 0** and run "
+        "TP 0.5% / SL 3% / 180m · Room → Strength · 1 slot · x3 · 80%."
+    )
+
+    reference = (
+        _legacy_v1_load_persisted_reference()
+    )
+
+    if reference.empty:
+        st.warning(
+            "No persisted V1 Legacy SHORT/LONG monitor history is available."
+        )
+        return
+
+    tab_calibration, tab_replay = (
+        st.tabs([
+            "🎯 1. Calibrate Legacy buffer semantics",
+            "🗓️ 2. Historical Legacy replay",
+        ])
+    )
+
+    # ========================================================
+    # CALIBRATION
+    # ========================================================
+    with tab_calibration:
+        st.markdown(
+            "#### Calibrate against V1 Legacy rows we actually persisted"
+        )
+        st.caption(
+            "Legacy loaded the last N Redis candles at dashboard observation "
+            "time, then calculated each old REACTION using only information "
+            "actionable at reaction_known_ts. Because the monitor persisted the "
+            "latest row per Event ID, the missing variable is how long after the "
+            "REACTION that last observation occurred. We infer that lag here."
+        )
+
+        retest_values = pd.to_numeric(
+            reference.get(
+                "retest_timestamp"
+            ),
+            errors="coerce",
+        ).dropna()
+
+        if retest_values.empty:
+            st.warning(
+                "Persisted Legacy rows have no usable retest timestamps."
+            )
+            return
+
+        latest_local = (
+            pd.to_datetime(
+                int(
+                    retest_values.max()
+                ),
+                unit="ms",
+                utc=True,
+            )
+            .tz_convert(
+                TZ
+            )
+        )
+
+        default_cal_end = min(
+            latest_local.date(),
+            pd.Timestamp.now(
+                tz=TZ
+            ).date(),
+        )
+        default_cal_start = (
+            pd.Timestamp(
+                default_cal_end
+            )
+            - pd.Timedelta(
+                days=3
+            )
+        ).date()
+
+        c1, c2, c3 = st.columns(
+            3
+        )
+
+        calibration_start = c1.date_input(
+            "Calibration start",
+            value=default_cal_start,
+            key=(
+                "legacy_recon_cal_start"
+            ),
+        )
+
+        calibration_end = c2.date_input(
+            "Calibration end",
+            value=default_cal_end,
+            min_value=calibration_start,
+            key=(
+                "legacy_recon_cal_end"
+            ),
+        )
+
+        calibration_symbol_limit = c3.selectbox(
+            "Persisted Legacy symbol sample",
+            options=[
+                0,
+                25,
+                50,
+                100,
+            ],
+            index=0,
+            format_func=lambda value: (
+                "ALL Legacy symbols"
+                if int(
+                    value
+                )
+                == 0
+                else str(
+                    int(
+                        value
+                    )
+                )
+            ),
+            key=(
+                "legacy_recon_cal_symbol_limit"
+            ),
+        )
+
+        calibration_lags = st.multiselect(
+            "Observation lag candidates (minutes after reaction-known)",
+            options=list(
+                CANDIDATE_V1_LEGACY_LAG_CHOICES
+            ),
+            default=list(
+                CANDIDATE_V1_LEGACY_LAG_CHOICES
+            ),
+            key=(
+                "legacy_recon_cal_lags"
+            ),
+            help=(
+                "0 = buffer ended exactly when REACTION became known. "
+                "360 = emulate the Legacy row being last recalculated roughly "
+                "six hours later while the REACTION was still visible."
+            ),
+        )
+
+        cal_start_ms = int(
+            pd.Timestamp(
+                calibration_start,
+                tz=TZ,
+            )
+            .tz_convert(
+                "UTC"
+            )
+            .timestamp()
+            * 1000
+        )
+        cal_end_ms = int(
+            (
+                pd.Timestamp(
+                    calibration_end,
+                    tz=TZ,
+                )
+                + pd.Timedelta(
+                    days=1
+                )
+                - pd.Timedelta(
+                    milliseconds=1
+                )
+            )
+            .tz_convert(
+                "UTC"
+            )
+            .timestamp()
+            * 1000
+        )
+
+        cal_reference = (
+            _legacy_v1_filter_reference_window(
+                reference,
+                cal_start_ms,
+                cal_end_ms,
+            )
+        )
+
+        if (
+            int(
+                calibration_symbol_limit
+            )
+            > 0
+            and not cal_reference.empty
+        ):
+            available_symbols = sorted(
+                cal_reference[
+                    "symbol"
+                ]
+                .dropna()
+                .astype(str)
+                .str.upper()
+                .unique()
+                .tolist()
+            )
+
+            chosen_symbols = (
+                _lh_fidelity_sample_symbols(
+                    available_symbols,
+                    int(
+                        calibration_symbol_limit
+                    ),
+                )
+            )
+
+            cal_reference = (
+                _legacy_v1_filter_reference_window(
+                    cal_reference,
+                    cal_start_ms,
+                    cal_end_ms,
+                    symbols=(
+                        chosen_symbols
+                    ),
+                )
+            )
+
+        cm1, cm2, cm3, cm4 = st.columns(
+            4
+        )
+        cm1.metric(
+            "Persisted Legacy events",
+            int(
+                cal_reference[
+                    "candidate_v1_event_key"
+                ].nunique()
+            )
+            if not cal_reference.empty
+            else 0,
+        )
+        cm2.metric(
+            "Symbols",
+            int(
+                cal_reference[
+                    "symbol"
+                ].nunique()
+            )
+            if not cal_reference.empty
+            else 0,
+        )
+        cm3.metric(
+            "Room filter",
+            f">={thresholds['room_min_pct']:.2f}%",
+        )
+        cm4.metric(
+            "RSI filter",
+            f">={thresholds['rsi_min_tf']} TF",
+        )
+
+        if (
+            cal_reference.empty
+            or not calibration_lags
+        ):
+            st.info(
+                "Choose a window with persisted V1 Legacy events and at least "
+                "one lag candidate."
+            )
+        else:
+            calibration_id = (
+                _legacy_v1_calibration_id(
+                    cal_start_ms,
+                    cal_end_ms,
+                    cal_reference[
+                        "candidate_v1_event_key"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .tolist(),
+                    calibration_lags,
+                )
+            )
+
+            calibration_dir = (
+                CANDIDATE_V1_LEGACY_CALIBRATION_DIR
+                / calibration_id
+            )
+            calibration_file = (
+                calibration_dir
+                / "context_by_lag.csv"
+            )
+
+            st.caption(
+                f"Calibration ID: `{calibration_id}` · reuses the existing "
+                "persistent Binance candle cache."
+            )
+
+            run_calibration = st.button(
+                "🎯 Run / refresh Legacy calibration",
+                key=(
+                    "legacy_recon_run_calibration"
+                ),
+                use_container_width=True,
+                type="primary",
+            )
+
+            if run_calibration:
+                with st.spinner(
+                    "Reconstructing the original V1 bounded buffers across "
+                    "the selected lag candidates..."
+                ):
+                    calibration_result = (
+                        _legacy_v1_reconstruct_context_multi_lag(
+                            cal_reference,
+                            calibration_lags,
+                        )
+                    )
+
+                if (
+                    calibration_result is None
+                    or calibration_result.empty
+                ):
+                    st.error(
+                        "Legacy context reconstruction returned no rows."
+                    )
+                else:
+                    _legacy_v1_save_csv(
+                        calibration_result,
+                        calibration_file,
+                    )
+                    st.success(
+                        "Legacy calibration snapshot saved."
+                    )
+                    st.rerun()
+
+            calibration_result = (
+                _legacy_v1_read_csv(
+                    calibration_file
+                )
+            )
+
+            if not calibration_result.empty:
+                calibration_summary = (
+                    _legacy_v1_calibration_summary(
+                        calibration_result,
+                        cal_reference,
+                        thresholds[
+                            "room_min_pct"
+                        ],
+                        thresholds[
+                            "rsi_min_tf"
+                        ],
+                    )
+                )
+
+                if not calibration_summary.empty:
+                    suggested_lag = int(
+                        calibration_summary.iloc[
+                            0
+                        ][
+                            "Legacy lag min"
+                        ]
+                    )
+
+                    st.success(
+                        "Suggested fixed Legacy observation lag from this "
+                        f"window: **{suggested_lag} minutes**."
+                    )
+
+                    st.dataframe(
+                        calibration_summary,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=(
+                            "legacy_recon_calibration_summary"
+                        ),
+                    )
+
+                    best_per_event = (
+                        _legacy_v1_best_lag_per_event(
+                            calibration_result,
+                            cal_reference,
+                            thresholds[
+                                "room_min_pct"
+                            ],
+                            thresholds[
+                                "rsi_min_tf"
+                            ],
+                        )
+                    )
+
+                    if not best_per_event.empty:
+                        st.markdown(
+                            "##### Best-fitting lag by persisted Event ID"
+                        )
+
+                        lag_distribution = (
+                            best_per_event[
+                                "legacy_observation_lag_min"
+                            ]
+                            .value_counts(
+                                dropna=False
+                            )
+                            .rename_axis(
+                                "Best lag min"
+                            )
+                            .reset_index(
+                                name="Events"
+                            )
+                            .sort_values(
+                                "Best lag min",
+                                kind="stable",
+                            )
+                        )
+
+                        st.dataframe(
+                            lag_distribution,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        with st.expander(
+                            "Inspect per-event best lag",
+                            expanded=False,
+                        ):
+                            st.dataframe(
+                                best_per_event,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                    st.download_button(
+                        "Download Legacy calibration CSV",
+                        data=(
+                            calibration_summary.to_csv(
+                                index=False
+                            )
+                            .encode(
+                                "utf-8"
+                            )
+                        ),
+                        file_name=(
+                            f"v1_legacy_calibration_{calibration_id}.csv"
+                        ),
+                        mime="text/csv",
+                        key=(
+                            "legacy_recon_cal_download"
+                        ),
+                    )
+
+    # ========================================================
+    # HISTORICAL REPLAY
+    # ========================================================
+    with tab_replay:
+        st.markdown(
+            "#### Historical replay of the ORIGINAL V1 Legacy rule"
+        )
+        st.caption(
+            "First calibrate the Legacy observation lag above. Then this replay "
+            "reconstructs ALL 15m REACTIONs historically, applies the original "
+            "Legacy Room/RSI rule with that buffer lag, adds Strength > 0 for "
+            "the champion variant, and runs the exact 1-slot x3 / 80% portfolio."
+        )
+
+        today_local = pd.Timestamp.now(
+            tz=TZ
+        ).normalize()
+        default_replay_end = (
+            today_local
+            - pd.Timedelta(
+                days=1
+            )
+        )
+
+        r1, r2, r3 = st.columns(
+            3
+        )
+
+        replay_range = r1.selectbox(
+            "Historical range",
+            options=[
+                "1 month",
+                "3 months",
+                "6 months",
+                "12 months",
+                "Custom",
+            ],
+            index=0,
+            key=(
+                "legacy_recon_replay_range"
+            ),
+        )
+
+        replay_end_date = r2.date_input(
+            "End date",
+            value=default_replay_end.date(),
+            max_value=today_local.date(),
+            key=(
+                "legacy_recon_replay_end"
+            ),
+        )
+
+        if replay_range == "Custom":
+            replay_start_date = r3.date_input(
+                "Start date",
+                value=(
+                    default_replay_end
+                    - pd.Timedelta(
+                        days=30
+                    )
+                ).date(),
+                max_value=replay_end_date,
+                key=(
+                    "legacy_recon_replay_start"
+                ),
+            )
+        else:
+            months_back = {
+                "1 month": 1,
+                "3 months": 3,
+                "6 months": 6,
+                "12 months": 12,
+            }[
+                replay_range
+            ]
+
+            replay_start_date = (
+                pd.Timestamp(
+                    replay_end_date
+                )
+                - pd.DateOffset(
+                    months=int(
+                        months_back
+                    )
+                )
+                + pd.Timedelta(
+                    days=1
+                )
+            ).date()
+
+            r3.metric(
+                "Start date",
+                str(
+                    replay_start_date
+                ),
+            )
+
+        q1, q2, q3 = st.columns(
+            3
+        )
+
+        legacy_lag_min = q1.selectbox(
+            "Legacy observation lag",
+            options=list(
+                CANDIDATE_V1_LEGACY_LAG_CHOICES
+            ),
+            index=(
+                list(
+                    CANDIDATE_V1_LEGACY_LAG_CHOICES
+                ).index(
+                    360
+                )
+            ),
+            format_func=lambda value: (
+                f"{int(value)} min"
+            ),
+            key=(
+                "legacy_recon_replay_lag"
+            ),
+            help=(
+                "Use the lag suggested by the Calibration tab. "
+                "This is part of the Legacy reconstruction contract."
+            ),
+        )
+
+        symbols_per_batch = q2.selectbox(
+            "Symbols per resume batch",
+            options=[
+                10,
+                25,
+                50,
+                100,
+                9999,
+            ],
+            index=1,
+            format_func=lambda value: (
+                "ALL remaining in month"
+                if int(
+                    value
+                )
+                >= 9999
+                else str(
+                    int(
+                        value
+                    )
+                )
+            ),
+            key=(
+                "legacy_recon_replay_batch"
+            ),
+        )
+
+        pilot_symbol_limit = q3.number_input(
+            "Pilot symbol limit (0 = all)",
+            min_value=0,
+            max_value=500,
+            value=50,
+            step=10,
+            key=(
+                "legacy_recon_replay_symbol_limit"
+            ),
+        )
+
+        replay_start_ms = int(
+            pd.Timestamp(
+                replay_start_date,
+                tz=TZ,
+            )
+            .tz_convert(
+                "UTC"
+            )
+            .timestamp()
+            * 1000
+        )
+        replay_end_ms = int(
+            (
+                pd.Timestamp(
+                    replay_end_date,
+                    tz=TZ,
+                )
+                + pd.Timedelta(
+                    days=1
+                )
+                - pd.Timedelta(
+                    milliseconds=1
+                )
+            )
+            .tz_convert(
+                "UTC"
+            )
+            .timestamp()
+            * 1000
+        )
+
+        replay_symbols = sorted({
+            str(
+                symbol
+            ).upper()
+            for symbol
+            in load_volume_exhaustion_symbol_universe()
+            if str(
+                symbol
+            ).strip()
+        })
+
+        if int(
+            pilot_symbol_limit
+        ) > 0:
+            replay_symbols = replay_symbols[
+                : int(
+                    pilot_symbol_limit
+                )
+            ]
+
+        if not replay_symbols:
+            st.warning(
+                "No research symbols are available."
+            )
+            return
+
+        months = (
+            _lh_month_ranges(
+                replay_start_ms,
+                replay_end_ms,
+            )
+        )
+
+        run_id = (
+            _legacy_v1_replay_run_id(
+                replay_start_ms,
+                replay_end_ms,
+                replay_symbols,
+                legacy_lag_min,
+                thresholds,
+            )
+        )
+
+        paths = (
+            _legacy_v1_replay_paths(
+                run_id
+            )
+        )
+
+        if not paths[
+            "config"
+        ].exists():
+            _lh_atomic_json_write(
+                {
+                    "run_id": run_id,
+                    "version": (
+                        CANDIDATE_V1_LEGACY_RECON_VERSION
+                    ),
+                    "start_ms": int(
+                        replay_start_ms
+                    ),
+                    "end_ms": int(
+                        replay_end_ms
+                    ),
+                    "symbols": (
+                        replay_symbols
+                    ),
+                    "legacy_observation_lag_min": int(
+                        legacy_lag_min
+                    ),
+                    "thresholds": (
+                        thresholds
+                    ),
+                    "strategy": {
+                        "variant": (
+                            "V1 Legacy + Strength"
+                        ),
+                        "tp_pct": 0.5,
+                        "sl_pct": 3.0,
+                        "horizon_min": 180,
+                        "priority": (
+                            "Most HTF Room → Strength"
+                        ),
+                        "slots": 1,
+                        "leverage": 3.0,
+                        "margin_pct": 80.0,
+                        "starting_equity": 200.0,
+                    },
+                },
+                paths[
+                    "config"
+                ],
+            )
+
+        state = _lh_load_json(
+            paths[
+                "state"
+            ],
+            {
+                "run_id": run_id,
+                "processed": {},
+                "errors": {},
+            },
+        )
+
+        processed = state.get(
+            "processed",
+            {},
+        )
+
+        total_units = (
+            len(
+                months
+            )
+            * len(
+                replay_symbols
+            )
+        )
+
+        done_units = sum(
+            len(
+                set(
+                    processed.get(
+                        month[
+                            "label"
+                        ],
+                        [],
+                    )
+                )
+            )
+            for month in months
+        )
+
+        progress_pct = (
+            (
+                done_units
+                / total_units
+                * 100.0
+            )
+            if total_units
+            else None
+        )
+
+        p1, p2, p3, p4 = st.columns(
+            4
+        )
+
+        p1.metric(
+            "Months",
+            len(
+                months
+            ),
+        )
+        p2.metric(
+            "Symbols",
+            len(
+                replay_symbols
+            ),
+        )
+        p3.metric(
+            "Symbol-months done",
+            f"{done_units}/{total_units}",
+        )
+        p4.metric(
+            "Progress",
+            (
+                f"{progress_pct:.1f}%"
+                if progress_pct
+                is not None
+                else "—"
+            ),
+        )
+
+        st.caption(
+            f"Legacy replay Run ID: `{run_id}` · "
+            f"lag={int(legacy_lag_min)}m · candle cache shared with the "
+            "historical replay modules."
+        )
+
+        b1, b2 = st.columns(
+            2
+        )
+
+        run_batch = b1.button(
+            "▶ Run / resume Legacy historical batch",
+            key=(
+                "legacy_recon_replay_run"
+            ),
+            use_container_width=True,
+            type="primary",
+        )
+
+        reset_run = b2.button(
+            "🗑️ Reset Legacy historical run",
+            key=(
+                "legacy_recon_replay_reset"
+            ),
+            use_container_width=True,
+        )
+
+        if reset_run:
+            try:
+                if paths[
+                    "dir"
+                ].exists():
+                    shutil.rmtree(
+                        paths[
+                            "dir"
+                        ]
+                    )
+                st.success(
+                    "Legacy historical run reset. Shared candle cache kept."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(
+                    f"Could not reset Legacy run: {exc}"
+                )
+
+        if run_batch:
+            next_month = None
+            next_symbols = []
+
+            for month in months:
+                month_label = month[
+                    "label"
+                ]
+                done_symbols = set(
+                    processed.get(
+                        month_label,
+                        [],
+                    )
+                )
+
+                remaining = [
+                    symbol
+                    for symbol
+                    in replay_symbols
+                    if symbol
+                    not in done_symbols
+                ]
+
+                if remaining:
+                    next_month = month
+                    next_symbols = remaining[
+                        : int(
+                            symbols_per_batch
+                        )
+                    ]
+                    break
+
+            if next_month is None:
+                st.success(
+                    "Legacy historical replay is already complete."
+                )
+            else:
+                month_label = (
+                    next_month[
+                        "label"
+                    ]
+                )
+
+                st.write(
+                    f"Processing **{month_label}** · "
+                    f"{len(next_symbols)} symbols..."
+                )
+
+                progress_bar = st.progress(
+                    0.0
+                )
+                status_box = st.empty()
+
+                fresh_parts = []
+                batch_errors = []
+                succeeded = 0
+
+                for position, symbol in enumerate(
+                    next_symbols,
+                    start=1,
+                ):
+                    status_box.caption(
+                        f"{month_label} · {symbol} · "
+                        f"{position}/{len(next_symbols)}"
+                    )
+
+                    try:
+                        fresh = (
+                            _legacy_v1_prepare_replay_symbol_month(
+                                symbol,
+                                next_month[
+                                    "start_ms"
+                                ],
+                                next_month[
+                                    "end_ms"
+                                ],
+                                legacy_lag_min,
+                                thresholds,
+                            )
+                        )
+
+                        if (
+                            fresh is not None
+                            and not fresh.empty
+                        ):
+                            fresh_parts.append(
+                                fresh
+                            )
+
+                        processed.setdefault(
+                            month_label,
+                            []
+                        )
+
+                        if symbol not in processed[
+                            month_label
+                        ]:
+                            processed[
+                                month_label
+                            ].append(
+                                symbol
+                            )
+
+                        succeeded += 1
+
+                    except Exception as exc:
+                        message = (
+                            f"{type(exc).__name__}: "
+                            f"{exc}"
+                        )
+
+                        state.setdefault(
+                            "errors",
+                            {},
+                        )
+                        state[
+                            "errors"
+                        ][
+                            f"{month_label}|{symbol}"
+                        ] = message
+
+                        batch_errors.append({
+                            "Symbol": symbol,
+                            "Error": message,
+                        })
+
+                    state[
+                        "processed"
+                    ] = processed
+
+                    _lh_atomic_json_write(
+                        state,
+                        paths[
+                            "state"
+                        ],
+                    )
+
+                    progress_bar.progress(
+                        position
+                        / len(
+                            next_symbols
+                        )
+                    )
+
+                if fresh_parts:
+                    fresh_events = pd.concat(
+                        fresh_parts,
+                        ignore_index=True,
+                        sort=False,
+                    )
+                    _legacy_v1_append_events(
+                        paths[
+                            "events"
+                        ],
+                        fresh_events,
+                    )
+
+                state[
+                    "last_batch"
+                ] = {
+                    "month": month_label,
+                    "attempted": int(
+                        len(
+                            next_symbols
+                        )
+                    ),
+                    "succeeded": int(
+                        succeeded
+                    ),
+                    "failed": int(
+                        len(
+                            batch_errors
+                        )
+                    ),
+                    "finished_at_utc": (
+                        pd.Timestamp.now(
+                            tz="UTC"
+                        ).isoformat()
+                    ),
+                }
+
+                _lh_atomic_json_write(
+                    state,
+                    paths[
+                        "state"
+                    ],
+                )
+
+                st.rerun()
+
+        state = _lh_load_json(
+            paths[
+                "state"
+            ],
+            state,
+        )
+
+        last_batch = state.get(
+            "last_batch",
+            {},
+        )
+
+        if last_batch:
+            st.markdown(
+                "##### Last Legacy replay batch"
+            )
+            lb1, lb2, lb3 = st.columns(
+                3
+            )
+            lb1.metric(
+                "Attempted",
+                int(
+                    last_batch.get(
+                        "attempted",
+                        0,
+                    )
+                ),
+            )
+            lb2.metric(
+                "Succeeded",
+                int(
+                    last_batch.get(
+                        "succeeded",
+                        0,
+                    )
+                ),
+            )
+            lb3.metric(
+                "Failed",
+                int(
+                    last_batch.get(
+                        "failed",
+                        0,
+                    )
+                ),
+            )
+
+        events = (
+            _legacy_v1_read_csv(
+                paths[
+                    "events"
+                ]
+            )
+        )
+
+        if events.empty:
+            errors = state.get(
+                "errors",
+                {},
+            )
+
+            if errors:
+                st.error(
+                    "No reconstructed Legacy events are persisted yet. "
+                    "Errors were recorded:"
+                )
+                st.dataframe(
+                    pd.DataFrame([
+                        {
+                            "Unit": key,
+                            "Error": value,
+                        }
+                        for key, value
+                        in list(
+                            errors.items()
+                        )[
+                            :100
+                        ]
+                    ]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info(
+                    "Run a Legacy historical batch to create reconstructed events."
+                )
+            return
+
+        base_frame, strength_frame = (
+            _legacy_v1_variant_frames(
+                events
+            )
+        )
+
+        base_portfolio = (
+            _lh_portfolio(
+                base_frame
+            )
+        )
+        strength_portfolio = (
+            _lh_portfolio(
+                strength_frame
+            )
+        )
+
+        summary_table = pd.DataFrame([
+            _legacy_v1_variant_summary(
+                "V1 Legacy Base reconstructed",
+                base_frame,
+                base_portfolio,
+            ),
+            _legacy_v1_variant_summary(
+                "V1 Legacy + Strength reconstructed",
+                strength_frame,
+                strength_portfolio,
+            ),
+        ])
+
+        st.markdown(
+            "#### Reconstructed Legacy results · completed batches"
+        )
+
+        st.dataframe(
+            summary_table,
+            use_container_width=True,
+            hide_index=True,
+            key=(
+                "legacy_recon_summary_table"
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Overlap fidelity against the actual persisted Legacy rows.
+        # Historical-only rows are NOT automatically errors because the old
+        # dashboard was not guaranteed to be an exhaustive continuous collector.
+        # Reference-only rows are the critical miss.
+        # ----------------------------------------------------
+        processed_symbols = set()
+
+        for month in months:
+            processed_symbols.update(
+                processed.get(
+                    month[
+                        "label"
+                    ],
+                    [],
+                )
+            )
+
+        overlap_reference = (
+            _legacy_v1_filter_reference_window(
+                reference,
+                replay_start_ms,
+                replay_end_ms,
+                symbols=(
+                    processed_symbols
+                ),
+            )
+        )
+
+        if not overlap_reference.empty:
+            base_compare = (
+                _legacy_v1_reference_key_comparison(
+                    events,
+                    overlap_reference,
+                    reconstructed_mask=(
+                        events.get(
+                            "legacy_v1_base",
+                            pd.Series(
+                                False,
+                                index=events.index,
+                            ),
+                        )
+                        .fillna(
+                            False
+                        )
+                        .astype(
+                            bool
+                        )
+                    ),
+                )
+            )
+
+            comparison_rows = [{
+                "Layer": (
+                    "V1 Legacy Base identity"
+                ),
+                **{
+                    key: value
+                    for key, value
+                    in base_compare.items()
+                    if not key.endswith(
+                        "_keys"
+                    )
+                },
+            }]
+
+            enriched_reference = (
+                _legacy_v1_reference_enriched(
+                    overlap_reference
+                )
+            )
+
+            if (
+                enriched_reference is not None
+                and not enriched_reference.empty
+            ):
+                ref_strength = pd.to_numeric(
+                    enriched_reference.get(
+                        "side_adjusted_strength_vs_btc_4h",
+                        pd.Series(
+                            np.nan,
+                            index=enriched_reference.index,
+                        ),
+                    ),
+                    errors="coerce",
+                )
+
+                strength_compare = (
+                    _legacy_v1_reference_key_comparison(
+                        events,
+                        enriched_reference,
+                        reconstructed_mask=(
+                            events.get(
+                                "legacy_v1_strength",
+                                pd.Series(
+                                    False,
+                                    index=events.index,
+                                ),
+                            )
+                            .fillna(
+                                False
+                            )
+                            .astype(
+                                bool
+                            )
+                        ),
+                        reference_mask=(
+                            ref_strength.gt(
+                                0.0
+                            )
+                        ),
+                    )
+                )
+
+                comparison_rows.append({
+                    "Layer": (
+                        "V1 Legacy + Strength identity"
+                    ),
+                    **{
+                        key: value
+                        for key, value
+                        in strength_compare.items()
+                        if not key.endswith(
+                            "_keys"
+                        )
+                    },
+                })
+
+            st.markdown(
+                "#### Fidelity against persisted V1 Legacy"
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    comparison_rows
+                ),
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "legacy_recon_identity_fidelity"
+                ),
+            )
+
+            st.caption(
+                "Reference-only = a persisted Legacy Event ID the historical "
+                "reconstructor failed to reproduce and is the critical fidelity "
+                "error. Historical-only can include real events that the old "
+                "dashboard never persisted while it was offline/not refreshed."
+            )
+
+        # ----------------------------------------------------
+        # Equity curve
+        # ----------------------------------------------------
+        equity_parts = []
+
+        for label, portfolio in [
+            (
+                "Legacy Base reconstructed",
+                base_portfolio,
+            ),
+            (
+                "Legacy + Strength reconstructed",
+                strength_portfolio,
+            ),
+        ]:
+            curve = (
+                _legacy_v1_replay_equity_frame(
+                    portfolio,
+                    label,
+                )
+            )
+
+            if not curve.empty:
+                equity_parts.append(
+                    curve
+                )
+
+        if equity_parts:
+            equity = pd.concat(
+                equity_parts,
+                ignore_index=True,
+            )
+
+            equity_pivot = (
+                equity.pivot_table(
+                    index="time",
+                    columns="Series",
+                    values="equity",
+                    aggfunc="last",
+                )
+                .sort_index()
+                .ffill()
+            )
+
+            st.markdown(
+                "#### Historical Legacy equity"
+            )
+            st.line_chart(
+                equity_pivot,
+                use_container_width=True,
+            )
+
+        monthly = (
+            _lh_monthly_report(
+                "V1 Legacy + Strength reconstructed",
+                strength_frame,
+                strength_portfolio,
+            )
+        )
+
+        if not monthly.empty:
+            st.markdown(
+                "#### Monthly stability · Legacy + Strength"
+            )
+            st.dataframe(
+                monthly,
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "legacy_recon_monthly"
+                ),
+            )
+
+        with st.expander(
+            "Inspect reconstructed Legacy events",
+            expanded=False,
+        ):
+            display_columns = [
+                column
+                for column
+                in [
+                    "symbol",
+                    "side",
+                    "retest_timestamp",
+                    "legacy_observation_lag_min",
+                    "nearest_opposing_room_pct",
+                    "aligned_rsi_extreme_count",
+                    "side_adjusted_strength_vs_btc_4h",
+                    "legacy_v1_base",
+                    "legacy_v1_strength",
+                    "Outcome",
+                    "net_pnl_pct",
+                    "legacy_buffer_first_ts_1m",
+                    "legacy_buffer_last_ts_1m",
+                    "legacy_buffer_first_ts_30m",
+                    "legacy_buffer_last_ts_30m",
+                    "legacy_buffer_first_ts_1h",
+                    "legacy_buffer_last_ts_1h",
+                    "legacy_buffer_first_ts_4h",
+                    "legacy_buffer_last_ts_4h",
+                    "candidate_v1_event_key",
+                ]
+                if column
+                in events.columns
+            ]
+
+            st.dataframe(
+                events[
+                    display_columns
+                ],
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "legacy_recon_events"
+                ),
+            )
+
+        st.download_button(
+            "Download reconstructed Legacy events CSV",
+            data=events.to_csv(
+                index=False
+            ).encode(
+                "utf-8"
+            ),
+            file_name=(
+                f"v1_legacy_reconstructed_{run_id}.csv"
+            ),
+            mime="text/csv",
+            key=(
+                "legacy_recon_events_download"
+            ),
+        )
+
+
 def render_candidate_historical_replay_fidelity_audit(
     retests_df,
     v1_short_config,
@@ -30127,7 +33047,7 @@ def render_candidate_historical_replay_fidelity_audit(
 
     b2.metric(
         "Reference source",
-        "Canonical Reaction V1/V2",
+        "Persisted Candidate V1/V2",
     )
 
     audit_start_ms = int(
@@ -44777,460 +47697,108 @@ def render_candidate_research(
     v1_short_config=None,
     v1_long_config=None,
 ):
-    candidate_version = str(
-        candidate_version
-    )
-    normalized_candidate = (
-        candidate_version
-        .lower()
-        .strip()
-    )
+    candidate_version = str(candidate_version)
+    profile_id = "v1" if "V1" in candidate_version else "v2"
+    candidate_label = "Candidate V1" if profile_id == "v1" else "Candidate V2"
+    candidate_slug = "candidate_v1" if profile_id == "v1" else "candidate_v2"
 
-    if (
-        "v1" in normalized_candidate
-        and "legacy" in normalized_candidate
-    ):
-        candidate_mode = "v1_legacy"
-        profile_id = "v1"
-        candidate_label = "Candidate V1 Legacy"
-        candidate_slug = "candidate_v1_legacy"
-        uses_canonical_source = False
-    elif "v1" in normalized_candidate:
-        candidate_mode = "v1_causal"
-        profile_id = "v1"
-        candidate_label = "Candidate V1 Causal"
-        candidate_slug = "candidate_v1_causal"
-        uses_canonical_source = True
-    else:
-        candidate_mode = "v2"
-        profile_id = "v2"
-        candidate_label = "Candidate V2"
-        candidate_slug = "candidate_v2"
-        uses_canonical_source = True
-
-    st.markdown(
-        f"### 🧬 {candidate_label} · Unified Candidate Research"
+    st.markdown(f"### 🧬 {candidate_label} · Unified Candidate Research")
+    st.caption(
+        "The analysis engine below is shared by Candidate V1 and Candidate V2. "
+        "Switching Candidate changes only the source universe; execution matrix, "
+        "equity curve, same-minute selectors, Market Flow gates, Early Exit, "
+        "TIME_EXIT analysis and Position Upgrade remain available in both modes."
     )
-
-    if candidate_mode == "v1_legacy":
-        st.caption(
-            "LEGACY compatibility mode. This uses the original persisted "
-            "Candidate V1 SHORT+LONG universe and its original V1 path/context "
-            "stores, so the previous V1 + Strength portfolio/equity research "
-            "remains reproducible."
-        )
-    else:
-        st.caption(
-            "Canonical mode. Candidate V1 Causal and Candidate V2 consume the "
-            "same REACTION Event IDs. V2 Base = all REACTIONs; "
-            "V1 Causal Base = Room >= 1% AND aligned RSI >= 1."
-        )
 
     newly_frozen = False
+    # Re-evaluate candidate follow-up at most once per minute even when no new
+    # REACTION ID appears; pending paths can mature from PENDING to resolved.
+    retests_signature = (
+        _candidate_analysis_retests_signature(retests_df),
+        int(time.time() // 60),
+    )
+    universe_cache_key = f"candidate_analysis_universe_{profile_id}"
+    universe_cache = st.session_state.get(universe_cache_key)
+    use_cached_universe = (
+        isinstance(universe_cache, dict)
+        and universe_cache.get("signature") == retests_signature
+    )
 
-    # --------------------------------------------------------
-    # Source selection:
-    # - V1 Legacy = original persisted SHORT/LONG V1 universe.
-    # - V1 Causal / V2 = one canonical REACTION universe.
-    # --------------------------------------------------------
-    if candidate_mode == "v1_legacy":
-        if (
-            v1_short_config is None
-            or v1_long_config is None
-        ):
-            st.warning(
-                "Candidate V1 Legacy requires the original SHORT/LONG configs."
-            )
+    if use_cached_universe:
+        history = universe_cache.get("history", pd.DataFrame())
+        config = universe_cache.get("config")
+    elif profile_id == "v1":
+        if v1_short_config is None or v1_long_config is None:
+            st.error("Candidate V1 unified research needs frozen SHORT and LONG configs.")
             return
-
-        legacy_signature = (
-            _candidate_analysis_retests_signature(
-                retests_df
-            ),
-            int(
-                time.time()
-                // 60
-            ),
+        history = _candidate_v1_unified_research_history(
+            retests_df,
+            v1_short_config,
+            v1_long_config,
         )
-
-        legacy_cache_key = (
-            "candidate_analysis_v1_legacy_universe"
-        )
-        legacy_cache = st.session_state.get(
-            legacy_cache_key
-        )
-
-        if (
-            isinstance(
-                legacy_cache,
-                dict,
-            )
-            and legacy_cache.get(
-                "signature"
-            )
-            == legacy_signature
-        ):
-            history = legacy_cache.get(
-                "history",
-                pd.DataFrame(),
-            )
-        else:
-            history = (
-                _candidate_v1_unified_research_history(
-                    retests_df,
-                    v1_short_config,
-                    v1_long_config,
-                )
-            )
-
-            if (
-                history is not None
-                and not history.empty
-            ):
-                history = history.copy()
-                history[
-                    "candidate_analysis_profile"
-                ] = "v1"
-                history[
-                    "canonical_reaction_source"
-                ] = False
-                history[
-                    "candidate_source_mode"
-                ] = "V1_LEGACY"
-
-            st.session_state[
-                legacy_cache_key
-            ] = {
-                "signature": legacy_signature,
-                "history": (
-                    history.copy()
-                    if (
-                        history is not None
-                        and not history.empty
-                    )
-                    else pd.DataFrame()
-                ),
-            }
-
-        if (
-            history is None
-            or history.empty
-        ):
-            st.info(
-                "No persisted Candidate V1 Legacy SHORT/LONG rows are available."
-            )
-            return
-
-        config = dict(
-            v1_short_config
-            or {}
-        )
-        config.setdefault(
-            "frozen_at_utc",
-            config.get(
-                "created_at_utc",
-                "LEGACY",
-            ),
-        )
-
-        source_signature = (
-            _candidate_analysis_source_signature(
-                history,
-                profile_id="v1_legacy",
-            )
-        )
-
-        legacy_market_cache_key = (
-            "candidate_analysis_market_context_v1_legacy"
-        )
-        legacy_market_cache = st.session_state.get(
-            legacy_market_cache_key
-        )
-
-        force_market = st.button(
-            "🔄 Rebuild V1 Legacy causal 4h + 1h contexts",
-            key=(
-                "candidate_analysis_force_market_v1_legacy"
-            ),
-            use_container_width=True,
-        )
-
-        if (
-            isinstance(
-                legacy_market_cache,
-                dict,
-            )
-            and legacy_market_cache.get(
-                "signature"
-            )
-            == source_signature
-            and not force_market
-        ):
-            context = legacy_market_cache.get(
-                "context",
-                pd.DataFrame(),
-            )
-            sector_error = legacy_market_cache.get(
-                "sector_error"
-            )
-        else:
-            legacy_market_rows = history.copy()
-            legacy_market_rows[
-                "candidate_analysis_profile"
-            ] = "v1"
-            legacy_market_rows[
-                "canonical_reaction_source"
-            ] = False
-
-            with st.spinner(
-                "Attaching V1 Legacy causal Market Flow context..."
-            ):
-                (
-                    context,
-                    sector_error,
-                ) = _candidate_v2_build_market_context(
-                    legacy_market_rows,
-                    force=bool(
-                        force_market
-                    ),
-                )
-
-            if (
-                context is not None
-                and not context.empty
-            ):
-                context = context.copy()
-                context[
-                    "candidate_analysis_profile"
-                ] = "v1"
-                context[
-                    "canonical_reaction_source"
-                ] = False
-                context[
-                    "candidate_source_mode"
-                ] = "V1_LEGACY"
-
-            st.session_state[
-                legacy_market_cache_key
-            ] = {
-                "signature": source_signature,
-                "context": (
-                    context.copy()
-                    if (
-                        context is not None
-                        and not context.empty
-                    )
-                    else pd.DataFrame()
-                ),
-                "sector_error": sector_error,
-            }
-
-        st.info(
-            "🧊 **V1 Legacy preserved:** use `Candidate + Strength` here to "
-            "reproduce/continue the previous V1 + Strength research curve."
-        )
-
+        config = {
+            "name": "Candidate V1",
+            "frozen_at_utc": str(v1_short_config.get("created_at_utc", CANDIDATE_V1_FREEZE_TS_UTC)),
+        }
+        st.session_state[universe_cache_key] = {
+            "signature": retests_signature,
+            "history": history.copy() if history is not None else pd.DataFrame(),
+            "config": config,
+        }
     else:
-        retests_signature = (
-            _candidate_analysis_retests_signature(
-                retests_df
-            ),
-            int(
-                time.time()
-                // 60
-            ),
+        history, config, newly_frozen = _candidate_v2_load_or_freeze_universe(retests_df)
+        if history is not None and not history.empty:
+            history = history.copy()
+            history["candidate_analysis_profile"] = "v2"
+        st.session_state[universe_cache_key] = {
+            "signature": retests_signature,
+            "history": history.copy() if history is not None else pd.DataFrame(),
+            "config": config,
+        }
+
+    if history is None or history.empty or config is None:
+        st.info(f"No causal REACTIONs are available for {candidate_label} yet.")
+        return
+
+    if newly_frozen:
+        st.success(
+            "Candidate V2 Discovery universe frozen from all currently visible "
+            "REACTION IDs. Strength/Flow thresholds did not participate in the freeze."
         )
 
-        canonical_cache_key = (
-            "candidate_analysis_canonical_reaction_universe"
-        )
-        canonical_cache = st.session_state.get(
-            canonical_cache_key
-        )
+    history_signature = _candidate_analysis_source_signature(
+        history,
+        profile_id=profile_id,
+    )
+    market_cache_key = f"candidate_analysis_market_context_{profile_id}"
+    market_cache = st.session_state.get(market_cache_key)
 
-        if (
-            isinstance(
-                canonical_cache,
-                dict,
-            )
-            and canonical_cache.get(
-                "signature"
-            )
-            == retests_signature
-        ):
-            canonical_history = canonical_cache.get(
-                "history",
-                pd.DataFrame(),
-            )
-            config = canonical_cache.get(
-                "config"
-            )
-        else:
-            (
-                canonical_history,
-                config,
-                newly_frozen,
-            ) = _candidate_canonical_reaction_universe(
-                retests_df
-            )
+    force_market = st.button(
+        f"🔄 Rebuild {candidate_label} causal 4h + 1h contexts",
+        key=f"candidate_analysis_force_market_{profile_id}",
+        use_container_width=True,
+    )
 
-            st.session_state[
-                canonical_cache_key
-            ] = {
-                "signature": retests_signature,
-                "history": (
-                    canonical_history.copy()
-                    if (
-                        canonical_history is not None
-                        and not canonical_history.empty
-                    )
-                    else pd.DataFrame()
-                ),
-                "config": config,
-            }
+    use_cached_market = (
+        isinstance(market_cache, dict)
+        and market_cache.get("signature") == history_signature
+        and not force_market
+    )
 
-        if (
-            canonical_history is None
-            or canonical_history.empty
-            or config is None
-        ):
-            st.info(
-                "No causal REACTIONs are available in the canonical source yet."
+    if use_cached_market:
+        context = market_cache.get("context", pd.DataFrame())
+        sector_error = market_cache.get("sector_error")
+    else:
+        with st.spinner(f"Attaching causal Market Flow to {candidate_label}..."):
+            context, sector_error = _candidate_v2_build_market_context(
+                history,
+                force=bool(force_market),
             )
-            return
-
-        if newly_frozen:
-            st.success(
-                "Canonical/V2 Discovery universe frozen. "
-                "Candidate V1 Causal is derived from the same Event IDs."
-            )
-
-        canonical_status = (
-            _candidate_canonical_status_table(
-                canonical_history
-            )
-        )
-
-        if not canonical_status.empty:
-            st.markdown(
-                "#### Canonical REACTION source"
-            )
-            st.dataframe(
-                canonical_status,
-                use_container_width=True,
-                hide_index=True,
-                key=(
-                    "candidate_canonical_source_status"
-                ),
-            )
-            st.caption(
-                "V1 Causal owns no independent REACTION history. "
-                "Room/RSI driver context is frozen once per Event ID in "
-                "`candidate_reaction_causal_ledger.csv`."
-            )
-
-        canonical_signature = (
-            _candidate_analysis_source_signature(
-                canonical_history,
-                profile_id="v2",
-            )
-        )
-
-        market_cache_key = (
-            "candidate_analysis_market_context_canonical"
-        )
-        market_cache = st.session_state.get(
-            market_cache_key
-        )
-
-        force_market = st.button(
-            "🔄 Rebuild shared canonical causal 4h + 1h contexts",
-            key=(
-                "candidate_analysis_force_market_canonical"
-            ),
-            use_container_width=True,
-        )
-
-        if (
-            isinstance(
-                market_cache,
-                dict,
-            )
-            and market_cache.get(
-                "signature"
-            )
-            == canonical_signature
-            and not force_market
-        ):
-            canonical_context = market_cache.get(
-                "context",
-                pd.DataFrame(),
-            )
-            sector_error = market_cache.get(
-                "sector_error"
-            )
-        else:
-            canonical_market_rows = canonical_history.copy()
-            canonical_market_rows[
-                "candidate_analysis_profile"
-            ] = "v2"
-
-            with st.spinner(
-                "Attaching one shared causal Market Flow context to the "
-                "canonical REACTION universe..."
-            ):
-                (
-                    canonical_context,
-                    sector_error,
-                ) = _candidate_v2_build_market_context(
-                    canonical_market_rows,
-                    force=bool(
-                        force_market
-                    ),
-                )
-
-            st.session_state[
-                market_cache_key
-            ] = {
-                "signature": canonical_signature,
-                "context": (
-                    canonical_context.copy()
-                    if (
-                        canonical_context is not None
-                        and not canonical_context.empty
-                    )
-                    else pd.DataFrame()
-                ),
-                "sector_error": sector_error,
-            }
-
-        history = (
-            _candidate_canonical_candidate_view(
-                canonical_history,
-                profile_id,
-            )
-        )
-        context = (
-            _candidate_canonical_candidate_view(
-                canonical_context,
-                profile_id,
-            )
-            if (
-                canonical_context is not None
-                and not canonical_context.empty
-            )
-            else pd.DataFrame()
-        )
-
-        if (
-            history is None
-            or history.empty
-        ):
-            st.info(
-                f"No canonical REACTIONs currently qualify for {candidate_label}."
-            )
-            return
-
+        st.session_state[market_cache_key] = {
+            "signature": history_signature,
+            "context": context.copy() if context is not None and not context.empty else pd.DataFrame(),
+            "sector_error": sector_error,
+        }
     if sector_error:
         st.caption(f"Sector metadata note: {sector_error}")
     if context is None or context.empty:
@@ -45280,18 +47848,11 @@ def render_candidate_research(
     h3.metric("Forward", forward_n)
     h4.metric("Causal strength", f"{len(study)}/{len(history)}")
     h5.metric("4h boundaries", boundaries)
-    if candidate_mode == "v1_legacy":
-        st.caption(
-            f"{candidate_label} uses the original persisted V1 SHORT/LONG "
-            f"Event IDs. Reference timestamp: {frozen_at}. This is the source "
-            "used by the previous V1 portfolio/equity research."
-        )
-    else:
-        st.caption(
-            f"{candidate_label} is a view over the canonical persisted "
-            f"REACTION IDs. Reference timestamp: {frozen_at}. V1 Causal "
-            "membership comes from frozen Room/RSI over V2 Base Event IDs."
-        )
+    st.caption(
+        f"{candidate_label} source frozen/identified from persisted IDs. "
+        f"Reference timestamp: {frozen_at}. Discovery/Forward membership remains "
+        "ID-based and is not rewritten by the analysis filters below."
+    )
     one_h_available = pd.to_numeric(
         study.get("market_breadth_1h", pd.Series(np.nan, index=study.index)),
         errors="coerce",
@@ -45352,29 +47913,12 @@ def render_candidate_research(
         st.info(f"No {candidate_label} rows match this side/cohort selection.")
         return
 
-    scoped[
-        "candidate_analysis_profile"
-    ] = profile_id
-    scoped[
-        "canonical_reaction_source"
-    ] = bool(
-        uses_canonical_source
+    scoped["candidate_analysis_profile"] = profile_id
+    active_path_store_file = _candidate_analysis_path_store_file(
+        scoped,
+        profile_id=profile_id,
     )
-
-    active_path_store_file = (
-        _candidate_analysis_path_store_file(
-            scoped,
-            profile_id=profile_id,
-        )
-    )
-    active_selected_history_file = (
-        _candidate_analysis_selected_cell_history_file(
-            profile_id,
-            candidate_mode=(
-                candidate_mode
-            ),
-        )
-    )
+    active_selected_history_file = _candidate_analysis_selected_cell_history_file(profile_id)
     active_variants = (
         [
             "Candidate Base",
@@ -73392,18 +75936,11 @@ if selected_section == "reaction_swing_lab":
             candidate_version = st.radio(
                 "Candidate",
                 options=[
-                    "🧊 Candidate V1 Legacy",
-                    "🧬 Candidate V1 Causal",
+                    "🧊 Candidate V1",
                     "🧪 Candidate V2",
                 ],
                 horizontal=True,
                 key="reaction_lab_candidate_version",
-                help=(
-                    "V1 Legacy preserves the original persisted V1 universe "
-                    "and prior equity research. V1 Causal derives V1 as "
-                    "Room>=1% + aligned RSI>=1 over the exact same canonical "
-                    "REACTION IDs as V2."
-                ),
             )
 
             candidate_v1_config = _candidate_v1_load_or_freeze_config(
@@ -73446,11 +75983,10 @@ if selected_section == "reaction_swing_lab":
             )
 
             st.caption(
-                "Three research views are preserved: **V1 Legacy** = original "
-                "persisted V1 universe/stores; **V1 Causal** = Room>=1% + "
-                "aligned RSI>=1 over canonical V2 REACTION IDs; **V2** = every "
-                "canonical REACTION. All three use the same Unified Candidate "
-                "Research analysis UI."
+                "V1 and V2 now share the same cached structural scan and the "
+                "same analysis engine. Switching Candidate preserves TP/SL, "
+                "portfolio and selector controls while loading that Candidate's "
+                "own cohort, path store and execution snapshot."
             )
 
             with st.spinner("Loading shared cached 15m causal REACTION scan..."):
@@ -73490,14 +76026,7 @@ if selected_section == "reaction_swing_lab":
 
             st.divider()
 
-            render_candidate_long_horizon_historical_replay()
-
-            st.divider()
-
-            render_candidate_historical_replay_fidelity_audit(
-                retests_df=(
-                    candidate_shared_retests_df
-                ),
+            render_candidate_v1_legacy_historical_reconstructor(
                 v1_short_config=(
                     candidate_v1_config
                 ),
@@ -73509,42 +76038,26 @@ if selected_section == "reaction_swing_lab":
             st.divider()
 
             selected_candidate_label = (
-                "Candidate V1 Legacy"
-                if "Legacy" in candidate_version
-                else (
-                    "Candidate V1 Causal"
-                    if "V1" in candidate_version
-                    else "Candidate V2"
-                )
+                "Candidate V1" if "V1" in candidate_version else "Candidate V2"
             )
 
             render_candidate_research(
-                retests_df=(
-                    candidate_shared_retests_df
-                ),
-                candidate_version=(
-                    selected_candidate_label
-                ),
-                v1_short_config=(
-                    candidate_v1_config
-                ),
-                v1_long_config=(
-                    candidate_v1_long_config
-                ),
+                retests_df=candidate_shared_retests_df,
+                candidate_version=selected_candidate_label,
+                v1_short_config=candidate_v1_config,
+                v1_long_config=candidate_v1_long_config,
             )
 
-            if (
-                selected_candidate_label
-                == "Candidate V1 Legacy"
-            ):
+            if selected_candidate_label == "Candidate V1":
                 show_legacy_v1 = st.checkbox(
                     "Show legacy V1 frozen-monitor UI",
                     value=False,
                     key="reaction_lab_show_legacy_v1",
                     help=(
-                        "Optional original V1 monitor/inspector blocks. "
-                        "Candidate V1 Legacy above already uses the old V1 "
-                        "universe for execution/equity/selectors."
+                        "Compatibility view only. OFF by default because the "
+                        "unified Candidate Research engine above already exposes "
+                        "execution/equity/selectors without rendering duplicate "
+                        "heavy V1 monitor blocks."
                     ),
                 )
 
