@@ -289,6 +289,23 @@ CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE = (
 CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE = (
     BASE_DIR / "reports" / "candidate_v1_analysis" / "selected_cell_history.csv"
 )
+
+# Prospective, append-only evidence of EVERY 15m REACTION before the Legacy V1
+# Room/RSI filters are applied. One Event ID may have more than one snapshot if
+# its Legacy decision context changes while the REACTION remains visible.
+CANDIDATE_V1_LEGACY_PREFILTER_LEDGER_FILE = (
+    BASE_DIR
+    / "reports"
+    / "candidate_v1_analysis"
+    / "legacy_prefilter_decision_ledger.csv"
+)
+CANDIDATE_V1_LEGACY_PREFILTER_LATEST_FILE = (
+    BASE_DIR
+    / "reports"
+    / "candidate_v1_analysis"
+    / "legacy_prefilter_latest.csv"
+)
+
 CANDIDATE_V2_STRENGTH_THRESHOLDS = (
     0.00, 0.25, 0.50, 0.75, 1.00, 1.50,
 )
@@ -16928,6 +16945,366 @@ def _candidate_v1_build_reaction_control_source(retests_df):
         default="CANDIDATE_V1_DRIVER",
     )
     return contextual.reset_index(drop=True)
+
+
+def _candidate_v1_legacy_prefilter_json_value(value):
+    """Normalize numpy/pandas values before hashing one Legacy decision snapshot."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _candidate_v1_legacy_prefilter_fingerprint(row):
+    """Fingerprint only the evidence that can change the Legacy V1 decision."""
+    fields = [
+        "retest_close",
+        "rsi14_1m",
+        "rsi14_5m",
+        "rsi14_15m",
+        "rsi14_1h",
+        "aligned_rsi_extreme_1m",
+        "aligned_rsi_extreme_5m",
+        "aligned_rsi_extreme_15m",
+        "aligned_rsi_extreme_1h",
+        "aligned_rsi_extreme_count",
+        "same_swing_dist_30m_pct",
+        "same_swing_dist_1h_pct",
+        "same_swing_dist_4h_pct",
+        "opposing_room_30m_pct",
+        "opposing_room_1h_pct",
+        "opposing_room_4h_pct",
+        "nearest_opposing_room_pct",
+        "nearest_opposing_swing_tf",
+        "nearest_opposing_swing_price",
+        "nearest_opposing_swing_pivot_timestamp",
+        "nearest_opposing_swing_confirmed_timestamp",
+        "nearest_opposing_swing_actionable_timestamp",
+        "htf_confluence_count_0_50",
+        "nearest_htf_same_swing_pct",
+        "nearest_htf_same_swing_tf",
+    ]
+    payload = {
+        field: _candidate_v1_legacy_prefilter_json_value(
+            row.get(field)
+        )
+        for field in fields
+    }
+    return hashlib.sha1(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+
+
+def _candidate_v1_legacy_thresholds_for_side(side, short_config, long_config):
+    side = str(side or "").upper()
+    config = long_config if side == "LONG" else short_config
+    config = config if isinstance(config, dict) else {}
+    return (
+        float(config.get("opposing_htf_room_min_pct", 1.0)),
+        int(config.get("aligned_rsi_min_tf", 1)),
+    )
+
+
+def _candidate_v1_persist_legacy_prefilter_ledger(
+    retests_df,
+    short_config=None,
+    long_config=None,
+):
+    """Persist every Legacy V1 pre-filter REACTION decision snapshot.
+
+    This is observational only: it does not alter Candidate V1 or Candidate V2
+    membership. The raw Room/RSI/context values are persisted first; PASS/REJECT
+    columns are convenience labels that can be recomputed manually later.
+    """
+    current = _candidate_v1_build_reaction_control_source(retests_df)
+    if current is None or current.empty:
+        return {
+            "current": pd.DataFrame(),
+            "fresh": pd.DataFrame(),
+            "history": pd.DataFrame(),
+            "latest": pd.DataFrame(),
+        }
+
+    current = current.copy()
+    evaluated_at = pd.Timestamp.now(tz="UTC")
+    evaluated_at_ms = int(evaluated_at.timestamp() * 1000)
+
+    current["legacy_v1_evaluated_at_utc"] = evaluated_at.isoformat()
+    current["legacy_v1_evaluated_at_ms"] = evaluated_at_ms
+
+    room_thresholds = []
+    rsi_thresholds = []
+    for side in current.get(
+        "signal",
+        pd.Series("", index=current.index),
+    ):
+        room_min, rsi_min = _candidate_v1_legacy_thresholds_for_side(
+            side,
+            short_config,
+            long_config,
+        )
+        room_thresholds.append(room_min)
+        rsi_thresholds.append(rsi_min)
+
+    current["legacy_v1_room_threshold_pct"] = room_thresholds
+    current["legacy_v1_rsi_min_tf"] = rsi_thresholds
+
+    room = pd.to_numeric(
+        current.get(
+            "nearest_opposing_room_pct",
+            pd.Series(np.nan, index=current.index),
+        ),
+        errors="coerce",
+    )
+    rsi_count = pd.to_numeric(
+        current.get(
+            "aligned_rsi_extreme_count",
+            pd.Series(np.nan, index=current.index),
+        ),
+        errors="coerce",
+    )
+
+    current["legacy_v1_room_pass"] = room.ge(
+        pd.to_numeric(
+            current["legacy_v1_room_threshold_pct"],
+            errors="coerce",
+        )
+    )
+    current["legacy_v1_rsi_pass"] = rsi_count.ge(
+        pd.to_numeric(
+            current["legacy_v1_rsi_min_tf"],
+            errors="coerce",
+        )
+    )
+    current["legacy_v1_accept"] = (
+        current["legacy_v1_room_pass"].fillna(False).astype(bool)
+        & current["legacy_v1_rsi_pass"].fillna(False).astype(bool)
+    )
+    current["legacy_v1_decision"] = np.select(
+        [
+            current["legacy_v1_accept"],
+            ~current["legacy_v1_room_pass"]
+            & ~current["legacy_v1_rsi_pass"],
+            ~current["legacy_v1_room_pass"],
+            ~current["legacy_v1_rsi_pass"],
+        ],
+        [
+            "ACCEPT",
+            "REJECT_ROOM+RSI",
+            "REJECT_ROOM",
+            "REJECT_RSI",
+        ],
+        default="UNKNOWN",
+    )
+
+    current["legacy_v1_context_fingerprint"] = current.apply(
+        _candidate_v1_legacy_prefilter_fingerprint,
+        axis=1,
+    )
+    current["legacy_v1_snapshot_key"] = (
+        current["candidate_v1_event_key"].astype(str)
+        + "|"
+        + current["legacy_v1_context_fingerprint"].astype(str)
+    )
+
+    ledger_path = Path(CANDIDATE_V1_LEGACY_PREFILTER_LEDGER_FILE)
+    latest_path = Path(CANDIDATE_V1_LEGACY_PREFILTER_LATEST_FILE)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = pd.DataFrame()
+    try:
+        if ledger_path.exists():
+            existing = pd.read_csv(ledger_path, low_memory=False)
+    except Exception:
+        existing = pd.DataFrame()
+
+    existing_keys = set()
+    if (
+        existing is not None
+        and not existing.empty
+        and "legacy_v1_snapshot_key" in existing.columns
+    ):
+        existing_keys = set(
+            existing["legacy_v1_snapshot_key"]
+            .dropna()
+            .astype(str)
+            .tolist()
+        )
+
+    fresh = current.loc[
+        ~current["legacy_v1_snapshot_key"]
+        .astype(str)
+        .isin(existing_keys)
+    ].copy()
+
+    history = (
+        pd.concat(
+            [existing, fresh],
+            ignore_index=True,
+            sort=False,
+        )
+        if not existing.empty or not fresh.empty
+        else pd.DataFrame()
+    )
+
+    if not history.empty:
+        history = (
+            history.drop_duplicates(
+                subset=["legacy_v1_snapshot_key"],
+                keep="first",
+            )
+            .sort_values(
+                [
+                    column
+                    for column in [
+                        "legacy_v1_evaluated_at_ms",
+                        "retest_timestamp",
+                        "symbol",
+                    ]
+                    if column in history.columns
+                ],
+                kind="stable",
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
+
+        tmp = ledger_path.with_suffix(".csv.tmp")
+        history.to_csv(tmp, index=False)
+        tmp.replace(ledger_path)
+
+        latest = (
+            history.sort_values(
+                ["legacy_v1_evaluated_at_ms"],
+                kind="stable",
+                na_position="last",
+            )
+            .drop_duplicates(
+                subset=["candidate_v1_event_key"],
+                keep="last",
+            )
+            .reset_index(drop=True)
+        )
+        tmp_latest = latest_path.with_suffix(".csv.tmp")
+        latest.to_csv(tmp_latest, index=False)
+        tmp_latest.replace(latest_path)
+    else:
+        latest = pd.DataFrame()
+
+    return {
+        "current": current.reset_index(drop=True),
+        "fresh": fresh.reset_index(drop=True),
+        "history": history.reset_index(drop=True),
+        "latest": latest.reset_index(drop=True),
+    }
+
+
+def render_candidate_v1_legacy_prefilter_ledger_status(ledger_result):
+    """Small audit panel for the prospective Legacy V1 pre-filter ledger."""
+    ledger_result = (
+        ledger_result
+        if isinstance(ledger_result, dict)
+        else {}
+    )
+    history = ledger_result.get("history", pd.DataFrame())
+    latest = ledger_result.get("latest", pd.DataFrame())
+    fresh = ledger_result.get("fresh", pd.DataFrame())
+
+    st.markdown("#### 🧾 Legacy V1 · pre-filter Decision Ledger")
+    st.caption(
+        "Prospective evidence only. Every 15m REACTION is stored BEFORE the "
+        "Legacy Room/RSI filters. Repeated identical contexts are deduplicated; "
+        "a new row is written only when the decision evidence changes."
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("REACTION IDs", (
+        int(latest["candidate_v1_event_key"].nunique())
+        if not latest.empty and "candidate_v1_event_key" in latest.columns
+        else 0
+    ))
+    c2.metric("Decision snapshots", int(len(history)))
+    c3.metric("New this refresh", int(len(fresh)))
+    c4.metric("Latest ACCEPT", (
+        int(latest.get(
+            "legacy_v1_accept",
+            pd.Series(False, index=latest.index),
+        ).fillna(False).astype(bool).sum())
+        if not latest.empty
+        else 0
+    ))
+    c5.metric("Latest REJECT", (
+        int((~latest.get(
+            "legacy_v1_accept",
+            pd.Series(False, index=latest.index),
+        ).fillna(False).astype(bool)).sum())
+        if not latest.empty
+        else 0
+    ))
+
+    st.caption(
+        "Files: "
+        f"`{CANDIDATE_V1_LEGACY_PREFILTER_LEDGER_FILE}` · "
+        f"latest view: `{CANDIDATE_V1_LEGACY_PREFILTER_LATEST_FILE}`"
+    )
+
+    if not latest.empty:
+        display_columns = [
+            "legacy_v1_evaluated_at_utc",
+            "symbol",
+            "signal",
+            "retest_timestamp",
+            "nearest_opposing_room_pct",
+            "aligned_rsi_extreme_count",
+            "legacy_v1_room_pass",
+            "legacy_v1_rsi_pass",
+            "legacy_v1_decision",
+            "rsi14_1m",
+            "rsi14_5m",
+            "rsi14_15m",
+            "rsi14_1h",
+            "opposing_room_30m_pct",
+            "opposing_room_1h_pct",
+            "opposing_room_4h_pct",
+        ]
+        display_columns = [
+            column
+            for column in display_columns
+            if column in latest.columns
+        ]
+        with st.expander(
+            "Inspect latest pre-filter REACTION decisions",
+            expanded=False,
+        ):
+            st.dataframe(
+                latest[display_columns]
+                .sort_values(
+                    "legacy_v1_evaluated_at_utc",
+                    ascending=False,
+                    kind="stable",
+                )
+                .head(500),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def _candidate_v1_selected_execution_cost(selected_paths):
@@ -76018,21 +76395,30 @@ if selected_section == "reaction_swing_lab":
                     max_retest_age_minutes=4320,
                 )
 
-            render_candidate_v1_v2_fixed_benchmark(
-                retests_df=candidate_shared_retests_df,
-                v1_short_config=candidate_v1_config,
-                v1_long_config=candidate_v1_long_config,
+            legacy_prefilter_ledger = (
+                _candidate_v1_persist_legacy_prefilter_ledger(
+                    candidate_shared_retests_df,
+                    short_config=candidate_v1_config,
+                    long_config=candidate_v1_long_config,
+                )
+            )
+
+            render_candidate_v1_legacy_prefilter_ledger_status(
+                legacy_prefilter_ledger
+            )
+
+            st.caption(
+                "Historical Legacy reconstruction is intentionally not rendered. "
+                "From this version forward, the dashboard records the actual "
+                "pre-filter Legacy decision evidence prospectively instead."
             )
 
             st.divider()
 
-            render_candidate_v1_legacy_historical_reconstructor(
-                v1_short_config=(
-                    candidate_v1_config
-                ),
-                v1_long_config=(
-                    candidate_v1_long_config
-                ),
+            render_candidate_v1_v2_fixed_benchmark(
+                retests_df=candidate_shared_retests_df,
+                v1_short_config=candidate_v1_config,
+                v1_long_config=candidate_v1_long_config,
             )
 
             st.divider()
