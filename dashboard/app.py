@@ -19382,6 +19382,15 @@ def render_candidate_v1_v2_fixed_benchmark(
         "TP/SL/180m execution. B answers what survives after exactly the same "
         "Room → Strength, one-slot, x3, 80% equity portfolio."
     )
+    st.info(
+        "**Why V1 is smaller:** V1 is not stale by design. On each refresh it "
+        "rebuilds the currently visible SHORT/LONG candidates and appends new "
+        "qualifying Event IDs to its persisted history as FORWARD. But V1 only "
+        "admits 15m REACTIONs with **causal opposing HTF Room >= 1.00%** and "
+        "**>=1 aligned RSI-extreme timeframe**. V2 persists every causal 15m "
+        "REACTION first and applies Strength/Flow later as variants. Therefore "
+        "V1 is expected to contain materially fewer trades."
+    )
 
     with st.expander(
         "Benchmark definition",
@@ -20439,6 +20448,422 @@ def render_candidate_v1_v2_fixed_benchmark(
                                 )
                             )
 
+                        # --------------------------------------------------
+                        # D · Matched observation window
+                        #
+                        # Purpose:
+                        # Remove the easiest cohort-age bias from the V1/V2
+                        # comparison. Both Candidates are restricted to:
+                        #   - resolved 180m outcomes only
+                        #   - the overlapping entry-time interval
+                        #   - symbols observed in BOTH Candidates in that interval
+                        #   - sides observed in BOTH Candidates in that interval
+                        #
+                        # This is not one-to-one event matching (that would erase
+                        # the Candidate-definition difference). It is a matched
+                        # market-observation window.
+                        # --------------------------------------------------
+                        def _matched_resolved_base(execution):
+                            if execution is None or execution.empty:
+                                return pd.DataFrame()
+
+                            work = execution.copy()
+
+                            entry_ts = pd.to_numeric(
+                                work.get(
+                                    "entry_timestamp",
+                                    work.get(
+                                        "candidate_v1_reaction_known_ts",
+                                        pd.Series(
+                                            np.nan,
+                                            index=work.index,
+                                        ),
+                                    ),
+                                ),
+                                errors="coerce",
+                            )
+                            work["_matched_entry_ts"] = entry_ts
+
+                            outcome = (
+                                work.get(
+                                    "Outcome",
+                                    pd.Series(
+                                        "PENDING",
+                                        index=work.index,
+                                    ),
+                                )
+                                .fillna("PENDING")
+                                .astype(str)
+                                .str.upper()
+                            )
+
+                            work = work.loc[
+                                entry_ts.notna()
+                                & outcome.ne("PENDING")
+                            ].copy()
+
+                            if "symbol" in work.columns:
+                                work["symbol"] = (
+                                    work["symbol"]
+                                    .fillna("")
+                                    .astype(str)
+                                    .str.upper()
+                                )
+
+                            if "side" in work.columns:
+                                work["side"] = (
+                                    work["side"]
+                                    .fillna("")
+                                    .astype(str)
+                                    .str.upper()
+                                )
+                            else:
+                                work["side"] = (
+                                    work.get(
+                                        "signal",
+                                        pd.Series(
+                                            "",
+                                            index=work.index,
+                                        ),
+                                    )
+                                    .fillna("")
+                                    .astype(str)
+                                    .str.upper()
+                                )
+
+                            return work
+
+                        v1_match_base = _matched_resolved_base(
+                            v1_exec
+                        )
+                        v2_match_base = _matched_resolved_base(
+                            v2_exec
+                        )
+
+                        matched_meta = {}
+                        v1_matched_exec = pd.DataFrame()
+                        v2_matched_exec = pd.DataFrame()
+                        v1_matched_variant_leaderboard = (
+                            pd.DataFrame()
+                        )
+                        v2_matched_variant_leaderboard = (
+                            pd.DataFrame()
+                        )
+                        matched_combined_variant_leaderboard = (
+                            pd.DataFrame()
+                        )
+
+                        if (
+                            not v1_match_base.empty
+                            and not v2_match_base.empty
+                        ):
+                            common_start_ts = int(
+                                max(
+                                    pd.to_numeric(
+                                        v1_match_base[
+                                            "_matched_entry_ts"
+                                        ],
+                                        errors="coerce",
+                                    ).min(),
+                                    pd.to_numeric(
+                                        v2_match_base[
+                                            "_matched_entry_ts"
+                                        ],
+                                        errors="coerce",
+                                    ).min(),
+                                )
+                            )
+                            common_end_ts = int(
+                                min(
+                                    pd.to_numeric(
+                                        v1_match_base[
+                                            "_matched_entry_ts"
+                                        ],
+                                        errors="coerce",
+                                    ).max(),
+                                    pd.to_numeric(
+                                        v2_match_base[
+                                            "_matched_entry_ts"
+                                        ],
+                                        errors="coerce",
+                                    ).max(),
+                                )
+                            )
+
+                            if (
+                                common_end_ts
+                                >= common_start_ts
+                            ):
+                                v1_window = (
+                                    v1_match_base.loc[
+                                        v1_match_base[
+                                            "_matched_entry_ts"
+                                        ].between(
+                                            common_start_ts,
+                                            common_end_ts,
+                                            inclusive="both",
+                                        )
+                                    ].copy()
+                                )
+                                v2_window = (
+                                    v2_match_base.loc[
+                                        v2_match_base[
+                                            "_matched_entry_ts"
+                                        ].between(
+                                            common_start_ts,
+                                            common_end_ts,
+                                            inclusive="both",
+                                        )
+                                    ].copy()
+                                )
+
+                                common_symbols = (
+                                    set(
+                                        v1_window[
+                                            "symbol"
+                                        ]
+                                        .fillna("")
+                                        .astype(str)
+                                    )
+                                    & set(
+                                        v2_window[
+                                            "symbol"
+                                        ]
+                                        .fillna("")
+                                        .astype(str)
+                                    )
+                                )
+                                common_symbols.discard("")
+
+                                common_sides = (
+                                    set(
+                                        v1_window[
+                                            "side"
+                                        ]
+                                        .fillna("")
+                                        .astype(str)
+                                    )
+                                    & set(
+                                        v2_window[
+                                            "side"
+                                        ]
+                                        .fillna("")
+                                        .astype(str)
+                                    )
+                                )
+                                common_sides.discard("")
+
+                                v1_matched_exec = (
+                                    v1_window.loc[
+                                        v1_window[
+                                            "symbol"
+                                        ].isin(
+                                            common_symbols
+                                        )
+                                        & v1_window[
+                                            "side"
+                                        ].isin(
+                                            common_sides
+                                        )
+                                    ].copy()
+                                )
+                                v2_matched_exec = (
+                                    v2_window.loc[
+                                        v2_window[
+                                            "symbol"
+                                        ].isin(
+                                            common_symbols
+                                        )
+                                        & v2_window[
+                                            "side"
+                                        ].isin(
+                                            common_sides
+                                        )
+                                    ].copy()
+                                )
+
+                                v1_matched_keys = set(
+                                    v1_matched_exec[
+                                        "candidate_v1_event_key"
+                                    ]
+                                    .fillna("")
+                                    .astype(str)
+                                    .loc[
+                                        lambda s: s.ne("")
+                                    ]
+                                    .tolist()
+                                )
+                                v2_matched_keys = set(
+                                    v2_matched_exec[
+                                        "candidate_v1_event_key"
+                                    ]
+                                    .fillna("")
+                                    .astype(str)
+                                    .loc[
+                                        lambda s: s.ne("")
+                                    ]
+                                    .tolist()
+                                )
+
+                                matched_meta = {
+                                    "start_ts": (
+                                        common_start_ts
+                                    ),
+                                    "end_ts": (
+                                        common_end_ts
+                                    ),
+                                    "common_symbols_n": int(
+                                        len(
+                                            common_symbols
+                                        )
+                                    ),
+                                    "common_sides": ", ".join(
+                                        sorted(
+                                            common_sides
+                                        )
+                                    ),
+                                    "v1_resolved_n": int(
+                                        v1_matched_exec[
+                                            "candidate_v1_event_key"
+                                        ]
+                                        .fillna("")
+                                        .astype(str)
+                                        .nunique()
+                                    ),
+                                    "v2_resolved_n": int(
+                                        v2_matched_exec[
+                                            "candidate_v1_event_key"
+                                        ]
+                                        .fillna("")
+                                        .astype(str)
+                                        .nunique()
+                                    ),
+                                    "event_intersection_n": int(
+                                        len(
+                                            v1_matched_keys
+                                            & v2_matched_keys
+                                        )
+                                    ),
+                                    "v1_only_event_n": int(
+                                        len(
+                                            v1_matched_keys
+                                            - v2_matched_keys
+                                        )
+                                    ),
+                                    "v2_only_event_n": int(
+                                        len(
+                                            v2_matched_keys
+                                            - v1_matched_keys
+                                        )
+                                    ),
+                                    "v1_events_present_in_v2_pct": (
+                                        float(
+                                            len(
+                                                v1_matched_keys
+                                                & v2_matched_keys
+                                            )
+                                            / len(
+                                                v1_matched_keys
+                                            )
+                                            * 100.0
+                                        )
+                                        if v1_matched_keys
+                                        else np.nan
+                                    ),
+                                }
+
+                                if (
+                                    not v1_matched_exec.empty
+                                ):
+                                    v1_matched_variant_leaderboard = (
+                                        build_variant_leaderboard(
+                                            v1_matched_exec,
+                                            v1_benchmark_variants,
+                                            "Candidate V1",
+                                        )
+                                    )
+
+                                if (
+                                    not v2_matched_exec.empty
+                                ):
+                                    v2_matched_variant_leaderboard = (
+                                        build_variant_leaderboard(
+                                            v2_matched_exec,
+                                            v2_benchmark_variants,
+                                            "Candidate V2",
+                                        )
+                                    )
+
+                                matched_frames = [
+                                    frame
+                                    for frame in [
+                                        v1_matched_variant_leaderboard,
+                                        v2_matched_variant_leaderboard,
+                                    ]
+                                    if (
+                                        frame is not None
+                                        and not frame.empty
+                                    )
+                                ]
+
+                                if matched_frames:
+                                    matched_combined_variant_leaderboard = (
+                                        pd.concat(
+                                            matched_frames,
+                                            ignore_index=True,
+                                            sort=False,
+                                        )
+                                    )
+
+                                    matched_combined_variant_leaderboard[
+                                        "Matched Universe NET rank"
+                                    ] = (
+                                        pd.to_numeric(
+                                            matched_combined_variant_leaderboard[
+                                                "Universe NET pts"
+                                            ],
+                                            errors="coerce",
+                                        )
+                                        .rank(
+                                            method="min",
+                                            ascending=False,
+                                        )
+                                        .astype(
+                                            "Int64"
+                                        )
+                                    )
+                                    matched_combined_variant_leaderboard[
+                                        "Matched Portfolio NET rank"
+                                    ] = (
+                                        pd.to_numeric(
+                                            matched_combined_variant_leaderboard[
+                                                "Portfolio NET pts"
+                                            ],
+                                            errors="coerce",
+                                        )
+                                        .rank(
+                                            method="min",
+                                            ascending=False,
+                                        )
+                                        .astype(
+                                            "Int64"
+                                        )
+                                    )
+
+                                    matched_combined_variant_leaderboard = (
+                                        matched_combined_variant_leaderboard
+                                        .sort_values(
+                                            [
+                                                "Matched Universe NET rank",
+                                                "Matched Portfolio NET rank",
+                                            ],
+                                            kind="stable",
+                                        )
+                                        .reset_index(
+                                            drop=True
+                                        )
+                                    )
+
                         def accepted_keys(
                             portfolio,
                         ):
@@ -20623,6 +21048,18 @@ def render_candidate_v1_v2_fixed_benchmark(
                                 combined_variant_leaderboard
                             ),
                             "variant_strong_threshold_pct": 0.50,
+                            "matched_meta": (
+                                matched_meta
+                            ),
+                            "v1_matched_variant_leaderboard": (
+                                v1_matched_variant_leaderboard
+                            ),
+                            "v2_matched_variant_leaderboard": (
+                                v2_matched_variant_leaderboard
+                            ),
+                            "matched_combined_variant_leaderboard": (
+                                matched_combined_variant_leaderboard
+                            ),
                             "overlap": {
                                 "V1 ∩ V2": int(
                                     len(
@@ -21209,6 +21646,276 @@ def render_candidate_v1_v2_fixed_benchmark(
                 ),
             )
 
+    # ======================================================
+    # D · Matched V1 vs V2
+    # ======================================================
+    st.markdown(
+        "#### D. MATCHED WINDOW · V1 vs V2 without cohort-age advantage"
+    )
+    st.caption(
+        "Both Candidates are restricted to the same overlapping observation "
+        "window, only 180m-resolved trades, symbols present in BOTH Candidates, "
+        "and sides present in BOTH Candidates. We intentionally do **not** force "
+        "the same Event IDs: doing that would erase the actual V1-vs-V2 "
+        "candidate-definition difference."
+    )
+
+    matched_meta = cached.get(
+        "matched_meta",
+        {},
+    )
+    v1_matched_variant_leaderboard = cached.get(
+        "v1_matched_variant_leaderboard",
+        pd.DataFrame(),
+    )
+    v2_matched_variant_leaderboard = cached.get(
+        "v2_matched_variant_leaderboard",
+        pd.DataFrame(),
+    )
+    matched_combined_variant_leaderboard = cached.get(
+        "matched_combined_variant_leaderboard",
+        pd.DataFrame(),
+    )
+
+    if (
+        not matched_meta
+        or matched_combined_variant_leaderboard is None
+        or matched_combined_variant_leaderboard.empty
+    ):
+        st.info(
+            "No matched-window comparison is available in this benchmark "
+            "snapshot yet. Run / refresh the benchmark."
+        )
+    else:
+        matched_start = pd.to_datetime(
+            matched_meta.get(
+                "start_ts",
+                np.nan,
+            ),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        matched_end = pd.to_datetime(
+            matched_meta.get(
+                "end_ts",
+                np.nan,
+            ),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+
+        if pd.notna(matched_start) and pd.notna(matched_end):
+            st.caption(
+                "Matched observation interval: "
+                f"**{matched_start.tz_convert(TZ).strftime('%Y-%m-%d %H:%M')}** "
+                "→ "
+                f"**{matched_end.tz_convert(TZ).strftime('%Y-%m-%d %H:%M')}** "
+                f"({TZ})"
+            )
+
+        mm1, mm2, mm3, mm4 = st.columns(4)
+        mm1.metric(
+            "Common symbols",
+            int(
+                matched_meta.get(
+                    "common_symbols_n",
+                    0,
+                )
+            ),
+        )
+        mm2.metric(
+            "Common sides",
+            str(
+                matched_meta.get(
+                    "common_sides",
+                    "—",
+                )
+                or "—"
+            ),
+        )
+        mm3.metric(
+            "V1 resolved",
+            int(
+                matched_meta.get(
+                    "v1_resolved_n",
+                    0,
+                )
+            ),
+        )
+        mm4.metric(
+            "V2 resolved",
+            int(
+                matched_meta.get(
+                    "v2_resolved_n",
+                    0,
+                )
+            ),
+        )
+
+        mi1, mi2, mi3, mi4 = st.columns(4)
+        mi1.metric(
+            "Same Event IDs",
+            int(
+                matched_meta.get(
+                    "event_intersection_n",
+                    0,
+                )
+            ),
+        )
+        mi2.metric(
+            "V1-only Event IDs",
+            int(
+                matched_meta.get(
+                    "v1_only_event_n",
+                    0,
+                )
+            ),
+        )
+        mi3.metric(
+            "V2-only Event IDs",
+            int(
+                matched_meta.get(
+                    "v2_only_event_n",
+                    0,
+                )
+            ),
+        )
+        matched_v1_coverage = pd.to_numeric(
+            pd.Series([
+                matched_meta.get(
+                    "v1_events_present_in_v2_pct",
+                    np.nan,
+                )
+            ]),
+            errors="coerce",
+        ).iloc[0]
+        mi4.metric(
+            "V1 IDs present in V2",
+            (
+                f"{float(matched_v1_coverage):.1f}%"
+                if pd.notna(
+                    matched_v1_coverage
+                )
+                else "—"
+            ),
+            help=(
+                "Useful audit: if materially below 100%, some persisted V1 "
+                "events are absent from the V2 history even inside the common "
+                "window. That points to historical-source/freeze coverage, not "
+                "to the V1 qualification rule itself."
+            ),
+        )
+
+        matched_tab_v1, matched_tab_v2, matched_tab_all = (
+            st.tabs(
+                [
+                    "🧊 Matched V1 variants",
+                    "🧪 Matched V2 variants",
+                    "🏆 Matched all variants",
+                ]
+            )
+        )
+
+        with matched_tab_v1:
+            render_variant_table(
+                v1_matched_variant_leaderboard,
+                "candidate_v1_matched_variant_leaderboard",
+            )
+
+        with matched_tab_v2:
+            render_variant_table(
+                v2_matched_variant_leaderboard,
+                "candidate_v2_matched_variant_leaderboard",
+            )
+
+        with matched_tab_all:
+            matched_preferred = [
+                "Matched Universe NET rank",
+                "Matched Portfolio NET rank",
+                "Candidate",
+                "Execution matrix variant",
+                "Coverage %",
+                "Resolved",
+                "TP",
+                "SL",
+                "TIME_EXIT",
+                "Universe NET pts",
+                "Universe Avg %",
+                "Universe PF",
+                "Universe WR %",
+                "Portfolio accepted",
+                "Portfolio NET pts",
+                "Final equity $",
+                "Return %",
+                "Max DD %",
+                "Portfolio PF",
+            ]
+            matched_cols = [
+                column
+                for column in matched_preferred
+                if column
+                in matched_combined_variant_leaderboard.columns
+            ]
+
+            st.dataframe(
+                matched_combined_variant_leaderboard[
+                    matched_cols
+                ].copy(),
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_matched_all_variant_leaderboard"
+                ),
+            )
+
+            matched_best_raw = (
+                matched_combined_variant_leaderboard
+                .sort_values(
+                    "Matched Universe NET rank",
+                    kind="stable",
+                )
+                .iloc[0]
+            )
+            matched_best_portfolio = (
+                matched_combined_variant_leaderboard
+                .sort_values(
+                    "Matched Portfolio NET rank",
+                    kind="stable",
+                )
+                .iloc[0]
+            )
+
+            mb1, mb2 = st.columns(2)
+            mb1.metric(
+                "🏆 Matched best raw NET",
+                (
+                    f"{matched_best_raw.get('Candidate', '')} · "
+                    f"{matched_best_raw.get('Execution matrix variant', '')}"
+                ),
+                (
+                    f"{float(matched_best_raw.get('Universe NET pts', 0.0)):+.4f} pts"
+                ),
+            )
+            mb2.metric(
+                "🏆 Matched best portfolio NET",
+                (
+                    f"{matched_best_portfolio.get('Candidate', '')} · "
+                    f"{matched_best_portfolio.get('Execution matrix variant', '')}"
+                ),
+                (
+                    f"{float(matched_best_portfolio.get('Portfolio NET pts', 0.0)):+.4f} pts"
+                ),
+            )
+
+        st.caption(
+            "Interpretation: if V1 still wins here, the result is much less "
+            "likely to be explained merely by V1 having an older/different "
+            "historical window. If the advantage disappears, cohort timing was "
+            "doing a meaningful part of the work."
+        )
+
     export_sections = []
     if (
         universe_table is not None
@@ -21260,6 +21967,39 @@ def render_candidate_v1_v2_fixed_benchmark(
         export_sections.append(
             "C_ALL_VARIANTS_COMBINED\n"
             + combined_variant_leaderboard.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        v1_matched_variant_leaderboard is not None
+        and not v1_matched_variant_leaderboard.empty
+    ):
+        export_sections.append(
+            "D_MATCHED_V1_VARIANTS\n"
+            + v1_matched_variant_leaderboard.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        v2_matched_variant_leaderboard is not None
+        and not v2_matched_variant_leaderboard.empty
+    ):
+        export_sections.append(
+            "D_MATCHED_V2_VARIANTS\n"
+            + v2_matched_variant_leaderboard.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        matched_combined_variant_leaderboard is not None
+        and not matched_combined_variant_leaderboard.empty
+    ):
+        export_sections.append(
+            "D_MATCHED_ALL_VARIANTS\n"
+            + matched_combined_variant_leaderboard.to_csv(
                 index=False
             )
         )
