@@ -28793,14 +28793,14 @@ def _lh_fidelity_run_id(
     start_ms,
     end_ms,
     symbols,
-    reference_v2,
+    reference_v2=None,
 ):
-    keys = sorted(
-        _lh_fidelity_event_key_set(
-            reference_v2
-        )
-    )
+    """Stable fidelity run id.
 
+    Do not include the live/persisted Candidate Event-ID set in the hash.
+    Candidate history can grow while the audit runs; the reference is frozen
+    once inside the run directory instead.
+    """
     payload = {
         "start_ms": int(
             start_ms
@@ -28809,16 +28809,8 @@ def _lh_fidelity_run_id(
             end_ms
         ),
         "symbols": sorted(
-            symbols
-        ),
-        "reference_v2_sha1": (
-            hashlib.sha1(
-                "\n".join(
-                    keys
-                ).encode(
-                    "utf-8"
-                )
-            ).hexdigest()
+            str(symbol).upper()
+            for symbol in symbols
         ),
         "detector": "15m_3x3",
         "room_warmup_days": 120,
@@ -28830,6 +28822,9 @@ def _lh_fidelity_run_id(
         ),
         "context_reconstruction_version": (
             "native_tf_exact_limits_v2"
+        ),
+        "fidelity_run_id_version": (
+            "stable_reference_freeze_v1"
         ),
     }
 
@@ -29209,6 +29204,30 @@ def render_candidate_historical_replay_fidelity_audit(
         )
     )
 
+    # Once an audit starts, pin comparisons to the frozen Candidate snapshot.
+    frozen_reference_v2 = _lh_fidelity_read_csv(
+        paths[
+            "reference_v2"
+        ]
+    )
+    frozen_reference_v1 = _lh_fidelity_read_csv(
+        paths[
+            "reference_v1"
+        ]
+    )
+
+    if (
+        frozen_reference_v2 is not None
+        and not frozen_reference_v2.empty
+    ):
+        current_v2_raw = frozen_reference_v2.copy()
+
+    if (
+        frozen_reference_v1 is not None
+        and not frozen_reference_v1.empty
+    ):
+        current_v1_raw = frozen_reference_v1.copy()
+
     state = _lh_load_json(
         paths[
             "state"
@@ -29219,6 +29238,15 @@ def render_candidate_historical_replay_fidelity_audit(
             "errors": {},
         },
     )
+
+    if paths[
+        "reference_v2"
+    ].exists():
+        st.caption(
+            "🔒 Candidate reference frozen for this audit. "
+            "New persisted Candidate events will not change this Run ID "
+            "or reset progress."
+        )
 
     processed_symbols = set(
         str(
@@ -29344,6 +29372,28 @@ def render_candidate_historical_replay_fidelity_audit(
                 enriched_v2,
                 paths[
                     "reference_v2"
+                ],
+            )
+
+            state[
+                "reference_frozen_at_utc"
+            ] = pd.Timestamp.now(
+                tz="UTC"
+            ).isoformat()
+            state[
+                "reference_v2_event_count"
+            ] = int(
+                enriched_v2[
+                    "candidate_v1_event_key"
+                ]
+                .fillna("")
+                .astype(str)
+                .nunique()
+            )
+            _lh_atomic_json_write(
+                state,
+                paths[
+                    "state"
                 ],
             )
 
@@ -29602,6 +29652,24 @@ def render_candidate_historical_replay_fidelity_audit(
             "Candidate reference and begin reconstruction."
         )
         return
+
+    if (
+        len(
+            processed_symbols
+        )
+        >= len(
+            audit_symbols
+        )
+        and len(
+            audit_symbols
+        )
+        > 0
+    ):
+        st.success(
+            "✅ Fidelity audit COMPLETE for this frozen symbol sample. "
+            f"{len(processed_symbols)}/{len(audit_symbols)} symbols processed. "
+            "Results below remain pinned to the same frozen Candidate reference."
+        )
 
     processed_reference_v2 = (
         reference_v2.loc[
