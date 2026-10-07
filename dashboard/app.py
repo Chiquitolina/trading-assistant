@@ -271,6 +271,13 @@ CANDIDATE_V2_CONFIG_FILE = (
 CANDIDATE_V2_HISTORY_FILE = (
     BASE_DIR / "candidate_v2_monitor.csv"
 )
+# Canonical threshold-agnostic REACTION source shared by Candidate V1/V2.
+# Candidate V1 is now a deterministic mask over this same universe instead of
+# maintaining a second independently persisted candidate universe.
+CANDIDATE_CANONICAL_REACTION_LEDGER_FILE = (
+    BASE_DIR / "candidate_reaction_causal_ledger.csv"
+)
+CANDIDATE_CANONICAL_CONTEXT_VERSION = "canonical_shared_reaction_v1"
 CANDIDATE_V2_PATH_STORE_FILE = (
     BASE_DIR / "reports" / "candidate_v2_analysis" / "paths_1m.pkl"
 )
@@ -288,6 +295,12 @@ CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE = (
 )
 CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE = (
     BASE_DIR / "reports" / "candidate_v1_analysis" / "selected_cell_history.csv"
+)
+CANDIDATE_V1_CAUSAL_SELECTED_CELL_HISTORY_FILE = (
+    BASE_DIR
+    / "reports"
+    / "candidate_v1_causal_analysis"
+    / "selected_cell_history.csv"
 )
 CANDIDATE_V2_STRENGTH_THRESHOLDS = (
     0.00, 0.25, 0.50, 0.75, 1.00, 1.50,
@@ -19170,6 +19183,18 @@ def _candidate_analysis_profile_id(frame, fallback="v2"):
 
 
 def _candidate_analysis_path_store_file(frame=None, profile_id=None):
+    if (
+        frame is not None
+        and not frame.empty
+        and _candidate_canonical_bool_series(
+            frame,
+            "canonical_reaction_source",
+        ).any()
+    ):
+        # One REACTION identity -> one persisted 1m path store.
+        # Candidate V1 is a subset view and must not duplicate V2 path work.
+        return CANDIDATE_V2_PATH_STORE_FILE
+
     profile = (
         str(profile_id).lower()
         if profile_id is not None
@@ -19179,6 +19204,18 @@ def _candidate_analysis_path_store_file(frame=None, profile_id=None):
 
 
 def _candidate_analysis_market_context_file(frame=None, profile_id=None):
+    if (
+        frame is not None
+        and not frame.empty
+        and _candidate_canonical_bool_series(
+            frame,
+            "canonical_reaction_source",
+        ).any()
+    ):
+        # Market context is attached once to the shared canonical REACTION
+        # universe; V1/V2 consume the same causal market snapshot.
+        return CANDIDATE_V2_MARKET_CONTEXT_FILE
+
     profile = (
         str(profile_id).lower()
         if profile_id is not None
@@ -19191,11 +19228,31 @@ def _candidate_analysis_market_context_file(frame=None, profile_id=None):
     )
 
 
-def _candidate_analysis_selected_cell_history_file(profile_id):
+def _candidate_analysis_selected_cell_history_file(
+    profile_id,
+    candidate_mode=None,
+):
+    mode = str(
+        candidate_mode
+        or profile_id
+        or ""
+    ).lower()
+
+    if mode == "v1_causal":
+        return (
+            CANDIDATE_V1_CAUSAL_SELECTED_CELL_HISTORY_FILE
+        )
+
+    if mode in {
+        "v1",
+        "v1_legacy",
+    }:
+        return (
+            CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE
+        )
+
     return (
-        CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE
-        if str(profile_id).lower() == "v1"
-        else CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
+        CANDIDATE_V2_SELECTED_CELL_HISTORY_FILE
     )
 
 
@@ -19362,6 +19419,979 @@ def _candidate_v1_unified_research_history(retests_df, short_config, long_config
     return history
 
 
+_CANDIDATE_CANONICAL_CONTEXT_FIELDS = [
+    # RSI / V1 driver fields
+    "rsi14_1m",
+    "rsi14_5m",
+    "rsi14_15m",
+    "rsi14_1h",
+    "aligned_rsi_extreme_1m",
+    "aligned_rsi_extreme_5m",
+    "aligned_rsi_extreme_15m",
+    "aligned_rsi_extreme_1h",
+    "aligned_rsi_extreme_count",
+    "rel_volume_5m",
+    "rel_volume_15m",
+    "rel_volume_1h",
+    # HTF structural room
+    "same_swing_dist_30m_pct",
+    "same_swing_dist_1h_pct",
+    "same_swing_dist_4h_pct",
+    "opposing_room_30m_pct",
+    "opposing_room_1h_pct",
+    "opposing_room_4h_pct",
+    "opposing_swing_price_30m",
+    "opposing_swing_price_1h",
+    "opposing_swing_price_4h",
+    "opposing_swing_pivot_timestamp_30m",
+    "opposing_swing_pivot_timestamp_1h",
+    "opposing_swing_pivot_timestamp_4h",
+    "opposing_swing_confirmed_timestamp_30m",
+    "opposing_swing_confirmed_timestamp_1h",
+    "opposing_swing_confirmed_timestamp_4h",
+    "opposing_swing_actionable_timestamp_30m",
+    "opposing_swing_actionable_timestamp_1h",
+    "opposing_swing_actionable_timestamp_4h",
+    "htf_confluence_count_0_50",
+    "nearest_htf_same_swing_pct",
+    "nearest_htf_same_swing_tf",
+    "nearest_opposing_room_pct",
+    "nearest_opposing_swing_tf",
+    "nearest_opposing_swing_price",
+    "nearest_opposing_swing_pivot_timestamp",
+    "nearest_opposing_swing_confirmed_timestamp",
+    "nearest_opposing_swing_actionable_timestamp",
+    "run_driver_tags",
+]
+
+_CANDIDATE_CANONICAL_IDENTITY_FIELDS = [
+    "candidate_v1_event_key",
+    "candidate_v2_event_key",
+    "symbol",
+    "signal",
+    "side",
+    "timeframe",
+    "detector",
+    "status",
+    "pivot_timestamp",
+    "actionable_timestamp",
+    "departure_timestamp",
+    "retest_timestamp",
+    "candidate_v1_reaction_known_ts",
+    "pivot_price",
+    "swing_price",
+    "entry_price",
+    "departure_price",
+    "retest_price",
+    "retest_close",
+    "retest_distance_pct",
+    "pivot_to_confirmation_pct",
+    "pivot_to_retest_min",
+    "confirmed_to_retest_min",
+    "max_departure_pct",
+    "triggering_swing_count",
+]
+
+
+def _candidate_canonical_bool_series(frame, column):
+    if (
+        frame is None
+        or frame.empty
+        or column not in frame.columns
+    ):
+        return pd.Series(
+            False,
+            index=getattr(
+                frame,
+                "index",
+                None,
+            ),
+            dtype=bool,
+        )
+
+    raw = frame[
+        column
+    ]
+
+    if pd.api.types.is_bool_dtype(
+        raw
+    ):
+        return raw.fillna(
+            False
+        ).astype(
+            bool
+        )
+
+    return (
+        raw.fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin(
+            [
+                "true",
+                "1",
+                "yes",
+            ]
+        )
+    )
+
+
+def _candidate_canonical_driver_mask(frame):
+    """Candidate V1 Base = shared REACTION + Room>=1% + aligned RSI>=1."""
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return pd.Series(
+            False,
+            index=getattr(
+                frame,
+                "index",
+                None,
+            ),
+            dtype=bool,
+        )
+
+    room = pd.to_numeric(
+        frame.get(
+            "nearest_opposing_room_pct",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    rsi_count = pd.to_numeric(
+        frame.get(
+            "aligned_rsi_extreme_count",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    return (
+        room.ge(
+            1.0
+        )
+        & rsi_count.ge(
+            1
+        )
+    )
+
+
+def _candidate_canonical_reject_reason(frame):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return pd.Series(
+            dtype=str
+        )
+
+    room = pd.to_numeric(
+        frame.get(
+            "nearest_opposing_room_pct",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    rsi_count = pd.to_numeric(
+        frame.get(
+            "aligned_rsi_extreme_count",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    missing = (
+        room.isna()
+        | rsi_count.isna()
+    )
+    no_room = (
+        room.notna()
+        & room.lt(
+            1.0
+        )
+    )
+    no_rsi = (
+        rsi_count.notna()
+        & rsi_count.lt(
+            1
+        )
+    )
+
+    return pd.Series(
+        np.select(
+            [
+                missing,
+                no_room
+                & no_rsi,
+                no_room,
+                no_rsi,
+            ],
+            [
+                "MISSING_CONTEXT",
+                "FAIL_ROOM+RSI",
+                "FAIL_ROOM",
+                "FAIL_RSI",
+            ],
+            default=(
+                "CANDIDATE_V1_BASE"
+            ),
+        ),
+        index=frame.index,
+    )
+
+
+def _candidate_canonical_load_ledger():
+    try:
+        if CANDIDATE_CANONICAL_REACTION_LEDGER_FILE.exists():
+            ledger = pd.read_csv(
+                CANDIDATE_CANONICAL_REACTION_LEDGER_FILE
+            )
+        else:
+            ledger = pd.DataFrame()
+    except Exception:
+        ledger = pd.DataFrame()
+
+    if (
+        ledger is None
+        or ledger.empty
+    ):
+        return pd.DataFrame()
+
+    if (
+        "candidate_v1_event_key"
+        not in ledger.columns
+        and "candidate_v2_event_key"
+        in ledger.columns
+    ):
+        ledger[
+            "candidate_v1_event_key"
+        ] = (
+            ledger[
+                "candidate_v2_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+        )
+
+    if (
+        "candidate_v2_event_key"
+        not in ledger.columns
+        and "candidate_v1_event_key"
+        in ledger.columns
+    ):
+        ledger[
+            "candidate_v2_event_key"
+        ] = (
+            ledger[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+        )
+
+    if (
+        "candidate_v1_event_key"
+        not in ledger.columns
+    ):
+        return pd.DataFrame()
+
+    return (
+        ledger.sort_values(
+            [
+                column
+                for column
+                in [
+                    "retest_timestamp",
+                    "symbol",
+                ]
+                if column
+                in ledger.columns
+            ],
+            kind="stable",
+            na_position="last",
+        )
+        .drop_duplicates(
+            subset=[
+                "candidate_v1_event_key"
+            ],
+            keep="first",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def _candidate_canonical_context_source_rows(
+    retests_df,
+    v2_history,
+):
+    """Prefer the current shared REACTION scan, then seed legacy V2 rows.
+
+    Current-scan rows are the forward contract: Room/RSI are frozen once when
+    the REACTION is visible. Historical V2 rows are used only for migration of
+    already-existing Event IDs so the old research history remains accessible.
+    """
+    current = (
+        _candidate_v1_build_reaction_control_source(
+            retests_df
+        )
+    )
+
+    if current is None:
+        current = pd.DataFrame()
+
+    current = current.copy()
+
+    if not current.empty:
+        if (
+            "candidate_v1_event_key"
+            not in current.columns
+        ):
+            return pd.DataFrame()
+
+        current[
+            "_canonical_context_source"
+        ] = (
+            "CAUSAL_CURRENT_SCAN"
+        )
+        current[
+            "_canonical_source_priority"
+        ] = 2
+
+    legacy = (
+        v2_history.copy()
+        if (
+            v2_history is not None
+            and not v2_history.empty
+        )
+        else pd.DataFrame()
+    )
+
+    if not legacy.empty:
+        if (
+            "candidate_v1_event_key"
+            not in legacy.columns
+            and "candidate_v2_event_key"
+            in legacy.columns
+        ):
+            legacy[
+                "candidate_v1_event_key"
+            ] = (
+                legacy[
+                    "candidate_v2_event_key"
+                ]
+                .fillna("")
+                .astype(str)
+            )
+
+        legacy[
+            "_canonical_context_source"
+        ] = (
+            "LEGACY_V2_HISTORY_SEED"
+        )
+        legacy[
+            "_canonical_source_priority"
+        ] = 1
+
+    pieces = [
+        frame
+        for frame
+        in [
+            legacy,
+            current,
+        ]
+        if (
+            frame is not None
+            and not frame.empty
+        )
+    ]
+
+    if not pieces:
+        return pd.DataFrame()
+
+    source = pd.concat(
+        pieces,
+        ignore_index=True,
+        sort=False,
+    )
+
+    if (
+        "candidate_v1_event_key"
+        not in source.columns
+    ):
+        return pd.DataFrame()
+
+    return (
+        source.sort_values(
+            [
+                "_canonical_source_priority"
+            ],
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=[
+                "candidate_v1_event_key"
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def _candidate_canonical_freeze_new_context(
+    retests_df,
+    v2_history,
+):
+    """Append only new Event IDs to the immutable shared driver-context ledger."""
+    ledger = (
+        _candidate_canonical_load_ledger()
+    )
+
+    source = (
+        _candidate_canonical_context_source_rows(
+            retests_df,
+            v2_history,
+        )
+    )
+
+    if (
+        source is None
+        or source.empty
+    ):
+        return ledger
+
+    existing_keys = (
+        set(
+            ledger[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+            .tolist()
+        )
+        if (
+            ledger is not None
+            and not ledger.empty
+        )
+        else set()
+    )
+
+    source_keys = (
+        source[
+            "candidate_v1_event_key"
+        ]
+        .fillna("")
+        .astype(str)
+    )
+
+    fresh = source.loc[
+        source_keys.ne("")
+        & ~source_keys.isin(
+            existing_keys
+        )
+    ].copy()
+
+    if fresh.empty:
+        return ledger
+
+    keep_columns = list(
+        dict.fromkeys(
+            _CANDIDATE_CANONICAL_IDENTITY_FIELDS
+            + _CANDIDATE_CANONICAL_CONTEXT_FIELDS
+            + [
+                "_canonical_context_source",
+            ]
+        )
+    )
+
+    keep_columns = [
+        column
+        for column
+        in keep_columns
+        if column
+        in fresh.columns
+    ]
+
+    frozen = fresh[
+        keep_columns
+    ].copy()
+
+    if (
+        "candidate_v2_event_key"
+        not in frozen.columns
+    ):
+        frozen[
+            "candidate_v2_event_key"
+        ] = (
+            frozen[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+        )
+
+    if (
+        "side"
+        not in frozen.columns
+    ):
+        frozen[
+            "side"
+        ] = frozen.get(
+            "signal",
+            pd.Series(
+                "",
+                index=frozen.index,
+            ),
+        )
+
+    frozen[
+        "side"
+    ] = (
+        frozen[
+            "side"
+        ]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    frozen[
+        "canonical_context_version"
+    ] = (
+        CANDIDATE_CANONICAL_CONTEXT_VERSION
+    )
+
+    frozen[
+        "canonical_context_frozen_at_utc"
+    ] = (
+        pd.Timestamp.now(
+            tz="UTC"
+        ).isoformat()
+    )
+
+    source_kind = (
+        frozen.get(
+            "_canonical_context_source",
+            pd.Series(
+                "",
+                index=frozen.index,
+            ),
+        )
+        .fillna("")
+        .astype(str)
+    )
+
+    frozen[
+        "canonical_context_quality"
+    ] = np.where(
+        source_kind.eq(
+            "CAUSAL_CURRENT_SCAN"
+        ),
+        "CAUSAL_FROZEN",
+        "LEGACY_SEEDED",
+    )
+
+    frozen[
+        "is_candidate_v1_driver"
+    ] = (
+        _candidate_canonical_driver_mask(
+            frozen
+        )
+    )
+
+    frozen[
+        "canonical_v1_reject_reason"
+    ] = (
+        _candidate_canonical_reject_reason(
+            frozen
+        )
+    )
+
+    frozen = frozen.drop(
+        columns=[
+            "_canonical_context_source",
+        ],
+        errors="ignore",
+    )
+
+    combined = pd.concat(
+        [
+            ledger,
+            frozen,
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+
+    combined = (
+        combined.drop_duplicates(
+            subset=[
+                "candidate_v1_event_key"
+            ],
+            keep="first",
+        )
+        .sort_values(
+            [
+                column
+                for column
+                in [
+                    "retest_timestamp",
+                    "symbol",
+                ]
+                if column
+                in combined.columns
+            ],
+            kind="stable",
+            na_position="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    try:
+        _candidate_v2_atomic_write_csv(
+            combined,
+            CANDIDATE_CANONICAL_REACTION_LEDGER_FILE,
+        )
+    except Exception:
+        pass
+
+    return combined
+
+
+def _candidate_canonical_reaction_universe(
+    retests_df,
+):
+    """Single source of truth for Candidate V1 and Candidate V2.
+
+    V2 defines the threshold-agnostic REACTION identity universe.
+    V1 is a pure deterministic mask over the same Event IDs.
+    """
+    v2_history, config, newly_frozen = (
+        _candidate_v2_load_or_freeze_universe(
+            retests_df
+        )
+    )
+
+    if (
+        v2_history is None
+        or v2_history.empty
+    ):
+        return (
+            pd.DataFrame(),
+            config,
+            newly_frozen,
+        )
+
+    ledger = (
+        _candidate_canonical_freeze_new_context(
+            retests_df,
+            v2_history,
+        )
+    )
+
+    base = v2_history.copy()
+
+    if (
+        "candidate_v1_event_key"
+        not in base.columns
+    ):
+        base[
+            "candidate_v1_event_key"
+        ] = (
+            base[
+                "candidate_v2_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+        )
+
+    if (
+        ledger is not None
+        and not ledger.empty
+    ):
+        ledger_fields = [
+            column
+            for column
+            in ledger.columns
+            if column
+            not in {
+                "candidate_v2_event_key",
+                "symbol",
+                "signal",
+                "side",
+                "timeframe",
+                "detector",
+                "status",
+                "pivot_timestamp",
+                "actionable_timestamp",
+                "departure_timestamp",
+                "retest_timestamp",
+                "candidate_v1_reaction_known_ts",
+                "pivot_price",
+                "swing_price",
+                "entry_price",
+                "departure_price",
+                "retest_price",
+                "retest_close",
+                "retest_distance_pct",
+                "pivot_to_confirmation_pct",
+                "pivot_to_retest_min",
+                "confirmed_to_retest_min",
+                "max_departure_pct",
+                "triggering_swing_count",
+            }
+        ]
+
+        frozen_context_columns = [
+            column
+            for column
+            in ledger_fields
+            if column
+            != "candidate_v1_event_key"
+        ]
+
+        base = base.drop(
+            columns=[
+                column
+                for column
+                in frozen_context_columns
+                if column
+                in base.columns
+            ],
+            errors="ignore",
+        ).merge(
+            ledger[
+                [
+                    "candidate_v1_event_key",
+                ]
+                + frozen_context_columns
+            ].drop_duplicates(
+                "candidate_v1_event_key",
+                keep="first",
+            ),
+            on="candidate_v1_event_key",
+            how="left",
+            validate="many_to_one",
+        )
+
+    base[
+        "candidate_v2_event_key"
+    ] = (
+        base[
+            "candidate_v1_event_key"
+        ]
+        .fillna("")
+        .astype(str)
+    )
+
+    if (
+        "candidate_v2_cohort"
+        not in base.columns
+    ):
+        base[
+            "candidate_v2_cohort"
+        ] = "FORWARD"
+
+    # Discovery / Forward is now the same canonical REACTION cohort in both
+    # views. V1 does not maintain a second competing cohort identity.
+    base[
+        "candidate_v1_cohort"
+    ] = (
+        base[
+            "candidate_v2_cohort"
+        ]
+        .fillna(
+            "FORWARD"
+        )
+        .astype(str)
+    )
+
+    if (
+        "side"
+        not in base.columns
+    ):
+        base[
+            "side"
+        ] = base.get(
+            "signal",
+            pd.Series(
+                "",
+                index=base.index,
+            ),
+        )
+
+    base[
+        "side"
+    ] = (
+        base[
+            "side"
+        ]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    # Always recompute the mask from the frozen fields, never from a legacy
+    # V1 monitor membership flag.
+    base[
+        "is_candidate_v1_driver"
+    ] = (
+        _candidate_canonical_driver_mask(
+            base
+        )
+    )
+
+    base[
+        "control_reason"
+    ] = (
+        _candidate_canonical_reject_reason(
+            base
+        )
+    )
+
+    base[
+        "canonical_reaction_source"
+    ] = True
+    base[
+        "candidate_analysis_profile"
+    ] = "v2"
+
+    return (
+        base.reset_index(
+            drop=True
+        ),
+        config,
+        newly_frozen,
+    )
+
+
+def _candidate_canonical_candidate_view(
+    canonical,
+    profile_id,
+):
+    if (
+        canonical is None
+        or canonical.empty
+    ):
+        return pd.DataFrame()
+
+    profile_id = str(
+        profile_id
+    ).lower()
+
+    if profile_id == "v1":
+        selected = canonical.loc[
+            _candidate_canonical_driver_mask(
+                canonical
+            )
+        ].copy()
+    else:
+        selected = canonical.copy()
+
+    selected[
+        "candidate_analysis_profile"
+    ] = profile_id
+    selected[
+        "canonical_reaction_source"
+    ] = True
+
+    return selected.reset_index(
+        drop=True
+    )
+
+
+def _candidate_canonical_status_table(
+    canonical,
+):
+    if (
+        canonical is None
+        or canonical.empty
+    ):
+        return pd.DataFrame()
+
+    quality = (
+        canonical.get(
+            "canonical_context_quality",
+            pd.Series(
+                "MISSING",
+                index=canonical.index,
+            ),
+        )
+        .fillna(
+            "MISSING"
+        )
+        .astype(str)
+    )
+
+    v1_mask = (
+        _candidate_canonical_driver_mask(
+            canonical
+        )
+    )
+
+    return pd.DataFrame([
+        {
+            "Canonical REACTIONs": int(
+                canonical[
+                    "candidate_v1_event_key"
+                ]
+                .fillna("")
+                .astype(str)
+                .nunique()
+            ),
+            "V1 Base": int(
+                v1_mask.sum()
+            ),
+            "V1 rejected": int(
+                (
+                    ~v1_mask
+                ).sum()
+            ),
+            "Causal-frozen context": int(
+                quality.eq(
+                    "CAUSAL_FROZEN"
+                ).sum()
+            ),
+            "Legacy-seeded context": int(
+                quality.eq(
+                    "LEGACY_SEEDED"
+                ).sum()
+            ),
+            "Missing context": int(
+                quality.eq(
+                    "MISSING"
+                ).sum()
+            ),
+            "V1 subset of V2": (
+                "100%"
+            ),
+        }
+    ])
+
+
+
+
 
 def render_candidate_v1_v2_fixed_benchmark(
     retests_df,
@@ -19377,7 +20407,7 @@ def render_candidate_v1_v2_fixed_benchmark(
     make ordinary Candidate Research reruns slower.
     """
     st.markdown(
-        "### ⚖️ Candidate V1 vs V2 · fixed benchmark"
+        "### ⚖️ Candidate V1 Causal vs V2 · fixed benchmark"
     )
     st.caption(
         "A answers whether the raw Candidate universe is better under the same "
@@ -19385,13 +20415,12 @@ def render_candidate_v1_v2_fixed_benchmark(
         "Room → Strength, one-slot, x3, 80% equity portfolio."
     )
     st.info(
-        "**Why V1 is smaller:** V1 is not stale by design. On each refresh it "
-        "rebuilds the currently visible SHORT/LONG candidates and appends new "
-        "qualifying Event IDs to its persisted history as FORWARD. But V1 only "
-        "admits 15m REACTIONs with **causal opposing HTF Room >= 1.00%** and "
-        "**>=1 aligned RSI-extreme timeframe**. V2 persists every causal 15m "
-        "REACTION first and applies Strength/Flow later as variants. Therefore "
-        "V1 is expected to contain materially fewer trades."
+        "**Shared source architecture:** Candidate V1 and Candidate V2 now start "
+        "from the exact same canonical REACTION Event IDs. V2 Base keeps the full "
+        "REACTION universe. V1 Base is only the deterministic mask "
+        "**HTF Room >= 1.00% AND aligned RSI-extreme count >= 1** over those same "
+        "rows. Therefore V1 is always a subset of V2 by construction; differences "
+        "can no longer come from two independently persisted universes."
     )
 
     with st.expander(
@@ -19437,19 +20466,25 @@ def render_candidate_v1_v2_fixed_benchmark(
             # --------------------------------------------------
             # Source universes
             # --------------------------------------------------
+            (
+                canonical_history,
+                _canonical_config,
+                _canonical_newly_frozen,
+            ) = _candidate_canonical_reaction_universe(
+                retests_df
+            )
+
             v1_history = (
-                _candidate_v1_unified_research_history(
-                    retests_df,
-                    v1_short_config,
-                    v1_long_config,
+                _candidate_canonical_candidate_view(
+                    canonical_history,
+                    "v1",
                 )
             )
-            (
-                v2_history,
-                _v2_config,
-                _v2_newly_frozen,
-            ) = _candidate_v2_load_or_freeze_universe(
-                retests_df
+            v2_history = (
+                _candidate_canonical_candidate_view(
+                    canonical_history,
+                    "v2",
+                )
             )
 
             if (
@@ -19474,24 +20509,45 @@ def render_candidate_v1_v2_fixed_benchmark(
                 v2_history["candidate_analysis_profile"] = "v2"
 
                 # --------------------------------------------------
-                # Same causal context machinery for both candidates
+                # One causal market-context build for the shared universe.
+                # Candidate V1 is selected only after the shared context exists.
                 # --------------------------------------------------
-                v1_context, _ = _candidate_v2_build_market_context(
-                    v1_history,
-                    force=False,
+                canonical_for_market = (
+                    canonical_history.copy()
                 )
-                v2_context, _ = _candidate_v2_build_market_context(
-                    v2_history,
-                    force=False,
+                canonical_for_market[
+                    "candidate_analysis_profile"
+                ] = "v2"
+
+                canonical_context, _ = (
+                    _candidate_v2_build_market_context(
+                        canonical_for_market,
+                        force=False,
+                    )
                 )
 
-                if v1_context is not None and not v1_context.empty:
-                    v1_context = v1_context.copy()
-                    v1_context["candidate_analysis_profile"] = "v1"
-
-                if v2_context is not None and not v2_context.empty:
-                    v2_context = v2_context.copy()
-                    v2_context["candidate_analysis_profile"] = "v2"
+                v2_context = (
+                    _candidate_canonical_candidate_view(
+                        canonical_context,
+                        "v2",
+                    )
+                    if (
+                        canonical_context is not None
+                        and not canonical_context.empty
+                    )
+                    else pd.DataFrame()
+                )
+                v1_context = (
+                    _candidate_canonical_candidate_view(
+                        canonical_context,
+                        "v1",
+                    )
+                    if (
+                        canonical_context is not None
+                        and not canonical_context.empty
+                    )
+                    else pd.DataFrame()
+                )
 
                 if (
                     v1_context is None
@@ -27666,17 +28722,25 @@ def _lh_fidelity_current_sources(
     start_ms,
     end_ms,
 ):
-    v2_history, _, _ = (
-        _candidate_v2_load_or_freeze_universe(
+    # Fidelity now compares historical reconstruction against the same canonical
+    # source used by both Candidate views. Legacy V1 monitor files are no longer
+    # treated as Candidate V1 ground truth.
+    canonical, _, _ = (
+        _candidate_canonical_reaction_universe(
             retests_df
         )
     )
 
+    v2_history = (
+        _candidate_canonical_candidate_view(
+            canonical,
+            "v2",
+        )
+    )
     v1_history = (
-        _candidate_v1_unified_research_history(
-            retests_df,
-            v1_short_config,
-            v1_long_config,
+        _candidate_canonical_candidate_view(
+            canonical,
+            "v1",
         )
     )
 
@@ -27694,24 +28758,6 @@ def _lh_fidelity_current_sources(
             end_ms,
         )
     )
-
-    if (
-        v2_history is not None
-        and not v2_history.empty
-    ):
-        v2_history = v2_history.copy()
-        v2_history[
-            "candidate_analysis_profile"
-        ] = "v2"
-
-    if (
-        v1_history is not None
-        and not v1_history.empty
-    ):
-        v1_history = v1_history.copy()
-        v1_history[
-            "candidate_analysis_profile"
-        ] = "v1"
 
     return (
         v1_history,
@@ -29081,7 +30127,7 @@ def render_candidate_historical_replay_fidelity_audit(
 
     b2.metric(
         "Reference source",
-        "Persisted Candidate V1/V2",
+        "Canonical Reaction V1/V2",
     )
 
     audit_start_ms = int(
@@ -43731,108 +44777,460 @@ def render_candidate_research(
     v1_short_config=None,
     v1_long_config=None,
 ):
-    candidate_version = str(candidate_version)
-    profile_id = "v1" if "V1" in candidate_version else "v2"
-    candidate_label = "Candidate V1" if profile_id == "v1" else "Candidate V2"
-    candidate_slug = "candidate_v1" if profile_id == "v1" else "candidate_v2"
-
-    st.markdown(f"### 🧬 {candidate_label} · Unified Candidate Research")
-    st.caption(
-        "The analysis engine below is shared by Candidate V1 and Candidate V2. "
-        "Switching Candidate changes only the source universe; execution matrix, "
-        "equity curve, same-minute selectors, Market Flow gates, Early Exit, "
-        "TIME_EXIT analysis and Position Upgrade remain available in both modes."
+    candidate_version = str(
+        candidate_version
     )
+    normalized_candidate = (
+        candidate_version
+        .lower()
+        .strip()
+    )
+
+    if (
+        "v1" in normalized_candidate
+        and "legacy" in normalized_candidate
+    ):
+        candidate_mode = "v1_legacy"
+        profile_id = "v1"
+        candidate_label = "Candidate V1 Legacy"
+        candidate_slug = "candidate_v1_legacy"
+        uses_canonical_source = False
+    elif "v1" in normalized_candidate:
+        candidate_mode = "v1_causal"
+        profile_id = "v1"
+        candidate_label = "Candidate V1 Causal"
+        candidate_slug = "candidate_v1_causal"
+        uses_canonical_source = True
+    else:
+        candidate_mode = "v2"
+        profile_id = "v2"
+        candidate_label = "Candidate V2"
+        candidate_slug = "candidate_v2"
+        uses_canonical_source = True
+
+    st.markdown(
+        f"### 🧬 {candidate_label} · Unified Candidate Research"
+    )
+
+    if candidate_mode == "v1_legacy":
+        st.caption(
+            "LEGACY compatibility mode. This uses the original persisted "
+            "Candidate V1 SHORT+LONG universe and its original V1 path/context "
+            "stores, so the previous V1 + Strength portfolio/equity research "
+            "remains reproducible."
+        )
+    else:
+        st.caption(
+            "Canonical mode. Candidate V1 Causal and Candidate V2 consume the "
+            "same REACTION Event IDs. V2 Base = all REACTIONs; "
+            "V1 Causal Base = Room >= 1% AND aligned RSI >= 1."
+        )
 
     newly_frozen = False
-    # Re-evaluate candidate follow-up at most once per minute even when no new
-    # REACTION ID appears; pending paths can mature from PENDING to resolved.
-    retests_signature = (
-        _candidate_analysis_retests_signature(retests_df),
-        int(time.time() // 60),
-    )
-    universe_cache_key = f"candidate_analysis_universe_{profile_id}"
-    universe_cache = st.session_state.get(universe_cache_key)
-    use_cached_universe = (
-        isinstance(universe_cache, dict)
-        and universe_cache.get("signature") == retests_signature
-    )
 
-    if use_cached_universe:
-        history = universe_cache.get("history", pd.DataFrame())
-        config = universe_cache.get("config")
-    elif profile_id == "v1":
-        if v1_short_config is None or v1_long_config is None:
-            st.error("Candidate V1 unified research needs frozen SHORT and LONG configs.")
-            return
-        history = _candidate_v1_unified_research_history(
-            retests_df,
-            v1_short_config,
-            v1_long_config,
-        )
-        config = {
-            "name": "Candidate V1",
-            "frozen_at_utc": str(v1_short_config.get("created_at_utc", CANDIDATE_V1_FREEZE_TS_UTC)),
-        }
-        st.session_state[universe_cache_key] = {
-            "signature": retests_signature,
-            "history": history.copy() if history is not None else pd.DataFrame(),
-            "config": config,
-        }
-    else:
-        history, config, newly_frozen = _candidate_v2_load_or_freeze_universe(retests_df)
-        if history is not None and not history.empty:
-            history = history.copy()
-            history["candidate_analysis_profile"] = "v2"
-        st.session_state[universe_cache_key] = {
-            "signature": retests_signature,
-            "history": history.copy() if history is not None else pd.DataFrame(),
-            "config": config,
-        }
-
-    if history is None or history.empty or config is None:
-        st.info(f"No causal REACTIONs are available for {candidate_label} yet.")
-        return
-
-    if newly_frozen:
-        st.success(
-            "Candidate V2 Discovery universe frozen from all currently visible "
-            "REACTION IDs. Strength/Flow thresholds did not participate in the freeze."
-        )
-
-    history_signature = _candidate_analysis_source_signature(
-        history,
-        profile_id=profile_id,
-    )
-    market_cache_key = f"candidate_analysis_market_context_{profile_id}"
-    market_cache = st.session_state.get(market_cache_key)
-
-    force_market = st.button(
-        f"🔄 Rebuild {candidate_label} causal 4h + 1h contexts",
-        key=f"candidate_analysis_force_market_{profile_id}",
-        use_container_width=True,
-    )
-
-    use_cached_market = (
-        isinstance(market_cache, dict)
-        and market_cache.get("signature") == history_signature
-        and not force_market
-    )
-
-    if use_cached_market:
-        context = market_cache.get("context", pd.DataFrame())
-        sector_error = market_cache.get("sector_error")
-    else:
-        with st.spinner(f"Attaching causal Market Flow to {candidate_label}..."):
-            context, sector_error = _candidate_v2_build_market_context(
-                history,
-                force=bool(force_market),
+    # --------------------------------------------------------
+    # Source selection:
+    # - V1 Legacy = original persisted SHORT/LONG V1 universe.
+    # - V1 Causal / V2 = one canonical REACTION universe.
+    # --------------------------------------------------------
+    if candidate_mode == "v1_legacy":
+        if (
+            v1_short_config is None
+            or v1_long_config is None
+        ):
+            st.warning(
+                "Candidate V1 Legacy requires the original SHORT/LONG configs."
             )
-        st.session_state[market_cache_key] = {
-            "signature": history_signature,
-            "context": context.copy() if context is not None and not context.empty else pd.DataFrame(),
-            "sector_error": sector_error,
-        }
+            return
+
+        legacy_signature = (
+            _candidate_analysis_retests_signature(
+                retests_df
+            ),
+            int(
+                time.time()
+                // 60
+            ),
+        )
+
+        legacy_cache_key = (
+            "candidate_analysis_v1_legacy_universe"
+        )
+        legacy_cache = st.session_state.get(
+            legacy_cache_key
+        )
+
+        if (
+            isinstance(
+                legacy_cache,
+                dict,
+            )
+            and legacy_cache.get(
+                "signature"
+            )
+            == legacy_signature
+        ):
+            history = legacy_cache.get(
+                "history",
+                pd.DataFrame(),
+            )
+        else:
+            history = (
+                _candidate_v1_unified_research_history(
+                    retests_df,
+                    v1_short_config,
+                    v1_long_config,
+                )
+            )
+
+            if (
+                history is not None
+                and not history.empty
+            ):
+                history = history.copy()
+                history[
+                    "candidate_analysis_profile"
+                ] = "v1"
+                history[
+                    "canonical_reaction_source"
+                ] = False
+                history[
+                    "candidate_source_mode"
+                ] = "V1_LEGACY"
+
+            st.session_state[
+                legacy_cache_key
+            ] = {
+                "signature": legacy_signature,
+                "history": (
+                    history.copy()
+                    if (
+                        history is not None
+                        and not history.empty
+                    )
+                    else pd.DataFrame()
+                ),
+            }
+
+        if (
+            history is None
+            or history.empty
+        ):
+            st.info(
+                "No persisted Candidate V1 Legacy SHORT/LONG rows are available."
+            )
+            return
+
+        config = dict(
+            v1_short_config
+            or {}
+        )
+        config.setdefault(
+            "frozen_at_utc",
+            config.get(
+                "created_at_utc",
+                "LEGACY",
+            ),
+        )
+
+        source_signature = (
+            _candidate_analysis_source_signature(
+                history,
+                profile_id="v1_legacy",
+            )
+        )
+
+        legacy_market_cache_key = (
+            "candidate_analysis_market_context_v1_legacy"
+        )
+        legacy_market_cache = st.session_state.get(
+            legacy_market_cache_key
+        )
+
+        force_market = st.button(
+            "🔄 Rebuild V1 Legacy causal 4h + 1h contexts",
+            key=(
+                "candidate_analysis_force_market_v1_legacy"
+            ),
+            use_container_width=True,
+        )
+
+        if (
+            isinstance(
+                legacy_market_cache,
+                dict,
+            )
+            and legacy_market_cache.get(
+                "signature"
+            )
+            == source_signature
+            and not force_market
+        ):
+            context = legacy_market_cache.get(
+                "context",
+                pd.DataFrame(),
+            )
+            sector_error = legacy_market_cache.get(
+                "sector_error"
+            )
+        else:
+            legacy_market_rows = history.copy()
+            legacy_market_rows[
+                "candidate_analysis_profile"
+            ] = "v1"
+            legacy_market_rows[
+                "canonical_reaction_source"
+            ] = False
+
+            with st.spinner(
+                "Attaching V1 Legacy causal Market Flow context..."
+            ):
+                (
+                    context,
+                    sector_error,
+                ) = _candidate_v2_build_market_context(
+                    legacy_market_rows,
+                    force=bool(
+                        force_market
+                    ),
+                )
+
+            if (
+                context is not None
+                and not context.empty
+            ):
+                context = context.copy()
+                context[
+                    "candidate_analysis_profile"
+                ] = "v1"
+                context[
+                    "canonical_reaction_source"
+                ] = False
+                context[
+                    "candidate_source_mode"
+                ] = "V1_LEGACY"
+
+            st.session_state[
+                legacy_market_cache_key
+            ] = {
+                "signature": source_signature,
+                "context": (
+                    context.copy()
+                    if (
+                        context is not None
+                        and not context.empty
+                    )
+                    else pd.DataFrame()
+                ),
+                "sector_error": sector_error,
+            }
+
+        st.info(
+            "🧊 **V1 Legacy preserved:** use `Candidate + Strength` here to "
+            "reproduce/continue the previous V1 + Strength research curve."
+        )
+
+    else:
+        retests_signature = (
+            _candidate_analysis_retests_signature(
+                retests_df
+            ),
+            int(
+                time.time()
+                // 60
+            ),
+        )
+
+        canonical_cache_key = (
+            "candidate_analysis_canonical_reaction_universe"
+        )
+        canonical_cache = st.session_state.get(
+            canonical_cache_key
+        )
+
+        if (
+            isinstance(
+                canonical_cache,
+                dict,
+            )
+            and canonical_cache.get(
+                "signature"
+            )
+            == retests_signature
+        ):
+            canonical_history = canonical_cache.get(
+                "history",
+                pd.DataFrame(),
+            )
+            config = canonical_cache.get(
+                "config"
+            )
+        else:
+            (
+                canonical_history,
+                config,
+                newly_frozen,
+            ) = _candidate_canonical_reaction_universe(
+                retests_df
+            )
+
+            st.session_state[
+                canonical_cache_key
+            ] = {
+                "signature": retests_signature,
+                "history": (
+                    canonical_history.copy()
+                    if (
+                        canonical_history is not None
+                        and not canonical_history.empty
+                    )
+                    else pd.DataFrame()
+                ),
+                "config": config,
+            }
+
+        if (
+            canonical_history is None
+            or canonical_history.empty
+            or config is None
+        ):
+            st.info(
+                "No causal REACTIONs are available in the canonical source yet."
+            )
+            return
+
+        if newly_frozen:
+            st.success(
+                "Canonical/V2 Discovery universe frozen. "
+                "Candidate V1 Causal is derived from the same Event IDs."
+            )
+
+        canonical_status = (
+            _candidate_canonical_status_table(
+                canonical_history
+            )
+        )
+
+        if not canonical_status.empty:
+            st.markdown(
+                "#### Canonical REACTION source"
+            )
+            st.dataframe(
+                canonical_status,
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_canonical_source_status"
+                ),
+            )
+            st.caption(
+                "V1 Causal owns no independent REACTION history. "
+                "Room/RSI driver context is frozen once per Event ID in "
+                "`candidate_reaction_causal_ledger.csv`."
+            )
+
+        canonical_signature = (
+            _candidate_analysis_source_signature(
+                canonical_history,
+                profile_id="v2",
+            )
+        )
+
+        market_cache_key = (
+            "candidate_analysis_market_context_canonical"
+        )
+        market_cache = st.session_state.get(
+            market_cache_key
+        )
+
+        force_market = st.button(
+            "🔄 Rebuild shared canonical causal 4h + 1h contexts",
+            key=(
+                "candidate_analysis_force_market_canonical"
+            ),
+            use_container_width=True,
+        )
+
+        if (
+            isinstance(
+                market_cache,
+                dict,
+            )
+            and market_cache.get(
+                "signature"
+            )
+            == canonical_signature
+            and not force_market
+        ):
+            canonical_context = market_cache.get(
+                "context",
+                pd.DataFrame(),
+            )
+            sector_error = market_cache.get(
+                "sector_error"
+            )
+        else:
+            canonical_market_rows = canonical_history.copy()
+            canonical_market_rows[
+                "candidate_analysis_profile"
+            ] = "v2"
+
+            with st.spinner(
+                "Attaching one shared causal Market Flow context to the "
+                "canonical REACTION universe..."
+            ):
+                (
+                    canonical_context,
+                    sector_error,
+                ) = _candidate_v2_build_market_context(
+                    canonical_market_rows,
+                    force=bool(
+                        force_market
+                    ),
+                )
+
+            st.session_state[
+                market_cache_key
+            ] = {
+                "signature": canonical_signature,
+                "context": (
+                    canonical_context.copy()
+                    if (
+                        canonical_context is not None
+                        and not canonical_context.empty
+                    )
+                    else pd.DataFrame()
+                ),
+                "sector_error": sector_error,
+            }
+
+        history = (
+            _candidate_canonical_candidate_view(
+                canonical_history,
+                profile_id,
+            )
+        )
+        context = (
+            _candidate_canonical_candidate_view(
+                canonical_context,
+                profile_id,
+            )
+            if (
+                canonical_context is not None
+                and not canonical_context.empty
+            )
+            else pd.DataFrame()
+        )
+
+        if (
+            history is None
+            or history.empty
+        ):
+            st.info(
+                f"No canonical REACTIONs currently qualify for {candidate_label}."
+            )
+            return
+
     if sector_error:
         st.caption(f"Sector metadata note: {sector_error}")
     if context is None or context.empty:
@@ -43882,11 +45280,18 @@ def render_candidate_research(
     h3.metric("Forward", forward_n)
     h4.metric("Causal strength", f"{len(study)}/{len(history)}")
     h5.metric("4h boundaries", boundaries)
-    st.caption(
-        f"{candidate_label} source frozen/identified from persisted IDs. "
-        f"Reference timestamp: {frozen_at}. Discovery/Forward membership remains "
-        "ID-based and is not rewritten by the analysis filters below."
-    )
+    if candidate_mode == "v1_legacy":
+        st.caption(
+            f"{candidate_label} uses the original persisted V1 SHORT/LONG "
+            f"Event IDs. Reference timestamp: {frozen_at}. This is the source "
+            "used by the previous V1 portfolio/equity research."
+        )
+    else:
+        st.caption(
+            f"{candidate_label} is a view over the canonical persisted "
+            f"REACTION IDs. Reference timestamp: {frozen_at}. V1 Causal "
+            "membership comes from frozen Room/RSI over V2 Base Event IDs."
+        )
     one_h_available = pd.to_numeric(
         study.get("market_breadth_1h", pd.Series(np.nan, index=study.index)),
         errors="coerce",
@@ -43947,12 +45352,29 @@ def render_candidate_research(
         st.info(f"No {candidate_label} rows match this side/cohort selection.")
         return
 
-    scoped["candidate_analysis_profile"] = profile_id
-    active_path_store_file = _candidate_analysis_path_store_file(
-        scoped,
-        profile_id=profile_id,
+    scoped[
+        "candidate_analysis_profile"
+    ] = profile_id
+    scoped[
+        "canonical_reaction_source"
+    ] = bool(
+        uses_canonical_source
     )
-    active_selected_history_file = _candidate_analysis_selected_cell_history_file(profile_id)
+
+    active_path_store_file = (
+        _candidate_analysis_path_store_file(
+            scoped,
+            profile_id=profile_id,
+        )
+    )
+    active_selected_history_file = (
+        _candidate_analysis_selected_cell_history_file(
+            profile_id,
+            candidate_mode=(
+                candidate_mode
+            ),
+        )
+    )
     active_variants = (
         [
             "Candidate Base",
@@ -71970,11 +73392,18 @@ if selected_section == "reaction_swing_lab":
             candidate_version = st.radio(
                 "Candidate",
                 options=[
-                    "🧊 Candidate V1",
+                    "🧊 Candidate V1 Legacy",
+                    "🧬 Candidate V1 Causal",
                     "🧪 Candidate V2",
                 ],
                 horizontal=True,
                 key="reaction_lab_candidate_version",
+                help=(
+                    "V1 Legacy preserves the original persisted V1 universe "
+                    "and prior equity research. V1 Causal derives V1 as "
+                    "Room>=1% + aligned RSI>=1 over the exact same canonical "
+                    "REACTION IDs as V2."
+                ),
             )
 
             candidate_v1_config = _candidate_v1_load_or_freeze_config(
@@ -72017,10 +73446,11 @@ if selected_section == "reaction_swing_lab":
             )
 
             st.caption(
-                "V1 and V2 now share the same cached structural scan and the "
-                "same analysis engine. Switching Candidate preserves TP/SL, "
-                "portfolio and selector controls while loading that Candidate's "
-                "own cohort, path store and execution snapshot."
+                "Three research views are preserved: **V1 Legacy** = original "
+                "persisted V1 universe/stores; **V1 Causal** = Room>=1% + "
+                "aligned RSI>=1 over canonical V2 REACTION IDs; **V2** = every "
+                "canonical REACTION. All three use the same Unified Candidate "
+                "Research analysis UI."
             )
 
             with st.spinner("Loading shared cached 15m causal REACTION scan..."):
@@ -72079,26 +73509,42 @@ if selected_section == "reaction_swing_lab":
             st.divider()
 
             selected_candidate_label = (
-                "Candidate V1" if "V1" in candidate_version else "Candidate V2"
+                "Candidate V1 Legacy"
+                if "Legacy" in candidate_version
+                else (
+                    "Candidate V1 Causal"
+                    if "V1" in candidate_version
+                    else "Candidate V2"
+                )
             )
 
             render_candidate_research(
-                retests_df=candidate_shared_retests_df,
-                candidate_version=selected_candidate_label,
-                v1_short_config=candidate_v1_config,
-                v1_long_config=candidate_v1_long_config,
+                retests_df=(
+                    candidate_shared_retests_df
+                ),
+                candidate_version=(
+                    selected_candidate_label
+                ),
+                v1_short_config=(
+                    candidate_v1_config
+                ),
+                v1_long_config=(
+                    candidate_v1_long_config
+                ),
             )
 
-            if selected_candidate_label == "Candidate V1":
+            if (
+                selected_candidate_label
+                == "Candidate V1 Legacy"
+            ):
                 show_legacy_v1 = st.checkbox(
                     "Show legacy V1 frozen-monitor UI",
                     value=False,
                     key="reaction_lab_show_legacy_v1",
                     help=(
-                        "Compatibility view only. OFF by default because the "
-                        "unified Candidate Research engine above already exposes "
-                        "execution/equity/selectors without rendering duplicate "
-                        "heavy V1 monitor blocks."
+                        "Optional original V1 monitor/inspector blocks. "
+                        "Candidate V1 Legacy above already uses the old V1 "
+                        "universe for execution/equity/selectors."
                     ),
                 )
 
