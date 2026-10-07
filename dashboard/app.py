@@ -27474,15 +27474,21 @@ def render_candidate_long_horizon_historical_replay():
             f"{done_units}/{total_units}"
         ),
     )
+    progress_pct = (
+        (
+            done_units
+            / total_units
+            * 100.0
+        )
+        if total_units
+        else None
+    )
+
     p4.metric(
         "Progress",
         (
-            f"{(
-                done_units
-                / total_units
-                * 100.0
-            ):.1f}%"
-            if total_units
+            f"{progress_pct:.1f}%"
+            if progress_pct is not None
             else "—"
         ),
     )
