@@ -18,6 +18,7 @@ import plotly.graph_objects as go
 
 import numpy as np
 
+import math
 # =========================
 # CONFIG
 # =========================
@@ -23976,7 +23977,17 @@ def _lh_binance_request_json(
                 )
                 continue
 
-            response.raise_for_status()
+            if response.status_code >= 400:
+                body_preview = (
+                    response.text[:500]
+                    if response.text
+                    else ""
+                )
+                raise RuntimeError(
+                    f"HTTP {response.status_code} from Binance: "
+                    f"{body_preview}"
+                )
+
             return response.json()
 
         except Exception as exc:
@@ -27624,6 +27635,11 @@ def render_candidate_long_horizon_historical_replay():
             status_box = st.empty()
 
             fresh_parts = []
+            batch_success = 0
+            batch_empty = 0
+            batch_failed = 0
+            batch_event_count = 0
+            batch_errors = []
 
             for position, symbol in enumerate(
                 next_symbols,
@@ -27660,6 +27676,15 @@ def render_candidate_long_horizon_historical_replay():
                         fresh_parts.append(
                             fresh
                         )
+                        batch_event_count += int(
+                            len(
+                                fresh
+                            )
+                        )
+                    else:
+                        batch_empty += 1
+
+                    batch_success += 1
 
                     processed.setdefault(
                         month_label,
@@ -27676,6 +27701,20 @@ def render_candidate_long_horizon_historical_replay():
                         )
 
                 except Exception as exc:
+                    batch_failed += 1
+
+                    error_message = (
+                        f"{type(exc).__name__}: "
+                        f"{exc}"
+                    )
+
+                    batch_errors.append({
+                        "symbol": str(
+                            symbol
+                        ),
+                        "error": error_message,
+                    })
+
                     state.setdefault(
                         "errors",
                         {},
@@ -27684,10 +27723,7 @@ def render_candidate_long_horizon_historical_replay():
                         "errors"
                     ][
                         f"{month_label}|{symbol}"
-                    ] = (
-                        f"{type(exc).__name__}: "
-                        f"{exc}"
-                    )
+                    ] = error_message
 
                 state[
                     "processed"
@@ -27720,13 +27756,198 @@ def render_candidate_long_horizon_historical_replay():
                     fresh_events,
                 )
 
+            state[
+                "last_batch"
+            ] = {
+                "month": str(
+                    month_label
+                ),
+                "attempted": int(
+                    len(
+                        next_symbols
+                    )
+                ),
+                "success": int(
+                    batch_success
+                ),
+                "empty_success": int(
+                    batch_empty
+                ),
+                "failed": int(
+                    batch_failed
+                ),
+                "events": int(
+                    batch_event_count
+                ),
+                "errors": batch_errors[
+                    :50
+                ],
+                "finished_at_utc": (
+                    pd.Timestamp.now(
+                        tz="UTC"
+                    ).isoformat()
+                ),
+            }
+
+            _lh_atomic_json_write(
+                state,
+                paths[
+                    "state"
+                ],
+            )
+
             progress.progress(
                 1.0
             )
-            status_box.success(
-                f"Batch saved · {month_label}."
-            )
+
+            if batch_failed:
+                status_box.error(
+                    f"Batch finished · {batch_success} succeeded · "
+                    f"{batch_failed} failed · "
+                    f"{batch_event_count} REACTIONs."
+                )
+            else:
+                status_box.success(
+                    f"Batch saved · {month_label} · "
+                    f"{batch_success} symbols · "
+                    f"{batch_event_count} REACTIONs."
+                )
+
             st.rerun()
+
+    # -------------------------------------------------------
+    # Batch diagnostics MUST render even when events.csv is empty.
+    # Previously an all-error batch looked like "nothing happened"
+    # because the function returned before the Errors tab.
+    # -------------------------------------------------------
+    latest_state = _lh_load_json(
+        paths[
+            "state"
+        ],
+        state,
+    )
+
+    last_batch = latest_state.get(
+        "last_batch",
+        {},
+    )
+
+    if last_batch:
+        st.markdown(
+            "#### Last replay batch"
+        )
+
+        lb1, lb2, lb3, lb4 = st.columns(
+            4
+        )
+
+        lb1.metric(
+            "Attempted",
+            int(
+                last_batch.get(
+                    "attempted",
+                    0,
+                )
+            ),
+        )
+        lb2.metric(
+            "Succeeded",
+            int(
+                last_batch.get(
+                    "success",
+                    0,
+                )
+            ),
+        )
+        lb3.metric(
+            "Failed",
+            int(
+                last_batch.get(
+                    "failed",
+                    0,
+                )
+            ),
+        )
+        lb4.metric(
+            "REACTIONs found",
+            int(
+                last_batch.get(
+                    "events",
+                    0,
+                )
+            ),
+        )
+
+        last_errors = last_batch.get(
+            "errors",
+            [],
+        )
+
+        if last_errors:
+            st.error(
+                "The last batch had errors. Failed symbols are NOT marked "
+                "processed, so Run / resume will retry them after the cause "
+                "is fixed."
+            )
+
+            st.dataframe(
+                pd.DataFrame(
+                    last_errors
+                ),
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_long_horizon_last_batch_errors"
+                ),
+            )
+
+            first_error = str(
+                last_errors[
+                    0
+                ].get(
+                    "error",
+                    ""
+                )
+            )
+
+            if first_error:
+                st.code(
+                    first_error,
+                    language="text",
+                )
+
+    persisted_error_map = latest_state.get(
+        "errors",
+        {},
+    )
+
+    if (
+        persisted_error_map
+        and not last_batch
+    ):
+        st.warning(
+            f"Persisted replay errors: "
+            f"{len(persisted_error_map)}"
+        )
+
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Unit": key,
+                    "Error": value,
+                }
+                for (
+                    key,
+                    value,
+                ) in list(
+                    persisted_error_map.items()
+                )[
+                    :100
+                ]
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     events = _lh_load_events(
         paths[
@@ -27735,9 +27956,27 @@ def render_candidate_long_horizon_historical_replay():
     )
 
     if events.empty:
-        st.info(
-            "No historical REACTIONs are persisted yet. "
-            "Run a batch. For a quick validation, start with 20-50 symbols."
+        if last_batch and int(
+            last_batch.get(
+                "failed",
+                0,
+            )
+        ) > 0:
+            st.warning(
+                "No historical REACTIONs are persisted because the latest "
+                "batch failed before any symbol could be completed. "
+                "Use the error shown above; do not keep clicking Run blindly."
+            )
+        else:
+            st.info(
+                "No historical REACTIONs are persisted yet. "
+                "A successful batch can legitimately find zero REACTIONs; "
+                "check Last replay batch to distinguish that from an error."
+            )
+
+        st.caption(
+            "State file on the VPS: "
+            f"`{paths['state']}`"
         )
         return
 
@@ -28064,7 +28303,7 @@ def render_candidate_long_horizon_historical_replay():
         )
 
     with tab_errors:
-        error_map = state.get(
+        error_map = latest_state.get(
             "errors",
             {},
         )
