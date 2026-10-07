@@ -19739,9 +19739,14 @@ def render_candidate_v1_v2_fixed_benchmark(
                                 ledger is not None
                                 and not ledger.empty
                             ):
+                                accepted_col = (
+                                    "Accepted"
+                                    if "Accepted" in ledger.columns
+                                    else "accepted"
+                                )
                                 accepted = ledger.loc[
                                     ledger.get(
-                                        "accepted",
+                                        accepted_col,
                                         pd.Series(
                                             False,
                                             index=ledger.index,
@@ -19751,9 +19756,14 @@ def render_candidate_v1_v2_fixed_benchmark(
                                     .astype(bool)
                                 ].copy()
 
+                            outcome_col = (
+                                "Outcome"
+                                if "Outcome" in accepted.columns
+                                else "outcome"
+                            )
                             accepted_outcome = (
                                 accepted.get(
-                                    "outcome",
+                                    outcome_col,
                                     pd.Series(
                                         dtype=str
                                     ),
@@ -20864,6 +20874,1302 @@ def render_candidate_v1_v2_fixed_benchmark(
                                         )
                                     )
 
+                        # --------------------------------------------------
+                        # E · Temporal stability of current finalists
+                        #
+                        #   V1 = Candidate + Strength
+                        #   V2 = REACTION Base
+                        #
+                        # Daily grouping uses local ENTRY date.
+                        # Four equal chronological blocks complement calendar days.
+                        # --------------------------------------------------
+                        finalist_stability_summary = pd.DataFrame()
+                        finalist_daily_comparison = pd.DataFrame()
+                        finalist_block_comparison = pd.DataFrame()
+                        finalist_cumulative = pd.DataFrame()
+
+                        def _stability_pf(values):
+                            values = pd.to_numeric(
+                                values,
+                                errors="coerce",
+                            ).dropna()
+                            if values.empty:
+                                return np.nan
+                            gains = values.loc[
+                                values.gt(0.0)
+                            ]
+                            losses = values.loc[
+                                values.lt(0.0)
+                            ]
+                            if (
+                                not losses.empty
+                                and abs(
+                                    float(
+                                        losses.sum()
+                                    )
+                                )
+                                > 1e-12
+                            ):
+                                return float(
+                                    gains.sum()
+                                    / abs(
+                                        float(
+                                            losses.sum()
+                                        )
+                                    )
+                                )
+                            if not gains.empty:
+                                return np.inf
+                            return np.nan
+
+                        def _accepted_portfolio_detail(
+                            portfolio_result,
+                            execution_frame,
+                        ):
+                            if (
+                                not portfolio_result
+                                or execution_frame is None
+                                or execution_frame.empty
+                            ):
+                                return pd.DataFrame()
+
+                            ledger = portfolio_result.get(
+                                "ledger",
+                                pd.DataFrame(),
+                            )
+                            if (
+                                ledger is None
+                                or ledger.empty
+                            ):
+                                return pd.DataFrame()
+
+                            accepted_col = (
+                                "Accepted"
+                                if "Accepted" in ledger.columns
+                                else "accepted"
+                            )
+                            event_col = (
+                                "Event key"
+                                if "Event key" in ledger.columns
+                                else "candidate_v1_event_key"
+                            )
+                            pnl_col = (
+                                "PnL $"
+                                if "PnL $" in ledger.columns
+                                else "pnl_usd"
+                            )
+                            trade_net_col = (
+                                "Trade net %"
+                                if "Trade net %" in ledger.columns
+                                else "raw_net_pnl_pct"
+                            )
+                            outcome_col = (
+                                "Outcome"
+                                if "Outcome" in ledger.columns
+                                else "outcome"
+                            )
+
+                            accepted = ledger.loc[
+                                ledger.get(
+                                    accepted_col,
+                                    pd.Series(
+                                        False,
+                                        index=ledger.index,
+                                    ),
+                                )
+                                .fillna(False)
+                                .astype(bool)
+                            ].copy()
+
+                            if (
+                                accepted.empty
+                                or event_col not in accepted.columns
+                            ):
+                                return pd.DataFrame()
+
+                            execution_map = (
+                                execution_frame[
+                                    [
+                                        "candidate_v1_event_key",
+                                        "entry_timestamp",
+                                        "symbol",
+                                        "side",
+                                        "net_pnl_pct",
+                                    ]
+                                ]
+                                .copy()
+                                .drop_duplicates(
+                                    subset=[
+                                        "candidate_v1_event_key"
+                                    ],
+                                    keep="last",
+                                )
+                            )
+                            execution_map[
+                                "candidate_v1_event_key"
+                            ] = (
+                                execution_map[
+                                    "candidate_v1_event_key"
+                                ]
+                                .fillna("")
+                                .astype(str)
+                            )
+
+                            detail = pd.DataFrame({
+                                "candidate_v1_event_key": (
+                                    accepted[
+                                        event_col
+                                    ]
+                                    .fillna("")
+                                    .astype(str)
+                                ),
+                                "Portfolio PnL $": pd.to_numeric(
+                                    accepted.get(
+                                        pnl_col,
+                                        pd.Series(
+                                            np.nan,
+                                            index=accepted.index,
+                                        ),
+                                    ),
+                                    errors="coerce",
+                                ),
+                                "Portfolio trade net %": pd.to_numeric(
+                                    accepted.get(
+                                        trade_net_col,
+                                        pd.Series(
+                                            np.nan,
+                                            index=accepted.index,
+                                        ),
+                                    ),
+                                    errors="coerce",
+                                ),
+                                "Portfolio outcome": (
+                                    accepted.get(
+                                        outcome_col,
+                                        pd.Series(
+                                            "",
+                                            index=accepted.index,
+                                        ),
+                                    )
+                                    .fillna("")
+                                    .astype(str)
+                                    .str.upper()
+                                ),
+                            })
+
+                            detail = detail.merge(
+                                execution_map,
+                                on="candidate_v1_event_key",
+                                how="left",
+                                validate="many_to_one",
+                            )
+
+                            detail[
+                                "entry_timestamp"
+                            ] = pd.to_numeric(
+                                detail[
+                                    "entry_timestamp"
+                                ],
+                                errors="coerce",
+                            )
+                            detail = detail.loc[
+                                detail[
+                                    "entry_timestamp"
+                                ].notna()
+                            ].copy()
+
+                            if detail.empty:
+                                return detail
+
+                            local_dt = (
+                                pd.to_datetime(
+                                    detail[
+                                        "entry_timestamp"
+                                    ],
+                                    unit="ms",
+                                    utc=True,
+                                    errors="coerce",
+                                )
+                                .dt.tz_convert(
+                                    TZ
+                                )
+                            )
+                            detail[
+                                "Local date"
+                            ] = local_dt.dt.strftime(
+                                "%Y-%m-%d"
+                            )
+                            return detail
+
+                        def _variant_stability_inputs(
+                            execution_frame,
+                            variant_name,
+                        ):
+                            if (
+                                execution_frame is None
+                                or execution_frame.empty
+                            ):
+                                return (
+                                    pd.DataFrame(),
+                                    {},
+                                    pd.DataFrame(),
+                                )
+
+                            mask = (
+                                _candidate_v2_variant_mask(
+                                    execution_frame,
+                                    variant_name,
+                                    strong_threshold=0.50,
+                                )
+                                .fillna(False)
+                                .astype(bool)
+                            )
+                            variant_exec = (
+                                execution_frame.loc[
+                                    mask
+                                ].copy()
+                            )
+
+                            if variant_exec.empty:
+                                return (
+                                    variant_exec,
+                                    {},
+                                    pd.DataFrame(),
+                                )
+
+                            _, variant_resolved = (
+                                _candidate_v2_concurrency_source(
+                                    execution_frame,
+                                    variant=variant_name,
+                                    strong_threshold=0.50,
+                                )
+                            )
+                            portfolio_result = (
+                                _candidate_v2_portfolio_simulation(
+                                    variant_resolved,
+                                    **fixed_portfolio,
+                                )
+                                if (
+                                    variant_resolved is not None
+                                    and not variant_resolved.empty
+                                )
+                                else {}
+                            )
+
+                            return (
+                                variant_exec,
+                                portfolio_result,
+                                _accepted_portfolio_detail(
+                                    portfolio_result,
+                                    variant_exec,
+                                ),
+                            )
+
+                        def _raw_daily(frame):
+                            if (
+                                frame is None
+                                or frame.empty
+                            ):
+                                return pd.DataFrame()
+
+                            work = frame.copy()
+                            work[
+                                "entry_timestamp"
+                            ] = pd.to_numeric(
+                                work.get(
+                                    "entry_timestamp",
+                                    pd.Series(
+                                        np.nan,
+                                        index=work.index,
+                                    ),
+                                ),
+                                errors="coerce",
+                            )
+                            work[
+                                "net_pnl_pct"
+                            ] = pd.to_numeric(
+                                work.get(
+                                    "net_pnl_pct",
+                                    pd.Series(
+                                        np.nan,
+                                        index=work.index,
+                                    ),
+                                ),
+                                errors="coerce",
+                            )
+                            work = work.loc[
+                                work[
+                                    "entry_timestamp"
+                                ].notna()
+                                & work[
+                                    "net_pnl_pct"
+                                ].notna()
+                            ].copy()
+
+                            if work.empty:
+                                return pd.DataFrame()
+
+                            work[
+                                "Local date"
+                            ] = (
+                                pd.to_datetime(
+                                    work[
+                                        "entry_timestamp"
+                                    ],
+                                    unit="ms",
+                                    utc=True,
+                                    errors="coerce",
+                                )
+                                .dt.tz_convert(
+                                    TZ
+                                )
+                                .dt.strftime(
+                                    "%Y-%m-%d"
+                                )
+                            )
+
+                            rows = []
+                            for day, group in work.groupby(
+                                "Local date",
+                                sort=True,
+                            ):
+                                net = pd.to_numeric(
+                                    group[
+                                        "net_pnl_pct"
+                                    ],
+                                    errors="coerce",
+                                ).dropna()
+                                rows.append({
+                                    "Local date": day,
+                                    "Raw trades": int(
+                                        len(
+                                            net
+                                        )
+                                    ),
+                                    "Raw NET pts": (
+                                        float(
+                                            net.sum()
+                                        )
+                                        if not net.empty
+                                        else 0.0
+                                    ),
+                                    "Raw avg %": (
+                                        float(
+                                            net.mean()
+                                        )
+                                        if not net.empty
+                                        else np.nan
+                                    ),
+                                    "Raw WR %": (
+                                        float(
+                                            net.gt(
+                                                0.0
+                                            ).mean()
+                                            * 100.0
+                                        )
+                                        if not net.empty
+                                        else np.nan
+                                    ),
+                                    "Raw PF": (
+                                        _stability_pf(
+                                            net
+                                        )
+                                    ),
+                                })
+                            return pd.DataFrame(
+                                rows
+                            )
+
+                        def _portfolio_daily(detail):
+                            if (
+                                detail is None
+                                or detail.empty
+                            ):
+                                return pd.DataFrame()
+
+                            rows = []
+                            for day, group in detail.groupby(
+                                "Local date",
+                                sort=True,
+                            ):
+                                raw_net = pd.to_numeric(
+                                    group[
+                                        "Portfolio trade net %"
+                                    ],
+                                    errors="coerce",
+                                ).dropna()
+                                pnl = pd.to_numeric(
+                                    group[
+                                        "Portfolio PnL $"
+                                    ],
+                                    errors="coerce",
+                                ).dropna()
+                                rows.append({
+                                    "Local date": day,
+                                    "Portfolio accepted": int(
+                                        len(
+                                            group
+                                        )
+                                    ),
+                                    "Portfolio raw NET pts": (
+                                        float(
+                                            raw_net.sum()
+                                        )
+                                        if not raw_net.empty
+                                        else 0.0
+                                    ),
+                                    "Portfolio PnL $": (
+                                        float(
+                                            pnl.sum()
+                                        )
+                                        if not pnl.empty
+                                        else 0.0
+                                    ),
+                                    "Portfolio PF $": (
+                                        _stability_pf(
+                                            pnl
+                                        )
+                                    ),
+                                })
+                            return pd.DataFrame(
+                                rows
+                            )
+
+                        def _stability_summary_row(
+                            label,
+                            raw_daily,
+                            portfolio_daily,
+                            portfolio_result,
+                        ):
+                            raw_net = pd.to_numeric(
+                                raw_daily.get(
+                                    "Raw NET pts",
+                                    pd.Series(dtype=float),
+                                ),
+                                errors="coerce",
+                            ).dropna()
+                            portfolio_pnl = pd.to_numeric(
+                                portfolio_daily.get(
+                                    "Portfolio PnL $",
+                                    pd.Series(dtype=float),
+                                ),
+                                errors="coerce",
+                            ).dropna()
+
+                            total_port_pnl = (
+                                float(
+                                    portfolio_pnl.sum()
+                                )
+                                if not portfolio_pnl.empty
+                                else 0.0
+                            )
+                            positive_sorted = (
+                                portfolio_pnl.loc[
+                                    portfolio_pnl.gt(
+                                        0.0
+                                    )
+                                ]
+                                .sort_values(
+                                    ascending=False
+                                )
+                            )
+                            top1_share = np.nan
+                            top2_share = np.nan
+                            if (
+                                total_port_pnl > 1e-12
+                                and not positive_sorted.empty
+                            ):
+                                top1_share = float(
+                                    positive_sorted.iloc[
+                                        :1
+                                    ].sum()
+                                    / total_port_pnl
+                                    * 100.0
+                                )
+                                top2_share = float(
+                                    positive_sorted.iloc[
+                                        :2
+                                    ].sum()
+                                    / total_port_pnl
+                                    * 100.0
+                                )
+
+                            summary = (
+                                portfolio_result.get(
+                                    "summary",
+                                    {},
+                                )
+                                if portfolio_result
+                                else {}
+                            )
+
+                            return {
+                                "Finalist": label,
+                                "Raw active days": int(
+                                    len(
+                                        raw_net
+                                    )
+                                ),
+                                "Raw positive days %": (
+                                    float(
+                                        raw_net.gt(
+                                            0.0
+                                        ).mean()
+                                        * 100.0
+                                    )
+                                    if not raw_net.empty
+                                    else np.nan
+                                ),
+                                "Median daily raw NET": (
+                                    float(
+                                        raw_net.median()
+                                    )
+                                    if not raw_net.empty
+                                    else np.nan
+                                ),
+                                "Worst daily raw NET": (
+                                    float(
+                                        raw_net.min()
+                                    )
+                                    if not raw_net.empty
+                                    else np.nan
+                                ),
+                                "Best daily raw NET": (
+                                    float(
+                                        raw_net.max()
+                                    )
+                                    if not raw_net.empty
+                                    else np.nan
+                                ),
+                                "Daily raw NET std": (
+                                    float(
+                                        raw_net.std(
+                                            ddof=0
+                                        )
+                                    )
+                                    if not raw_net.empty
+                                    else np.nan
+                                ),
+                                "Portfolio active days": int(
+                                    len(
+                                        portfolio_pnl
+                                    )
+                                ),
+                                "Portfolio positive days %": (
+                                    float(
+                                        portfolio_pnl.gt(
+                                            0.0
+                                        ).mean()
+                                        * 100.0
+                                    )
+                                    if not portfolio_pnl.empty
+                                    else np.nan
+                                ),
+                                "Median daily portfolio PnL $": (
+                                    float(
+                                        portfolio_pnl.median()
+                                    )
+                                    if not portfolio_pnl.empty
+                                    else np.nan
+                                ),
+                                "Worst daily portfolio PnL $": (
+                                    float(
+                                        portfolio_pnl.min()
+                                    )
+                                    if not portfolio_pnl.empty
+                                    else np.nan
+                                ),
+                                "Best daily portfolio PnL $": (
+                                    float(
+                                        portfolio_pnl.max()
+                                    )
+                                    if not portfolio_pnl.empty
+                                    else np.nan
+                                ),
+                                "Daily portfolio PnL std $": (
+                                    float(
+                                        portfolio_pnl.std(
+                                            ddof=0
+                                        )
+                                    )
+                                    if not portfolio_pnl.empty
+                                    else np.nan
+                                ),
+                                "Best day / total PnL %": (
+                                    top1_share
+                                ),
+                                "Top 2 days / total PnL %": (
+                                    top2_share
+                                ),
+                                "Accepted": int(
+                                    summary.get(
+                                        "Accepted trades",
+                                        0,
+                                    )
+                                    or 0
+                                ),
+                                "Final equity $": (
+                                    summary.get(
+                                        "Final equity",
+                                        np.nan,
+                                    )
+                                ),
+                                "Return %": (
+                                    summary.get(
+                                        "Return %",
+                                        np.nan,
+                                    )
+                                ),
+                                "Max DD %": (
+                                    summary.get(
+                                        "Max drawdown %",
+                                        np.nan,
+                                    )
+                                ),
+                                "Portfolio PF": (
+                                    summary.get(
+                                        "Portfolio PF",
+                                        np.nan,
+                                    )
+                                ),
+                            }
+
+                        def _add_time_block(
+                            frame,
+                            start_ts,
+                            end_ts,
+                            block_count=4,
+                        ):
+                            if (
+                                frame is None
+                                or frame.empty
+                            ):
+                                return pd.DataFrame()
+
+                            work = frame.copy()
+                            ts = pd.to_numeric(
+                                work.get(
+                                    "entry_timestamp",
+                                    pd.Series(
+                                        np.nan,
+                                        index=work.index,
+                                    ),
+                                ),
+                                errors="coerce",
+                            )
+                            work = work.loc[
+                                ts.notna()
+                            ].copy()
+                            if work.empty:
+                                return work
+
+                            ts = pd.to_numeric(
+                                work[
+                                    "entry_timestamp"
+                                ],
+                                errors="coerce",
+                            )
+                            span = max(
+                                int(
+                                    end_ts
+                                )
+                                - int(
+                                    start_ts
+                                )
+                                + 1,
+                                1,
+                            )
+                            raw_block = np.floor(
+                                (
+                                    ts.astype(float)
+                                    - float(
+                                        start_ts
+                                    )
+                                )
+                                / float(
+                                    span
+                                )
+                                * int(
+                                    block_count
+                                )
+                            )
+                            work[
+                                "Block"
+                            ] = (
+                                raw_block
+                                .clip(
+                                    0,
+                                    int(
+                                        block_count
+                                    )
+                                    - 1,
+                                )
+                                .astype(int)
+                                + 1
+                            )
+                            return work
+
+                        def _block_table(
+                            raw_frame,
+                            portfolio_detail,
+                            start_ts,
+                            end_ts,
+                            block_count=4,
+                        ):
+                            raw = _add_time_block(
+                                raw_frame,
+                                start_ts,
+                                end_ts,
+                                block_count,
+                            )
+                            port = (
+                                _add_time_block(
+                                    portfolio_detail,
+                                    start_ts,
+                                    end_ts,
+                                    block_count,
+                                )
+                                if (
+                                    portfolio_detail
+                                    is not None
+                                    and not portfolio_detail.empty
+                                )
+                                else pd.DataFrame()
+                            )
+
+                            rows = []
+                            span = max(
+                                int(
+                                    end_ts
+                                )
+                                - int(
+                                    start_ts
+                                )
+                                + 1,
+                                1,
+                            )
+
+                            for block in range(
+                                1,
+                                int(
+                                    block_count
+                                )
+                                + 1,
+                            ):
+                                block_start = int(
+                                    int(
+                                        start_ts
+                                    )
+                                    + span
+                                    * (
+                                        block
+                                        - 1
+                                    )
+                                    / block_count
+                                )
+                                block_end = int(
+                                    int(
+                                        start_ts
+                                    )
+                                    + span
+                                    * block
+                                    / block_count
+                                    - 1
+                                )
+
+                                raw_group = (
+                                    raw.loc[
+                                        raw[
+                                            "Block"
+                                        ].eq(
+                                            block
+                                        )
+                                    ]
+                                    if not raw.empty
+                                    else pd.DataFrame()
+                                )
+                                port_group = (
+                                    port.loc[
+                                        port[
+                                            "Block"
+                                        ].eq(
+                                            block
+                                        )
+                                    ]
+                                    if not port.empty
+                                    else pd.DataFrame()
+                                )
+
+                                raw_net = pd.to_numeric(
+                                    raw_group.get(
+                                        "net_pnl_pct",
+                                        pd.Series(dtype=float),
+                                    ),
+                                    errors="coerce",
+                                ).dropna()
+                                port_net = pd.to_numeric(
+                                    port_group.get(
+                                        "Portfolio trade net %",
+                                        pd.Series(dtype=float),
+                                    ),
+                                    errors="coerce",
+                                ).dropna()
+                                port_pnl = pd.to_numeric(
+                                    port_group.get(
+                                        "Portfolio PnL $",
+                                        pd.Series(dtype=float),
+                                    ),
+                                    errors="coerce",
+                                ).dropna()
+
+                                rows.append({
+                                    "Block": int(
+                                        block
+                                    ),
+                                    "Block start": (
+                                        pd.to_datetime(
+                                            block_start,
+                                            unit="ms",
+                                            utc=True,
+                                        )
+                                        .tz_convert(
+                                            TZ
+                                        )
+                                        .strftime(
+                                            "%Y-%m-%d %H:%M"
+                                        )
+                                    ),
+                                    "Block end": (
+                                        pd.to_datetime(
+                                            block_end,
+                                            unit="ms",
+                                            utc=True,
+                                        )
+                                        .tz_convert(
+                                            TZ
+                                        )
+                                        .strftime(
+                                            "%Y-%m-%d %H:%M"
+                                        )
+                                    ),
+                                    "Raw trades": int(
+                                        len(
+                                            raw_net
+                                        )
+                                    ),
+                                    "Raw NET pts": (
+                                        float(
+                                            raw_net.sum()
+                                        )
+                                        if not raw_net.empty
+                                        else 0.0
+                                    ),
+                                    "Raw PF": (
+                                        _stability_pf(
+                                            raw_net
+                                        )
+                                    ),
+                                    "Raw WR %": (
+                                        float(
+                                            raw_net.gt(
+                                                0.0
+                                            ).mean()
+                                            * 100.0
+                                        )
+                                        if not raw_net.empty
+                                        else np.nan
+                                    ),
+                                    "Portfolio accepted": int(
+                                        len(
+                                            port_group
+                                        )
+                                    ),
+                                    "Portfolio raw NET pts": (
+                                        float(
+                                            port_net.sum()
+                                        )
+                                        if not port_net.empty
+                                        else 0.0
+                                    ),
+                                    "Portfolio PnL $": (
+                                        float(
+                                            port_pnl.sum()
+                                        )
+                                        if not port_pnl.empty
+                                        else 0.0
+                                    ),
+                                })
+
+                            return pd.DataFrame(
+                                rows
+                            )
+
+                        if (
+                            not v1_matched_exec.empty
+                            and not v2_matched_exec.empty
+                            and matched_meta
+                        ):
+                            (
+                                v1_finalist_exec,
+                                v1_finalist_portfolio,
+                                v1_finalist_portfolio_detail,
+                            ) = _variant_stability_inputs(
+                                v1_matched_exec,
+                                "Candidate + Strength",
+                            )
+                            (
+                                v2_finalist_exec,
+                                v2_finalist_portfolio,
+                                v2_finalist_portfolio_detail,
+                            ) = _variant_stability_inputs(
+                                v2_matched_exec,
+                                "REACTION Base",
+                            )
+
+                            v1_raw_daily = _raw_daily(
+                                v1_finalist_exec
+                            )
+                            v2_raw_daily = _raw_daily(
+                                v2_finalist_exec
+                            )
+                            v1_port_daily = _portfolio_daily(
+                                v1_finalist_portfolio_detail
+                            )
+                            v2_port_daily = _portfolio_daily(
+                                v2_finalist_portfolio_detail
+                            )
+
+                            finalist_stability_summary = (
+                                pd.DataFrame([
+                                    _stability_summary_row(
+                                        (
+                                            "Candidate V1 · "
+                                            "Candidate + Strength"
+                                        ),
+                                        v1_raw_daily,
+                                        v1_port_daily,
+                                        v1_finalist_portfolio,
+                                    ),
+                                    _stability_summary_row(
+                                        (
+                                            "Candidate V2 · "
+                                            "REACTION Base"
+                                        ),
+                                        v2_raw_daily,
+                                        v2_port_daily,
+                                        v2_finalist_portfolio,
+                                    ),
+                                ])
+                            )
+
+                            def _prefix_daily(
+                                raw_daily,
+                                port_daily,
+                                prefix,
+                            ):
+                                all_days = sorted(
+                                    set(
+                                        raw_daily.get(
+                                            "Local date",
+                                            pd.Series(
+                                                dtype=str
+                                            ),
+                                        ).tolist()
+                                    )
+                                    | set(
+                                        port_daily.get(
+                                            "Local date",
+                                            pd.Series(
+                                                dtype=str
+                                            ),
+                                        ).tolist()
+                                    )
+                                )
+                                base = pd.DataFrame({
+                                    "Local date": all_days
+                                })
+                                base = base.merge(
+                                    raw_daily,
+                                    on="Local date",
+                                    how="left",
+                                )
+                                base = base.merge(
+                                    port_daily,
+                                    on="Local date",
+                                    how="left",
+                                )
+                                for column in [
+                                    column
+                                    for column in base.columns
+                                    if column != "Local date"
+                                ]:
+                                    base[column] = (
+                                        pd.to_numeric(
+                                            base[
+                                                column
+                                            ],
+                                            errors="coerce",
+                                        )
+                                        .fillna(
+                                            0.0
+                                        )
+                                    )
+                                return base.rename(
+                                    columns={
+                                        column: (
+                                            f"{prefix} {column}"
+                                            if column
+                                            != "Local date"
+                                            else column
+                                        )
+                                        for column in base.columns
+                                    }
+                                )
+
+                            v1_daily_pref = _prefix_daily(
+                                v1_raw_daily,
+                                v1_port_daily,
+                                "V1",
+                            )
+                            v2_daily_pref = _prefix_daily(
+                                v2_raw_daily,
+                                v2_port_daily,
+                                "V2",
+                            )
+
+                            finalist_daily_comparison = (
+                                v1_daily_pref.merge(
+                                    v2_daily_pref,
+                                    on="Local date",
+                                    how="outer",
+                                )
+                                .sort_values(
+                                    "Local date",
+                                    kind="stable",
+                                )
+                                .reset_index(
+                                    drop=True
+                                )
+                            )
+
+                            finalist_daily_comparison[
+                                "Δ raw NET V1-V2"
+                            ] = (
+                                pd.to_numeric(
+                                    finalist_daily_comparison.get(
+                                        "V1 Raw NET pts",
+                                        0.0,
+                                    ),
+                                    errors="coerce",
+                                ).fillna(
+                                    0.0
+                                )
+                                - pd.to_numeric(
+                                    finalist_daily_comparison.get(
+                                        "V2 Raw NET pts",
+                                        0.0,
+                                    ),
+                                    errors="coerce",
+                                ).fillna(
+                                    0.0
+                                )
+                            )
+                            finalist_daily_comparison[
+                                "Δ portfolio PnL $ V1-V2"
+                            ] = (
+                                pd.to_numeric(
+                                    finalist_daily_comparison.get(
+                                        "V1 Portfolio PnL $",
+                                        0.0,
+                                    ),
+                                    errors="coerce",
+                                ).fillna(
+                                    0.0
+                                )
+                                - pd.to_numeric(
+                                    finalist_daily_comparison.get(
+                                        "V2 Portfolio PnL $",
+                                        0.0,
+                                    ),
+                                    errors="coerce",
+                                ).fillna(
+                                    0.0
+                                )
+                            )
+
+                            finalist_cumulative = (
+                                finalist_daily_comparison[
+                                    [
+                                        "Local date",
+                                        "V1 Raw NET pts",
+                                        "V2 Raw NET pts",
+                                        "V1 Portfolio PnL $",
+                                        "V2 Portfolio PnL $",
+                                    ]
+                                ]
+                                .copy()
+                            )
+                            finalist_cumulative[
+                                "V1 cumulative raw NET"
+                            ] = pd.to_numeric(
+                                finalist_cumulative[
+                                    "V1 Raw NET pts"
+                                ],
+                                errors="coerce",
+                            ).fillna(
+                                0.0
+                            ).cumsum()
+                            finalist_cumulative[
+                                "V2 cumulative raw NET"
+                            ] = pd.to_numeric(
+                                finalist_cumulative[
+                                    "V2 Raw NET pts"
+                                ],
+                                errors="coerce",
+                            ).fillna(
+                                0.0
+                            ).cumsum()
+                            finalist_cumulative[
+                                "V1 cumulative portfolio PnL $"
+                            ] = pd.to_numeric(
+                                finalist_cumulative[
+                                    "V1 Portfolio PnL $"
+                                ],
+                                errors="coerce",
+                            ).fillna(
+                                0.0
+                            ).cumsum()
+                            finalist_cumulative[
+                                "V2 cumulative portfolio PnL $"
+                            ] = pd.to_numeric(
+                                finalist_cumulative[
+                                    "V2 Portfolio PnL $"
+                                ],
+                                errors="coerce",
+                            ).fillna(
+                                0.0
+                            ).cumsum()
+
+                            block_start_ts = int(
+                                matched_meta[
+                                    "start_ts"
+                                ]
+                            )
+                            block_end_ts = int(
+                                matched_meta[
+                                    "end_ts"
+                                ]
+                            )
+
+                            v1_blocks = _block_table(
+                                v1_finalist_exec,
+                                v1_finalist_portfolio_detail,
+                                block_start_ts,
+                                block_end_ts,
+                                4,
+                            )
+                            v2_blocks = _block_table(
+                                v2_finalist_exec,
+                                v2_finalist_portfolio_detail,
+                                block_start_ts,
+                                block_end_ts,
+                                4,
+                            )
+
+                            v1_blocks = v1_blocks.rename(
+                                columns={
+                                    column: (
+                                        f"V1 {column}"
+                                        if column
+                                        not in {
+                                            "Block",
+                                            "Block start",
+                                            "Block end",
+                                        }
+                                        else column
+                                    )
+                                    for column in v1_blocks.columns
+                                }
+                            )
+                            v2_blocks = v2_blocks.rename(
+                                columns={
+                                    column: (
+                                        f"V2 {column}"
+                                        if column
+                                        not in {
+                                            "Block",
+                                            "Block start",
+                                            "Block end",
+                                        }
+                                        else column
+                                    )
+                                    for column in v2_blocks.columns
+                                }
+                            )
+
+                            finalist_block_comparison = (
+                                v1_blocks.merge(
+                                    v2_blocks,
+                                    on=[
+                                        "Block",
+                                        "Block start",
+                                        "Block end",
+                                    ],
+                                    how="outer",
+                                )
+                                .sort_values(
+                                    "Block",
+                                    kind="stable",
+                                )
+                                .reset_index(
+                                    drop=True
+                                )
+                            )
+                            finalist_block_comparison[
+                                "Δ raw NET V1-V2"
+                            ] = (
+                                pd.to_numeric(
+                                    finalist_block_comparison.get(
+                                        "V1 Raw NET pts",
+                                        0.0,
+                                    ),
+                                    errors="coerce",
+                                ).fillna(
+                                    0.0
+                                )
+                                - pd.to_numeric(
+                                    finalist_block_comparison.get(
+                                        "V2 Raw NET pts",
+                                        0.0,
+                                    ),
+                                    errors="coerce",
+                                ).fillna(
+                                    0.0
+                                )
+                            )
+                            finalist_block_comparison[
+                                "Δ portfolio PnL $ V1-V2"
+                            ] = (
+                                pd.to_numeric(
+                                    finalist_block_comparison.get(
+                                        "V1 Portfolio PnL $",
+                                        0.0,
+                                    ),
+                                    errors="coerce",
+                                ).fillna(
+                                    0.0
+                                )
+                                - pd.to_numeric(
+                                    finalist_block_comparison.get(
+                                        "V2 Portfolio PnL $",
+                                        0.0,
+                                    ),
+                                    errors="coerce",
+                                ).fillna(
+                                    0.0
+                                )
+                            )
+
                         def accepted_keys(
                             portfolio,
                         ):
@@ -20880,9 +22186,14 @@ def render_candidate_v1_v2_fixed_benchmark(
                             ):
                                 return set()
 
+                            accepted_col = (
+                                "Accepted"
+                                if "Accepted" in ledger.columns
+                                else "accepted"
+                            )
                             accepted = ledger.loc[
                                 ledger.get(
-                                    "accepted",
+                                    accepted_col,
                                     pd.Series(
                                         False,
                                         index=ledger.index,
@@ -20892,15 +22203,17 @@ def render_candidate_v1_v2_fixed_benchmark(
                                 .astype(bool)
                             ].copy()
 
-                            if (
-                                "candidate_v1_event_key"
-                                not in accepted.columns
-                            ):
+                            event_col = (
+                                "Event key"
+                                if "Event key" in accepted.columns
+                                else "candidate_v1_event_key"
+                            )
+                            if event_col not in accepted.columns:
                                 return set()
 
                             return set(
                                 accepted[
-                                    "candidate_v1_event_key"
+                                    event_col
                                 ]
                                 .fillna("")
                                 .astype(str)
@@ -21059,6 +22372,18 @@ def render_candidate_v1_v2_fixed_benchmark(
                             ),
                             "matched_combined_variant_leaderboard": (
                                 matched_combined_variant_leaderboard
+                            ),
+                            "finalist_stability_summary": (
+                                finalist_stability_summary
+                            ),
+                            "finalist_daily_comparison": (
+                                finalist_daily_comparison
+                            ),
+                            "finalist_block_comparison": (
+                                finalist_block_comparison
+                            ),
+                            "finalist_cumulative": (
+                                finalist_cumulative
                             ),
                             "overlap": {
                                 "V1 ∩ V2": int(
@@ -21916,6 +23241,258 @@ def render_candidate_v1_v2_fixed_benchmark(
             "doing a meaningful part of the work."
         )
 
+    # ======================================================
+    # E · Temporal stability
+    # ======================================================
+    st.markdown(
+        "#### E. TEMPORAL STABILITY · V1 + Strength vs V2 REACTION Base"
+    )
+    st.caption(
+        "Same matched window and same fixed portfolio. Daily cohorts are grouped "
+        "by the trade's local **entry date**. Actual portfolio PnL $ preserves "
+        "the simulator's compounding and notional sizing."
+    )
+
+    finalist_stability_summary = cached.get(
+        "finalist_stability_summary",
+        pd.DataFrame(),
+    )
+    finalist_daily_comparison = cached.get(
+        "finalist_daily_comparison",
+        pd.DataFrame(),
+    )
+    finalist_block_comparison = cached.get(
+        "finalist_block_comparison",
+        pd.DataFrame(),
+    )
+    finalist_cumulative = cached.get(
+        "finalist_cumulative",
+        pd.DataFrame(),
+    )
+
+    if (
+        finalist_stability_summary is None
+        or finalist_stability_summary.empty
+    ):
+        st.info(
+            "No temporal-stability result in this snapshot. "
+            "Run / refresh the V1 vs V2 benchmark."
+        )
+    else:
+        st.markdown(
+            "##### Stability summary"
+        )
+        st.dataframe(
+            finalist_stability_summary,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_finalist_stability_summary",
+        )
+
+        v1_stability = finalist_stability_summary.loc[
+            finalist_stability_summary[
+                "Finalist"
+            ].astype(str).str.startswith(
+                "Candidate V1"
+            )
+        ]
+        v2_stability = finalist_stability_summary.loc[
+            finalist_stability_summary[
+                "Finalist"
+            ].astype(str).str.startswith(
+                "Candidate V2"
+            )
+        ]
+
+        if (
+            not v1_stability.empty
+            and not v2_stability.empty
+        ):
+            v1s = v1_stability.iloc[0]
+            v2s = v2_stability.iloc[0]
+
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric(
+                "V1 positive portfolio days",
+                (
+                    f"{float(v1s.get('Portfolio positive days %', np.nan)):.1f}%"
+                    if pd.notna(
+                        pd.to_numeric(
+                            pd.Series([
+                                v1s.get(
+                                    "Portfolio positive days %",
+                                    np.nan,
+                                )
+                            ]),
+                            errors="coerce",
+                        ).iloc[0]
+                    )
+                    else "—"
+                ),
+            )
+            s2.metric(
+                "V2 positive portfolio days",
+                (
+                    f"{float(v2s.get('Portfolio positive days %', np.nan)):.1f}%"
+                    if pd.notna(
+                        pd.to_numeric(
+                            pd.Series([
+                                v2s.get(
+                                    "Portfolio positive days %",
+                                    np.nan,
+                                )
+                            ]),
+                            errors="coerce",
+                        ).iloc[0]
+                    )
+                    else "—"
+                ),
+            )
+            s3.metric(
+                "V1 top-2 day concentration",
+                (
+                    f"{float(v1s.get('Top 2 days / total PnL %', np.nan)):.1f}%"
+                    if pd.notna(
+                        pd.to_numeric(
+                            pd.Series([
+                                v1s.get(
+                                    "Top 2 days / total PnL %",
+                                    np.nan,
+                                )
+                            ]),
+                            errors="coerce",
+                        ).iloc[0]
+                    )
+                    else "—"
+                ),
+            )
+            s4.metric(
+                "V2 top-2 day concentration",
+                (
+                    f"{float(v2s.get('Top 2 days / total PnL %', np.nan)):.1f}%"
+                    if pd.notna(
+                        pd.to_numeric(
+                            pd.Series([
+                                v2s.get(
+                                    "Top 2 days / total PnL %",
+                                    np.nan,
+                                )
+                            ]),
+                            errors="coerce",
+                        ).iloc[0]
+                    )
+                    else "—"
+                ),
+            )
+
+        day_tab, block_tab, curve_tab = st.tabs(
+            [
+                "📅 By entry day",
+                "🧱 4 chronological blocks",
+                "📈 Cumulative stability",
+            ]
+        )
+
+        with day_tab:
+            if (
+                finalist_daily_comparison is None
+                or finalist_daily_comparison.empty
+            ):
+                st.info(
+                    "No daily stability rows."
+                )
+            else:
+                st.dataframe(
+                    finalist_daily_comparison,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="candidate_finalist_daily_stability",
+                )
+                st.caption(
+                    "Look for repeated positive contribution, not only a large "
+                    "aggregate total produced by one exceptional day."
+                )
+
+        with block_tab:
+            if (
+                finalist_block_comparison is None
+                or finalist_block_comparison.empty
+            ):
+                st.info(
+                    "No chronological-block stability rows."
+                )
+            else:
+                st.dataframe(
+                    finalist_block_comparison,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="candidate_finalist_block_stability",
+                )
+                st.caption(
+                    "The matched interval is split into four equal time blocks, "
+                    "so regime changes inside the same calendar day remain visible."
+                )
+
+        with curve_tab:
+            if (
+                finalist_cumulative is None
+                or finalist_cumulative.empty
+            ):
+                st.info(
+                    "No cumulative stability rows."
+                )
+            else:
+                curve = (
+                    finalist_cumulative.copy()
+                    .set_index(
+                        "Local date"
+                    )
+                )
+
+                raw_cols = [
+                    col
+                    for col in [
+                        "V1 cumulative raw NET",
+                        "V2 cumulative raw NET",
+                    ]
+                    if col in curve.columns
+                ]
+                pnl_cols = [
+                    col
+                    for col in [
+                        "V1 cumulative portfolio PnL $",
+                        "V2 cumulative portfolio PnL $",
+                    ]
+                    if col in curve.columns
+                ]
+
+                if raw_cols:
+                    st.markdown(
+                        "**Cumulative raw NET by entry day**"
+                    )
+                    st.line_chart(
+                        curve[
+                            raw_cols
+                        ],
+                        use_container_width=True,
+                    )
+
+                if pnl_cols:
+                    st.markdown(
+                        "**Cumulative actual portfolio PnL $ by entry day**"
+                    )
+                    st.line_chart(
+                        curve[
+                            pnl_cols
+                        ],
+                        use_container_width=True,
+                    )
+
+        st.caption(
+            "A more convincing finalist should remain healthy across days/blocks, "
+            "with lower profit concentration and controlled drawdown."
+        )
+
     export_sections = []
     if (
         universe_table is not None
@@ -22004,6 +23581,50 @@ def render_candidate_v1_v2_fixed_benchmark(
             )
         )
 
+    if (
+        finalist_stability_summary is not None
+        and not finalist_stability_summary.empty
+    ):
+        export_sections.append(
+            "E_FINALIST_STABILITY_SUMMARY\n"
+            + finalist_stability_summary.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        finalist_daily_comparison is not None
+        and not finalist_daily_comparison.empty
+    ):
+        export_sections.append(
+            "E_FINALIST_BY_ENTRY_DAY\n"
+            + finalist_daily_comparison.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        finalist_block_comparison is not None
+        and not finalist_block_comparison.empty
+    ):
+        export_sections.append(
+            "E_FINALIST_4_TIME_BLOCKS\n"
+            + finalist_block_comparison.to_csv(
+                index=False
+            )
+        )
+
+    if (
+        finalist_cumulative is not None
+        and not finalist_cumulative.empty
+    ):
+        export_sections.append(
+            "E_FINALIST_CUMULATIVE\n"
+            + finalist_cumulative.to_csv(
+                index=False
+            )
+        )
+
     if export_sections:
         st.download_button(
             "Download V1 vs V2 fixed benchmark CSV",
@@ -22019,6 +23640,4540 @@ def render_candidate_v1_v2_fixed_benchmark(
             key="candidate_v1_v2_fixed_benchmark_download",
         )
 
+
+
+# ============================================================
+# LONG-HORIZON CANDIDATE HISTORICAL REPLAY
+# ============================================================
+
+CANDIDATE_LONG_HORIZON_ROOT = (
+    BASE_DIR
+    / "reports"
+    / "candidate_long_horizon"
+)
+CANDIDATE_LONG_HORIZON_CACHE = (
+    CANDIDATE_LONG_HORIZON_ROOT
+    / "candle_cache"
+)
+CANDIDATE_LONG_HORIZON_RUNS = (
+    CANDIDATE_LONG_HORIZON_ROOT
+    / "runs"
+)
+
+_LH_BINANCE_KLINES_URL = (
+    "https://fapi.binance.com/fapi/v1/klines"
+)
+_LH_BINANCE_EXCHANGE_INFO_URL = (
+    "https://fapi.binance.com/fapi/v1/exchangeInfo"
+)
+
+
+def _lh_atomic_json_write(payload, path):
+    path = Path(path)
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    tmp = path.with_suffix(
+        path.suffix + ".tmp"
+    )
+    tmp.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _lh_dir_size_bytes(path):
+    path = Path(path)
+    if not path.exists():
+        return 0
+
+    total = 0
+    try:
+        for item in path.rglob("*"):
+            try:
+                if item.is_file():
+                    total += int(
+                        item.stat().st_size
+                    )
+            except OSError:
+                continue
+    except OSError:
+        return 0
+
+    return int(total)
+
+
+def _lh_interval_ms(interval):
+    mapping = {
+        "1m": 60_000,
+        "15m": 15 * 60_000,
+    }
+    return int(
+        mapping.get(
+            str(interval),
+            60_000,
+        )
+    )
+
+
+def _lh_month_floor(timestamp_ms):
+    ts = pd.Timestamp(
+        int(timestamp_ms),
+        unit="ms",
+        tz="UTC",
+    )
+    return ts.normalize().replace(
+        day=1,
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _lh_month_partitions(start_ms, end_ms):
+    start = _lh_month_floor(
+        start_ms
+    )
+    end = _lh_month_floor(
+        end_ms
+    )
+
+    months = []
+    cursor = start
+
+    while cursor <= end:
+        next_month = (
+            cursor
+            + pd.offsets.MonthBegin(1)
+        )
+        part_start = int(
+            cursor.timestamp()
+            * 1000
+        )
+        part_end = int(
+            next_month.timestamp()
+            * 1000
+        ) - 1
+
+        months.append((
+            cursor.strftime(
+                "%Y-%m"
+            ),
+            part_start,
+            part_end,
+        ))
+        cursor = next_month
+
+    return months
+
+
+def _lh_day_partitions(start_ms, end_ms):
+    start = (
+        pd.Timestamp(
+            int(start_ms),
+            unit="ms",
+            tz="UTC",
+        )
+        .floor("D")
+    )
+    end = (
+        pd.Timestamp(
+            int(end_ms),
+            unit="ms",
+            tz="UTC",
+        )
+        .floor("D")
+    )
+
+    days = []
+    cursor = start
+
+    while cursor <= end:
+        next_day = cursor + pd.Timedelta(
+            days=1
+        )
+        days.append((
+            cursor.strftime(
+                "%Y-%m-%d"
+            ),
+            int(
+                cursor.timestamp()
+                * 1000
+            ),
+            int(
+                next_day.timestamp()
+                * 1000
+            )
+            - 1,
+        ))
+        cursor = next_day
+
+    return days
+
+
+def _lh_normalize_klines(payload):
+    if not isinstance(
+        payload,
+        list,
+    ) or not payload:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(
+        payload,
+        columns=[
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "ignore",
+        ],
+    )
+
+    for column in [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+    ]:
+        frame[
+            column
+        ] = pd.to_numeric(
+            frame[
+                column
+            ],
+            errors="coerce",
+        )
+
+    frame = frame.dropna(
+        subset=[
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+        ]
+    ).copy()
+
+    if frame.empty:
+        return frame
+
+    frame[
+        "timestamp"
+    ] = frame[
+        "timestamp"
+    ].astype(
+        "int64"
+    )
+
+    return (
+        frame[
+            [
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+            ]
+        ]
+        .sort_values(
+            "timestamp",
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=[
+                "timestamp"
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def _lh_binance_request_json(
+    url,
+    params=None,
+    *,
+    retries=4,
+    timeout=15,
+):
+    last_error = None
+
+    for attempt in range(
+        max(
+            1,
+            int(
+                retries
+            ),
+        )
+    ):
+        try:
+            response = requests.get(
+                url,
+                params=(
+                    params
+                    or {}
+                ),
+                timeout=float(
+                    timeout
+                ),
+            )
+
+            if response.status_code in {
+                418,
+                429,
+            }:
+                retry_after = (
+                    response.headers.get(
+                        "Retry-After"
+                    )
+                )
+                try:
+                    wait_seconds = max(
+                        1.0,
+                        float(
+                            retry_after
+                        ),
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    wait_seconds = min(
+                        20.0,
+                        2.0
+                        ** (
+                            attempt
+                            + 1
+                        ),
+                    )
+
+                time.sleep(
+                    wait_seconds
+                )
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        except Exception as exc:
+            last_error = exc
+            if (
+                attempt
+                + 1
+                >= int(
+                    retries
+                )
+            ):
+                break
+
+            time.sleep(
+                min(
+                    10.0,
+                    1.0
+                    * (
+                        2
+                        ** attempt
+                    ),
+                )
+            )
+
+    raise RuntimeError(
+        "Binance request failed"
+        + (
+            f": {type(last_error).__name__}: "
+            f"{last_error}"
+            if last_error
+            else ""
+        )
+    )
+
+
+def _lh_fetch_klines_partition(
+    symbol,
+    interval,
+    partition_label,
+    part_start_ms,
+    part_end_ms,
+    *,
+    force=False,
+):
+    """Fetch one persistent Binance partition.
+
+    15m data is cached monthly.
+    1m data is cached daily, but only for days that are actually needed by
+    a potential structural REACTION. This keeps the 6-12 month study far
+    smaller than storing a full 1m market history.
+    """
+    symbol = (
+        str(
+            symbol
+        )
+        .upper()
+        .strip()
+    )
+    interval = str(
+        interval
+    )
+
+    cache_path = (
+        CANDIDATE_LONG_HORIZON_CACHE
+        / interval
+        / symbol
+        / (
+            f"{partition_label}.pkl.gz"
+        )
+    )
+
+    if (
+        cache_path.exists()
+        and not force
+    ):
+        try:
+            cached = pd.read_pickle(
+                cache_path,
+                compression="gzip",
+            )
+            if (
+                cached is not None
+                and not cached.empty
+            ):
+                return cached
+        except Exception:
+            pass
+
+    now_ms = int(
+        pd.Timestamp.now(
+            tz="UTC"
+        ).timestamp()
+        * 1000
+    )
+
+    safe_end_ms = min(
+        int(
+            part_end_ms
+        ),
+        now_ms
+        - 1,
+    )
+
+    if safe_end_ms < int(
+        part_start_ms
+    ):
+        return pd.DataFrame()
+
+    cursor = int(
+        part_start_ms
+    )
+    frames = []
+    interval_ms = (
+        _lh_interval_ms(
+            interval
+        )
+    )
+    safety = 0
+
+    while (
+        cursor
+        <= safe_end_ms
+        and safety
+        < 500
+    ):
+        safety += 1
+
+        payload = (
+            _lh_binance_request_json(
+                _LH_BINANCE_KLINES_URL,
+                params={
+                    "symbol": symbol,
+                    "interval": interval,
+                    "startTime": int(
+                        cursor
+                    ),
+                    "endTime": int(
+                        safe_end_ms
+                    ),
+                    "limit": 1000,
+                },
+            )
+        )
+
+        frame = _lh_normalize_klines(
+            payload
+        )
+
+        if frame.empty:
+            break
+
+        frame = frame.loc[
+            (
+                frame[
+                    "timestamp"
+                ]
+                >= int(
+                    part_start_ms
+                )
+            )
+            & (
+                frame[
+                    "timestamp"
+                ]
+                <= int(
+                    part_end_ms
+                )
+            )
+        ].copy()
+
+        if frame.empty:
+            break
+
+        frames.append(
+            frame
+        )
+
+        last_ts = int(
+            frame[
+                "timestamp"
+            ].max()
+        )
+
+        next_cursor = (
+            last_ts
+            + interval_ms
+        )
+
+        if next_cursor <= cursor:
+            break
+
+        cursor = int(
+            next_cursor
+        )
+
+        if len(
+            payload
+        ) < 1000:
+            break
+
+        # Small cooperative pause. Cached reruns do not pay this cost.
+        time.sleep(
+            0.02
+        )
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = (
+        pd.concat(
+            frames,
+            ignore_index=True,
+            sort=False,
+        )
+        .sort_values(
+            "timestamp",
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=[
+                "timestamp"
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    cache_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    try:
+        tmp_path = (
+            cache_path
+            .with_suffix(
+                ".tmp.gz"
+            )
+        )
+        result.to_pickle(
+            tmp_path,
+            compression="gzip",
+        )
+        tmp_path.replace(
+            cache_path
+        )
+    except Exception:
+        pass
+
+    return result
+
+
+def _lh_fetch_klines_range(
+    symbol,
+    interval,
+    start_ms,
+    end_ms,
+    *,
+    force=False,
+):
+    if (
+        pd.isna(
+            start_ms
+        )
+        or pd.isna(
+            end_ms
+        )
+        or int(
+            end_ms
+        )
+        < int(
+            start_ms
+        )
+    ):
+        return pd.DataFrame()
+
+    if str(
+        interval
+    ) == "1m":
+        partitions = (
+            _lh_day_partitions(
+                start_ms,
+                end_ms,
+            )
+        )
+    else:
+        partitions = (
+            _lh_month_partitions(
+                start_ms,
+                end_ms,
+            )
+        )
+
+    frames = []
+
+    for (
+        label,
+        part_start,
+        part_end,
+    ) in partitions:
+        part = (
+            _lh_fetch_klines_partition(
+                symbol,
+                interval,
+                label,
+                part_start,
+                part_end,
+                force=bool(
+                    force
+                ),
+            )
+        )
+
+        if (
+            part is not None
+            and not part.empty
+        ):
+            frames.append(
+                part
+            )
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = (
+        pd.concat(
+            frames,
+            ignore_index=True,
+            sort=False,
+        )
+        .sort_values(
+            "timestamp",
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=[
+                "timestamp"
+            ],
+            keep="last",
+        )
+    )
+
+    result = result.loc[
+        (
+            result[
+                "timestamp"
+            ]
+            >= int(
+                start_ms
+            )
+        )
+        & (
+            result[
+                "timestamp"
+            ]
+            <= int(
+                end_ms
+            )
+        )
+    ].copy()
+
+    return result.reset_index(
+        drop=True
+    )
+
+
+@st.cache_data(
+    ttl=3600,
+    show_spinner=False,
+)
+def _lh_binance_current_perpetual_catalog():
+    try:
+        payload = (
+            _lh_binance_request_json(
+                _LH_BINANCE_EXCHANGE_INFO_URL,
+                params={},
+            )
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+
+    for item in payload.get(
+        "symbols",
+        [],
+    ):
+        if (
+            str(
+                item.get(
+                    "quoteAsset",
+                    ""
+                )
+            ).upper()
+            != "USDT"
+        ):
+            continue
+
+        if (
+            str(
+                item.get(
+                    "contractType",
+                    ""
+                )
+            ).upper()
+            != "PERPETUAL"
+        ):
+            continue
+
+        rows.append({
+            "symbol": str(
+                item.get(
+                    "symbol",
+                    ""
+                )
+            ).upper(),
+            "status": str(
+                item.get(
+                    "status",
+                    ""
+                )
+            ),
+            "onboardDate": pd.to_numeric(
+                item.get(
+                    "onboardDate"
+                ),
+                errors="coerce",
+            ),
+            "deliveryDate": pd.to_numeric(
+                item.get(
+                    "deliveryDate"
+                ),
+                errors="coerce",
+            ),
+        })
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+def _lh_symbol_universe(
+    source_mode,
+    start_ms,
+    end_ms,
+):
+    source_mode = str(
+        source_mode
+    )
+
+    if (
+        source_mode
+        == "Current research universe"
+    ):
+        symbols = list(
+            load_volume_exhaustion_symbol_universe()
+        )
+
+        return (
+            sorted({
+                str(
+                    symbol
+                ).upper()
+                for symbol in symbols
+                if str(
+                    symbol
+                ).strip()
+            }),
+            (
+                "Current dashboard research universe. "
+                "Fast, but survivorship-biased for old delisted contracts."
+            ),
+        )
+
+    catalog = (
+        _lh_binance_current_perpetual_catalog()
+    )
+
+    if catalog.empty:
+        symbols = list(
+            load_volume_exhaustion_symbol_universe()
+        )
+
+        return (
+            sorted({
+                str(
+                    symbol
+                ).upper()
+                for symbol in symbols
+                if str(
+                    symbol
+                ).strip()
+            }),
+            (
+                "Binance exchangeInfo was unavailable; fell back to current "
+                "research universe."
+            ),
+        )
+
+    onboard = pd.to_numeric(
+        catalog[
+            "onboardDate"
+        ],
+        errors="coerce",
+    )
+    delivery = pd.to_numeric(
+        catalog[
+            "deliveryDate"
+        ],
+        errors="coerce",
+    )
+
+    mask = (
+        onboard.isna()
+        | onboard.le(
+            int(
+                end_ms
+            )
+        )
+    )
+
+    # Current exchangeInfo does not reliably reconstruct already-delisted
+    # contracts. deliveryDate filtering is useful for rows that are present.
+    mask &= (
+        delivery.isna()
+        | delivery.gt(
+            int(
+                start_ms
+            )
+        )
+    )
+
+    symbols = (
+        catalog.loc[
+            mask,
+            "symbol",
+        ]
+        .dropna()
+        .astype(str)
+        .str.upper()
+        .tolist()
+    )
+
+    return (
+        sorted(
+            set(
+                symbols
+            )
+        ),
+        (
+            "Binance current USD-M perpetual catalog filtered by onboard/"
+            "delivery dates. Better than a flat current list, but contracts "
+            "already absent from current exchangeInfo can still create "
+            "survivorship bias."
+        ),
+    )
+
+
+def _lh_resample_ohlcv(
+    candles,
+    timeframe,
+    expected_rows,
+):
+    if (
+        candles is None
+        or candles.empty
+    ):
+        return pd.DataFrame()
+
+    work = candles.copy()
+
+    required = {
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    }
+
+    if not required.issubset(
+        work.columns
+    ):
+        return pd.DataFrame()
+
+    work[
+        "dt"
+    ] = pd.to_datetime(
+        pd.to_numeric(
+            work[
+                "timestamp"
+            ],
+            errors="coerce",
+        ),
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    )
+
+    for column in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]:
+        work[
+            column
+        ] = pd.to_numeric(
+            work[
+                column
+            ],
+            errors="coerce",
+        )
+
+    work = work.dropna(
+        subset=[
+            "dt",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+    )
+
+    if work.empty:
+        return pd.DataFrame()
+
+    work = (
+        work.set_index(
+            "dt"
+        )
+        .sort_index()
+    )
+
+    grouped = work.resample(
+        str(
+            timeframe
+        ),
+        label="left",
+        closed="left",
+        origin="epoch",
+    )
+
+    result = grouped.agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    })
+
+    counts = grouped[
+        "close"
+    ].count()
+
+    result = result.loc[
+        counts.eq(
+            int(
+                expected_rows
+            )
+        )
+    ].dropna().copy()
+
+    if result.empty:
+        return pd.DataFrame()
+
+    result[
+        "timestamp"
+    ] = (
+        result.index.astype(
+            "int64"
+        )
+        // 1_000_000
+    ).astype(
+        "int64"
+    )
+
+    interval_ms = {
+        "5min": 5 * 60_000,
+        "15min": 15 * 60_000,
+        "30min": 30 * 60_000,
+        "1h": 60 * 60_000,
+        "4h": 4 * 60 * 60_000,
+    }.get(
+        str(
+            timeframe
+        ),
+        60_000,
+    )
+
+    result[
+        "close_time"
+    ] = (
+        result[
+            "timestamp"
+        ]
+        + int(
+            interval_ms
+        )
+        - 1
+    )
+
+    return result[
+        [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+        ]
+    ].reset_index(
+        drop=True
+    )
+
+
+def _lh_coarse_possible_retest(
+    fifteen_minute,
+    swing_row,
+    *,
+    retest_tolerance_pct,
+    min_departure_pct,
+    max_age_minutes,
+):
+    """Necessary 15m pre-screen only.
+
+    False positives are acceptable because the exact 1m causal detector runs
+    afterwards. The pre-screen must avoid false negatives.
+    """
+    if (
+        fifteen_minute is None
+        or fifteen_minute.empty
+    ):
+        return False
+
+    try:
+        actionable_ts = int(
+            swing_row[
+                "actionable_timestamp"
+            ]
+        )
+        swing_price = float(
+            swing_row[
+                "pivot_price"
+            ]
+        )
+        side = str(
+            swing_row[
+                "signal"
+            ]
+        ).upper()
+    except Exception:
+        return False
+
+    if (
+        swing_price <= 0
+        or side not in {
+            "LONG",
+            "SHORT",
+        }
+    ):
+        return False
+
+    horizon_end = (
+        actionable_ts
+        + int(
+            max_age_minutes
+        )
+        * 60_000
+    )
+
+    future = fifteen_minute.loc[
+        (
+            pd.to_numeric(
+                fifteen_minute[
+                    "timestamp"
+                ],
+                errors="coerce",
+            )
+            >= actionable_ts
+        )
+        & (
+            pd.to_numeric(
+                fifteen_minute[
+                    "timestamp"
+                ],
+                errors="coerce",
+            )
+            <= horizon_end
+        )
+    ].copy()
+
+    if future.empty:
+        return False
+
+    tolerance = float(
+        retest_tolerance_pct
+    )
+    departure = float(
+        min_departure_pct
+    )
+
+    lower_zone = (
+        swing_price
+        * (
+            1.0
+            - tolerance
+            / 100.0
+        )
+    )
+    upper_zone = (
+        swing_price
+        * (
+            1.0
+            + tolerance
+            / 100.0
+        )
+    )
+
+    departed = False
+
+    for _, candle in future.iterrows():
+        high = float(
+            candle[
+                "high"
+            ]
+        )
+        low = float(
+            candle[
+                "low"
+            ]
+        )
+
+        if side == "LONG":
+            away = max(
+                0.0,
+                (
+                    high
+                    / swing_price
+                    - 1.0
+                )
+                * 100.0,
+            )
+        else:
+            away = max(
+                0.0,
+                (
+                    1.0
+                    - low
+                    / swing_price
+                )
+                * 100.0,
+            )
+
+        if (
+            not departed
+            and away
+            >= departure
+        ):
+            departed = True
+
+        if not departed:
+            continue
+
+        zone_hit = (
+            high
+            >= lower_zone
+            and low
+            <= upper_zone
+        )
+
+        if zone_hit:
+            return True
+
+    return False
+
+
+def _lh_4h_return_at(
+    four_hour,
+    known_ts,
+):
+    if (
+        four_hour is None
+        or four_hour.empty
+    ):
+        return np.nan
+
+    interval_ms = (
+        4
+        * 60
+        * 60
+        * 1000
+    )
+
+    boundary = int(
+        (
+            math.floor(
+                int(
+                    known_ts
+                )
+                / interval_ms
+            )
+            * interval_ms
+        )
+        - interval_ms
+    )
+
+    close_map = dict(
+        zip(
+            pd.to_numeric(
+                four_hour[
+                    "timestamp"
+                ],
+                errors="coerce",
+            )
+            .dropna()
+            .astype(
+                "int64"
+            ),
+            pd.to_numeric(
+                four_hour.loc[
+                    pd.to_numeric(
+                        four_hour[
+                            "timestamp"
+                        ],
+                        errors="coerce",
+                    ).notna(),
+                    "close",
+                ],
+                errors="coerce",
+            ),
+        )
+    )
+
+    close_now = close_map.get(
+        boundary
+    )
+    close_prev = close_map.get(
+        boundary
+        - interval_ms
+    )
+
+    if (
+        close_now is None
+        or close_prev is None
+        or pd.isna(
+            close_now
+        )
+        or pd.isna(
+            close_prev
+        )
+        or float(
+            close_prev
+        )
+        == 0.0
+    ):
+        return np.nan
+
+    return float(
+        (
+            float(
+                close_now
+            )
+            / float(
+                close_prev
+            )
+            - 1.0
+        )
+        * 100.0
+    )
+
+
+def _lh_execution_from_1m(
+    one_minute,
+    reaction_row,
+    *,
+    tp_pct=0.5,
+    sl_pct=3.0,
+    horizon_min=180,
+    execution_cost_pct=0.10,
+):
+    prepared = (
+        _prepare_confirmed_swing_retest_candles(
+            one_minute
+        )
+    )
+
+    if prepared.empty:
+        return None
+
+    try:
+        reaction_ts = int(
+            reaction_row[
+                "retest_timestamp"
+            ]
+        )
+        side = str(
+            reaction_row[
+                "signal"
+            ]
+        ).upper()
+    except Exception:
+        return None
+
+    entry_ts = (
+        reaction_ts
+        + 60_000
+    )
+
+    timestamps = (
+        prepared[
+            "timestamp"
+        ]
+        .astype(
+            "int64"
+        )
+        .to_numpy()
+    )
+
+    start_idx = int(
+        np.searchsorted(
+            timestamps,
+            entry_ts,
+            side="left",
+        )
+    )
+
+    if (
+        start_idx
+        >= len(
+            timestamps
+        )
+        or int(
+            timestamps[
+                start_idx
+            ]
+        )
+        != entry_ts
+    ):
+        return {
+            "Outcome": "PENDING",
+            "entry_timestamp": entry_ts,
+        }
+
+    max_end_idx = (
+        start_idx
+        + int(
+            horizon_min
+        )
+        - 1
+    )
+
+    if (
+        max_end_idx
+        >= len(
+            timestamps
+        )
+    ):
+        return {
+            "Outcome": "PENDING",
+            "entry_timestamp": entry_ts,
+        }
+
+    expected = (
+        entry_ts
+        + np.arange(
+            int(
+                horizon_min
+            ),
+            dtype="int64",
+        )
+        * 60_000
+    )
+
+    actual = timestamps[
+        start_idx:
+        max_end_idx
+        + 1
+    ]
+
+    if (
+        len(
+            actual
+        )
+        != int(
+            horizon_min
+        )
+        or np.any(
+            actual
+            != expected
+        )
+    ):
+        return {
+            "Outcome": "PENDING",
+            "entry_timestamp": entry_ts,
+        }
+
+    path = prepared.iloc[
+        start_idx:
+        max_end_idx
+        + 1
+    ].copy()
+
+    entry_price = float(
+        path.iloc[
+            0
+        ][
+            "open"
+        ]
+    )
+
+    if (
+        entry_price
+        <= 0
+        or side not in {
+            "LONG",
+            "SHORT",
+        }
+    ):
+        return None
+
+    if side == "LONG":
+        tp_price = (
+            entry_price
+            * (
+                1.0
+                + float(
+                    tp_pct
+                )
+                / 100.0
+            )
+        )
+        sl_price = (
+            entry_price
+            * (
+                1.0
+                - float(
+                    sl_pct
+                )
+                / 100.0
+            )
+        )
+    else:
+        tp_price = (
+            entry_price
+            * (
+                1.0
+                - float(
+                    tp_pct
+                )
+                / 100.0
+            )
+        )
+        sl_price = (
+            entry_price
+            * (
+                1.0
+                + float(
+                    sl_pct
+                )
+                / 100.0
+            )
+        )
+
+    outcome = "TIME_EXIT"
+    exit_ts = int(
+        path.iloc[
+            -1
+        ][
+            "timestamp"
+        ]
+    )
+    exit_price = float(
+        path.iloc[
+            -1
+        ][
+            "close"
+        ]
+    )
+    gross_pct = np.nan
+
+    highs = (
+        path[
+            "high"
+        ]
+        .astype(float)
+        .to_numpy()
+    )
+    lows = (
+        path[
+            "low"
+        ]
+        .astype(float)
+        .to_numpy()
+    )
+
+    mfe = 0.0
+    mae = 0.0
+
+    for offset, (
+        high,
+        low,
+    ) in enumerate(
+        zip(
+            highs,
+            lows,
+        )
+    ):
+        candle_ts = int(
+            path.iloc[
+                offset
+            ][
+                "timestamp"
+            ]
+        )
+
+        if side == "LONG":
+            favorable = max(
+                0.0,
+                (
+                    high
+                    / entry_price
+                    - 1.0
+                )
+                * 100.0,
+            )
+            adverse = max(
+                0.0,
+                (
+                    1.0
+                    - low
+                    / entry_price
+                )
+                * 100.0,
+            )
+            tp_hit = (
+                high
+                >= tp_price
+            )
+            sl_hit = (
+                low
+                <= sl_price
+            )
+        else:
+            favorable = max(
+                0.0,
+                (
+                    1.0
+                    - low
+                    / entry_price
+                )
+                * 100.0,
+            )
+            adverse = max(
+                0.0,
+                (
+                    high
+                    / entry_price
+                    - 1.0
+                )
+                * 100.0,
+            )
+            tp_hit = (
+                low
+                <= tp_price
+            )
+            sl_hit = (
+                high
+                >= sl_price
+            )
+
+        mfe = max(
+            mfe,
+            favorable,
+        )
+        mae = max(
+            mae,
+            adverse,
+        )
+
+        if (
+            tp_hit
+            and sl_hit
+        ):
+            outcome = (
+                "SL_AMBIGUOUS"
+            )
+            exit_ts = candle_ts
+            exit_price = float(
+                sl_price
+            )
+            gross_pct = -float(
+                sl_pct
+            )
+            break
+
+        if sl_hit:
+            outcome = "SL"
+            exit_ts = candle_ts
+            exit_price = float(
+                sl_price
+            )
+            gross_pct = -float(
+                sl_pct
+            )
+            break
+
+        if tp_hit:
+            outcome = "TP"
+            exit_ts = candle_ts
+            exit_price = float(
+                tp_price
+            )
+            gross_pct = float(
+                tp_pct
+            )
+            break
+
+    if pd.isna(
+        gross_pct
+    ):
+        if side == "LONG":
+            gross_pct = (
+                (
+                    exit_price
+                    / entry_price
+                )
+                - 1.0
+            ) * 100.0
+        else:
+            gross_pct = (
+                1.0
+                - (
+                    exit_price
+                    / entry_price
+                )
+            ) * 100.0
+
+    net_pct = (
+        float(
+            gross_pct
+        )
+        - float(
+            execution_cost_pct
+        )
+    )
+
+    return {
+        "Outcome": str(
+            outcome
+        ),
+        "entry_timestamp": int(
+            entry_ts
+        ),
+        "exit_timestamp": int(
+            exit_ts
+        ),
+        "entry_price": float(
+            entry_price
+        ),
+        "exit_price": float(
+            exit_price
+        ),
+        "gross_pnl_pct": float(
+            gross_pct
+        ),
+        "execution_cost_pct": float(
+            execution_cost_pct
+        ),
+        "net_pnl_pct": float(
+            net_pct
+        ),
+        "mfe_until_exit_pct": float(
+            mfe
+        ),
+        "mae_until_exit_pct": float(
+            mae
+        ),
+    }
+
+
+def _lh_symbol_month_events(
+    symbol,
+    month_start_ms,
+    month_end_ms,
+    *,
+    room_warmup_days=120,
+    max_age_minutes=360,
+    retest_tolerance_pct=0.10,
+    min_departure_pct=0.20,
+):
+    """Exact 1m confirmation of 15m structural REACTIONs for one symbol/month.
+
+    Discovery is cheap 15m. Full 1m is downloaded only for days touched by
+    a possible departure+retest window.
+    """
+    symbol = str(
+        symbol
+    ).upper()
+
+    warmup_start_ms = int(
+        month_start_ms
+        - int(
+            room_warmup_days
+        )
+        * 24
+        * 60
+        * 60
+        * 1000
+    )
+
+    tail_end_ms = int(
+        month_end_ms
+        + (
+            max_age_minutes
+            + 180
+            + 5
+        )
+        * 60_000
+    )
+
+    fifteen = (
+        _lh_fetch_klines_range(
+            symbol,
+            "15m",
+            warmup_start_ms,
+            tail_end_ms,
+        )
+    )
+
+    if (
+        fifteen is None
+        or fifteen.empty
+    ):
+        return pd.DataFrame()
+
+    # BTC is needed only for the historical 4h relative-strength snapshot.
+    btc_fifteen = (
+        _lh_fetch_klines_range(
+            "BTCUSDT",
+            "15m",
+            warmup_start_ms,
+            tail_end_ms,
+        )
+    )
+
+    # Causal structural frames derived from one 15m source.
+    thirty = _lh_resample_ohlcv(
+        fifteen,
+        "30min",
+        2,
+    )
+    one_hour = _lh_resample_ohlcv(
+        fifteen,
+        "1h",
+        4,
+    )
+    four_hour = _lh_resample_ohlcv(
+        fifteen,
+        "4h",
+        16,
+    )
+
+    btc_four_hour = (
+        _lh_resample_ohlcv(
+            btc_fifteen,
+            "4h",
+            16,
+        )
+        if (
+            btc_fifteen is not None
+            and not btc_fifteen.empty
+        )
+        else pd.DataFrame()
+    )
+
+    room_points = {}
+
+    for (
+        tf,
+        candles,
+    ) in [
+        (
+            "30m",
+            thirty,
+        ),
+        (
+            "1h",
+            one_hour,
+        ),
+        (
+            "4h",
+            four_hour,
+        ),
+    ]:
+        if (
+            candles is None
+            or candles.empty
+        ):
+            room_points[
+                tf
+            ] = []
+            continue
+
+        detector = SwingDetector(
+            left_bars=5,
+            right_bars=5,
+            min_prominence_pct=0.0,
+        )
+
+        try:
+            room_points[
+                tf
+            ] = detector.detect_all(
+                candles.to_dict(
+                    orient="records"
+                )
+            )
+        except Exception:
+            room_points[
+                tf
+            ] = []
+
+    # 15m 3x3 is the shared structural detector used by the current V1/V2 lab.
+    reaction_detector = SwingDetector(
+        left_bars=3,
+        right_bars=3,
+        min_prominence_pct=0.0,
+    )
+
+    try:
+        reaction_points = (
+            reaction_detector.detect_all(
+                fifteen.to_dict(
+                    orient="records"
+                )
+            )
+        )
+    except Exception:
+        reaction_points = []
+
+    if not reaction_points:
+        return pd.DataFrame()
+
+    rows = []
+
+    for point in reaction_points:
+        if (
+            point.pivot_timestamp
+            is None
+        ):
+            continue
+
+        info = (
+            get_volume_exhaustion_swing_confirmation_info(
+                point=point,
+                timeframe_candles=fifteen,
+                swing_timeframe="15m",
+            )
+        )
+
+        if info is None:
+            continue
+
+        actionable_ts = int(
+            info[
+                "actionable_timestamp"
+            ]
+        )
+
+        # A reaction inside this month can originate from a confirmation up to
+        # max_age before the month starts.
+        if (
+            actionable_ts
+            > int(
+                month_end_ms
+            )
+            or (
+                actionable_ts
+                + int(
+                    max_age_minutes
+                )
+                * 60_000
+            )
+            < int(
+                month_start_ms
+            )
+        ):
+            continue
+
+        signal_side = (
+            "SHORT"
+            if point.side
+            == "HIGH"
+            else "LONG"
+            if point.side
+            == "LOW"
+            else None
+        )
+
+        if signal_side is None:
+            continue
+
+        swing_row = {
+            "timeframe": "15m",
+            "detector": "3x3",
+            "signal": (
+                signal_side
+            ),
+            "pivot_timestamp": int(
+                point.pivot_timestamp
+            ),
+            "actionable_timestamp": (
+                actionable_ts
+            ),
+            "pivot_price": float(
+                point.price
+            ),
+            "entry_price": float(
+                info[
+                    "confirmation_close"
+                ]
+            ),
+            "pivot_to_confirmation_pct": float(
+                info[
+                    "move_pct"
+                ]
+            ),
+            "prominence_pct": pd.to_numeric(
+                getattr(
+                    point,
+                    "prominence_pct",
+                    np.nan,
+                ),
+                errors="coerce",
+            ),
+        }
+
+        if not _lh_coarse_possible_retest(
+            fifteen,
+            swing_row,
+            retest_tolerance_pct=(
+                retest_tolerance_pct
+            ),
+            min_departure_pct=(
+                min_departure_pct
+            ),
+            max_age_minutes=(
+                max_age_minutes
+            ),
+        ):
+            continue
+
+        # ~15h pre-history is enough for RSI14 on 1h while the forward tail
+        # covers structural retest + 180m execution.
+        one_min_start = int(
+            actionable_ts
+            - 15
+            * 60
+            * 60
+            * 1000
+        )
+        one_min_end = int(
+            actionable_ts
+            + (
+                max_age_minutes
+                + 180
+                + 5
+            )
+            * 60_000
+        )
+
+        one_minute = (
+            _lh_fetch_klines_range(
+                symbol,
+                "1m",
+                one_min_start,
+                one_min_end,
+            )
+        )
+
+        if (
+            one_minute is None
+            or one_minute.empty
+        ):
+            continue
+
+        retest = (
+            _find_confirmed_swing_retest(
+                one_minute=(
+                    one_minute
+                ),
+                swing_row=(
+                    swing_row
+                ),
+                retest_tolerance_pct=float(
+                    retest_tolerance_pct
+                ),
+                min_departure_pct=float(
+                    min_departure_pct
+                ),
+                max_age_minutes=int(
+                    max_age_minutes
+                ),
+            )
+        )
+
+        if (
+            retest is None
+            or str(
+                retest.get(
+                    "status",
+                    ""
+                )
+            )
+            != "REACTION"
+        ):
+            continue
+
+        retest_ts = int(
+            retest[
+                "retest_timestamp"
+            ]
+        )
+
+        if not (
+            int(
+                month_start_ms
+            )
+            <= retest_ts
+            <= int(
+                month_end_ms
+            )
+        ):
+            continue
+
+        known_ts = (
+            retest_ts
+            + 60_000
+        )
+
+        # RSI context uses only bars that are fully closed at known_ts.
+        one_min_prepared = (
+            _prepare_confirmed_swing_retest_candles(
+                one_minute
+            )
+        )
+        five_minute = (
+            _lh_resample_ohlcv(
+                one_min_prepared,
+                "5min",
+                5,
+            )
+        )
+        fifteen_from_1m = (
+            _lh_resample_ohlcv(
+                one_min_prepared,
+                "15min",
+                15,
+            )
+        )
+        one_hour_from_1m = (
+            _lh_resample_ohlcv(
+                one_min_prepared,
+                "1h",
+                60,
+            )
+        )
+
+        rsi_context = {}
+
+        for (
+            tf,
+            candles,
+            tf_ms,
+        ) in [
+            (
+                "1m",
+                one_min_prepared,
+                60_000,
+            ),
+            (
+                "5m",
+                five_minute,
+                5
+                * 60_000,
+            ),
+            (
+                "15m",
+                fifteen_from_1m,
+                15
+                * 60_000,
+            ),
+            (
+                "1h",
+                one_hour_from_1m,
+                60
+                * 60_000,
+            ),
+        ]:
+            rsi_context[
+                f"rsi14_{tf}"
+            ] = (
+                _reaction_driver_rsi_from_candles(
+                    candles,
+                    known_ts,
+                    tf_ms,
+                    period=14,
+                )
+            )
+
+        aligned_count = 0
+
+        for tf in [
+            "1m",
+            "5m",
+            "15m",
+            "1h",
+        ]:
+            rsi_value = (
+                pd.to_numeric(
+                    rsi_context.get(
+                        f"rsi14_{tf}"
+                    ),
+                    errors="coerce",
+                )
+            )
+
+            aligned = (
+                pd.notna(
+                    rsi_value
+                )
+                and (
+                    (
+                        signal_side
+                        == "LONG"
+                        and float(
+                            rsi_value
+                        )
+                        <= 30.0
+                    )
+                    or (
+                        signal_side
+                        == "SHORT"
+                        and float(
+                            rsi_value
+                        )
+                        >= 70.0
+                    )
+                )
+            )
+
+            rsi_context[
+                f"aligned_rsi_extreme_{tf}"
+            ] = bool(
+                aligned
+            )
+            aligned_count += int(
+                aligned
+            )
+
+        rsi_context[
+            "aligned_rsi_extreme_count"
+        ] = int(
+            aligned_count
+        )
+
+        room_candidates = []
+
+        for (
+            tf,
+            tf_ms,
+        ) in [
+            (
+                "30m",
+                30
+                * 60_000,
+            ),
+            (
+                "1h",
+                60
+                * 60_000,
+            ),
+            (
+                "4h",
+                4
+                * 60
+                * 60_000,
+            ),
+        ]:
+            distances = (
+                _reaction_driver_swing_distances(
+                    room_points.get(
+                        tf,
+                        [],
+                    ),
+                    known_ts,
+                    tf_ms,
+                    float(
+                        retest[
+                            "retest_close"
+                        ]
+                    ),
+                    signal_side,
+                )
+            )
+
+            room_value = (
+                distances.get(
+                    "opposing_room_pct"
+                )
+            )
+
+            if pd.notna(
+                room_value
+            ):
+                room_candidates.append({
+                    "room_pct": float(
+                        room_value
+                    ),
+                    "timeframe": tf,
+                    "price": distances.get(
+                        "opposing_swing_price",
+                        np.nan,
+                    ),
+                    "pivot_timestamp": distances.get(
+                        "opposing_swing_pivot_timestamp",
+                        np.nan,
+                    ),
+                    "confirmed_timestamp": distances.get(
+                        "opposing_swing_confirmed_timestamp",
+                        np.nan,
+                    ),
+                    "actionable_timestamp": distances.get(
+                        "opposing_swing_actionable_timestamp",
+                        np.nan,
+                    ),
+                })
+
+        nearest_room = (
+            min(
+                room_candidates,
+                key=lambda item: item[
+                    "room_pct"
+                ],
+            )
+            if room_candidates
+            else None
+        )
+
+        symbol_return_4h = (
+            _lh_4h_return_at(
+                four_hour,
+                known_ts,
+            )
+        )
+        btc_return_4h = (
+            _lh_4h_return_at(
+                btc_four_hour,
+                known_ts,
+            )
+        )
+
+        residual = (
+            float(
+                symbol_return_4h
+            )
+            - float(
+                btc_return_4h
+            )
+            if (
+                pd.notna(
+                    symbol_return_4h
+                )
+                and pd.notna(
+                    btc_return_4h
+                )
+            )
+            else np.nan
+        )
+
+        side_adjusted = (
+            residual
+            if signal_side
+            == "LONG"
+            else -residual
+            if (
+                signal_side
+                == "SHORT"
+                and pd.notna(
+                    residual
+                )
+            )
+            else np.nan
+        )
+
+        execution = (
+            _lh_execution_from_1m(
+                one_minute,
+                retest,
+                tp_pct=0.5,
+                sl_pct=3.0,
+                horizon_min=180,
+                execution_cost_pct=0.10,
+            )
+        )
+
+        if execution is None:
+            continue
+
+        event_key = (
+            f"{symbol}|"
+            f"{signal_side}|"
+            f"{retest_ts}"
+        )
+
+        row = {
+            **retest,
+            **rsi_context,
+            **execution,
+            "symbol": symbol,
+            "side": signal_side,
+            "candidate_v1_event_key": (
+                event_key
+            ),
+            "candidate_v2_event_key": (
+                event_key
+            ),
+            "candidate_v1_reaction_known_ts": int(
+                known_ts
+            ),
+            "return_pct_4h": (
+                symbol_return_4h
+            ),
+            "btc_return_pct_4h": (
+                btc_return_4h
+            ),
+            "symbol_strength_vs_btc_4h": (
+                residual
+            ),
+            "side_adjusted_strength_vs_btc_4h": (
+                side_adjusted
+            ),
+            "nearest_opposing_room_pct": (
+                nearest_room[
+                    "room_pct"
+                ]
+                if nearest_room
+                else np.nan
+            ),
+            "nearest_opposing_swing_tf": (
+                nearest_room[
+                    "timeframe"
+                ]
+                if nearest_room
+                else None
+            ),
+            "nearest_opposing_swing_price": (
+                nearest_room[
+                    "price"
+                ]
+                if nearest_room
+                else np.nan
+            ),
+            "nearest_opposing_swing_pivot_timestamp": (
+                nearest_room[
+                    "pivot_timestamp"
+                ]
+                if nearest_room
+                else np.nan
+            ),
+            "nearest_opposing_swing_confirmed_timestamp": (
+                nearest_room[
+                    "confirmed_timestamp"
+                ]
+                if nearest_room
+                else np.nan
+            ),
+            "nearest_opposing_swing_actionable_timestamp": (
+                nearest_room[
+                    "actionable_timestamp"
+                ]
+                if nearest_room
+                else np.nan
+            ),
+            "historical_replay_month": (
+                pd.Timestamp(
+                    int(
+                        month_start_ms
+                    ),
+                    unit="ms",
+                    tz="UTC",
+                ).strftime(
+                    "%Y-%m"
+                )
+            ),
+        }
+
+        rows.append(
+            row
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(
+        rows
+    )
+
+    # One market reaction is one observation even if multiple 15m swings map to
+    # the same retest candle.
+    result = (
+        result.sort_values(
+            [
+                "retest_timestamp",
+                "symbol",
+            ],
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=[
+                "symbol",
+                "side",
+                "retest_timestamp",
+            ],
+            keep="first",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return result
+
+
+def _lh_month_ranges(
+    start_ms,
+    end_ms,
+):
+    ranges = []
+
+    for (
+        label,
+        part_start,
+        part_end,
+    ) in _lh_month_partitions(
+        start_ms,
+        end_ms,
+    ):
+        ranges.append({
+            "label": label,
+            "start_ms": int(
+                max(
+                    int(
+                        start_ms
+                    ),
+                    int(
+                        part_start
+                    ),
+                )
+            ),
+            "end_ms": int(
+                min(
+                    int(
+                        end_ms
+                    ),
+                    int(
+                        part_end
+                    ),
+                )
+            ),
+        })
+
+    return ranges
+
+
+def _lh_run_id(
+    start_ms,
+    end_ms,
+    universe_mode,
+    symbols,
+    room_warmup_days,
+):
+    payload = {
+        "start_ms": int(
+            start_ms
+        ),
+        "end_ms": int(
+            end_ms
+        ),
+        "universe_mode": str(
+            universe_mode
+        ),
+        "symbols": sorted(
+            str(
+                symbol
+            )
+            for symbol in symbols
+        ),
+        "room_warmup_days": int(
+            room_warmup_days
+        ),
+        "detector": "15m_3x3",
+        "retest_tolerance_pct": 0.10,
+        "min_departure_pct": 0.20,
+        "max_age_minutes": 360,
+        "tp_pct": 0.5,
+        "sl_pct": 3.0,
+        "horizon_min": 180,
+    }
+
+    digest = hashlib.sha1(
+        json.dumps(
+            payload,
+            sort_keys=True,
+        ).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:12]
+
+    return (
+        f"{pd.Timestamp(start_ms, unit='ms', tz='UTC').strftime('%Y%m%d')}"
+        f"_"
+        f"{pd.Timestamp(end_ms, unit='ms', tz='UTC').strftime('%Y%m%d')}"
+        f"_"
+        f"{digest}"
+    )
+
+
+def _lh_run_paths(run_id):
+    run_dir = (
+        CANDIDATE_LONG_HORIZON_RUNS
+        / str(
+            run_id
+        )
+    )
+
+    return {
+        "dir": run_dir,
+        "config": run_dir
+        / "config.json",
+        "state": run_dir
+        / "state.json",
+        "events": run_dir
+        / "events.csv",
+    }
+
+
+def _lh_load_json(path, default):
+    path = Path(
+        path
+    )
+
+    if not path.exists():
+        return default
+
+    try:
+        payload = json.loads(
+            path.read_text(
+                encoding="utf-8"
+            )
+        )
+        return payload
+    except Exception:
+        return default
+
+
+def _lh_load_events(path):
+    path = Path(
+        path
+    )
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    try:
+        frame = pd.read_csv(
+            path
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    numeric_columns = [
+        "retest_timestamp",
+        "candidate_v1_reaction_known_ts",
+        "entry_timestamp",
+        "exit_timestamp",
+        "entry_price",
+        "exit_price",
+        "gross_pnl_pct",
+        "execution_cost_pct",
+        "net_pnl_pct",
+        "mfe_until_exit_pct",
+        "mae_until_exit_pct",
+        "return_pct_4h",
+        "btc_return_pct_4h",
+        "symbol_strength_vs_btc_4h",
+        "side_adjusted_strength_vs_btc_4h",
+        "nearest_opposing_room_pct",
+        "nearest_opposing_swing_price",
+        "nearest_opposing_swing_pivot_timestamp",
+        "nearest_opposing_swing_confirmed_timestamp",
+        "nearest_opposing_swing_actionable_timestamp",
+        "aligned_rsi_extreme_count",
+    ]
+
+    for column in numeric_columns:
+        if column in frame.columns:
+            frame[
+                column
+            ] = pd.to_numeric(
+                frame[
+                    column
+                ],
+                errors="coerce",
+            )
+
+    return frame
+
+
+def _lh_append_events(
+    path,
+    fresh,
+):
+    if (
+        fresh is None
+        or fresh.empty
+    ):
+        return _lh_load_events(
+            path
+        )
+
+    existing = (
+        _lh_load_events(
+            path
+        )
+    )
+
+    merged = pd.concat(
+        [
+            existing,
+            fresh,
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+
+    key_columns = [
+        "candidate_v1_event_key",
+    ]
+
+    if all(
+        column
+        in merged.columns
+        for column in key_columns
+    ):
+        merged = (
+            merged.drop_duplicates(
+                subset=key_columns,
+                keep="last",
+            )
+        )
+
+    merged = merged.sort_values(
+        [
+            column
+            for column in [
+                "entry_timestamp",
+                "symbol",
+            ]
+            if column
+            in merged.columns
+        ],
+        kind="stable",
+        na_position="last",
+    )
+
+    Path(
+        path
+    ).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    tmp = Path(
+        path
+    ).with_suffix(
+        ".csv.tmp"
+    )
+
+    merged.to_csv(
+        tmp,
+        index=False,
+    )
+    tmp.replace(
+        path
+    )
+
+    return merged.reset_index(
+        drop=True
+    )
+
+
+def _lh_prepare_portfolio_rows(
+    events,
+):
+    if (
+        events is None
+        or events.empty
+    ):
+        return pd.DataFrame()
+
+    work = events.copy()
+
+    outcome = (
+        work.get(
+            "Outcome",
+            pd.Series(
+                "PENDING",
+                index=work.index,
+            ),
+        )
+        .fillna(
+            "PENDING"
+        )
+        .astype(str)
+        .str.upper()
+    )
+
+    work = work.loc[
+        outcome.ne(
+            "PENDING"
+        )
+    ].copy()
+
+    if work.empty:
+        return work
+
+    work[
+        "_entry_ts"
+    ] = pd.to_numeric(
+        work[
+            "entry_timestamp"
+        ],
+        errors="coerce",
+    )
+
+    work[
+        "_effective_exit_ts"
+    ] = pd.to_numeric(
+        work[
+            "exit_timestamp"
+        ],
+        errors="coerce",
+    )
+
+    work[
+        "candidate_v1_reaction_known_ts"
+    ] = pd.to_numeric(
+        work.get(
+            "candidate_v1_reaction_known_ts",
+            work.get(
+                "retest_timestamp",
+                pd.Series(
+                    np.nan,
+                    index=work.index,
+                ),
+            ),
+        ),
+        errors="coerce",
+    )
+
+    return work
+
+
+def _lh_finalist_frames(events):
+    if (
+        events is None
+        or events.empty
+    ):
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+    work = _lh_prepare_portfolio_rows(
+        events
+    )
+
+    if work.empty:
+        return (
+            work,
+            work,
+        )
+
+    strength = pd.to_numeric(
+        work.get(
+            "side_adjusted_strength_vs_btc_4h",
+            pd.Series(
+                np.nan,
+                index=work.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    room = pd.to_numeric(
+        work.get(
+            "nearest_opposing_room_pct",
+            pd.Series(
+                np.nan,
+                index=work.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    rsi_count = pd.to_numeric(
+        work.get(
+            "aligned_rsi_extreme_count",
+            pd.Series(
+                np.nan,
+                index=work.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    # Historical V2 REACTION Base mirrors the current matrix variant contract:
+    # it requires a causal 4h strength snapshot to be numerically available,
+    # but does not filter on its sign.
+    v2 = work.loc[
+        strength.notna()
+    ].copy()
+
+    # Candidate V1 definition + the finalist Strength > 0 overlay.
+    v1 = work.loc[
+        room.ge(
+            1.0
+        )
+        & rsi_count.ge(
+            1
+        )
+        & strength.gt(
+            0.0
+        )
+    ].copy()
+
+    return (
+        v1,
+        v2,
+    )
+
+
+def _lh_pf(values):
+    series = pd.to_numeric(
+        values,
+        errors="coerce",
+    ).dropna()
+
+    if series.empty:
+        return np.nan
+
+    gains = series.loc[
+        series.gt(
+            0.0
+        )
+    ]
+    losses = series.loc[
+        series.lt(
+            0.0
+        )
+    ]
+
+    if (
+        not losses.empty
+        and abs(
+            float(
+                losses.sum()
+            )
+        )
+        > 1e-12
+    ):
+        return float(
+            gains.sum()
+            / abs(
+                float(
+                    losses.sum()
+                )
+            )
+        )
+
+    if not gains.empty:
+        return np.inf
+
+    return np.nan
+
+
+def _lh_portfolio(
+    frame,
+):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return {}
+
+    return _candidate_v2_portfolio_simulation(
+        frame,
+        starting_equity=200.0,
+        leverage=3.0,
+        max_slots=1,
+        risk_per_trade_pct=0.25,
+        selected_sl_pct=3.0,
+        max_margin_pct=80.0,
+        compound=True,
+        priority_mode=(
+            "Most HTF Room → Strength"
+        ),
+        sizing_mode=(
+            "Margin % equity"
+        ),
+        fixed_margin_usd=150.0,
+        margin_per_trade_pct=80.0,
+        market_flow_gate_mode="OFF",
+    )
+
+
+def _lh_raw_summary(
+    frame,
+):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return {
+            "Resolved": 0,
+            "TP": 0,
+            "SL": 0,
+            "TIME_EXIT": 0,
+            "Raw NET pts": 0.0,
+            "WR %": np.nan,
+            "PF": np.nan,
+        }
+
+    outcome = (
+        frame[
+            "Outcome"
+        ]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    net = pd.to_numeric(
+        frame[
+            "net_pnl_pct"
+        ],
+        errors="coerce",
+    ).dropna()
+
+    return {
+        "Resolved": int(
+            len(
+                net
+            )
+        ),
+        "TP": int(
+            outcome.eq(
+                "TP"
+            ).sum()
+        ),
+        "SL": int(
+            outcome.isin(
+                [
+                    "SL",
+                    "SL_AMBIGUOUS",
+                ]
+            ).sum()
+        ),
+        "TIME_EXIT": int(
+            outcome.eq(
+                "TIME_EXIT"
+            ).sum()
+        ),
+        "Raw NET pts": float(
+            net.sum()
+        )
+        if not net.empty
+        else 0.0,
+        "WR %": float(
+            net.gt(
+                0.0
+            ).mean()
+            * 100.0
+        )
+        if not net.empty
+        else np.nan,
+        "PF": _lh_pf(
+            net
+        ),
+    }
+
+
+def _lh_monthly_report(
+    label,
+    frame,
+    portfolio_result,
+):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return pd.DataFrame()
+
+    work = frame.copy()
+
+    local_entry = (
+        pd.to_datetime(
+            pd.to_numeric(
+                work[
+                    "entry_timestamp"
+            ],
+            errors="coerce",
+        ),
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    )
+    .dt.tz_convert(
+        TZ
+    )
+    )
+
+    work[
+        "Month"
+    ] = local_entry.dt.to_period(
+        "M"
+    ).astype(
+        str
+    )
+
+    accepted_pnl = {}
+
+    if portfolio_result:
+        ledger = portfolio_result.get(
+            "ledger",
+            pd.DataFrame(),
+        )
+
+        if (
+            ledger is not None
+            and not ledger.empty
+            and "Accepted"
+            in ledger.columns
+        ):
+            accepted = ledger.loc[
+                ledger[
+                    "Accepted"
+                ]
+                .fillna(
+                    False
+                )
+                .astype(
+                    bool
+                )
+            ].copy()
+
+            if not accepted.empty:
+                entry_dt = pd.to_datetime(
+                    accepted[
+                        "Entry"
+                    ],
+                    errors="coerce",
+                )
+                accepted[
+                    "Month"
+                ] = entry_dt.dt.to_period(
+                    "M"
+                ).astype(
+                    str
+                )
+
+                for month, group in accepted.groupby(
+                    "Month",
+                    sort=True,
+                ):
+                    pnl = pd.to_numeric(
+                        group.get(
+                            "PnL $",
+                            pd.Series(
+                                dtype=float
+                            ),
+                        ),
+                        errors="coerce",
+                    ).dropna()
+
+                    trade_net = pd.to_numeric(
+                        group.get(
+                            "Trade net %",
+                            pd.Series(
+                                dtype=float
+                            ),
+                        ),
+                        errors="coerce",
+                    ).dropna()
+
+                    accepted_pnl[
+                        str(
+                            month
+                        )
+                    ] = {
+                        "Accepted": int(
+                            len(
+                                group
+                            )
+                        ),
+                        "Portfolio PnL $": float(
+                            pnl.sum()
+                        )
+                        if not pnl.empty
+                        else 0.0,
+                        "Portfolio PF": _lh_pf(
+                            pnl
+                        ),
+                        "Portfolio raw NET pts": float(
+                            trade_net.sum()
+                        )
+                        if not trade_net.empty
+                        else 0.0,
+                    }
+
+    rows = []
+
+    for month, group in work.groupby(
+        "Month",
+        sort=True,
+    ):
+        net = pd.to_numeric(
+            group[
+                "net_pnl_pct"
+            ],
+            errors="coerce",
+        ).dropna()
+
+        port = accepted_pnl.get(
+            str(
+                month
+            ),
+            {},
+        )
+
+        rows.append({
+            "Finalist": label,
+            "Month": str(
+                month
+            ),
+            "Resolved": int(
+                len(
+                    net
+                )
+            ),
+            "Raw NET pts": float(
+                net.sum()
+            )
+            if not net.empty
+            else 0.0,
+            "Raw PF": _lh_pf(
+                net
+            ),
+            "Raw WR %": float(
+                net.gt(
+                    0.0
+                ).mean()
+                * 100.0
+            )
+            if not net.empty
+            else np.nan,
+            "Accepted": int(
+                port.get(
+                    "Accepted",
+                    0,
+                )
+            ),
+            "Portfolio raw NET pts": float(
+                port.get(
+                    "Portfolio raw NET pts",
+                    0.0,
+                )
+            ),
+            "Portfolio PnL $": float(
+                port.get(
+                    "Portfolio PnL $",
+                    0.0,
+                )
+            ),
+            "Portfolio PF": port.get(
+                "Portfolio PF",
+                np.nan,
+            ),
+        })
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+def _lh_quarterly_from_monthly(
+    monthly,
+):
+    if (
+        monthly is None
+        or monthly.empty
+    ):
+        return pd.DataFrame()
+
+    work = monthly.copy()
+
+    period = pd.PeriodIndex(
+        work[
+            "Month"
+        ],
+        freq="M",
+    )
+
+    work[
+        "Quarter"
+    ] = period.asfreq(
+        "Q"
+    ).astype(
+        str
+    )
+
+    rows = []
+
+    for (
+        finalist,
+        quarter,
+    ), group in work.groupby(
+        [
+            "Finalist",
+            "Quarter",
+        ],
+        sort=True,
+    ):
+        rows.append({
+            "Finalist": finalist,
+            "Quarter": quarter,
+            "Resolved": int(
+                pd.to_numeric(
+                    group[
+                        "Resolved"
+                    ],
+                    errors="coerce",
+                ).fillna(
+                    0
+                ).sum()
+            ),
+            "Raw NET pts": float(
+                pd.to_numeric(
+                    group[
+                        "Raw NET pts"
+                    ],
+                    errors="coerce",
+                ).fillna(
+                    0.0
+                ).sum()
+            ),
+            "Accepted": int(
+                pd.to_numeric(
+                    group[
+                        "Accepted"
+                    ],
+                    errors="coerce",
+                ).fillna(
+                    0
+                ).sum()
+            ),
+            "Portfolio raw NET pts": float(
+                pd.to_numeric(
+                    group[
+                        "Portfolio raw NET pts"
+                    ],
+                    errors="coerce",
+                ).fillna(
+                    0.0
+                ).sum()
+            ),
+            "Portfolio PnL $": float(
+                pd.to_numeric(
+                    group[
+                        "Portfolio PnL $"
+                    ],
+                    errors="coerce",
+                ).fillna(
+                    0.0
+                ).sum()
+            ),
+        })
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+def _lh_summary_table(
+    v1,
+    v2,
+    v1_portfolio,
+    v2_portfolio,
+):
+    rows = []
+
+    for (
+        label,
+        frame,
+        portfolio,
+    ) in [
+        (
+            "V1 + Strength",
+            v1,
+            v1_portfolio,
+        ),
+        (
+            "V2 REACTION Base",
+            v2,
+            v2_portfolio,
+        ),
+    ]:
+        raw = _lh_raw_summary(
+            frame
+        )
+        port_summary = (
+            portfolio.get(
+                "summary",
+                {},
+            )
+            if portfolio
+            else {}
+        )
+
+        room_coverage = pd.to_numeric(
+            frame.get(
+                "nearest_opposing_room_pct",
+                pd.Series(
+                    dtype=float
+                ),
+            ),
+            errors="coerce",
+        )
+
+        rows.append({
+            "Finalist": label,
+            **raw,
+            "Room coverage %": (
+                float(
+                    room_coverage.notna().mean()
+                    * 100.0
+                )
+                if len(
+                    frame
+                )
+                else np.nan
+            ),
+            "Accepted": int(
+                port_summary.get(
+                    "Accepted trades",
+                    0,
+                )
+                or 0
+            ),
+            "Portfolio NET pts": float(
+                port_summary.get(
+                    "Raw net pts accepted",
+                    0.0,
+                )
+                or 0.0
+            ),
+            "Final equity $": port_summary.get(
+                "Final equity",
+                np.nan,
+            ),
+            "Return %": port_summary.get(
+                "Return %",
+                np.nan,
+            ),
+            "Max DD %": port_summary.get(
+                "Max drawdown %",
+                np.nan,
+            ),
+            "Portfolio PF": port_summary.get(
+                "Portfolio PF",
+                np.nan,
+            ),
+        })
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+def render_candidate_long_horizon_historical_replay():
+    st.markdown(
+        "### 🗓️ F. Long-Horizon Historical Replay · 1m / 3m / 6m / 12m"
+    )
+    st.caption(
+        "Causal historical reconstruction of the two current finalists. "
+        "The dashboard downloads 15m discovery data persistently, then downloads "
+        "1m only for days where a 15m swing can plausibly depart and retest. "
+        "Progress is resumable by symbol/month, so a 6-12 month run does not need "
+        "to finish in one Streamlit request."
+    )
+
+    st.info(
+        "**Fixed strategies for this first long-horizon pass:** "
+        "V1 = Candidate V1 rule + Strength > 0; "
+        "V2 = REACTION Base. Both use TP 0.5% / SL 3% / 180m, "
+        "Most HTF Room → Strength, $200, 1 slot, x3, 80% equity margin, "
+        "Market Flow gate OFF, Early Exit OFF and Position Upgrade OFF."
+    )
+
+    today_utc = pd.Timestamp.now(
+        tz="UTC"
+    ).normalize()
+
+    default_end = (
+        today_utc
+        - pd.Timedelta(
+            days=1
+        )
+    )
+
+    h1, h2, h3 = st.columns(
+        3
+    )
+
+    horizon_label = h1.selectbox(
+        "Historical range",
+        options=[
+            "1 month",
+            "3 months",
+            "6 months",
+            "12 months",
+            "Custom",
+        ],
+        index=2,
+        key=(
+            "candidate_long_horizon_range"
+        ),
+    )
+
+    end_date = h2.date_input(
+        "End date",
+        value=default_end.date(),
+        max_value=(
+            today_utc.date()
+        ),
+        key=(
+            "candidate_long_horizon_end"
+        ),
+    )
+
+    if horizon_label == "Custom":
+        start_date = h3.date_input(
+            "Start date",
+            value=(
+                default_end
+                - pd.Timedelta(
+                    days=180
+                )
+            ).date(),
+            max_value=end_date,
+            key=(
+                "candidate_long_horizon_start"
+            ),
+        )
+    else:
+        months_back = {
+            "1 month": 1,
+            "3 months": 3,
+            "6 months": 6,
+            "12 months": 12,
+        }[
+            horizon_label
+        ]
+
+        start_ts = (
+            pd.Timestamp(
+                end_date,
+                tz="UTC",
+            )
+            - pd.DateOffset(
+                months=int(
+                    months_back
+                )
+            )
+            + pd.Timedelta(
+                days=1
+            )
+        )
+
+        start_date = start_ts.date()
+
+        h3.metric(
+            "Start date",
+            str(
+                start_date
+            ),
+        )
+
+    u1, u2, u3 = st.columns(
+        3
+    )
+
+    universe_mode = u1.selectbox(
+        "Historical symbol universe",
+        options=[
+            "Current research universe",
+            "Binance current perpetual catalog",
+        ],
+        index=0,
+        key=(
+            "candidate_long_horizon_universe"
+        ),
+    )
+
+    room_warmup_days = u2.selectbox(
+        "HTF Room warm-up",
+        options=[
+            60,
+            90,
+            120,
+            180,
+        ],
+        index=2,
+        format_func=lambda value: (
+            f"{value} days"
+        ),
+        key=(
+            "candidate_long_horizon_warmup"
+        ),
+        help=(
+            "Older causal opposing swings outside this warm-up cannot be used. "
+            "Rows with no reconstructed Room remain visible through coverage metrics."
+        ),
+    )
+
+    symbols_per_batch = u3.selectbox(
+        "Symbols per resume batch",
+        options=[
+            10,
+            25,
+            50,
+            100,
+            9999,
+        ],
+        index=1,
+        format_func=lambda value: (
+            "ALL remaining in month"
+            if int(
+                value
+            )
+            >= 9999
+            else str(
+                value
+            )
+        ),
+        key=(
+            "candidate_long_horizon_batch_size"
+        ),
+    )
+
+    start_ms = int(
+        pd.Timestamp(
+            start_date,
+            tz="UTC",
+        ).timestamp()
+        * 1000
+    )
+
+    end_ms = int(
+        (
+            pd.Timestamp(
+                end_date,
+                tz="UTC",
+            )
+            + pd.Timedelta(
+                days=1
+            )
+            - pd.Timedelta(
+                milliseconds=1
+            )
+        ).timestamp()
+        * 1000
+    )
+
+    symbols, universe_note = (
+        _lh_symbol_universe(
+            universe_mode,
+            start_ms,
+            end_ms,
+        )
+    )
+
+    st.caption(
+        universe_note
+    )
+
+    if not symbols:
+        st.warning(
+            "No symbols are available for the selected universe."
+        )
+        return
+
+    s1, s2 = st.columns(
+        2
+    )
+
+    max_symbols = s1.number_input(
+        "Pilot symbol limit (0 = all)",
+        min_value=0,
+        max_value=max(
+            0,
+            len(
+                symbols
+            ),
+        ),
+        value=0,
+        step=10,
+        key=(
+            "candidate_long_horizon_symbol_limit"
+        ),
+        help=(
+            "Use 20-50 for a quick pipeline validation before committing "
+            "the full 6-12 month universe."
+        ),
+    )
+
+    if int(
+        max_symbols
+    ) > 0:
+        symbols = symbols[
+            : int(
+                max_symbols
+            )
+        ]
+
+    s2.metric(
+        "Frozen run universe",
+        len(
+            symbols
+        ),
+    )
+
+    run_id = _lh_run_id(
+        start_ms,
+        end_ms,
+        universe_mode,
+        symbols,
+        room_warmup_days,
+    )
+
+    paths = _lh_run_paths(
+        run_id
+    )
+
+    months = _lh_month_ranges(
+        start_ms,
+        end_ms,
+    )
+
+    config = {
+        "run_id": run_id,
+        "created_at_utc": pd.Timestamp.now(
+            tz="UTC"
+        ).isoformat(),
+        "start_ms": int(
+            start_ms
+        ),
+        "end_ms": int(
+            end_ms
+        ),
+        "start_date": str(
+            start_date
+        ),
+        "end_date": str(
+            end_date
+        ),
+        "universe_mode": str(
+            universe_mode
+        ),
+        "universe_note": str(
+            universe_note
+        ),
+        "symbols": list(
+            symbols
+        ),
+        "room_warmup_days": int(
+            room_warmup_days
+        ),
+        "months": months,
+        "strategy": {
+            "v1": (
+                "Candidate V1 + Strength > 0"
+            ),
+            "v2": (
+                "REACTION Base"
+            ),
+            "tp_pct": 0.5,
+            "sl_pct": 3.0,
+            "horizon_min": 180,
+            "priority": (
+                "Most HTF Room → Strength"
+            ),
+            "starting_equity": 200.0,
+            "slots": 1,
+            "leverage": 3.0,
+            "margin_pct": 80.0,
+        },
+    }
+
+    if not paths[
+        "config"
+    ].exists():
+        _lh_atomic_json_write(
+            config,
+            paths[
+                "config"
+            ],
+        )
+
+    state = _lh_load_json(
+        paths[
+            "state"
+        ],
+        {
+            "run_id": run_id,
+            "processed": {},
+            "errors": {},
+        },
+    )
+
+    processed = state.get(
+        "processed",
+        {},
+    )
+
+    total_units = (
+        len(
+            months
+        )
+        * len(
+            symbols
+        )
+    )
+
+    done_units = sum(
+        len(
+            set(
+                processed.get(
+                    month[
+                        "label"
+                    ],
+                    [],
+                )
+            )
+        )
+        for month in months
+    )
+
+    p1, p2, p3, p4 = st.columns(
+        4
+    )
+
+    p1.metric(
+        "Months",
+        len(
+            months
+        ),
+    )
+    p2.metric(
+        "Symbols",
+        len(
+            symbols
+        ),
+    )
+    p3.metric(
+        "Symbol-months done",
+        (
+            f"{done_units}/{total_units}"
+        ),
+    )
+    p4.metric(
+        "Progress",
+        (
+            f"{(
+                done_units
+                / total_units
+                * 100.0
+            ):.1f}%"
+            if total_units
+            else "—"
+        ),
+    )
+
+    cache_bytes = (
+        _lh_dir_size_bytes(
+            CANDIDATE_LONG_HORIZON_CACHE
+        )
+    )
+
+    st.caption(
+        f"Run ID: `{run_id}` · persistent candle cache: "
+        f"{cache_bytes / (1024 ** 3):.2f} GB."
+    )
+
+    c1, c2, c3 = st.columns(
+        3
+    )
+
+    run_batch = c1.button(
+        "▶ Run / resume next batch",
+        key=(
+            "candidate_long_horizon_run_batch"
+        ),
+        use_container_width=True,
+        type="primary",
+    )
+
+    reset_run = c2.button(
+        "🗑️ Reset replay results",
+        key=(
+            "candidate_long_horizon_reset_run"
+        ),
+        use_container_width=True,
+        help=(
+            "Deletes this run's state/events but keeps candle cache."
+        ),
+    )
+
+    clear_cache = c3.button(
+        "🧹 Clear long-horizon candle cache",
+        key=(
+            "candidate_long_horizon_clear_cache"
+        ),
+        use_container_width=True,
+        help=(
+            "Frees disk but future runs must re-download candles."
+        ),
+    )
+
+    if reset_run:
+        try:
+            if paths[
+                "dir"
+            ].exists():
+                shutil.rmtree(
+                    paths[
+                        "dir"
+                    ]
+                )
+            st.success(
+                "Replay results reset. Candle cache was kept."
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(
+                f"Could not reset run: {exc}"
+            )
+
+    if clear_cache:
+        try:
+            if CANDIDATE_LONG_HORIZON_CACHE.exists():
+                shutil.rmtree(
+                    CANDIDATE_LONG_HORIZON_CACHE
+                )
+            st.success(
+                "Long-horizon candle cache cleared."
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(
+                f"Could not clear candle cache: {exc}"
+            )
+
+    if run_batch:
+        next_month = None
+        next_symbols = []
+
+        for month in months:
+            month_label = month[
+                "label"
+            ]
+            done_symbols = set(
+                processed.get(
+                    month_label,
+                    [],
+                )
+            )
+
+            remaining = [
+                symbol
+                for symbol in symbols
+                if symbol
+                not in done_symbols
+            ]
+
+            if remaining:
+                next_month = month
+                next_symbols = remaining[
+                    : int(
+                        symbols_per_batch
+                    )
+                ]
+                break
+
+        if next_month is None:
+            st.success(
+                "Historical replay is already complete for this run."
+            )
+        else:
+            month_label = next_month[
+                "label"
+            ]
+
+            st.write(
+                f"Processing **{month_label}** · "
+                f"{len(next_symbols)} symbols..."
+            )
+
+            progress = st.progress(
+                0.0
+            )
+            status_box = st.empty()
+
+            fresh_parts = []
+
+            for position, symbol in enumerate(
+                next_symbols,
+                start=1,
+            ):
+                status_box.caption(
+                    f"{month_label} · {symbol} · "
+                    f"{position}/{len(next_symbols)}"
+                )
+
+                try:
+                    fresh = (
+                        _lh_symbol_month_events(
+                            symbol,
+                            next_month[
+                                "start_ms"
+                            ],
+                            next_month[
+                                "end_ms"
+                            ],
+                            room_warmup_days=int(
+                                room_warmup_days
+                            ),
+                            max_age_minutes=360,
+                            retest_tolerance_pct=0.10,
+                            min_departure_pct=0.20,
+                        )
+                    )
+
+                    if (
+                        fresh is not None
+                        and not fresh.empty
+                    ):
+                        fresh_parts.append(
+                            fresh
+                        )
+
+                    processed.setdefault(
+                        month_label,
+                        []
+                    )
+
+                    if symbol not in processed[
+                        month_label
+                    ]:
+                        processed[
+                            month_label
+                        ].append(
+                            symbol
+                        )
+
+                except Exception as exc:
+                    state.setdefault(
+                        "errors",
+                        {},
+                    )
+                    state[
+                        "errors"
+                    ][
+                        f"{month_label}|{symbol}"
+                    ] = (
+                        f"{type(exc).__name__}: "
+                        f"{exc}"
+                    )
+
+                state[
+                    "processed"
+                ] = processed
+
+                _lh_atomic_json_write(
+                    state,
+                    paths[
+                        "state"
+                    ],
+                )
+
+                progress.progress(
+                    position
+                    / len(
+                        next_symbols
+                    )
+                )
+
+            if fresh_parts:
+                fresh_events = pd.concat(
+                    fresh_parts,
+                    ignore_index=True,
+                    sort=False,
+                )
+                _lh_append_events(
+                    paths[
+                        "events"
+                    ],
+                    fresh_events,
+                )
+
+            progress.progress(
+                1.0
+            )
+            status_box.success(
+                f"Batch saved · {month_label}."
+            )
+            st.rerun()
+
+    events = _lh_load_events(
+        paths[
+            "events"
+        ]
+    )
+
+    if events.empty:
+        st.info(
+            "No historical REACTIONs are persisted yet. "
+            "Run a batch. For a quick validation, start with 20-50 symbols."
+        )
+        return
+
+    v1_frame, v2_frame = (
+        _lh_finalist_frames(
+            events
+        )
+    )
+
+    v1_portfolio = _lh_portfolio(
+        v1_frame
+    )
+    v2_portfolio = _lh_portfolio(
+        v2_frame
+    )
+
+    summary = _lh_summary_table(
+        v1_frame,
+        v2_frame,
+        v1_portfolio,
+        v2_portfolio,
+    )
+
+    st.markdown(
+        "#### Long-horizon results · available completed batches"
+    )
+
+    st.dataframe(
+        summary,
+        use_container_width=True,
+        hide_index=True,
+        key=(
+            "candidate_long_horizon_summary"
+        ),
+    )
+
+    st.caption(
+        "Results are valid for the symbol-months already processed. "
+        "Do not interpret a partial run as a full 6/12-month backtest until "
+        "progress reaches 100%."
+    )
+
+    v1_monthly = (
+        _lh_monthly_report(
+            "V1 + Strength",
+            v1_frame,
+            v1_portfolio,
+        )
+    )
+    v2_monthly = (
+        _lh_monthly_report(
+            "V2 REACTION Base",
+            v2_frame,
+            v2_portfolio,
+        )
+    )
+
+    monthly = (
+        pd.concat(
+            [
+                v1_monthly,
+                v2_monthly,
+            ],
+            ignore_index=True,
+            sort=False,
+        )
+        if (
+            not v1_monthly.empty
+            or not v2_monthly.empty
+        )
+        else pd.DataFrame()
+    )
+
+    quarterly = (
+        _lh_quarterly_from_monthly(
+            monthly
+        )
+    )
+
+    tab_monthly, tab_quarterly, tab_equity, tab_events, tab_errors = (
+        st.tabs(
+            [
+                "📅 Monthly",
+                "🗓️ Quarterly",
+                "📈 Equity",
+                "🧾 Historical events",
+                "⚠️ Errors / coverage",
+            ]
+        )
+    )
+
+    with tab_monthly:
+        if monthly.empty:
+            st.info(
+                "No monthly rows yet."
+            )
+        else:
+            st.dataframe(
+                monthly,
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_long_horizon_monthly"
+                ),
+            )
+
+            monthly_pivot = (
+                monthly.pivot(
+                    index="Month",
+                    columns="Finalist",
+                    values="Portfolio PnL $",
+                )
+                .fillna(
+                    0.0
+                )
+            )
+
+            if not monthly_pivot.empty:
+                st.line_chart(
+                    monthly_pivot.cumsum(),
+                    use_container_width=True,
+                )
+
+    with tab_quarterly:
+        if quarterly.empty:
+            st.info(
+                "No quarterly rows yet."
+            )
+        else:
+            st.dataframe(
+                quarterly,
+                use_container_width=True,
+                hide_index=True,
+                key=(
+                    "candidate_long_horizon_quarterly"
+                ),
+            )
+
+    with tab_equity:
+        equity_frames = []
+
+        for (
+            label,
+            result,
+        ) in [
+            (
+                "V1 + Strength",
+                v1_portfolio,
+            ),
+            (
+                "V2 REACTION Base",
+                v2_portfolio,
+            ),
+        ]:
+            curve = (
+                result.get(
+                    "equity_curve",
+                    pd.DataFrame(),
+                )
+                if result
+                else pd.DataFrame()
+            )
+
+            if (
+                curve is None
+                or curve.empty
+            ):
+                continue
+
+            local = curve.copy()
+            local[
+                "time"
+            ] = pd.to_datetime(
+                pd.to_numeric(
+                    local[
+                        "timestamp"
+                    ],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            ).dt.tz_convert(
+                TZ
+            )
+
+            local[
+                "Finalist"
+            ] = label
+
+            equity_frames.append(
+                local[
+                    [
+                        "time",
+                        "equity",
+                        "Finalist",
+                    ]
+                ]
+            )
+
+        if equity_frames:
+            combined_equity = pd.concat(
+                equity_frames,
+                ignore_index=True,
+            )
+
+            equity_pivot = (
+                combined_equity.pivot_table(
+                    index="time",
+                    columns="Finalist",
+                    values="equity",
+                    aggfunc="last",
+                )
+                .sort_index()
+                .ffill()
+            )
+
+            st.line_chart(
+                equity_pivot,
+                use_container_width=True,
+            )
+        else:
+            st.info(
+                "No portfolio equity curve yet."
+            )
+
+    with tab_events:
+        display = events.copy()
+
+        display[
+            "Reaction local"
+        ] = (
+            pd.to_datetime(
+                pd.to_numeric(
+                    display[
+                        "retest_timestamp"
+                    ],
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(
+                TZ
+            )
+            .dt.strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        )
+
+        display[
+            "V1 + Strength"
+        ] = (
+            pd.to_numeric(
+                display.get(
+                    "nearest_opposing_room_pct",
+                    pd.Series(
+                        np.nan,
+                        index=display.index,
+                    ),
+                ),
+                errors="coerce",
+            ).ge(
+                1.0
+            )
+            & pd.to_numeric(
+                display.get(
+                    "aligned_rsi_extreme_count",
+                    pd.Series(
+                        np.nan,
+                        index=display.index,
+                    ),
+                ),
+                errors="coerce",
+            ).ge(
+                1
+            )
+            & pd.to_numeric(
+                display.get(
+                    "side_adjusted_strength_vs_btc_4h",
+                    pd.Series(
+                        np.nan,
+                        index=display.index,
+                    ),
+                ),
+                errors="coerce",
+            ).gt(
+                0.0
+            )
+        )
+
+        event_cols = [
+            "Reaction local",
+            "symbol",
+            "side",
+            "V1 + Strength",
+            "side_adjusted_strength_vs_btc_4h",
+            "nearest_opposing_room_pct",
+            "aligned_rsi_extreme_count",
+            "Outcome",
+            "net_pnl_pct",
+            "mfe_until_exit_pct",
+            "mae_until_exit_pct",
+            "historical_replay_month",
+        ]
+
+        event_cols = [
+            column
+            for column in event_cols
+            if column
+            in display.columns
+        ]
+
+        st.dataframe(
+            display[
+                event_cols
+            ],
+            use_container_width=True,
+            hide_index=True,
+            key=(
+                "candidate_long_horizon_events"
+            ),
+        )
+
+    with tab_errors:
+        error_map = state.get(
+            "errors",
+            {},
+        )
+
+        if error_map:
+            error_rows = [
+                {
+                    "Unit": key,
+                    "Error": value,
+                }
+                for key, value in error_map.items()
+            ]
+
+            st.dataframe(
+                pd.DataFrame(
+                    error_rows
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.success(
+                "No persisted symbol-month errors."
+            )
+
+        room_coverage = pd.to_numeric(
+            events.get(
+                "nearest_opposing_room_pct",
+                pd.Series(
+                    dtype=float
+                ),
+            ),
+            errors="coerce",
+        ).notna()
+
+        strength_coverage = pd.to_numeric(
+            events.get(
+                "side_adjusted_strength_vs_btc_4h",
+                pd.Series(
+                    dtype=float
+                ),
+            ),
+            errors="coerce",
+        ).notna()
+
+        cov1, cov2 = st.columns(
+            2
+        )
+
+        cov1.metric(
+            "HTF Room reconstructed",
+            (
+                f"{room_coverage.mean() * 100.0:.1f}%"
+                if len(
+                    room_coverage
+                )
+                else "—"
+            ),
+        )
+        cov2.metric(
+            "4h strength reconstructed",
+            (
+                f"{strength_coverage.mean() * 100.0:.1f}%"
+                if len(
+                    strength_coverage
+                )
+                else "—"
+            ),
+        )
+
+        st.warning(
+            "Historical-universe limitation: Binance's current exchangeInfo "
+            "does not guarantee a complete list of contracts that were already "
+            "delisted before today. The dashboard explicitly reports this "
+            "instead of treating the 6/12-month universe as survivorship-free."
+        )
+
+    export_parts = [
+        "SUMMARY\n"
+        + summary.to_csv(
+            index=False
+        )
+    ]
+
+    if not monthly.empty:
+        export_parts.append(
+            "MONTHLY\n"
+            + monthly.to_csv(
+                index=False
+            )
+        )
+
+    if not quarterly.empty:
+        export_parts.append(
+            "QUARTERLY\n"
+            + quarterly.to_csv(
+                index=False
+            )
+        )
+
+    st.download_button(
+        "Download long-horizon replay report CSV",
+        data="\n\n".join(
+            export_parts
+        ).encode(
+            "utf-8"
+        ),
+        file_name=(
+            f"candidate_long_horizon_{run_id}.csv"
+        ),
+        mime="text/csv",
+        key=(
+            "candidate_long_horizon_download"
+        ),
+    )
 
 def _candidate_v2_atomic_write_json(payload, path):
     path = Path(path)
@@ -62250,6 +68405,10 @@ if selected_section == "reaction_swing_lab":
                 v1_short_config=candidate_v1_config,
                 v1_long_config=candidate_v1_long_config,
             )
+
+            st.divider()
+
+            render_candidate_long_horizon_historical_replay()
 
             st.divider()
 
