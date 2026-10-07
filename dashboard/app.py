@@ -23661,6 +23661,10 @@ CANDIDATE_LONG_HORIZON_RUNS = (
     CANDIDATE_LONG_HORIZON_ROOT
     / "runs"
 )
+CANDIDATE_LONG_HORIZON_FIDELITY = (
+    CANDIDATE_LONG_HORIZON_ROOT
+    / "fidelity"
+)
 
 _LH_BINANCE_KLINES_URL = (
     "https://fapi.binance.com/fapi/v1/klines"
@@ -27092,6 +27096,2457 @@ def _lh_summary_table(
 
     return pd.DataFrame(
         rows
+    )
+
+
+
+def _lh_fidelity_filter_window(
+    frame,
+    start_ms,
+    end_ms,
+):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return pd.DataFrame()
+
+    work = frame.copy()
+
+    event_col = (
+        "candidate_v1_event_key"
+        if "candidate_v1_event_key"
+        in work.columns
+        else "candidate_v2_event_key"
+        if "candidate_v2_event_key"
+        in work.columns
+        else None
+    )
+
+    if event_col is None:
+        return pd.DataFrame()
+
+    retest_ts = pd.to_numeric(
+        work.get(
+            "retest_timestamp",
+            pd.Series(
+                np.nan,
+                index=work.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    work = work.loc[
+        retest_ts.between(
+            int(
+                start_ms
+            ),
+            int(
+                end_ms
+            ),
+            inclusive="both",
+        )
+    ].copy()
+
+    if work.empty:
+        return work
+
+    work[
+        "candidate_v1_event_key"
+    ] = (
+        work[
+            event_col
+        ]
+        .fillna("")
+        .astype(str)
+    )
+
+    if "candidate_v2_event_key" not in work.columns:
+        work[
+            "candidate_v2_event_key"
+        ] = work[
+            "candidate_v1_event_key"
+        ]
+
+    if "side" not in work.columns:
+        work[
+            "side"
+        ] = work.get(
+            "signal",
+            pd.Series(
+                "",
+                index=work.index,
+            ),
+        )
+
+    work[
+        "side"
+    ] = (
+        work[
+            "side"
+        ]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    work[
+        "symbol"
+    ] = (
+        work.get(
+            "symbol",
+            pd.Series(
+                "",
+                index=work.index,
+            ),
+        )
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    return (
+        work.sort_values(
+            [
+                "retest_timestamp",
+                "symbol",
+            ],
+            kind="stable",
+            na_position="last",
+        )
+        .drop_duplicates(
+            subset=[
+                "candidate_v1_event_key",
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def _lh_fidelity_current_sources(
+    retests_df,
+    v1_short_config,
+    v1_long_config,
+    start_ms,
+    end_ms,
+):
+    v2_history, _, _ = (
+        _candidate_v2_load_or_freeze_universe(
+            retests_df
+        )
+    )
+
+    v1_history = (
+        _candidate_v1_unified_research_history(
+            retests_df,
+            v1_short_config,
+            v1_long_config,
+        )
+    )
+
+    v2_history = (
+        _lh_fidelity_filter_window(
+            v2_history,
+            start_ms,
+            end_ms,
+        )
+    )
+    v1_history = (
+        _lh_fidelity_filter_window(
+            v1_history,
+            start_ms,
+            end_ms,
+        )
+    )
+
+    if (
+        v2_history is not None
+        and not v2_history.empty
+    ):
+        v2_history = v2_history.copy()
+        v2_history[
+            "candidate_analysis_profile"
+        ] = "v2"
+
+    if (
+        v1_history is not None
+        and not v1_history.empty
+    ):
+        v1_history = v1_history.copy()
+        v1_history[
+            "candidate_analysis_profile"
+        ] = "v1"
+
+    return (
+        v1_history,
+        v2_history,
+    )
+
+
+def _lh_fidelity_reference_enriched(
+    frame,
+    profile_id,
+):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return pd.DataFrame()
+
+    work = frame.copy()
+    work[
+        "candidate_analysis_profile"
+    ] = str(
+        profile_id
+    )
+
+    try:
+        context, _ = (
+            _candidate_v2_build_market_context(
+                work,
+                force=False,
+            )
+        )
+    except Exception:
+        context = work.copy()
+
+    if (
+        context is None
+        or context.empty
+    ):
+        context = work.copy()
+
+    try:
+        execution = (
+            _candidate_v2_execution_grid(
+                context,
+                tp_values=(
+                    0.5,
+                ),
+                sl_values=(
+                    3.0,
+                ),
+                horizon_min=180,
+                entry_fee_pct=0.05,
+                exit_fee_pct=0.05,
+                entry_slippage_pct=0.0,
+                exit_slippage_pct=0.0,
+                notional_usdt=100.0,
+                force=False,
+            )
+        )
+    except Exception:
+        execution = pd.DataFrame()
+
+    if (
+        execution is not None
+        and not execution.empty
+    ):
+        try:
+            merged = (
+                _candidate_v2_merge_execution_context(
+                    execution,
+                    context,
+                )
+            )
+            if (
+                merged is not None
+                and not merged.empty
+            ):
+                return merged
+        except Exception:
+            pass
+
+    return context
+
+
+def _lh_fidelity_event_key_set(
+    frame,
+):
+    if (
+        frame is None
+        or frame.empty
+        or "candidate_v1_event_key"
+        not in frame.columns
+    ):
+        return set()
+
+    return set(
+        frame[
+            "candidate_v1_event_key"
+        ]
+        .fillna("")
+        .astype(str)
+        .loc[
+            lambda series: series.ne("")
+        ]
+        .tolist()
+    )
+
+
+def _lh_fidelity_v1_base_mask(
+    frame,
+):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return pd.Series(
+            False,
+            index=getattr(
+                frame,
+                "index",
+                None,
+            ),
+            dtype=bool,
+        )
+
+    room = pd.to_numeric(
+        frame.get(
+            "nearest_opposing_room_pct",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    rsi_count = pd.to_numeric(
+        frame.get(
+            "aligned_rsi_extreme_count",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    return (
+        room.ge(
+            1.0
+        )
+        & rsi_count.ge(
+            1
+        )
+    )
+
+
+def _lh_fidelity_v1_strength_mask(
+    frame,
+):
+    if (
+        frame is None
+        or frame.empty
+    ):
+        return pd.Series(
+            False,
+            index=getattr(
+                frame,
+                "index",
+                None,
+            ),
+            dtype=bool,
+        )
+
+    strength = pd.to_numeric(
+        frame.get(
+            "side_adjusted_strength_vs_btc_4h",
+            pd.Series(
+                np.nan,
+                index=frame.index,
+            ),
+        ),
+        errors="coerce",
+    )
+
+    return (
+        _lh_fidelity_v1_base_mask(
+            frame
+        )
+        & strength.gt(
+            0.0
+        )
+    )
+
+
+def _lh_fidelity_compare_sets(
+    historical,
+    reference,
+    *,
+    historical_mask=None,
+    reference_mask=None,
+):
+    hist = (
+        historical.copy()
+        if (
+            historical is not None
+            and not historical.empty
+        )
+        else pd.DataFrame()
+    )
+    ref = (
+        reference.copy()
+        if (
+            reference is not None
+            and not reference.empty
+        )
+        else pd.DataFrame()
+    )
+
+    if (
+        historical_mask is not None
+        and not hist.empty
+    ):
+        hist = hist.loc[
+            historical_mask.reindex(
+                hist.index,
+                fill_value=False,
+            )
+            .fillna(False)
+            .astype(bool)
+        ].copy()
+
+    if (
+        reference_mask is not None
+        and not ref.empty
+    ):
+        ref = ref.loc[
+            reference_mask.reindex(
+                ref.index,
+                fill_value=False,
+            )
+            .fillna(False)
+            .astype(bool)
+        ].copy()
+
+    hist_keys = (
+        _lh_fidelity_event_key_set(
+            hist
+        )
+    )
+    ref_keys = (
+        _lh_fidelity_event_key_set(
+            ref
+        )
+    )
+
+    matched = (
+        hist_keys
+        & ref_keys
+    )
+    hist_only = (
+        hist_keys
+        - ref_keys
+    )
+    ref_only = (
+        ref_keys
+        - hist_keys
+    )
+
+    recall = (
+        len(
+            matched
+        )
+        / len(
+            ref_keys
+        )
+        * 100.0
+        if ref_keys
+        else np.nan
+    )
+
+    precision = (
+        len(
+            matched
+        )
+        / len(
+            hist_keys
+        )
+        * 100.0
+        if hist_keys
+        else np.nan
+    )
+
+    union = (
+        hist_keys
+        | ref_keys
+    )
+
+    jaccard = (
+        len(
+            matched
+        )
+        / len(
+            union
+        )
+        * 100.0
+        if union
+        else np.nan
+    )
+
+    return {
+        "Historical N": int(
+            len(
+                hist_keys
+            )
+        ),
+        "Reference N": int(
+            len(
+                ref_keys
+            )
+        ),
+        "Matched": int(
+            len(
+                matched
+            )
+        ),
+        "Historical only": int(
+            len(
+                hist_only
+            )
+        ),
+        "Reference only": int(
+            len(
+                ref_only
+            )
+        ),
+        "Recall %": recall,
+        "Precision %": precision,
+        "Jaccard %": jaccard,
+        "matched_keys": matched,
+        "historical_only_keys": (
+            hist_only
+        ),
+        "reference_only_keys": (
+            ref_only
+        ),
+    }
+
+
+def _lh_fidelity_detail_rows(
+    frame,
+    keys,
+    label,
+):
+    if (
+        frame is None
+        or frame.empty
+        or not keys
+    ):
+        return pd.DataFrame()
+
+    work = frame.loc[
+        frame[
+            "candidate_v1_event_key"
+        ]
+        .fillna("")
+        .astype(str)
+        .isin(
+            set(
+                keys
+            )
+        )
+    ].copy()
+
+    if work.empty:
+        return work
+
+    work = (
+        work.sort_values(
+            [
+                "retest_timestamp",
+                "symbol",
+            ],
+            kind="stable",
+            na_position="last",
+        )
+        .drop_duplicates(
+            subset=[
+                "candidate_v1_event_key"
+            ],
+            keep="last",
+        )
+    )
+
+    detail = pd.DataFrame({
+        "Bucket": str(
+            label
+        ),
+        "Event key": (
+            work[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+        ),
+        "Symbol": work.get(
+            "symbol",
+            pd.Series(
+                "",
+                index=work.index,
+            ),
+        ),
+        "Side": work.get(
+            "side",
+            work.get(
+                "signal",
+                pd.Series(
+                    "",
+                    index=work.index,
+                ),
+            ),
+        ),
+        "Retest timestamp": pd.to_numeric(
+            work.get(
+                "retest_timestamp",
+                pd.Series(
+                    np.nan,
+                    index=work.index,
+                ),
+            ),
+            errors="coerce",
+        ),
+        "Room %": pd.to_numeric(
+            work.get(
+                "nearest_opposing_room_pct",
+                pd.Series(
+                    np.nan,
+                    index=work.index,
+                ),
+            ),
+            errors="coerce",
+        ),
+        "Aligned RSI count": pd.to_numeric(
+            work.get(
+                "aligned_rsi_extreme_count",
+                pd.Series(
+                    np.nan,
+                    index=work.index,
+                ),
+            ),
+            errors="coerce",
+        ),
+        "Strength 4h %": pd.to_numeric(
+            work.get(
+                "side_adjusted_strength_vs_btc_4h",
+                pd.Series(
+                    np.nan,
+                    index=work.index,
+                ),
+            ),
+            errors="coerce",
+        ),
+        "Outcome": (
+            work.get(
+                "Outcome",
+                pd.Series(
+                    "",
+                    index=work.index,
+                ),
+            )
+            .fillna("")
+            .astype(str)
+        ),
+    })
+
+    detail[
+        "Retest local"
+    ] = (
+        pd.to_datetime(
+            detail[
+                "Retest timestamp"
+            ],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(
+            TZ
+        )
+        .dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    )
+
+    return detail.reset_index(
+        drop=True
+    )
+
+
+def _lh_fidelity_feature_audit(
+    historical,
+    reference,
+    matched_keys,
+):
+    if (
+        historical is None
+        or historical.empty
+        or reference is None
+        or reference.empty
+        or not matched_keys
+    ):
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+    hist = (
+        historical.loc[
+            historical[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+            .isin(
+                matched_keys
+            )
+        ]
+        .copy()
+        .drop_duplicates(
+            subset=[
+                "candidate_v1_event_key"
+            ],
+            keep="last",
+        )
+    )
+
+    ref = (
+        reference.loc[
+            reference[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+            .isin(
+                matched_keys
+            )
+        ]
+        .copy()
+        .drop_duplicates(
+            subset=[
+                "candidate_v1_event_key"
+            ],
+            keep="last",
+        )
+    )
+
+    keep_hist = [
+        column
+        for column in [
+            "candidate_v1_event_key",
+            "symbol",
+            "side",
+            "signal",
+            "actionable_timestamp",
+            "departure_timestamp",
+            "retest_timestamp",
+            "candidate_v1_reaction_known_ts",
+            "nearest_opposing_room_pct",
+            "aligned_rsi_extreme_count",
+            "rsi14_1m",
+            "rsi14_5m",
+            "rsi14_15m",
+            "rsi14_1h",
+            "side_adjusted_strength_vs_btc_4h",
+            "entry_timestamp",
+            "Outcome",
+            "net_pnl_pct",
+        ]
+        if column
+        in hist.columns
+    ]
+
+    keep_ref = [
+        column
+        for column in [
+            "candidate_v1_event_key",
+            "symbol",
+            "side",
+            "signal",
+            "actionable_timestamp",
+            "departure_timestamp",
+            "retest_timestamp",
+            "candidate_v1_reaction_known_ts",
+            "nearest_opposing_room_pct",
+            "aligned_rsi_extreme_count",
+            "rsi14_1m",
+            "rsi14_5m",
+            "rsi14_15m",
+            "rsi14_1h",
+            "side_adjusted_strength_vs_btc_4h",
+            "entry_timestamp",
+            "Outcome",
+            "net_pnl_pct",
+        ]
+        if column
+        in ref.columns
+    ]
+
+    merged = hist[
+        keep_hist
+    ].merge(
+        ref[
+            keep_ref
+        ],
+        on="candidate_v1_event_key",
+        how="inner",
+        suffixes=(
+            "_hist",
+            "_ref",
+        ),
+        validate="one_to_one",
+    )
+
+    if merged.empty:
+        return (
+            pd.DataFrame(),
+            merged,
+        )
+
+    summary_rows = []
+
+    timestamp_fields = [
+        (
+            "Actionable timestamp",
+            "actionable_timestamp",
+        ),
+        (
+            "Departure timestamp",
+            "departure_timestamp",
+        ),
+        (
+            "Retest timestamp",
+            "retest_timestamp",
+        ),
+        (
+            "Reaction-known timestamp",
+            "candidate_v1_reaction_known_ts",
+        ),
+        (
+            "Entry timestamp",
+            "entry_timestamp",
+        ),
+    ]
+
+    for label, field in timestamp_fields:
+        hist_col = (
+            f"{field}_hist"
+        )
+        ref_col = (
+            f"{field}_ref"
+        )
+
+        if (
+            hist_col
+            not in merged.columns
+            or ref_col
+            not in merged.columns
+        ):
+            continue
+
+        left = pd.to_numeric(
+            merged[
+                hist_col
+            ],
+            errors="coerce",
+        )
+        right = pd.to_numeric(
+            merged[
+                ref_col
+            ],
+            errors="coerce",
+        )
+
+        comparable = (
+            left.notna()
+            & right.notna()
+        )
+
+        if not comparable.any():
+            continue
+
+        delta_ms = (
+            left.loc[
+                comparable
+            ]
+            - right.loc[
+                comparable
+            ]
+        ).abs()
+
+        summary_rows.append({
+            "Feature": label,
+            "Comparable N": int(
+                comparable.sum()
+            ),
+            "Exact match %": float(
+                delta_ms.eq(
+                    0
+                ).mean()
+                * 100.0
+            ),
+            "Median abs delta": float(
+                delta_ms.median()
+            ),
+            "Max abs delta": float(
+                delta_ms.max()
+            ),
+            "Delta unit": "ms",
+        })
+
+    numeric_fields = [
+        (
+            "HTF Room %",
+            "nearest_opposing_room_pct",
+        ),
+        (
+            "Strength vs BTC 4h %",
+            "side_adjusted_strength_vs_btc_4h",
+        ),
+        (
+            "RSI 1m",
+            "rsi14_1m",
+        ),
+        (
+            "RSI 5m",
+            "rsi14_5m",
+        ),
+        (
+            "RSI 15m",
+            "rsi14_15m",
+        ),
+        (
+            "RSI 1h",
+            "rsi14_1h",
+        ),
+        (
+            "Net PnL %",
+            "net_pnl_pct",
+        ),
+    ]
+
+    for label, field in numeric_fields:
+        hist_col = (
+            f"{field}_hist"
+        )
+        ref_col = (
+            f"{field}_ref"
+        )
+
+        if (
+            hist_col
+            not in merged.columns
+            or ref_col
+            not in merged.columns
+        ):
+            continue
+
+        left = pd.to_numeric(
+            merged[
+                hist_col
+            ],
+            errors="coerce",
+        )
+        right = pd.to_numeric(
+            merged[
+                ref_col
+            ],
+            errors="coerce",
+        )
+
+        comparable = (
+            left.notna()
+            & right.notna()
+        )
+
+        if not comparable.any():
+            continue
+
+        delta = (
+            left.loc[
+                comparable
+            ]
+            - right.loc[
+                comparable
+            ]
+        ).abs()
+
+        summary_rows.append({
+            "Feature": label,
+            "Comparable N": int(
+                comparable.sum()
+            ),
+            "Exact match %": float(
+                np.isclose(
+                    left.loc[
+                        comparable
+                    ],
+                    right.loc[
+                        comparable
+                    ],
+                    rtol=0.0,
+                    atol=1e-9,
+                ).mean()
+                * 100.0
+            ),
+            "Median abs delta": float(
+                delta.median()
+            ),
+            "Max abs delta": float(
+                delta.max()
+            ),
+            "Delta unit": "value",
+        })
+
+    count_field = (
+        "aligned_rsi_extreme_count"
+    )
+
+    hist_col = (
+        f"{count_field}_hist"
+    )
+    ref_col = (
+        f"{count_field}_ref"
+    )
+
+    if (
+        hist_col in merged.columns
+        and ref_col in merged.columns
+    ):
+        left = pd.to_numeric(
+            merged[
+                hist_col
+            ],
+            errors="coerce",
+        )
+        right = pd.to_numeric(
+            merged[
+                ref_col
+            ],
+            errors="coerce",
+        )
+
+        comparable = (
+            left.notna()
+            & right.notna()
+        )
+
+        if comparable.any():
+            delta = (
+                left.loc[
+                    comparable
+                ]
+                - right.loc[
+                    comparable
+                ]
+            ).abs()
+
+            summary_rows.append({
+                "Feature": (
+                    "Aligned RSI count"
+                ),
+                "Comparable N": int(
+                    comparable.sum()
+                ),
+                "Exact match %": float(
+                    delta.eq(
+                        0
+                    ).mean()
+                    * 100.0
+                ),
+                "Median abs delta": float(
+                    delta.median()
+                ),
+                "Max abs delta": float(
+                    delta.max()
+                ),
+                "Delta unit": "count",
+            })
+
+    outcome_hist = (
+        "Outcome_hist"
+    )
+    outcome_ref = (
+        "Outcome_ref"
+    )
+
+    if (
+        outcome_hist
+        in merged.columns
+        and outcome_ref
+        in merged.columns
+    ):
+        left = (
+            merged[
+                outcome_hist
+            ]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+        right = (
+            merged[
+                outcome_ref
+            ]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+
+        comparable = (
+            left.ne("")
+            & right.ne("")
+            & left.ne(
+                "PENDING"
+            )
+            & right.ne(
+                "PENDING"
+            )
+        )
+
+        if comparable.any():
+            summary_rows.append({
+                "Feature": (
+                    "TP/SL/TIME_EXIT outcome"
+                ),
+                "Comparable N": int(
+                    comparable.sum()
+                ),
+                "Exact match %": float(
+                    left.loc[
+                        comparable
+                    ]
+                    .eq(
+                        right.loc[
+                            comparable
+                        ]
+                    )
+                    .mean()
+                    * 100.0
+                ),
+                "Median abs delta": np.nan,
+                "Max abs delta": np.nan,
+                "Delta unit": "categorical",
+            })
+
+    detail_columns = [
+        "candidate_v1_event_key",
+    ]
+
+    for field in [
+        "symbol",
+        "side",
+        "signal",
+        "retest_timestamp",
+        "nearest_opposing_room_pct",
+        "aligned_rsi_extreme_count",
+        "side_adjusted_strength_vs_btc_4h",
+        "entry_timestamp",
+        "Outcome",
+        "net_pnl_pct",
+    ]:
+        for suffix in [
+            "_hist",
+            "_ref",
+        ]:
+            column = (
+                f"{field}{suffix}"
+            )
+            if column in merged.columns:
+                detail_columns.append(
+                    column
+                )
+
+    detail = merged[
+        list(
+            dict.fromkeys(
+                detail_columns
+            )
+        )
+    ].copy()
+
+    return (
+        pd.DataFrame(
+            summary_rows
+        ),
+        detail,
+    )
+
+
+def _lh_fidelity_sample_symbols(
+    symbols,
+    limit,
+):
+    symbols = sorted({
+        str(
+            symbol
+        ).upper()
+        for symbol in symbols
+        if str(
+            symbol
+        ).strip()
+    })
+
+    if (
+        int(
+            limit
+        )
+        <= 0
+        or int(
+            limit
+        )
+        >= len(
+            symbols
+        )
+    ):
+        return symbols
+
+    positions = np.linspace(
+        0,
+        len(
+            symbols
+        )
+        - 1,
+        num=int(
+            limit
+        ),
+        dtype=int,
+    )
+
+    return [
+        symbols[
+            int(
+                position
+            )
+        ]
+        for position in sorted(
+            set(
+                positions.tolist()
+            )
+        )
+    ]
+
+
+def _lh_fidelity_run_id(
+    start_ms,
+    end_ms,
+    symbols,
+    reference_v2,
+):
+    keys = sorted(
+        _lh_fidelity_event_key_set(
+            reference_v2
+        )
+    )
+
+    payload = {
+        "start_ms": int(
+            start_ms
+        ),
+        "end_ms": int(
+            end_ms
+        ),
+        "symbols": sorted(
+            symbols
+        ),
+        "reference_v2_sha1": (
+            hashlib.sha1(
+                "\n".join(
+                    keys
+                ).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+        ),
+        "detector": "15m_3x3",
+        "room_warmup_days": 120,
+        "retest_tolerance_pct": 0.10,
+        "min_departure_pct": 0.20,
+        "max_age_minutes": 360,
+        "execution": (
+            "TP0.5_SL3_H180"
+        ),
+    }
+
+    digest = hashlib.sha1(
+        json.dumps(
+            payload,
+            sort_keys=True,
+        ).encode(
+            "utf-8"
+        )
+    ).hexdigest()[
+        :12
+    ]
+
+    return (
+        f"{pd.Timestamp(start_ms, unit='ms', tz='UTC').strftime('%Y%m%d')}"
+        f"_"
+        f"{pd.Timestamp(end_ms, unit='ms', tz='UTC').strftime('%Y%m%d')}"
+        f"_"
+        f"{digest}"
+    )
+
+
+def _lh_fidelity_paths(
+    run_id,
+):
+    run_dir = (
+        CANDIDATE_LONG_HORIZON_FIDELITY
+        / str(
+            run_id
+        )
+    )
+
+    return {
+        "dir": run_dir,
+        "state": (
+            run_dir
+            / "state.json"
+        ),
+        "historical": (
+            run_dir
+            / "historical_events.csv"
+        ),
+        "reference_v2": (
+            run_dir
+            / "reference_v2.csv"
+        ),
+        "reference_v1": (
+            run_dir
+            / "reference_v1.csv"
+        ),
+    }
+
+
+def _lh_fidelity_write_csv(
+    frame,
+    path,
+):
+    path = Path(
+        path
+    )
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    tmp = path.with_suffix(
+        ".csv.tmp"
+    )
+
+    frame.to_csv(
+        tmp,
+        index=False,
+    )
+    tmp.replace(
+        path
+    )
+
+
+def _lh_fidelity_read_csv(
+    path,
+):
+    path = Path(
+        path
+    )
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    try:
+        return pd.read_csv(
+            path
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def render_candidate_historical_replay_fidelity_audit(
+    retests_df,
+    v1_short_config,
+    v1_long_config,
+):
+    st.markdown(
+        "### 🔬 G. Historical Replay Fidelity Audit"
+    )
+    st.caption(
+        "Sanity check before scaling the replay to 6-12 months. "
+        "The historical Binance reconstruction is compared against the "
+        "already-persisted Candidate engine using exact Event IDs: "
+        "`symbol | side | retest_timestamp`."
+    )
+
+    persisted_v2 = pd.DataFrame()
+
+    try:
+        if CANDIDATE_V2_HISTORY_FILE.exists():
+            persisted_v2 = pd.read_csv(
+                CANDIDATE_V2_HISTORY_FILE
+            )
+    except Exception:
+        persisted_v2 = pd.DataFrame()
+
+    retest_values = pd.to_numeric(
+        persisted_v2.get(
+            "retest_timestamp",
+            pd.Series(
+                dtype=float
+            ),
+        ),
+        errors="coerce",
+    ).dropna()
+
+    if not retest_values.empty:
+        latest_local = (
+            pd.to_datetime(
+                int(
+                    retest_values.max()
+                ),
+                unit="ms",
+                utc=True,
+            )
+            .tz_convert(
+                TZ
+            )
+        )
+
+        default_end_date = (
+            latest_local.date()
+        )
+        default_start_date = (
+            latest_local
+            - pd.Timedelta(
+                days=3
+            )
+        ).date()
+    else:
+        fallback = (
+            pd.Timestamp.now(
+                tz="UTC"
+            )
+            - pd.Timedelta(
+                days=1
+            )
+        )
+
+        default_end_date = (
+            fallback.date()
+        )
+        default_start_date = (
+            fallback
+            - pd.Timedelta(
+                days=3
+            )
+        ).date()
+
+    a1, a2, a3 = st.columns(
+        3
+    )
+
+    audit_start_date = a1.date_input(
+        "Audit start",
+        value=default_start_date,
+        key=(
+            "candidate_fidelity_start_date"
+        ),
+    )
+
+    audit_end_date = a2.date_input(
+        "Audit end",
+        value=default_end_date,
+        min_value=(
+            audit_start_date
+        ),
+        key=(
+            "candidate_fidelity_end_date"
+        ),
+    )
+
+    audit_symbol_limit = a3.selectbox(
+        "Audit symbol sample",
+        options=[
+            50,
+            100,
+            0,
+        ],
+        index=0,
+        format_func=lambda value: (
+            "ALL current research symbols"
+            if int(
+                value
+            )
+            == 0
+            else (
+                f"{int(value)} deterministic spread"
+            )
+        ),
+        key=(
+            "candidate_fidelity_symbol_limit"
+        ),
+        help=(
+            "The deterministic spread samples across the full sorted symbol "
+            "universe rather than taking only the first alphabetical symbols."
+        ),
+    )
+
+    b1, b2 = st.columns(
+        2
+    )
+
+    audit_batch_size = b1.selectbox(
+        "Symbols per audit batch",
+        options=[
+            10,
+            25,
+            50,
+            100,
+            9999,
+        ],
+        index=1,
+        format_func=lambda value: (
+            "ALL remaining"
+            if int(
+                value
+            )
+            >= 9999
+            else str(
+                value
+            )
+        ),
+        key=(
+            "candidate_fidelity_batch_size"
+        ),
+    )
+
+    b2.metric(
+        "Reference source",
+        "Persisted Candidate V1/V2",
+    )
+
+    audit_start_ms = int(
+        pd.Timestamp(
+            audit_start_date,
+            tz=TZ,
+        )
+        .tz_convert(
+            "UTC"
+        )
+        .timestamp()
+        * 1000
+    )
+
+    audit_end_ms = int(
+        (
+            pd.Timestamp(
+                audit_end_date,
+                tz=TZ,
+            )
+            + pd.Timedelta(
+                days=1
+            )
+            - pd.Timedelta(
+                milliseconds=1
+            )
+        )
+        .tz_convert(
+            "UTC"
+        )
+        .timestamp()
+        * 1000
+    )
+
+    current_v1_raw, current_v2_raw = (
+        _lh_fidelity_current_sources(
+            retests_df,
+            v1_short_config,
+            v1_long_config,
+            audit_start_ms,
+            audit_end_ms,
+        )
+    )
+
+    if (
+        current_v2_raw is None
+        or current_v2_raw.empty
+    ):
+        st.warning(
+            "No persisted Candidate V2 REACTIONs exist in the selected audit "
+            "window. Choose a window where Candidate V2 has recorded events."
+        )
+        return
+
+    research_symbols = (
+        load_volume_exhaustion_symbol_universe()
+    )
+
+    if not research_symbols:
+        research_symbols = sorted(
+            current_v2_raw[
+                "symbol"
+            ]
+            .dropna()
+            .astype(str)
+            .str.upper()
+            .unique()
+            .tolist()
+        )
+
+    audit_symbols = (
+        _lh_fidelity_sample_symbols(
+            research_symbols,
+            audit_symbol_limit,
+        )
+    )
+
+    if not audit_symbols:
+        st.warning(
+            "No symbols are available for the fidelity audit."
+        )
+        return
+
+    # Restrict reference rows to the exact symbol sample so the displayed
+    # baseline is already apples-to-apples before any historical work begins.
+    current_v2_raw = current_v2_raw.loc[
+        current_v2_raw[
+            "symbol"
+        ]
+        .astype(str)
+        .str.upper()
+        .isin(
+            audit_symbols
+        )
+    ].copy()
+
+    current_v1_raw = current_v1_raw.loc[
+        current_v1_raw[
+            "symbol"
+        ]
+        .astype(str)
+        .str.upper()
+        .isin(
+            audit_symbols
+        )
+    ].copy()
+
+    run_id = (
+        _lh_fidelity_run_id(
+            audit_start_ms,
+            audit_end_ms,
+            audit_symbols,
+            current_v2_raw,
+        )
+    )
+
+    paths = (
+        _lh_fidelity_paths(
+            run_id
+        )
+    )
+
+    state = _lh_load_json(
+        paths[
+            "state"
+        ],
+        {
+            "run_id": run_id,
+            "processed_symbols": [],
+            "errors": {},
+        },
+    )
+
+    processed_symbols = set(
+        str(
+            symbol
+        ).upper()
+        for symbol in state.get(
+            "processed_symbols",
+            [],
+        )
+    )
+
+    f1, f2, f3, f4 = st.columns(
+        4
+    )
+
+    f1.metric(
+        "Audit symbols",
+        len(
+            audit_symbols
+        ),
+    )
+
+    f2.metric(
+        "Processed",
+        (
+            f"{len(processed_symbols)}/"
+            f"{len(audit_symbols)}"
+        ),
+    )
+
+    f3.metric(
+        "Reference V2 events",
+        int(
+            current_v2_raw[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+            .nunique()
+        ),
+    )
+
+    f4.metric(
+        "Reference V1 events",
+        int(
+            current_v1_raw[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+            .nunique()
+        )
+        if (
+            current_v1_raw is not None
+            and not current_v1_raw.empty
+        )
+        else 0,
+    )
+
+    st.caption(
+        f"Audit run ID: `{run_id}`. "
+        "This audit reuses the same persistent 15m/1m candle cache as the "
+        "long-horizon replay."
+    )
+
+    r1, r2 = st.columns(
+        2
+    )
+
+    run_audit = r1.button(
+        "🔬 Run / resume fidelity batch",
+        key=(
+            "candidate_fidelity_run"
+        ),
+        use_container_width=True,
+        type="primary",
+    )
+
+    reset_audit = r2.button(
+        "🗑️ Reset fidelity audit",
+        key=(
+            "candidate_fidelity_reset"
+        ),
+        use_container_width=True,
+    )
+
+    if reset_audit:
+        try:
+            if paths[
+                "dir"
+            ].exists():
+                shutil.rmtree(
+                    paths[
+                        "dir"
+                    ]
+                )
+
+            st.success(
+                "Fidelity audit reset. Shared candle cache was kept."
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(
+                f"Could not reset fidelity audit: {exc}"
+            )
+
+    if run_audit:
+        # Freeze enriched Candidate references once for this audit run.
+        if not paths[
+            "reference_v2"
+        ].exists():
+            with st.spinner(
+                "Freezing current Candidate V2 reference + execution context..."
+            ):
+                enriched_v2 = (
+                    _lh_fidelity_reference_enriched(
+                        current_v2_raw,
+                        "v2",
+                    )
+                )
+
+            _lh_fidelity_write_csv(
+                enriched_v2,
+                paths[
+                    "reference_v2"
+                ],
+            )
+
+        if (
+            current_v1_raw is not None
+            and not current_v1_raw.empty
+            and not paths[
+                "reference_v1"
+            ].exists()
+        ):
+            with st.spinner(
+                "Freezing current Candidate V1 reference + execution context..."
+            ):
+                enriched_v1 = (
+                    _lh_fidelity_reference_enriched(
+                        current_v1_raw,
+                        "v1",
+                    )
+                )
+
+            _lh_fidelity_write_csv(
+                enriched_v1,
+                paths[
+                    "reference_v1"
+                ],
+            )
+
+        remaining = [
+            symbol
+            for symbol in audit_symbols
+            if symbol
+            not in processed_symbols
+        ]
+
+        batch_symbols = remaining[
+            : int(
+                audit_batch_size
+            )
+        ]
+
+        if not batch_symbols:
+            st.success(
+                "Fidelity audit is already complete for this symbol sample."
+            )
+        else:
+            progress = st.progress(
+                0.0
+            )
+            status = st.empty()
+            fresh_parts = []
+            batch_errors = []
+
+            for position, symbol in enumerate(
+                batch_symbols,
+                start=1,
+            ):
+                status.caption(
+                    f"Fidelity · {symbol} · "
+                    f"{position}/{len(batch_symbols)}"
+                )
+
+                try:
+                    fresh = (
+                        _lh_symbol_month_events(
+                            symbol,
+                            audit_start_ms,
+                            audit_end_ms,
+                            room_warmup_days=120,
+                            max_age_minutes=360,
+                            retest_tolerance_pct=0.10,
+                            min_departure_pct=0.20,
+                        )
+                    )
+
+                    if (
+                        fresh is not None
+                        and not fresh.empty
+                    ):
+                        fresh = fresh.loc[
+                            pd.to_numeric(
+                                fresh[
+                                    "retest_timestamp"
+                                ],
+                                errors="coerce",
+                            ).between(
+                                audit_start_ms,
+                                audit_end_ms,
+                                inclusive="both",
+                            )
+                        ].copy()
+
+                        if not fresh.empty:
+                            fresh_parts.append(
+                                fresh
+                            )
+
+                    processed_symbols.add(
+                        str(
+                            symbol
+                        ).upper()
+                    )
+
+                except Exception as exc:
+                    message = (
+                        f"{type(exc).__name__}: "
+                        f"{exc}"
+                    )
+
+                    state.setdefault(
+                        "errors",
+                        {},
+                    )
+                    state[
+                        "errors"
+                    ][
+                        str(
+                            symbol
+                        ).upper()
+                    ] = message
+
+                    batch_errors.append({
+                        "Symbol": str(
+                            symbol
+                        ).upper(),
+                        "Error": message,
+                    })
+
+                state[
+                    "processed_symbols"
+                ] = sorted(
+                    processed_symbols
+                )
+
+                _lh_atomic_json_write(
+                    state,
+                    paths[
+                        "state"
+                    ],
+                )
+
+                progress.progress(
+                    position
+                    / len(
+                        batch_symbols
+                    )
+                )
+
+            if fresh_parts:
+                fresh_events = pd.concat(
+                    fresh_parts,
+                    ignore_index=True,
+                    sort=False,
+                )
+
+                _lh_append_events(
+                    paths[
+                        "historical"
+                    ],
+                    fresh_events,
+                )
+
+            state[
+                "processed_symbols"
+            ] = sorted(
+                processed_symbols
+            )
+            state[
+                "last_batch"
+            ] = {
+                "attempted": int(
+                    len(
+                        batch_symbols
+                    )
+                ),
+                "succeeded": int(
+                    len(
+                        batch_symbols
+                    )
+                    - len(
+                        batch_errors
+                    )
+                ),
+                "failed": int(
+                    len(
+                        batch_errors
+                    )
+                ),
+                "finished_at_utc": (
+                    pd.Timestamp.now(
+                        tz="UTC"
+                    ).isoformat()
+                ),
+            }
+
+            _lh_atomic_json_write(
+                state,
+                paths[
+                    "state"
+                ],
+            )
+
+            if batch_errors:
+                status.error(
+                    f"Fidelity batch finished with "
+                    f"{len(batch_errors)} failures."
+                )
+            else:
+                status.success(
+                    "Fidelity batch saved."
+                )
+
+            st.rerun()
+
+    state = _lh_load_json(
+        paths[
+            "state"
+        ],
+        state,
+    )
+
+    processed_symbols = set(
+        str(
+            symbol
+        ).upper()
+        for symbol in state.get(
+            "processed_symbols",
+            [],
+        )
+    )
+
+    reference_v2 = (
+        _lh_fidelity_read_csv(
+            paths[
+                "reference_v2"
+            ]
+        )
+    )
+    reference_v1 = (
+        _lh_fidelity_read_csv(
+            paths[
+                "reference_v1"
+            ]
+        )
+    )
+    historical = (
+        _lh_load_events(
+            paths[
+                "historical"
+            ]
+        )
+    )
+
+    if reference_v2.empty:
+        st.info(
+            "Press **Run / resume fidelity batch** once to freeze the current "
+            "Candidate reference and begin reconstruction."
+        )
+        return
+
+    processed_reference_v2 = (
+        reference_v2.loc[
+            reference_v2[
+                "symbol"
+            ]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            .isin(
+                processed_symbols
+            )
+        ].copy()
+    )
+
+    processed_reference_v1 = (
+        reference_v1.loc[
+            reference_v1[
+                "symbol"
+            ]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            .isin(
+                processed_symbols
+            )
+        ].copy()
+        if (
+            reference_v1 is not None
+            and not reference_v1.empty
+        )
+        else pd.DataFrame()
+    )
+
+    processed_historical = (
+        historical.loc[
+            historical[
+                "symbol"
+            ]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            .isin(
+                processed_symbols
+            )
+        ].copy()
+        if (
+            historical is not None
+            and not historical.empty
+        )
+        else pd.DataFrame()
+    )
+
+    v2_comparison = (
+        _lh_fidelity_compare_sets(
+            processed_historical,
+            processed_reference_v2,
+        )
+    )
+
+    hist_v1_base_mask = (
+        _lh_fidelity_v1_base_mask(
+            processed_historical
+        )
+    )
+
+    v1_base_comparison = (
+        _lh_fidelity_compare_sets(
+            processed_historical,
+            processed_reference_v1,
+            historical_mask=(
+                hist_v1_base_mask
+            ),
+        )
+        if (
+            processed_reference_v1
+            is not None
+            and not processed_reference_v1.empty
+        )
+        else None
+    )
+
+    hist_v1_strength_mask = (
+        _lh_fidelity_v1_strength_mask(
+            processed_historical
+        )
+    )
+
+    ref_v1_strength_mask = (
+        pd.to_numeric(
+            processed_reference_v1.get(
+                "side_adjusted_strength_vs_btc_4h",
+                pd.Series(
+                    np.nan,
+                    index=processed_reference_v1.index,
+                ),
+            ),
+            errors="coerce",
+        ).gt(
+            0.0
+        )
+        if (
+            processed_reference_v1 is not None
+            and not processed_reference_v1.empty
+        )
+        else pd.Series(
+            dtype=bool
+        )
+    )
+
+    v1_strength_comparison = (
+        _lh_fidelity_compare_sets(
+            processed_historical,
+            processed_reference_v1,
+            historical_mask=(
+                hist_v1_strength_mask
+            ),
+            reference_mask=(
+                ref_v1_strength_mask
+            ),
+        )
+        if (
+            processed_reference_v1 is not None
+            and not processed_reference_v1.empty
+        )
+        else None
+    )
+
+    st.markdown(
+        "#### Exact Event-ID fidelity"
+    )
+
+    comparison_rows = []
+
+    for label, result in [
+        (
+            "V2 · REACTION Base identity",
+            v2_comparison,
+        ),
+        (
+            "V1 · Base identity",
+            v1_base_comparison,
+        ),
+        (
+            "V1 · Base + Strength > 0",
+            v1_strength_comparison,
+        ),
+    ]:
+        if not result:
+            continue
+
+        comparison_rows.append({
+            "Layer": label,
+            "Historical N": result.get(
+                "Historical N",
+                0,
+            ),
+            "Reference N": result.get(
+                "Reference N",
+                0,
+            ),
+            "Matched": result.get(
+                "Matched",
+                0,
+            ),
+            "Historical only": result.get(
+                "Historical only",
+                0,
+            ),
+            "Reference only": result.get(
+                "Reference only",
+                0,
+            ),
+            "Recall %": result.get(
+                "Recall %",
+                np.nan,
+            ),
+            "Precision %": result.get(
+                "Precision %",
+                np.nan,
+            ),
+            "Jaccard %": result.get(
+                "Jaccard %",
+                np.nan,
+            ),
+        })
+
+    comparison_table = pd.DataFrame(
+        comparison_rows
+    )
+
+    st.dataframe(
+        comparison_table,
+        use_container_width=True,
+        hide_index=True,
+        key=(
+            "candidate_fidelity_event_id_table"
+        ),
+    )
+
+    structural_pass = (
+        pd.notna(
+            v2_comparison.get(
+                "Recall %",
+                np.nan,
+            )
+        )
+        and pd.notna(
+            v2_comparison.get(
+                "Precision %",
+                np.nan,
+            )
+        )
+        and float(
+            v2_comparison.get(
+                "Recall %",
+                0.0,
+            )
+        )
+        >= 99.0
+        and float(
+            v2_comparison.get(
+                "Precision %",
+                0.0,
+            )
+        )
+        >= 99.0
+    )
+
+    if (
+        processed_symbols
+        and structural_pass
+    ):
+        st.success(
+            "V2 structural Event-ID fidelity is >=99% recall and >=99% "
+            "precision on the processed audit symbols."
+        )
+    elif processed_symbols:
+        st.warning(
+            "V2 structural fidelity is below the 99% sanity threshold. "
+            "Inspect Historical-only / Reference-only events before scaling "
+            "the replay to longer horizons."
+        )
+
+    feature_summary, feature_detail = (
+        _lh_fidelity_feature_audit(
+            processed_historical,
+            processed_reference_v2,
+            v2_comparison.get(
+                "matched_keys",
+                set(),
+            ),
+        )
+    )
+
+    st.markdown(
+        "#### Matched-event feature parity"
+    )
+
+    if feature_summary.empty:
+        st.info(
+            "No matched features are comparable yet."
+        )
+    else:
+        st.dataframe(
+            feature_summary,
+            use_container_width=True,
+            hide_index=True,
+            key=(
+                "candidate_fidelity_feature_summary"
+            ),
+        )
+
+    audit_tabs = st.tabs([
+        "Historical only",
+        "Reference only",
+        "Matched feature detail",
+        "Audit errors",
+    ])
+
+    with audit_tabs[
+        0
+    ]:
+        historical_only = (
+            _lh_fidelity_detail_rows(
+                processed_historical,
+                v2_comparison.get(
+                    "historical_only_keys",
+                    set(),
+                ),
+                "Historical only",
+            )
+        )
+
+        if historical_only.empty:
+            st.success(
+                "No V2 historical-only events on processed symbols."
+            )
+        else:
+            st.dataframe(
+                historical_only,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with audit_tabs[
+        1
+    ]:
+        reference_only = (
+            _lh_fidelity_detail_rows(
+                processed_reference_v2,
+                v2_comparison.get(
+                    "reference_only_keys",
+                    set(),
+                ),
+                "Reference only",
+            )
+        )
+
+        if reference_only.empty:
+            st.success(
+                "No V2 reference-only events on processed symbols."
+            )
+        else:
+            st.dataframe(
+                reference_only,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with audit_tabs[
+        2
+    ]:
+        if feature_detail.empty:
+            st.info(
+                "No matched feature-detail rows."
+            )
+        else:
+            st.dataframe(
+                feature_detail,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with audit_tabs[
+        3
+    ]:
+        errors = state.get(
+            "errors",
+            {},
+        )
+
+        if not errors:
+            st.success(
+                "No persisted fidelity-audit errors."
+            )
+        else:
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Symbol": key,
+                        "Error": value,
+                    }
+                    for key, value in errors.items()
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.caption(
+        "Interpretation: Event-ID parity is the first gate. "
+        "Only after that is strong should Room/RSI/Strength/execution parity "
+        "be used to diagnose smaller numeric differences."
+    )
+
+    export_sections = [
+        "EVENT_ID_FIDELITY\n"
+        + comparison_table.to_csv(
+            index=False
+        )
+    ]
+
+    if not feature_summary.empty:
+        export_sections.append(
+            "FEATURE_PARITY\n"
+            + feature_summary.to_csv(
+                index=False
+            )
+        )
+
+    st.download_button(
+        "Download fidelity audit CSV",
+        data="\n\n".join(
+            export_sections
+        ).encode(
+            "utf-8"
+        ),
+        file_name=(
+            f"candidate_replay_fidelity_{run_id}.csv"
+        ),
+        mime="text/csv",
+        key=(
+            "candidate_fidelity_download"
+        ),
     )
 
 
@@ -68655,6 +71110,20 @@ if selected_section == "reaction_swing_lab":
             st.divider()
 
             render_candidate_long_horizon_historical_replay()
+
+            st.divider()
+
+            render_candidate_historical_replay_fidelity_audit(
+                retests_df=(
+                    candidate_shared_retests_df
+                ),
+                v1_short_config=(
+                    candidate_v1_config
+                ),
+                v1_long_config=(
+                    candidate_v1_long_config
+                ),
+            )
 
             st.divider()
 
