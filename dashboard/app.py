@@ -23719,7 +23719,11 @@ def _lh_dir_size_bytes(path):
 def _lh_interval_ms(interval):
     mapping = {
         "1m": 60_000,
+        "5m": 5 * 60_000,
         "15m": 15 * 60_000,
+        "30m": 30 * 60_000,
+        "1h": 60 * 60_000,
+        "4h": 4 * 60 * 60_000,
     }
     return int(
         mapping.get(
@@ -25379,6 +25383,642 @@ def _lh_execution_from_1m(
     }
 
 
+
+_LH_CONTEXT_LIMITS = {
+    "1m": 5000,
+    "5m": 2500,
+    "15m": 1500,
+    "30m": 1000,
+    "1h": 750,
+    "4h": 500,
+}
+
+
+def _lh_closed_tail(
+    candles,
+    known_timestamp_ms,
+    timeframe,
+    limit,
+):
+    """Exact rolling-buffer semantics used by the current Candidate context.
+
+    Only candles fully closed by known_timestamp_ms are visible, then the last
+    `limit` candles are retained. This mirrors the bounded live/research buffer
+    rather than letting very old historical swings leak into HTF Room.
+    """
+    if (
+        candles is None
+        or candles.empty
+    ):
+        return pd.DataFrame()
+
+    required = {
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    }
+    if not required.issubset(
+        candles.columns
+    ):
+        return pd.DataFrame()
+
+    tf_ms = _lh_interval_ms(
+        timeframe
+    )
+
+    work = candles.copy()
+    work[
+        "timestamp"
+    ] = pd.to_numeric(
+        work[
+            "timestamp"
+        ],
+        errors="coerce",
+    )
+
+    work = (
+        work.dropna(
+            subset=[
+                "timestamp"
+            ]
+        )
+        .sort_values(
+            "timestamp",
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=[
+                "timestamp"
+            ],
+            keep="last",
+        )
+    )
+
+    work = work.loc[
+        work[
+            "timestamp"
+        ]
+        .add(
+            int(
+                tf_ms
+            )
+        )
+        .le(
+            int(
+                known_timestamp_ms
+            )
+        )
+    ].copy()
+
+    if work.empty:
+        return work
+
+    return (
+        work.tail(
+            int(
+                limit
+            )
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def _lh_native_return_from_closed_window(
+    candles,
+    known_timestamp_ms,
+    timeframe="4h",
+):
+    window = _lh_closed_tail(
+        candles,
+        known_timestamp_ms,
+        timeframe,
+        2,
+    )
+
+    if len(
+        window
+    ) < 2:
+        return np.nan
+
+    close_prev = pd.to_numeric(
+        window.iloc[
+            -2
+        ].get(
+            "close"
+        ),
+        errors="coerce",
+    )
+    close_now = pd.to_numeric(
+        window.iloc[
+            -1
+        ].get(
+            "close"
+        ),
+        errors="coerce",
+    )
+
+    if (
+        pd.isna(
+            close_prev
+        )
+        or pd.isna(
+            close_now
+        )
+        or float(
+            close_prev
+        )
+        == 0.0
+    ):
+        return np.nan
+
+    return float(
+        (
+            float(
+                close_now
+            )
+            / float(
+                close_prev
+            )
+            - 1.0
+        )
+        * 100.0
+    )
+
+
+def _lh_exact_native_context(
+    *,
+    symbol,
+    side,
+    reaction_price,
+    known_ts,
+    one_minute,
+    native_frames,
+    btc_4h,
+):
+    """Rebuild Candidate driver context from Binance-native timeframes.
+
+    Exact current-driver contracts:
+      RSI limits:
+        1m=5000, 5m=2500, 15m=1500, 1h=750
+      Room limits:
+        30m=1000, 1h=750, 4h=500
+      Room swings:
+        5x5, min prominence 0
+      Known timestamp:
+        reaction retest close + 60s
+    """
+    side = str(
+        side
+    ).upper()
+
+    context = {}
+
+    # --------------------------------------------------------
+    # RSI: native timeframe candles + exact bounded windows.
+    # --------------------------------------------------------
+    rsi_sources = {
+        "1m": one_minute,
+        "5m": native_frames.get(
+            "5m",
+            pd.DataFrame(),
+        ),
+        "15m": native_frames.get(
+            "15m",
+            pd.DataFrame(),
+        ),
+        "1h": native_frames.get(
+            "1h",
+            pd.DataFrame(),
+        ),
+    }
+
+    aligned_count = 0
+
+    for tf in [
+        "1m",
+        "5m",
+        "15m",
+        "1h",
+    ]:
+        window = _lh_closed_tail(
+            rsi_sources.get(
+                tf
+            ),
+            known_ts,
+            tf,
+            _LH_CONTEXT_LIMITS[
+                tf
+            ],
+        )
+
+        rsi_value = (
+            _reaction_driver_rsi_from_candles(
+                window,
+                known_ts,
+                _lh_interval_ms(
+                    tf
+                ),
+                period=14,
+            )
+        )
+
+        context[
+            f"rsi14_{tf}"
+        ] = rsi_value
+
+        aligned = (
+            pd.notna(
+                rsi_value
+            )
+            and (
+                (
+                    side
+                    == "LONG"
+                    and float(
+                        rsi_value
+                    )
+                    <= 30.0
+                )
+                or (
+                    side
+                    == "SHORT"
+                    and float(
+                        rsi_value
+                    )
+                    >= 70.0
+                )
+            )
+        )
+
+        context[
+            f"aligned_rsi_extreme_{tf}"
+        ] = bool(
+            aligned
+        )
+
+        aligned_count += int(
+            aligned
+        )
+
+    context[
+        "aligned_rsi_extreme_count"
+    ] = int(
+        aligned_count
+    )
+
+    # --------------------------------------------------------
+    # HTF Room: native 30m/1h/4h, exact live buffer size,
+    # SwingDetector 5x5 on that exact bounded window.
+    # --------------------------------------------------------
+    room_candidates = []
+
+    for tf in [
+        "30m",
+        "1h",
+        "4h",
+    ]:
+        window = _lh_closed_tail(
+            native_frames.get(
+                tf,
+                pd.DataFrame(),
+            ),
+            known_ts,
+            tf,
+            _LH_CONTEXT_LIMITS[
+                tf
+            ],
+        )
+
+        if window.empty:
+            points = []
+        else:
+            detector = SwingDetector(
+                left_bars=5,
+                right_bars=5,
+                min_prominence_pct=0.0,
+            )
+
+            try:
+                points = detector.detect_all(
+                    window.to_dict(
+                        orient="records"
+                    )
+                )
+            except Exception:
+                points = []
+
+        distances = (
+            _reaction_driver_swing_distances(
+                points,
+                known_ts,
+                _lh_interval_ms(
+                    tf
+                ),
+                float(
+                    reaction_price
+                ),
+                side,
+            )
+        )
+
+        same_distance = distances.get(
+            "same_side_distance_pct",
+            np.nan,
+        )
+        opposing_room = distances.get(
+            "opposing_room_pct",
+            np.nan,
+        )
+
+        context[
+            f"same_swing_dist_{tf}_pct"
+        ] = same_distance
+        context[
+            f"opposing_room_{tf}_pct"
+        ] = opposing_room
+        context[
+            f"opposing_swing_price_{tf}"
+        ] = distances.get(
+            "opposing_swing_price",
+            np.nan,
+        )
+        context[
+            f"opposing_swing_pivot_timestamp_{tf}"
+        ] = distances.get(
+            "opposing_swing_pivot_timestamp",
+            np.nan,
+        )
+        context[
+            f"opposing_swing_confirmed_timestamp_{tf}"
+        ] = distances.get(
+            "opposing_swing_confirmed_timestamp",
+            np.nan,
+        )
+        context[
+            f"opposing_swing_actionable_timestamp_{tf}"
+        ] = distances.get(
+            "opposing_swing_actionable_timestamp",
+            np.nan,
+        )
+
+        if pd.notna(
+            opposing_room
+        ):
+            room_candidates.append({
+                "room_pct": float(
+                    opposing_room
+                ),
+                "timeframe": tf,
+                "price": distances.get(
+                    "opposing_swing_price",
+                    np.nan,
+                ),
+                "pivot_timestamp": distances.get(
+                    "opposing_swing_pivot_timestamp",
+                    np.nan,
+                ),
+                "confirmed_timestamp": distances.get(
+                    "opposing_swing_confirmed_timestamp",
+                    np.nan,
+                ),
+                "actionable_timestamp": distances.get(
+                    "opposing_swing_actionable_timestamp",
+                    np.nan,
+                ),
+            })
+
+    nearest_room = (
+        min(
+            room_candidates,
+            key=lambda item: item[
+                "room_pct"
+            ],
+        )
+        if room_candidates
+        else None
+    )
+
+    context[
+        "nearest_opposing_room_pct"
+    ] = (
+        nearest_room[
+            "room_pct"
+        ]
+        if nearest_room
+        else np.nan
+    )
+    context[
+        "nearest_opposing_swing_tf"
+    ] = (
+        nearest_room[
+            "timeframe"
+        ]
+        if nearest_room
+        else None
+    )
+    context[
+        "nearest_opposing_swing_price"
+    ] = (
+        nearest_room[
+            "price"
+        ]
+        if nearest_room
+        else np.nan
+    )
+    context[
+        "nearest_opposing_swing_pivot_timestamp"
+    ] = (
+        nearest_room[
+            "pivot_timestamp"
+        ]
+        if nearest_room
+        else np.nan
+    )
+    context[
+        "nearest_opposing_swing_confirmed_timestamp"
+    ] = (
+        nearest_room[
+            "confirmed_timestamp"
+        ]
+        if nearest_room
+        else np.nan
+    )
+    context[
+        "nearest_opposing_swing_actionable_timestamp"
+    ] = (
+        nearest_room[
+            "actionable_timestamp"
+        ]
+        if nearest_room
+        else np.nan
+    )
+
+    # --------------------------------------------------------
+    # 4h Strength: Binance-native 4h candles, last two fully closed
+    # at the exact same known_ts.
+    # --------------------------------------------------------
+    symbol_return_4h = (
+        _lh_native_return_from_closed_window(
+            native_frames.get(
+                "4h",
+                pd.DataFrame(),
+            ),
+            known_ts,
+            "4h",
+        )
+    )
+    btc_return_4h = (
+        _lh_native_return_from_closed_window(
+            btc_4h,
+            known_ts,
+            "4h",
+        )
+    )
+
+    residual = (
+        float(
+            symbol_return_4h
+        )
+        - float(
+            btc_return_4h
+        )
+        if (
+            pd.notna(
+                symbol_return_4h
+            )
+            and pd.notna(
+                btc_return_4h
+            )
+        )
+        else np.nan
+    )
+
+    side_adjusted = (
+        residual
+        if side
+        == "LONG"
+        else (
+            -residual
+            if (
+                side
+                == "SHORT"
+                and pd.notna(
+                    residual
+                )
+            )
+            else np.nan
+        )
+    )
+
+    context[
+        "return_pct_4h"
+    ] = symbol_return_4h
+    context[
+        "btc_return_pct_4h"
+    ] = btc_return_4h
+    context[
+        "symbol_strength_vs_btc_4h"
+    ] = residual
+    context[
+        "side_adjusted_strength_vs_btc_4h"
+    ] = side_adjusted
+
+    return context
+
+
+def _lh_native_prefetch_frames(
+    symbol,
+    month_start_ms,
+    month_end_ms,
+    *,
+    max_age_minutes,
+):
+    """Fetch native timeframe buffers once per symbol/month.
+
+    1m stays setup-targeted because it is much larger. All higher TFs are
+    inexpensive monthly caches and are reused by every REACTION in the month.
+    """
+    native_frames = {}
+
+    tail_end_ms = int(
+        month_end_ms
+        + (
+            int(
+                max_age_minutes
+            )
+            + 180
+            + 5
+        )
+        * 60_000
+    )
+
+    for tf in [
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "4h",
+    ]:
+        tf_ms = _lh_interval_ms(
+            tf
+        )
+        limit = _LH_CONTEXT_LIMITS[
+            tf
+        ]
+
+        start_ms = int(
+            month_start_ms
+            - (
+                int(
+                    limit
+                )
+                + 20
+            )
+            * int(
+                tf_ms
+            )
+        )
+
+        native_frames[
+            tf
+        ] = _lh_fetch_klines_range(
+            symbol,
+            tf,
+            start_ms,
+            tail_end_ms,
+        )
+
+    btc_start_ms = int(
+        month_start_ms
+        - (
+            _LH_CONTEXT_LIMITS[
+                "4h"
+            ]
+            + 20
+        )
+        * _lh_interval_ms(
+            "4h"
+        )
+    )
+
+    btc_4h = _lh_fetch_klines_range(
+        "BTCUSDT",
+        "4h",
+        btc_start_ms,
+        tail_end_ms,
+    )
+
+    return (
+        native_frames,
+        btc_4h,
+    )
+
+
 def _lh_symbol_month_events(
     symbol,
     month_start_ms,
@@ -25434,92 +26074,24 @@ def _lh_symbol_month_events(
     ):
         return pd.DataFrame()
 
-    # BTC is needed only for the historical 4h relative-strength snapshot.
-    btc_fifteen = (
-        _lh_fetch_klines_range(
-            "BTCUSDT",
-            "15m",
-            warmup_start_ms,
-            tail_end_ms,
+    # Native timeframe buffers are required for strict fidelity.
+    # Do not derive 5m/30m/1h/4h from another timeframe.
+    native_frames, btc_four_hour = (
+        _lh_native_prefetch_frames(
+            symbol,
+            month_start_ms,
+            month_end_ms,
+            max_age_minutes=(
+                max_age_minutes
+            ),
         )
     )
 
-    # Causal structural frames derived from one 15m source.
-    thirty = _lh_resample_ohlcv(
-        fifteen,
-        "30min",
-        2,
-    )
-    one_hour = _lh_resample_ohlcv(
-        fifteen,
-        "1h",
-        4,
-    )
-    four_hour = _lh_resample_ohlcv(
-        fifteen,
-        "4h",
-        16,
-    )
-
-    btc_four_hour = (
-        _lh_resample_ohlcv(
-            btc_fifteen,
-            "4h",
-            16,
-        )
-        if (
-            btc_fifteen is not None
-            and not btc_fifteen.empty
-        )
-        else pd.DataFrame()
-    )
-
-    room_points = {}
-
-    for (
-        tf,
-        candles,
-    ) in [
-        (
-            "30m",
-            thirty,
-        ),
-        (
-            "1h",
-            one_hour,
-        ),
-        (
-            "4h",
-            four_hour,
-        ),
-    ]:
-        if (
-            candles is None
-            or candles.empty
-        ):
-            room_points[
-                tf
-            ] = []
-            continue
-
-        detector = SwingDetector(
-            left_bars=5,
-            right_bars=5,
-            min_prominence_pct=0.0,
-        )
-
-        try:
-            room_points[
-                tf
-            ] = detector.detect_all(
-                candles.to_dict(
-                    orient="records"
-                )
-            )
-        except Exception:
-            room_points[
-                tf
-            ] = []
+    # Structural discovery remains the Binance-native 15m source already loaded
+    # with the larger warm-up required for finding 15m reaction swings.
+    native_frames[
+        "15m"
+    ] = fifteen
 
     # 15m 3x3 is the shared structural detector used by the current V1/V2 lab.
     reaction_detector = SwingDetector(
@@ -25651,14 +26223,19 @@ def _lh_symbol_month_events(
         ):
             continue
 
-        # ~15h pre-history is enough for RSI14 on 1h while the forward tail
-        # covers structural retest + 180m execution.
+        # Exact current Candidate driver semantics require up to 5000 closed
+        # native 1m candles before REACTION-known time. Start far enough before
+        # the actionable swing that a retest up to max_age later can still have
+        # a full 5000-candle rolling buffer.
         one_min_start = int(
             actionable_ts
-            - 15
-            * 60
-            * 60
-            * 1000
+            - (
+                _LH_CONTEXT_LIMITS[
+                    "1m"
+                ]
+                + 20
+            )
+            * 60_000
         )
         one_min_end = int(
             actionable_ts
@@ -25739,260 +26316,111 @@ def _lh_symbol_month_events(
             + 60_000
         )
 
-        # RSI context uses only bars that are fully closed at known_ts.
         one_min_prepared = (
             _prepare_confirmed_swing_retest_candles(
                 one_minute
             )
         )
-        five_minute = (
-            _lh_resample_ohlcv(
-                one_min_prepared,
-                "5min",
-                5,
+
+        exact_context = (
+            _lh_exact_native_context(
+                symbol=symbol,
+                side=signal_side,
+                reaction_price=float(
+                    retest[
+                        "retest_close"
+                    ]
+                ),
+                known_ts=known_ts,
+                one_minute=(
+                    one_min_prepared
+                ),
+                native_frames=(
+                    native_frames
+                ),
+                btc_4h=(
+                    btc_four_hour
+                ),
             )
         )
-        fifteen_from_1m = (
-            _lh_resample_ohlcv(
-                one_min_prepared,
-                "15min",
-                15,
-            )
-        )
-        one_hour_from_1m = (
-            _lh_resample_ohlcv(
-                one_min_prepared,
-                "1h",
-                60,
-            )
-        )
 
-        rsi_context = {}
-
-        for (
-            tf,
-            candles,
-            tf_ms,
-        ) in [
-            (
-                "1m",
-                one_min_prepared,
-                60_000,
-            ),
-            (
-                "5m",
-                five_minute,
-                5
-                * 60_000,
-            ),
-            (
-                "15m",
-                fifteen_from_1m,
-                15
-                * 60_000,
-            ),
-            (
-                "1h",
-                one_hour_from_1m,
-                60
-                * 60_000,
-            ),
-        ]:
-            rsi_context[
-                f"rsi14_{tf}"
-            ] = (
-                _reaction_driver_rsi_from_candles(
-                    candles,
-                    known_ts,
-                    tf_ms,
-                    period=14,
+        rsi_context = {
+            key: value
+            for key, value
+            in exact_context.items()
+            if (
+                key.startswith(
+                    "rsi14_"
                 )
-            )
-
-        aligned_count = 0
-
-        for tf in [
-            "1m",
-            "5m",
-            "15m",
-            "1h",
-        ]:
-            rsi_value = (
-                pd.to_numeric(
-                    rsi_context.get(
-                        f"rsi14_{tf}"
-                    ),
-                    errors="coerce",
+                or key.startswith(
+                    "aligned_rsi_extreme_"
                 )
+                or key
+                == "aligned_rsi_extreme_count"
             )
-
-            aligned = (
-                pd.notna(
-                    rsi_value
-                )
-                and (
-                    (
-                        signal_side
-                        == "LONG"
-                        and float(
-                            rsi_value
-                        )
-                        <= 30.0
-                    )
-                    or (
-                        signal_side
-                        == "SHORT"
-                        and float(
-                            rsi_value
-                        )
-                        >= 70.0
-                    )
-                )
-            )
-
-            rsi_context[
-                f"aligned_rsi_extreme_{tf}"
-            ] = bool(
-                aligned
-            )
-            aligned_count += int(
-                aligned
-            )
-
-        rsi_context[
-            "aligned_rsi_extreme_count"
-        ] = int(
-            aligned_count
-        )
-
-        room_candidates = []
-
-        for (
-            tf,
-            tf_ms,
-        ) in [
-            (
-                "30m",
-                30
-                * 60_000,
-            ),
-            (
-                "1h",
-                60
-                * 60_000,
-            ),
-            (
-                "4h",
-                4
-                * 60
-                * 60_000,
-            ),
-        ]:
-            distances = (
-                _reaction_driver_swing_distances(
-                    room_points.get(
-                        tf,
-                        [],
-                    ),
-                    known_ts,
-                    tf_ms,
-                    float(
-                        retest[
-                            "retest_close"
-                        ]
-                    ),
-                    signal_side,
-                )
-            )
-
-            room_value = (
-                distances.get(
-                    "opposing_room_pct"
-                )
-            )
-
-            if pd.notna(
-                room_value
-            ):
-                room_candidates.append({
-                    "room_pct": float(
-                        room_value
-                    ),
-                    "timeframe": tf,
-                    "price": distances.get(
-                        "opposing_swing_price",
-                        np.nan,
-                    ),
-                    "pivot_timestamp": distances.get(
-                        "opposing_swing_pivot_timestamp",
-                        np.nan,
-                    ),
-                    "confirmed_timestamp": distances.get(
-                        "opposing_swing_confirmed_timestamp",
-                        np.nan,
-                    ),
-                    "actionable_timestamp": distances.get(
-                        "opposing_swing_actionable_timestamp",
-                        np.nan,
-                    ),
-                })
-
-        nearest_room = (
-            min(
-                room_candidates,
-                key=lambda item: item[
-                    "room_pct"
-                ],
-            )
-            if room_candidates
-            else None
-        )
+        }
 
         symbol_return_4h = (
-            _lh_4h_return_at(
-                four_hour,
-                known_ts,
+            exact_context.get(
+                "return_pct_4h",
+                np.nan,
             )
         )
         btc_return_4h = (
-            _lh_4h_return_at(
-                btc_four_hour,
-                known_ts,
+            exact_context.get(
+                "btc_return_pct_4h",
+                np.nan,
             )
         )
-
         residual = (
-            float(
-                symbol_return_4h
+            exact_context.get(
+                "symbol_strength_vs_btc_4h",
+                np.nan,
             )
-            - float(
-                btc_return_4h
+        )
+        side_adjusted = (
+            exact_context.get(
+                "side_adjusted_strength_vs_btc_4h",
+                np.nan,
             )
-            if (
-                pd.notna(
-                    symbol_return_4h
-                )
-                and pd.notna(
-                    btc_return_4h
-                )
-            )
-            else np.nan
         )
 
-        side_adjusted = (
-            residual
-            if signal_side
-            == "LONG"
-            else -residual
-            if (
-                signal_side
-                == "SHORT"
-                and pd.notna(
-                    residual
-                )
+        nearest_room = None
+
+        if pd.notna(
+            exact_context.get(
+                "nearest_opposing_room_pct",
+                np.nan,
             )
-            else np.nan
-        )
+        ):
+            nearest_room = {
+                "room_pct": float(
+                    exact_context[
+                        "nearest_opposing_room_pct"
+                    ]
+                ),
+                "timeframe": (
+                    exact_context.get(
+                        "nearest_opposing_swing_tf"
+                    )
+                ),
+                "price": exact_context.get(
+                    "nearest_opposing_swing_price",
+                    np.nan,
+                ),
+                "pivot_timestamp": exact_context.get(
+                    "nearest_opposing_swing_pivot_timestamp",
+                    np.nan,
+                ),
+                "confirmed_timestamp": exact_context.get(
+                    "nearest_opposing_swing_confirmed_timestamp",
+                    np.nan,
+                ),
+                "actionable_timestamp": exact_context.get(
+                    "nearest_opposing_swing_actionable_timestamp",
+                    np.nan,
+                ),
+            }
 
         execution = (
             _lh_execution_from_1m(
@@ -26016,6 +26444,7 @@ def _lh_symbol_month_events(
 
         row = {
             **retest,
+            **exact_context,
             **rsi_context,
             **execution,
             "symbol": symbol,
@@ -26207,6 +26636,9 @@ def _lh_run_id(
         "tp_pct": 0.5,
         "sl_pct": 3.0,
         "horizon_min": 180,
+        "context_reconstruction_version": (
+            "native_tf_exact_limits_v2"
+        ),
     }
 
     digest = hashlib.sha1(
@@ -28077,6 +28509,19 @@ def _lh_fidelity_feature_audit(
             ]
         ).abs()
 
+        tolerance = {
+            "HTF Room %": 1e-6,
+            "Strength vs BTC 4h %": 0.001,
+            "RSI 1m": 1e-6,
+            "RSI 5m": 1e-6,
+            "RSI 15m": 1e-6,
+            "RSI 1h": 1e-6,
+            "Net PnL %": 1e-9,
+        }.get(
+            label,
+            1e-9,
+        )
+
         summary_rows.append({
             "Feature": label,
             "Comparable N": int(
@@ -28094,6 +28539,17 @@ def _lh_fidelity_feature_audit(
                     atol=1e-9,
                 ).mean()
                 * 100.0
+            ),
+            "Within tolerance %": float(
+                delta.le(
+                    float(
+                        tolerance
+                    )
+                ).mean()
+                * 100.0
+            ),
+            "Tolerance": float(
+                tolerance
             ),
             "Median abs delta": float(
                 delta.median()
@@ -28371,6 +28827,9 @@ def _lh_fidelity_run_id(
         "max_age_minutes": 360,
         "execution": (
             "TP0.5_SL3_H180"
+        ),
+        "context_reconstruction_version": (
+            "native_tf_exact_limits_v2"
         ),
     }
 
@@ -29203,41 +29662,87 @@ def render_candidate_historical_replay_fidelity_audit(
         )
     )
 
+    # The persisted V2 dashboard history is not an exhaustive collector.
+    # Therefore V1 identity parity must be measured on the exact V2 Event IDs
+    # that BOTH pipelines actually observed. Historical-only V2 REACTIONs are
+    # kept as useful discoveries, but are not counted as V1 false positives.
+    matched_v2_keys = set(
+        v2_comparison.get(
+            "matched_keys",
+            set(),
+        )
+    )
+
+    matched_historical = (
+        processed_historical.loc[
+            processed_historical[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+            .isin(
+                matched_v2_keys
+            )
+        ].copy()
+        if (
+            processed_historical is not None
+            and not processed_historical.empty
+        )
+        else pd.DataFrame()
+    )
+
+    matched_reference_v1 = (
+        processed_reference_v1.loc[
+            processed_reference_v1[
+                "candidate_v1_event_key"
+            ]
+            .fillna("")
+            .astype(str)
+            .isin(
+                matched_v2_keys
+            )
+        ].copy()
+        if (
+            processed_reference_v1 is not None
+            and not processed_reference_v1.empty
+        )
+        else pd.DataFrame()
+    )
+
     hist_v1_base_mask = (
         _lh_fidelity_v1_base_mask(
-            processed_historical
+            matched_historical
         )
     )
 
     v1_base_comparison = (
         _lh_fidelity_compare_sets(
-            processed_historical,
-            processed_reference_v1,
+            matched_historical,
+            matched_reference_v1,
             historical_mask=(
                 hist_v1_base_mask
             ),
         )
         if (
-            processed_reference_v1
-            is not None
-            and not processed_reference_v1.empty
+            matched_reference_v1 is not None
+            and not matched_reference_v1.empty
         )
         else None
     )
 
     hist_v1_strength_mask = (
         _lh_fidelity_v1_strength_mask(
-            processed_historical
+            matched_historical
         )
     )
 
     ref_v1_strength_mask = (
         pd.to_numeric(
-            processed_reference_v1.get(
+            matched_reference_v1.get(
                 "side_adjusted_strength_vs_btc_4h",
                 pd.Series(
                     np.nan,
-                    index=processed_reference_v1.index,
+                    index=matched_reference_v1.index,
                 ),
             ),
             errors="coerce",
@@ -29255,8 +29760,8 @@ def render_candidate_historical_replay_fidelity_audit(
 
     v1_strength_comparison = (
         _lh_fidelity_compare_sets(
-            processed_historical,
-            processed_reference_v1,
+            matched_historical,
+            matched_reference_v1,
             historical_mask=(
                 hist_v1_strength_mask
             ),
@@ -29265,8 +29770,8 @@ def render_candidate_historical_replay_fidelity_audit(
             ),
         )
         if (
-            processed_reference_v1 is not None
-            and not processed_reference_v1.empty
+            matched_reference_v1 is not None
+            and not matched_reference_v1.empty
         )
         else None
     )
@@ -29350,12 +29855,6 @@ def render_candidate_historical_replay_fidelity_audit(
                 np.nan,
             )
         )
-        and pd.notna(
-            v2_comparison.get(
-                "Precision %",
-                np.nan,
-            )
-        )
         and float(
             v2_comparison.get(
                 "Recall %",
@@ -29363,13 +29862,13 @@ def render_candidate_historical_replay_fidelity_audit(
             )
         )
         >= 99.0
-        and float(
+        and int(
             v2_comparison.get(
-                "Precision %",
-                0.0,
+                "Reference only",
+                0,
             )
         )
-        >= 99.0
+        == 0
     )
 
     if (
@@ -29377,14 +29876,15 @@ def render_candidate_historical_replay_fidelity_audit(
         and structural_pass
     ):
         st.success(
-            "V2 structural Event-ID fidelity is >=99% recall and >=99% "
-            "precision on the processed audit symbols."
+            "V2 known-event fidelity PASS: >=99% of persisted reference "
+            "REACTIONs were reconstructed and Reference-only = 0. "
+            "Historical-only events are not treated as false positives because "
+            "the persisted dashboard history is not an exhaustive collector."
         )
     elif processed_symbols:
         st.warning(
-            "V2 structural fidelity is below the 99% sanity threshold. "
-            "Inspect Historical-only / Reference-only events before scaling "
-            "the replay to longer horizons."
+            "V2 known-event fidelity is below the sanity gate. "
+            "Reference-only events must be explained before scaling."
         )
 
     feature_summary, feature_detail = (
@@ -29397,6 +29897,389 @@ def render_candidate_historical_replay_fidelity_audit(
             ),
         )
     )
+
+    # -------------------------------------------------------
+    # Decision parity: numeric values can differ by tiny floating noise;
+    # what must be 100% for the strategy is the actual decision boundary.
+    # -------------------------------------------------------
+    decision_rows = []
+
+    if (
+        processed_historical is not None
+        and not processed_historical.empty
+        and processed_reference_v2 is not None
+        and not processed_reference_v2.empty
+        and matched_v2_keys
+    ):
+        hist_match = (
+            processed_historical.loc[
+                processed_historical[
+                    "candidate_v1_event_key"
+                ]
+                .fillna("")
+                .astype(str)
+                .isin(
+                    matched_v2_keys
+                )
+            ]
+            .drop_duplicates(
+                subset=[
+                    "candidate_v1_event_key"
+                ],
+                keep="last",
+            )
+            .set_index(
+                "candidate_v1_event_key"
+            )
+        )
+
+        ref_match = (
+            processed_reference_v2.loc[
+                processed_reference_v2[
+                    "candidate_v1_event_key"
+                ]
+                .fillna("")
+                .astype(str)
+                .isin(
+                    matched_v2_keys
+                )
+            ]
+            .drop_duplicates(
+                subset=[
+                    "candidate_v1_event_key"
+                ],
+                keep="last",
+            )
+            .set_index(
+                "candidate_v1_event_key"
+            )
+        )
+
+        common_index = (
+            hist_match.index.intersection(
+                ref_match.index
+            )
+        )
+
+        hist_match = hist_match.loc[
+            common_index
+        ]
+        ref_match = ref_match.loc[
+            common_index
+        ]
+
+        if len(
+            common_index
+        ):
+            hist_room = pd.to_numeric(
+                hist_match.get(
+                    "nearest_opposing_room_pct"
+                ),
+                errors="coerce",
+            )
+            ref_room = pd.to_numeric(
+                ref_match.get(
+                    "nearest_opposing_room_pct"
+                ),
+                errors="coerce",
+            )
+
+            room_comparable = (
+                hist_room.notna()
+                & ref_room.notna()
+            )
+
+            if room_comparable.any():
+                decision_rows.append({
+                    "Decision": "Room >= 1.00%",
+                    "Comparable N": int(
+                        room_comparable.sum()
+                    ),
+                    "Match %": float(
+                        hist_room.loc[
+                            room_comparable
+                        ]
+                        .ge(
+                            1.0
+                        )
+                        .eq(
+                            ref_room.loc[
+                                room_comparable
+                            ]
+                            .ge(
+                                1.0
+                            )
+                        )
+                        .mean()
+                        * 100.0
+                    ),
+                })
+
+            hist_rsi_count = pd.to_numeric(
+                hist_match.get(
+                    "aligned_rsi_extreme_count"
+                ),
+                errors="coerce",
+            )
+            ref_rsi_count = pd.to_numeric(
+                ref_match.get(
+                    "aligned_rsi_extreme_count"
+                ),
+                errors="coerce",
+            )
+
+            rsi_comparable = (
+                hist_rsi_count.notna()
+                & ref_rsi_count.notna()
+            )
+
+            if rsi_comparable.any():
+                decision_rows.append({
+                    "Decision": "Aligned RSI count exact",
+                    "Comparable N": int(
+                        rsi_comparable.sum()
+                    ),
+                    "Match %": float(
+                        hist_rsi_count.loc[
+                            rsi_comparable
+                        ]
+                        .eq(
+                            ref_rsi_count.loc[
+                                rsi_comparable
+                            ]
+                        )
+                        .mean()
+                        * 100.0
+                    ),
+                })
+
+                decision_rows.append({
+                    "Decision": "Aligned RSI >= 1 TF",
+                    "Comparable N": int(
+                        rsi_comparable.sum()
+                    ),
+                    "Match %": float(
+                        hist_rsi_count.loc[
+                            rsi_comparable
+                        ]
+                        .ge(
+                            1
+                        )
+                        .eq(
+                            ref_rsi_count.loc[
+                                rsi_comparable
+                            ]
+                            .ge(
+                                1
+                            )
+                        )
+                        .mean()
+                        * 100.0
+                    ),
+                })
+
+            hist_strength = pd.to_numeric(
+                hist_match.get(
+                    "side_adjusted_strength_vs_btc_4h"
+                ),
+                errors="coerce",
+            )
+            ref_strength = pd.to_numeric(
+                ref_match.get(
+                    "side_adjusted_strength_vs_btc_4h"
+                ),
+                errors="coerce",
+            )
+
+            strength_comparable = (
+                hist_strength.notna()
+                & ref_strength.notna()
+            )
+
+            if strength_comparable.any():
+                decision_rows.append({
+                    "Decision": "Strength sign > 0",
+                    "Comparable N": int(
+                        strength_comparable.sum()
+                    ),
+                    "Match %": float(
+                        hist_strength.loc[
+                            strength_comparable
+                        ]
+                        .gt(
+                            0.0
+                        )
+                        .eq(
+                            ref_strength.loc[
+                                strength_comparable
+                            ]
+                            .gt(
+                                0.0
+                            )
+                        )
+                        .mean()
+                        * 100.0
+                    ),
+                })
+
+                decision_rows.append({
+                    "Decision": "Strength within 0.001 pp",
+                    "Comparable N": int(
+                        strength_comparable.sum()
+                    ),
+                    "Match %": float(
+                        (
+                            hist_strength.loc[
+                                strength_comparable
+                            ]
+                            - ref_strength.loc[
+                                strength_comparable
+                            ]
+                        )
+                        .abs()
+                        .le(
+                            0.001
+                        )
+                        .mean()
+                        * 100.0
+                    ),
+                })
+
+    if v1_base_comparison:
+        ref_n = int(
+            v1_base_comparison.get(
+                "Reference N",
+                0,
+            )
+        )
+        matched_n = int(
+            v1_base_comparison.get(
+                "Matched",
+                0,
+            )
+        )
+        hist_only_n = int(
+            v1_base_comparison.get(
+                "Historical only",
+                0,
+            )
+        )
+        ref_only_n = int(
+            v1_base_comparison.get(
+                "Reference only",
+                0,
+            )
+        )
+        denominator = (
+            matched_n
+            + hist_only_n
+            + ref_only_n
+        )
+
+        decision_rows.append({
+            "Decision": "V1 Base membership",
+            "Comparable N": int(
+                denominator
+            ),
+            "Match %": (
+                float(
+                    matched_n
+                    / denominator
+                    * 100.0
+                )
+                if denominator
+                else np.nan
+            ),
+        })
+
+    if v1_strength_comparison:
+        matched_n = int(
+            v1_strength_comparison.get(
+                "Matched",
+                0,
+            )
+        )
+        hist_only_n = int(
+            v1_strength_comparison.get(
+                "Historical only",
+                0,
+            )
+        )
+        ref_only_n = int(
+            v1_strength_comparison.get(
+                "Reference only",
+                0,
+            )
+        )
+        denominator = (
+            matched_n
+            + hist_only_n
+            + ref_only_n
+        )
+
+        decision_rows.append({
+            "Decision": "V1 + Strength membership",
+            "Comparable N": int(
+                denominator
+            ),
+            "Match %": (
+                float(
+                    matched_n
+                    / denominator
+                    * 100.0
+                )
+                if denominator
+                else np.nan
+            ),
+        })
+
+    decision_table = pd.DataFrame(
+        decision_rows
+    )
+
+    st.markdown(
+        "#### Strategy decision parity · target 100%"
+    )
+
+    if decision_table.empty:
+        st.info(
+            "No matched strategy decisions are comparable yet."
+        )
+    else:
+        st.dataframe(
+            decision_table,
+            use_container_width=True,
+            hide_index=True,
+            key=(
+                "candidate_fidelity_decision_parity"
+            ),
+        )
+
+        decision_match = pd.to_numeric(
+            decision_table[
+                "Match %"
+            ],
+            errors="coerce",
+        ).dropna()
+
+        if (
+            not decision_match.empty
+            and bool(
+                decision_match.ge(
+                    100.0
+                    - 1e-9
+                ).all()
+            )
+        ):
+            st.success(
+                "STRICT FIDELITY PASS: every comparable strategy decision "
+                "matches 100% on this audit sample."
+            )
+        else:
+            st.warning(
+                "Strict decision fidelity is not 100% yet. Keep the long-horizon "
+                "replay in validation mode and inspect the remaining mismatches."
+            )
 
     st.markdown(
         "#### Matched-event feature parity"
