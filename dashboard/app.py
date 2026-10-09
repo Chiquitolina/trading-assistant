@@ -49851,6 +49851,207 @@ def _candidate_fast_regime_render_auto_equity(
     )
 
 
+
+def _candidate_fast_regime_render_c_contribution_equity(
+    resolved,
+    base_mask,
+    qualified_mask,
+    base_gate_portfolio,
+    qualified_portfolio,
+    *,
+    key,
+    title,
+    base_label="Base gate",
+    qualified_label="Base gate + C",
+):
+    """Render C contribution with explicit NORMAL / C RE-ENABLED / FINAL NO-TRADE zones."""
+    curves = []
+    for label, portfolio in [
+        (str(base_label), base_gate_portfolio),
+        (str(qualified_label), qualified_portfolio),
+    ]:
+        curve = portfolio.get("equity_curve", pd.DataFrame()) if portfolio else pd.DataFrame()
+        if curve is None or curve.empty:
+            continue
+        curve = curve.copy()
+        curve["time"] = (
+            pd.to_datetime(
+                pd.to_numeric(curve["timestamp"], errors="coerce"),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+        )
+        curves.append((label, curve))
+    if not curves:
+        return
+
+    base_mask = (
+        base_mask.reindex(resolved.index, fill_value=False)
+        .fillna(False)
+        .astype(bool)
+    )
+    qualified_mask = (
+        qualified_mask.reindex(resolved.index, fill_value=False)
+        .fillna(False)
+        .astype(bool)
+    )
+    reenabled_mask = (base_mask & ~qualified_mask).astype(bool)
+
+    metric_cols = st.columns(3)
+    metric_cols[0].metric(
+        "C re-enabled candidates",
+        int(reenabled_mask.sum()),
+    )
+    metric_cols[1].metric(
+        "Original gate blocked",
+        int(base_mask.sum()),
+    )
+    metric_cols[2].metric(
+        "Final blocked after C",
+        int(qualified_mask.sum()),
+    )
+
+    fig = go.Figure()
+    for label, curve in curves:
+        fig.add_trace(
+            go.Scatter(
+                x=curve["time"],
+                y=pd.to_numeric(curve["equity"], errors="coerce"),
+                mode="lines+markers",
+                name=label,
+            )
+        )
+
+    zone_frame = pd.DataFrame({
+        "time": (
+            pd.to_datetime(
+                pd.to_numeric(
+                    resolved.get(
+                        "_entry_ts",
+                        pd.Series(index=resolved.index, dtype=float),
+                    ),
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+        ),
+        "base_blocked": base_mask,
+        "qualified_blocked": qualified_mask,
+        "reenabled": reenabled_mask,
+    }).dropna(subset=["time"])
+
+    if not zone_frame.empty:
+        timeline = (
+            zone_frame
+            .groupby("time", as_index=False, sort=True)
+            .agg(
+                base_blocked=("base_blocked", "all"),
+                qualified_blocked=("qualified_blocked", "all"),
+                reenabled=("reenabled", "any"),
+            )
+            .sort_values("time", kind="stable")
+            .reset_index(drop=True)
+        )
+
+        timeline["state"] = "NORMAL TRADING"
+        timeline.loc[
+            timeline["reenabled"].fillna(False).astype(bool),
+            "state",
+        ] = "C RE-ENABLED"
+        timeline.loc[
+            timeline["qualified_blocked"].fillna(False).astype(bool),
+            "state",
+        ] = "FINAL NO TRADE"
+
+        if len(timeline) >= 2:
+            timeline["next_time"] = timeline["time"].shift(-1)
+            step = timeline["time"].diff().dropna().median()
+            if pd.isna(step) or step <= pd.Timedelta(0):
+                step = pd.Timedelta(minutes=15)
+            timeline.loc[timeline.index[-1], "next_time"] = (
+                timeline.loc[timeline.index[-1], "time"] + step
+            )
+            timeline["state_id"] = timeline["state"].ne(
+                timeline["state"].shift()
+            ).cumsum()
+
+            fill_map = {
+                "NORMAL TRADING": "rgba(40, 167, 69, 0.08)",
+                "C RE-ENABLED": "rgba(23, 162, 184, 0.18)",
+                "FINAL NO TRADE": "rgba(220, 53, 69, 0.15)",
+            }
+            for _, zone in timeline.groupby("state_id", sort=True):
+                state = str(zone["state"].iloc[0])
+                fig.add_vrect(
+                    x0=zone["time"].iloc[0],
+                    x1=zone["next_time"].iloc[-1],
+                    fillcolor=fill_map.get(
+                        state,
+                        "rgba(40, 167, 69, 0.08)",
+                    ),
+                    line_width=0,
+                    layer="below",
+                )
+
+            # Legend-only traces are appended after real date traces so Plotly
+            # keeps a date x-axis.
+            fig.add_trace(
+                go.Scatter(
+                    x=[None], y=[None], mode="lines",
+                    line={"color": "rgba(40, 167, 69, 0.80)", "width": 8},
+                    name="NORMAL TRADING",
+                    hoverinfo="skip",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[None], y=[None], mode="lines",
+                    line={"color": "rgba(23, 162, 184, 0.90)", "width": 8},
+                    name="C RE-ENABLED",
+                    hoverinfo="skip",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[None], y=[None], mode="lines",
+                    line={"color": "rgba(220, 53, 69, 0.80)", "width": 8},
+                    name="FINAL NO TRADE",
+                    hoverinfo="skip",
+                )
+            )
+
+    fig.add_hline(
+        y=200.0,
+        line_dash="dot",
+        annotation_text="Starting equity",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        title=title,
+        xaxis={"title": "Time", "type": "date"},
+        yaxis_title="Realized equity (USDT)",
+        hovermode="x unified",
+        margin={"l": 10, "r": 10, "t": 55, "b": 10},
+    )
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=key,
+        config={"displaylogo": False},
+    )
+    st.caption(
+        "NORMAL TRADING = the original component gate did not fully block the "
+        "decision batch. C RE-ENABLED = the original gate wanted NO TRADE but "
+        "the optional C qualifier failed, so trading was restored. FINAL NO TRADE "
+        "= the original gate and C both confirm the block."
+    )
+
+
 def _candidate_fast_regime_variant_context(execution, variant):
     """Resolved execution + baseline portfolio for one Legacy V1 variant."""
     _, resolved = _candidate_v2_concurrency_source(
@@ -50900,29 +51101,52 @@ def _candidate_fast_render_auto_regime_scanner(
                                                 "for this strategy."
                                             )
                                             continue
+                                        strategy_slug = (
+                                            "base"
+                                            if strategy_label.endswith("Base")
+                                            else "strength"
+                                        )
+                                        c_text = _candidate_fast_regime_auto_rule_text(
+                                            selected_c_rule,
+                                            local_reverse_labels,
+                                        )
+
+                                        st.markdown("##### Graph 1 · original component gate")
                                         _candidate_fast_regime_render_auto_equity(
                                             payload["resolved"],
+                                            payload["base_mask"],
+                                            payload["baseline_portfolio"],
+                                            payload["base_gate_portfolio"],
+                                            key=(
+                                                "candidate_fast_regime_c_graph1_"
+                                                + strategy_slug
+                                            ),
+                                            title=(
+                                                f"{strategy_label} · Baseline vs "
+                                                f"{selected_component_label}"
+                                            ),
+                                            baseline_label="Baseline",
+                                            gated_label=selected_component_label,
+                                        )
+
+                                        st.markdown("##### Graph 2 · optional C contribution")
+                                        _candidate_fast_regime_render_c_contribution_equity(
+                                            payload["resolved"],
+                                            payload["base_mask"],
                                             payload["qualified_mask"],
                                             payload["base_gate_portfolio"],
                                             payload["qualified_portfolio"],
                                             key=(
-                                                "candidate_fast_regime_c_equity_"
-                                                + (
-                                                    "base"
-                                                    if strategy_label.endswith("Base")
-                                                    else "strength"
-                                                )
+                                                "candidate_fast_regime_c_graph2_"
+                                                + strategy_slug
                                             ),
                                             title=(
                                                 f"{strategy_label} · "
                                                 f"{selected_component_label} vs + optional C · "
-                                                + _candidate_fast_regime_auto_rule_text(
-                                                    selected_c_rule,
-                                                    local_reverse_labels,
-                                                )
+                                                f"{c_text}"
                                             ),
-                                            baseline_label=selected_component_label,
-                                            gated_label=f"{selected_component_label} + C",
+                                            base_label=selected_component_label,
+                                            qualified_label=f"{selected_component_label} + C",
                                         )
         else:
             st.info(
