@@ -28,11 +28,12 @@ class CandidateResearchStore:
     context builders.
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     PROFILE_FILES = {
         "v1_raw": "candidate_v1_raw.parquet",
         "v1_legacy": "candidate_v1_legacy.parquet",
         "v1_legacy_execution": "candidate_v1_legacy_execution.parquet",
+        "v1_legacy_matrix_execution": "candidate_v1_legacy_matrix_execution.parquet",
         "v2": "candidate_v2.parquet",
     }
 
@@ -282,6 +283,42 @@ class CandidateResearchStore:
             return [str(row[0]) for row in rows if row and row[0] is not None]
         finally:
             con.close()
+
+
+    def read_profile(self, profile: str, *, limit: int = 250000) -> Dict[str, Any]:
+        """Read a bounded materialized profile through DuckDB.
+
+        Used by fast research views such as the Legacy V1 execution matrix.
+        This never invokes scanners, Redis, swing reconstruction, or path BUILD.
+        """
+        if not self.available:
+            raise RuntimeError("duckdb + pyarrow are required for fast queries")
+
+        profile = str(profile).lower()
+        path = self.profile_path(profile)
+        if not path.exists():
+            return {
+                "frame": pd.DataFrame(),
+                "rows": 0,
+                "elapsed_ms": 0.0,
+            }
+
+        escaped = str(path).replace("'", "''")
+        limit = max(1, min(int(limit), 250000))
+        con = duckdb.connect(database=":memory:")
+        started = time.perf_counter()
+        try:
+            frame = con.execute(
+                f"SELECT * FROM read_parquet('{escaped}') LIMIT {limit}"
+            ).fetchdf()
+        finally:
+            con.close()
+
+        return {
+            "frame": frame,
+            "rows": int(len(frame)),
+            "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+        }
 
     def query(
         self,

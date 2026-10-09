@@ -48353,6 +48353,38 @@ def _candidate_fast_build_snapshot(
     legacy_exec_context = legacy_exec_context.copy()
     legacy_exec_context["candidate_analysis_profile"] = "v1"
 
+    # --------------------------------------------------------------
+    # 4) Full Legacy V1 TP/SL matrix snapshot at the historical 180m
+    #    horizon. Paths are persisted/reused; only the grid expansion
+    #    is materialized here once per BUILD.
+    # --------------------------------------------------------------
+    legacy_matrix_tp_values = (
+        0.25, 0.35, 0.50, 0.75, 1.00, 1.50, 2.00, 2.50, 3.00,
+    )
+    legacy_matrix_sl_values = (
+        0.50, 1.00, 1.50, 2.00, 2.50, 3.00,
+    )
+    legacy_matrix_execution = _candidate_v2_execution_grid(
+        v1_legacy_context,
+        tp_values=legacy_matrix_tp_values,
+        sl_values=legacy_matrix_sl_values,
+        horizon_min=180,
+        entry_fee_pct=0.05,
+        exit_fee_pct=0.05,
+        entry_slippage_pct=0.0,
+        exit_slippage_pct=0.0,
+        notional_usdt=100.0,
+        force=False,
+    )
+    legacy_matrix_exec_context = _candidate_v2_merge_execution_context(
+        legacy_matrix_execution,
+        v1_legacy_context,
+    )
+    if legacy_matrix_exec_context is None or legacy_matrix_exec_context.empty:
+        raise RuntimeError("Legacy V1 TP/SL matrix execution snapshot is empty")
+    legacy_matrix_exec_context = legacy_matrix_exec_context.copy()
+    legacy_matrix_exec_context["candidate_analysis_profile"] = "v1"
+
     reaction_count, reaction_digest, max_retest_ts = (
         _candidate_analysis_retests_signature(retests_df)
     )
@@ -48361,6 +48393,7 @@ def _candidate_fast_build_snapshot(
             "v1_raw": v1_context,
             "v1_legacy": v1_legacy_context,
             "v1_legacy_execution": legacy_exec_context,
+            "v1_legacy_matrix_execution": legacy_matrix_exec_context,
             "v2": v2_context,
         },
         source_meta={
@@ -48370,6 +48403,7 @@ def _candidate_fast_build_snapshot(
             "v1_raw_rows": int(len(v1_context)),
             "v1_legacy_rows": int(len(v1_legacy_context)),
             "v1_legacy_execution_rows": int(len(legacy_exec_context)),
+            "v1_legacy_matrix_execution_rows": int(len(legacy_matrix_exec_context)),
             "v2_rows": int(len(v2_context)),
             "v2_newly_frozen": bool(v2_newly_frozen),
             "v1_sector_error": v1_sector_error,
@@ -48383,6 +48417,16 @@ def _candidate_fast_build_snapshot(
                 "exit_fee_pct": 0.05,
                 "entry_slippage_pct": 0.0,
                 "exit_slippage_pct": 0.0,
+            },
+            "legacy_matrix_definition": {
+                "tp_values": list(legacy_matrix_tp_values),
+                "sl_values": list(legacy_matrix_sl_values),
+                "horizon_min": 180,
+                "entry_fee_pct": 0.05,
+                "exit_fee_pct": 0.05,
+                "entry_slippage_pct": 0.0,
+                "exit_slippage_pct": 0.0,
+                "notional_usdt": 100.0,
             },
             "legacy_portfolio_definition": {
                 "starting_equity": 200.0,
@@ -48402,6 +48446,7 @@ def _candidate_fast_build_snapshot(
         "v1_raw": v1_context,
         "v1_legacy": v1_legacy_context,
         "v1_legacy_execution": legacy_exec_context,
+        "v1_legacy_matrix_execution": legacy_matrix_exec_context,
         "v2": v2_context,
         "v2_config": v2_config,
     }
@@ -48426,7 +48471,7 @@ def _candidate_fast_portfolio_summary(portfolio):
     }
 
 
-def _candidate_fast_legacy_v1_portfolio(execution, variant):
+def _candidate_fast_legacy_v1_portfolio(execution, variant, selected_sl_pct=3.0):
     if execution is None or execution.empty:
         return {}, pd.DataFrame()
 
@@ -48444,7 +48489,7 @@ def _candidate_fast_legacy_v1_portfolio(execution, variant):
         leverage=3.0,
         max_slots=1,
         risk_per_trade_pct=0.25,
-        selected_sl_pct=3.0,
+        selected_sl_pct=float(selected_sl_pct),
         max_margin_pct=80.0,
         compound=True,
         priority_mode="Most HTF Room → Strength",
@@ -48585,6 +48630,337 @@ def render_candidate_fast_legacy_v1_equity():
         f"Execution snapshot query: {float(result.get('elapsed_ms', 0.0)):.1f} ms. "
         "If Legacy V1 Base does not match the compatibility benchmark, compare "
         "Event IDs / executable / resolved counts before changing any strategy rule."
+    )
+
+
+
+def _candidate_fast_load_matrix_execution():
+    store = candidate_research_store
+    if (
+        store is None
+        or not store.available
+        or not store.snapshot_exists("v1_legacy_matrix_execution")
+    ):
+        return pd.DataFrame(), 0.0
+
+    manifest = store.read_manifest()
+    built_at = str(manifest.get("built_at_utc", ""))
+    cache_key = "candidate_fast_legacy_matrix_cache"
+    cached = st.session_state.get(cache_key)
+    if (
+        isinstance(cached, dict)
+        and cached.get("built_at") == built_at
+        and isinstance(cached.get("frame"), pd.DataFrame)
+    ):
+        return cached["frame"].copy(), float(cached.get("elapsed_ms", 0.0))
+
+    result = store.read_profile(
+        "v1_legacy_matrix_execution",
+        limit=250000,
+    )
+    frame = result.get("frame", pd.DataFrame())
+    st.session_state[cache_key] = {
+        "built_at": built_at,
+        "frame": frame.copy() if frame is not None else pd.DataFrame(),
+        "elapsed_ms": float(result.get("elapsed_ms", 0.0)),
+    }
+    return frame, float(result.get("elapsed_ms", 0.0))
+
+
+def render_candidate_fast_legacy_v1_matrix():
+    """Fast Legacy V1 TP/SL matrix from materialized 180m execution rows."""
+    execution, load_ms = _candidate_fast_load_matrix_execution()
+    if execution is None or execution.empty:
+        return
+
+    st.markdown("#### 🧮 Legacy V1 execution matrix · Fast")
+    st.caption(
+        "Official Legacy V1 universe (already Room >= 1% + aligned RSI >= 1). "
+        "The 180m TP/SL grid is materialized during BUILD, so changing variant, "
+        "side, cohort, metric or inspected cell does not rebuild Candidate paths. "
+        "Fees 0.05% + 0.05% · slippage 0% · matrix notional $100/trade."
+    )
+
+    variant_labels = {
+        "Legacy V1 Base": "Candidate Base",
+        "Legacy V1 + Strength > 0": "Candidate + Strength",
+    }
+    cohort_values = (
+        execution.get("candidate_v2_cohort", pd.Series(dtype=str))
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    cohort_values = sorted(value for value in cohort_values if value)
+
+    c1, c2, c3, c4 = st.columns(4)
+    variant_label = c1.selectbox(
+        "Variant",
+        list(variant_labels),
+        index=1,
+        key="candidate_fast_legacy_matrix_variant",
+    )
+    side_scope = c2.selectbox(
+        "Side",
+        ["TOTAL", "LONG", "SHORT"],
+        index=0,
+        key="candidate_fast_legacy_matrix_side",
+    )
+    cohort_scope = c3.selectbox(
+        "Cohort",
+        ["TOTAL"] + cohort_values,
+        index=0,
+        key="candidate_fast_legacy_matrix_cohort",
+    )
+    metric = c4.selectbox(
+        "Matrix metric",
+        [
+            "Net PnL % pts",
+            "Net PnL USDT",
+            "Avg net/trade %",
+            "Profit factor",
+            "Win rate %",
+            "TP rate %",
+            "Max drawdown % pts",
+            "Resolved",
+        ],
+        index=0,
+        key="candidate_fast_legacy_matrix_metric",
+    )
+
+    variant = variant_labels[variant_label]
+    work = execution.copy()
+    variant_mask = _candidate_v2_variant_mask(
+        work,
+        variant,
+        strong_threshold=0.50,
+    )
+    work = work.loc[variant_mask.fillna(False)].copy()
+
+    if side_scope != "TOTAL" and "side" in work.columns:
+        work = work.loc[
+            work["side"].fillna("").astype(str).str.upper().eq(side_scope)
+        ].copy()
+
+    if cohort_scope != "TOTAL" and "candidate_v2_cohort" in work.columns:
+        work = work.loc[
+            work["candidate_v2_cohort"].fillna("").astype(str).eq(cohort_scope)
+        ].copy()
+
+    if work.empty:
+        st.info("No Legacy V1 execution rows match this selection.")
+        return
+
+    summary_started = time.perf_counter()
+    summary = _candidate_v1_execution_grid_summary(work)
+    summary_ms = (time.perf_counter() - summary_started) * 1000.0
+    if summary is None or summary.empty:
+        st.info("No Legacy V1 matrix cells are available.")
+        return
+
+    if metric in {"Net PnL % pts", "Net PnL USDT"}:
+        matrix_source = summary.copy()
+        matrix_source["_display"] = matrix_source.apply(
+            lambda row: _candidate_v1_matrix_cell_text(row, metric),
+            axis=1,
+        )
+        matrix = matrix_source.pivot(
+            index="SL %",
+            columns="TP %",
+            values="_display",
+        ).sort_index(ascending=True)
+    else:
+        matrix = summary.pivot(
+            index="SL %",
+            columns="TP %",
+            values=metric,
+        ).sort_index(ascending=True)
+
+    matrix.index = [f"SL {float(value):g}%" for value in matrix.index]
+    matrix.columns = [f"TP {float(value):g}%" for value in matrix.columns]
+    st.dataframe(
+        matrix,
+        use_container_width=True,
+        key="candidate_fast_legacy_matrix_table",
+    )
+
+    event_col = (
+        "candidate_v1_event_key"
+        if "candidate_v1_event_key" in work.columns
+        else "candidate_v2_event_key"
+    )
+    candidate_count = (
+        int(work[event_col].fillna("").astype(str).nunique())
+        if event_col in work.columns
+        else 0
+    )
+    st.caption(
+        f"{candidate_count} Legacy V1 candidates · execution rows {len(work):,} · "
+        f"Parquet load {load_ms:.1f} ms · matrix summary {summary_ms:.1f} ms. "
+        "PnL cells show PnL (WR · PF), matching the compatibility semantics."
+    )
+
+    tp_values = sorted(
+        pd.to_numeric(summary["TP %"], errors="coerce").dropna().unique().tolist()
+    )
+    sl_values = sorted(
+        pd.to_numeric(summary["SL %"], errors="coerce").dropna().unique().tolist()
+    )
+    if not tp_values or not sl_values:
+        return
+
+    default_tp = min(
+        range(len(tp_values)),
+        key=lambda i: abs(float(tp_values[i]) - 0.5),
+    )
+    default_sl = min(
+        range(len(sl_values)),
+        key=lambda i: abs(float(sl_values[i]) - 3.0),
+    )
+    i1, i2 = st.columns(2)
+    selected_tp = i1.selectbox(
+        "Inspect TP",
+        tp_values,
+        index=default_tp,
+        format_func=lambda value: f"{float(value):g}%",
+        key="candidate_fast_legacy_matrix_inspect_tp",
+    )
+    selected_sl = i2.selectbox(
+        "Inspect SL",
+        sl_values,
+        index=default_sl,
+        format_func=lambda value: f"{float(value):g}%",
+        key="candidate_fast_legacy_matrix_inspect_sl",
+    )
+
+    selected_summary = summary.loc[
+        np.isclose(
+            pd.to_numeric(summary["TP %"], errors="coerce"),
+            float(selected_tp),
+        )
+        & np.isclose(
+            pd.to_numeric(summary["SL %"], errors="coerce"),
+            float(selected_sl),
+        )
+    ]
+    selected_pair = work.loc[
+        np.isclose(
+            pd.to_numeric(work["TP %"], errors="coerce"),
+            float(selected_tp),
+        )
+        & np.isclose(
+            pd.to_numeric(work["SL %"], errors="coerce"),
+            float(selected_sl),
+        )
+    ].copy()
+    if selected_summary.empty or selected_pair.empty:
+        return
+
+    row = selected_summary.iloc[0]
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Resolved", f"{int(row['Resolved'])}/{int(row['N'])}")
+    m2.metric("TP", int(row["TP"]))
+    m3.metric("SL", int(row["SL"] + row["Ambiguous"]))
+    m4.metric("Time exit", int(row["Time exit"]))
+    m5.metric("Net PnL", f"{float(row['Net PnL % pts']):+.2f} pts")
+    pf_value = row["Profit factor"]
+    m6.metric(
+        "PF",
+        "∞"
+        if pd.notna(pf_value) and not np.isfinite(float(pf_value))
+        else (f"{float(pf_value):.2f}" if pd.notna(pf_value) else "—"),
+    )
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Win rate", f"{float(row['Win rate %']):.1f}%")
+    s2.metric("TP rate", f"{float(row['TP rate %']):.1f}%")
+    s3.metric("Avg net/trade", f"{float(row['Avg net/trade %']):+.3f}%")
+    s4.metric("Max DD", f"{float(row['Max drawdown % pts']):.2f} pts")
+
+    portfolio, _resolved = _candidate_fast_legacy_v1_portfolio(
+        selected_pair,
+        variant,
+        selected_sl_pct=float(selected_sl),
+    )
+    portfolio_summary = _candidate_fast_portfolio_summary(portfolio)
+    if not portfolio_summary:
+        return
+
+    st.markdown(
+        f"##### 💼 Selected-cell portfolio · TP {float(selected_tp):g}% / "
+        f"SL {float(selected_sl):g}%"
+    )
+    p1, p2, p3, p4, p5 = st.columns(5)
+    p1.metric("Accepted", int(portfolio_summary.get("Accepted", 0) or 0))
+    p2.metric(
+        "Final equity",
+        f"${float(portfolio_summary.get('Final equity', np.nan)):.2f}",
+    )
+    p3.metric(
+        "Return",
+        f"{float(portfolio_summary.get('Return %', np.nan)):.2f}%",
+    )
+    p4.metric(
+        "Max DD",
+        f"{float(portfolio_summary.get('Max DD %', np.nan)):.2f}%",
+    )
+    portfolio_pf = portfolio_summary.get("PF", np.nan)
+    p5.metric(
+        "PF",
+        "∞"
+        if pd.notna(portfolio_pf) and not np.isfinite(float(portfolio_pf))
+        else (
+            f"{float(portfolio_pf):.2f}"
+            if pd.notna(portfolio_pf)
+            else "—"
+        ),
+    )
+
+    curve = portfolio.get("equity_curve", pd.DataFrame()) if portfolio else pd.DataFrame()
+    if curve is None or curve.empty:
+        return
+
+    curve = curve.copy()
+    curve["time"] = (
+        pd.to_datetime(
+            pd.to_numeric(curve["timestamp"], errors="coerce"),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+    )
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=curve["time"],
+            y=pd.to_numeric(curve["equity"], errors="coerce"),
+            mode="lines+markers",
+            name=variant_label,
+        )
+    )
+    fig.add_hline(
+        y=200.0,
+        line_dash="dot",
+        annotation_text="Starting equity",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        title=(
+            f"Legacy V1 · {variant_label} · TP {float(selected_tp):g}% / "
+            f"SL {float(selected_sl):g}% · 180m"
+        ),
+        xaxis_title="Time",
+        yaxis_title="Realized equity (USDT)",
+        hovermode="x unified",
+        margin={"l": 10, "r": 10, "t": 55, "b": 10},
+    )
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key="candidate_fast_legacy_matrix_selected_equity",
+        config={"displaylogo": False},
     )
 
 
@@ -48764,6 +49140,8 @@ def render_candidate_fast_explorer():
     if profile == "v1_raw":
         st.divider()
         render_candidate_fast_legacy_v1_equity()
+        st.divider()
+        render_candidate_fast_legacy_v1_matrix()
 
 
 def render_candidate_research(
