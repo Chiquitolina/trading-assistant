@@ -48964,6 +48964,693 @@ def render_candidate_fast_legacy_v1_matrix():
     )
 
 
+
+def _candidate_fast_regime_pf(values):
+    values = pd.to_numeric(values, errors="coerce").dropna()
+    if values.empty:
+        return np.nan
+    gains = values.loc[values.gt(0.0)]
+    losses = values.loc[values.lt(0.0)]
+    if not losses.empty and abs(float(losses.sum())) > 1e-12:
+        return float(gains.sum() / abs(float(losses.sum())))
+    if not gains.empty:
+        return np.inf
+    return np.nan
+
+
+def _candidate_fast_regime_bucket_summary(frame, feature):
+    """Describe fixed-execution outcomes by one causal market-context feature."""
+    if frame is None or frame.empty or feature not in frame.columns:
+        return pd.DataFrame(), None
+
+    work = frame.copy()
+    net = pd.to_numeric(
+        work.get("net_pnl_pct", pd.Series(np.nan, index=work.index)),
+        errors="coerce",
+    )
+    work = work.loc[net.notna()].copy()
+    work["_net"] = net.loc[work.index]
+    if work.empty:
+        return pd.DataFrame(), None
+
+    numeric = pd.to_numeric(work[feature], errors="coerce")
+    numeric_coverage = float(numeric.notna().mean()) if len(work) else 0.0
+
+    if numeric_coverage >= 0.75 and int(numeric.nunique(dropna=True)) >= 4:
+        valid = work.loc[numeric.notna()].copy()
+        valid["_feature_numeric"] = numeric.loc[valid.index].astype(float)
+        try:
+            valid["_bucket"] = pd.qcut(
+                valid["_feature_numeric"],
+                q=min(5, int(valid["_feature_numeric"].nunique())),
+                duplicates="drop",
+            )
+        except Exception:
+            return pd.DataFrame(), "numeric"
+
+        rows = []
+        for bucket, group in valid.groupby("_bucket", observed=True, sort=True):
+            gnet = pd.to_numeric(group["_net"], errors="coerce").dropna()
+            outcome = (
+                group.get("Outcome", pd.Series("", index=group.index))
+                .fillna("")
+                .astype(str)
+                .str.upper()
+            )
+            rows.append({
+                "Bucket": str(bucket),
+                "Min": float(group["_feature_numeric"].min()),
+                "Max": float(group["_feature_numeric"].max()),
+                "Trades": int(len(gnet)),
+                "Win rate %": float(gnet.gt(0).mean() * 100.0) if len(gnet) else np.nan,
+                "PF": _candidate_fast_regime_pf(gnet),
+                "Net PnL % pts": float(gnet.sum()) if len(gnet) else np.nan,
+                "Avg net/trade %": float(gnet.mean()) if len(gnet) else np.nan,
+                "TP rate %": float(outcome.eq("TP").mean() * 100.0) if len(group) else np.nan,
+            })
+        return pd.DataFrame(rows), "numeric"
+
+    values = work[feature].fillna("UNKNOWN").astype(str)
+    rows = []
+    for value, group in work.assign(_category=values).groupby("_category", sort=True):
+        gnet = pd.to_numeric(group["_net"], errors="coerce").dropna()
+        outcome = (
+            group.get("Outcome", pd.Series("", index=group.index))
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+        rows.append({
+            "Bucket": str(value),
+            "Trades": int(len(gnet)),
+            "Win rate %": float(gnet.gt(0).mean() * 100.0) if len(gnet) else np.nan,
+            "PF": _candidate_fast_regime_pf(gnet),
+            "Net PnL % pts": float(gnet.sum()) if len(gnet) else np.nan,
+            "Avg net/trade %": float(gnet.mean()) if len(gnet) else np.nan,
+            "TP rate %": float(outcome.eq("TP").mean() * 100.0) if len(group) else np.nan,
+        })
+    return pd.DataFrame(rows), "categorical"
+
+
+def _candidate_fast_regime_condition_mask(frame, feature, operator, threshold_or_value):
+    if (
+        frame is None
+        or frame.empty
+        or not feature
+        or feature == "OFF"
+        or feature not in frame.columns
+    ):
+        return pd.Series(False, index=frame.index if frame is not None else pd.RangeIndex(0))
+
+    if operator in {"<=", ">="}:
+        values = pd.to_numeric(frame[feature], errors="coerce")
+        threshold = float(threshold_or_value)
+        if operator == "<=":
+            return values.le(threshold).fillna(False)
+        return values.ge(threshold).fillna(False)
+
+    values = frame[feature].fillna("UNKNOWN").astype(str)
+    return values.eq(str(threshold_or_value)).fillna(False)
+
+
+def _candidate_fast_render_regime_condition(
+    frame,
+    *,
+    key_prefix,
+    feature_options,
+    label,
+    display_labels=None,
+):
+    display_labels = display_labels or {}
+    feature = st.selectbox(
+        label,
+        ["OFF"] + list(feature_options),
+        key=f"{key_prefix}_feature",
+        format_func=lambda value: (
+            "OFF" if value == "OFF" else display_labels.get(value, value)
+        ),
+    )
+    if feature == "OFF":
+        return pd.Series(False, index=frame.index), "OFF"
+
+    numeric = pd.to_numeric(frame[feature], errors="coerce")
+    numeric_coverage = float(numeric.notna().mean()) if len(frame) else 0.0
+    is_numeric = numeric_coverage >= 0.75 and int(numeric.nunique(dropna=True)) >= 4
+
+    if is_numeric:
+        c1, c2 = st.columns([1, 2])
+        operator = c1.selectbox(
+            "Block when",
+            ["<=", ">="],
+            key=f"{key_prefix}_operator",
+        )
+        valid = numeric.dropna().astype(float)
+        default_quantile = 0.20 if operator == "<=" else 0.80
+        default_value = float(valid.quantile(default_quantile)) if not valid.empty else 0.0
+        min_value = float(valid.min()) if not valid.empty else -100.0
+        max_value = float(valid.max()) if not valid.empty else 100.0
+        span = max(abs(max_value - min_value), 1e-6)
+        step = max(span / 200.0, 0.001)
+        threshold = c2.number_input(
+            "Threshold",
+            value=float(default_value),
+            step=float(step),
+            format="%.4f",
+            key=f"{key_prefix}_threshold",
+        )
+        mask = _candidate_fast_regime_condition_mask(
+            frame,
+            feature,
+            operator,
+            threshold,
+        )
+        return mask, f"{feature} {operator} {float(threshold):.4f}"
+
+    categories = sorted(
+        frame[feature]
+        .fillna("UNKNOWN")
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    value = st.selectbox(
+        "Block category",
+        categories,
+        key=f"{key_prefix}_category",
+    )
+    mask = _candidate_fast_regime_condition_mask(
+        frame,
+        feature,
+        "==",
+        value,
+    )
+    return mask, f"{feature} == {value}"
+
+
+def render_candidate_fast_no_trade_lab():
+    """Causal NO-TRADE regime research on materialized Legacy V1 execution."""
+    store = candidate_research_store
+    if (
+        store is None
+        or not store.available
+        or not store.snapshot_exists("v1_legacy_execution")
+    ):
+        return
+
+    result = store.query(
+        "v1_legacy_execution",
+        limit=10000,
+    )
+    execution = result.get("frame", pd.DataFrame())
+    if execution is None or execution.empty:
+        return
+
+    feature_labels = {
+        "BTC return 1h": "btc_return_pct_1h",
+        "BTC return 4h": "btc_return_pct_4h",
+        "BTC return delta 1h": "btc_return_delta_1h",
+        "BTC return delta 4h": "btc_return_delta_4h",
+        "Market breadth 1h": "market_breadth_1h",
+        "Market breadth 4h": "market_breadth_4h",
+        "Breadth delta 1h": "breadth_delta_1h",
+        "Breadth delta 4h": "breadth_delta_4h",
+        "Market alignment 1h": "Market alignment 1h",
+        "BTC/breadth divergence 1h": "btc_breadth_divergence_1h",
+        "BTC/breadth divergence 4h": "btc_breadth_divergence_4h",
+        "Sector-side alignment": "Sector-side alignment",
+        "Market alignment 4h": "Market alignment",
+    }
+    available_labels = [
+        label
+        for label, column in feature_labels.items()
+        if column in execution.columns
+    ]
+    if not available_labels:
+        st.info("No causal market-regime columns are available in the current snapshot.")
+        return
+
+    st.markdown("#### 🌎 Market Regime / NO-TRADE Lab · Fast")
+    st.caption(
+        "Research-only gate on information already available before each Legacy V1 "
+        "entry. Baseline = official Legacy V1 + Strength > 0, TP 0.5% / SL 3% / "
+        "180m, $200, x3, 1 slot, 80% margin, Room → Strength. Blocking a regime "
+        "removes those candidate executions first and then reruns the chronological "
+        "portfolio, so freed slots can be used by later signals."
+    )
+
+    variant_labels = {
+        "Legacy V1 + Strength > 0": "Candidate + Strength",
+        "Legacy V1 Base": "Candidate Base",
+    }
+    top1, top2 = st.columns([1, 2])
+    variant_label = top1.selectbox(
+        "Strategy",
+        list(variant_labels),
+        index=0,
+        key="candidate_fast_regime_variant",
+    )
+    analysis_label = top2.selectbox(
+        "Bucket feature",
+        available_labels,
+        index=available_labels.index("BTC return 1h") if "BTC return 1h" in available_labels else 0,
+        key="candidate_fast_regime_bucket_feature",
+    )
+    variant = variant_labels[variant_label]
+
+    _, resolved = _candidate_v2_concurrency_source(
+        execution,
+        variant=variant,
+        strong_threshold=0.50,
+    )
+    if resolved is None or resolved.empty:
+        st.info("No resolved Legacy V1 executions are available for this strategy.")
+        return
+
+    analysis_feature = feature_labels[analysis_label]
+    bucket_summary, feature_type = _candidate_fast_regime_bucket_summary(
+        resolved,
+        analysis_feature,
+    )
+
+    st.markdown("##### 1. Outcome by causal regime bucket")
+    if bucket_summary.empty:
+        st.info("This feature does not have enough usable observations for buckets.")
+    else:
+        display = bucket_summary.copy()
+        for column in ["Win rate %", "PF", "Net PnL % pts", "Avg net/trade %", "TP rate %"]:
+            if column in display.columns:
+                display[column] = pd.to_numeric(display[column], errors="coerce").round(4)
+        for column in ["Min", "Max"]:
+            if column in display.columns:
+                display[column] = pd.to_numeric(display[column], errors="coerce").round(4)
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_fast_regime_bucket_table",
+        )
+        st.caption(
+            "Numeric features use equal-frequency buckets (quintiles when coverage allows). "
+            "Use these rows to locate deterioration before choosing a gate threshold; "
+            "do not treat the worst historical bucket as automatically optimal."
+        )
+
+    feature_options = [feature_labels[label] for label in available_labels]
+    reverse_labels = {column: label for label, column in feature_labels.items()}
+
+    st.markdown("##### 2. Simulate causal NO-TRADE gate")
+    gate1, gate2 = st.columns(2)
+    with gate1:
+        mask1, desc1 = _candidate_fast_render_regime_condition(
+            resolved,
+            key_prefix="candidate_fast_regime_gate1",
+            feature_options=feature_options,
+            label="Condition 1",
+            display_labels=reverse_labels,
+        )
+        if desc1 != "OFF":
+            for column, label in reverse_labels.items():
+                if desc1.startswith(column):
+                    desc1 = desc1.replace(column, label, 1)
+                    break
+
+    with gate2:
+        mask2, desc2 = _candidate_fast_render_regime_condition(
+            resolved,
+            key_prefix="candidate_fast_regime_gate2",
+            feature_options=feature_options,
+            label="Condition 2 (optional)",
+            display_labels=reverse_labels,
+        )
+        if desc2 != "OFF":
+            for column, label in reverse_labels.items():
+                if desc2.startswith(column):
+                    desc2 = desc2.replace(column, label, 1)
+                    break
+
+    active_masks = []
+    active_desc = []
+    if desc1 != "OFF":
+        active_masks.append(mask1)
+        active_desc.append(desc1)
+    if desc2 != "OFF":
+        active_masks.append(mask2)
+        active_desc.append(desc2)
+
+    combine_mode = "OR"
+    if len(active_masks) == 2:
+        combine_mode = st.radio(
+            "Combine conditions",
+            ["AND", "OR"],
+            horizontal=True,
+            key="candidate_fast_regime_combine",
+            help=(
+                "AND blocks only when both conditions are true. OR blocks when either "
+                "condition is true."
+            ),
+        )
+
+    baseline_portfolio = _candidate_v2_portfolio_simulation(
+        resolved,
+        starting_equity=200.0,
+        leverage=3.0,
+        max_slots=1,
+        risk_per_trade_pct=0.25,
+        selected_sl_pct=3.0,
+        max_margin_pct=80.0,
+        compound=True,
+        priority_mode="Most HTF Room → Strength",
+        sizing_mode="Margin % equity",
+        fixed_margin_usd=150.0,
+        margin_per_trade_pct=80.0,
+        market_flow_gate_mode="OFF",
+    )
+
+    if not active_masks:
+        st.info(
+            "Choose at least one NO-TRADE condition. Start with the bucket table above; "
+            "for the current BTC-down hypothesis, BTC return 1h or Breadth delta 1h "
+            "are the cleanest first tests."
+        )
+        return
+
+    if len(active_masks) == 1:
+        blocked_mask = active_masks[0].reindex(resolved.index, fill_value=False)
+    elif combine_mode == "AND":
+        blocked_mask = (
+            active_masks[0].reindex(resolved.index, fill_value=False)
+            & active_masks[1].reindex(resolved.index, fill_value=False)
+        )
+    else:
+        blocked_mask = (
+            active_masks[0].reindex(resolved.index, fill_value=False)
+            | active_masks[1].reindex(resolved.index, fill_value=False)
+        )
+    blocked_mask = blocked_mask.fillna(False).astype(bool)
+
+    allowed = resolved.loc[~blocked_mask].copy()
+    blocked = resolved.loc[blocked_mask].copy()
+    gated_portfolio = _candidate_v2_portfolio_simulation(
+        allowed,
+        starting_equity=200.0,
+        leverage=3.0,
+        max_slots=1,
+        risk_per_trade_pct=0.25,
+        selected_sl_pct=3.0,
+        max_margin_pct=80.0,
+        compound=True,
+        priority_mode="Most HTF Room → Strength",
+        sizing_mode="Margin % equity",
+        fixed_margin_usd=150.0,
+        margin_per_trade_pct=80.0,
+        market_flow_gate_mode="OFF",
+    )
+
+    base_summary = _candidate_fast_portfolio_summary(baseline_portfolio)
+    gate_summary = _candidate_fast_portfolio_summary(gated_portfolio)
+    if not base_summary or not gate_summary:
+        st.warning("The baseline or gated portfolio could not be simulated.")
+        return
+
+    blocked_net = pd.to_numeric(
+        blocked.get("net_pnl_pct", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    blocked_winners = int(blocked_net.gt(0).sum())
+    blocked_losers = int(blocked_net.lt(0).sum())
+
+    baseline_ledger = (
+        baseline_portfolio.get("ledger", pd.DataFrame())
+        if baseline_portfolio
+        else pd.DataFrame()
+    )
+    accepted_blocked = pd.DataFrame()
+    if (
+        baseline_ledger is not None
+        and not baseline_ledger.empty
+        and "candidate_v1_event_key" in baseline_ledger.columns
+        and "candidate_v1_event_key" in blocked.columns
+    ):
+        blocked_ids = set(
+            blocked["candidate_v1_event_key"]
+            .dropna()
+            .astype(str)
+            .tolist()
+        )
+        accepted_mask = (
+            baseline_ledger.get(
+                "accepted",
+                pd.Series(False, index=baseline_ledger.index),
+            )
+            .fillna(False)
+            .astype(bool)
+        )
+        accepted_blocked = baseline_ledger.loc[
+            accepted_mask
+            & baseline_ledger["candidate_v1_event_key"]
+            .fillna("")
+            .astype(str)
+            .isin(blocked_ids)
+        ].copy()
+
+    accepted_blocked_net = pd.to_numeric(
+        accepted_blocked.get(
+            "raw_net_pnl_pct",
+            pd.Series(dtype=float),
+        ),
+        errors="coerce",
+    ).dropna()
+    accepted_blocked_winners = int(accepted_blocked_net.gt(0).sum())
+    accepted_blocked_losers = int(accepted_blocked_net.lt(0).sum())
+
+    comparison = pd.DataFrame([
+        {"Scenario": "Baseline", **base_summary},
+        {"Scenario": "NO TRADE gate", **gate_summary},
+    ])
+    st.dataframe(
+        comparison,
+        use_container_width=True,
+        hide_index=True,
+        key="candidate_fast_regime_gate_comparison",
+    )
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Blocked candidates", int(len(blocked)))
+    c2.metric("Baseline accepted blocked", int(len(accepted_blocked)))
+    c3.metric(
+        "Accepted W / L blocked",
+        f"{accepted_blocked_winners} / {accepted_blocked_losers}",
+        help=(
+            "Winners / losers among trades the baseline 1-slot portfolio actually "
+            "accepted and this regime gate would have blocked."
+        ),
+    )
+    c4.metric(
+        "Δ final equity",
+        f"${float(gate_summary['Final equity'] - base_summary['Final equity']):+.2f}",
+    )
+    c5.metric(
+        "Δ Return",
+        f"{float(gate_summary['Return %'] - base_summary['Return %']):+.2f} pp",
+    )
+    c6.metric(
+        "Δ Max DD",
+        f"{float(gate_summary['Max DD %'] - base_summary['Max DD %']):+.2f} pp",
+        help="Negative is an improvement because maximum drawdown became smaller.",
+    )
+
+    st.caption(
+        f"Across all resolved candidates, the gate blocks {blocked_winners} winners "
+        f"and {blocked_losers} losers before slot selection. The accepted W/L metric "
+        "above is the stricter portfolio-level opportunity-cost view."
+    )
+
+    curves = []
+    for label, portfolio in [
+        ("Baseline", baseline_portfolio),
+        ("NO TRADE gate", gated_portfolio),
+    ]:
+        curve = portfolio.get("equity_curve", pd.DataFrame()) if portfolio else pd.DataFrame()
+        if curve is None or curve.empty:
+            continue
+        curve = curve.copy()
+        curve["time"] = (
+            pd.to_datetime(
+                pd.to_numeric(curve["timestamp"], errors="coerce"),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+        )
+        curves.append((label, curve))
+
+    if curves:
+        fig = go.Figure()
+
+        # --------------------------------------------------------------
+        # Causal regime background bands. These bands are derived only
+        # from the gate state available at each candidate entry time.
+        # For display, the last observed state is held until the next
+        # candidate decision timestamp; this is NOT a continuous market
+        # classifier between candidate observations.
+        # --------------------------------------------------------------
+        zone_frame = pd.DataFrame({
+            "time": (
+                pd.to_datetime(
+                    pd.to_numeric(
+                        resolved.get(
+                            "_entry_ts",
+                            pd.Series(index=resolved.index, dtype=float),
+                        ),
+                        errors="coerce",
+                    ),
+                    unit="ms",
+                    utc=True,
+                    errors="coerce",
+                )
+                .dt.tz_convert(TZ)
+            ),
+            "blocked": (
+                blocked_mask
+                .reindex(resolved.index, fill_value=False)
+                .fillna(False)
+                .astype(bool)
+            ),
+        }).dropna(subset=["time"])
+
+        if not zone_frame.empty:
+            # A timestamp is NO TRADING only when every candidate available
+            # at that decision time is blocked. If at least one candidate is
+            # still allowed, the account remains in a TRADING state.
+            zone_timeline = (
+                zone_frame
+                .groupby("time", as_index=False, sort=True)
+                .agg(
+                    blocked=("blocked", "all"),
+                    blocked_share=("blocked", "mean"),
+                )
+                .sort_values("time", kind="stable")
+                .reset_index(drop=True)
+            )
+
+            if len(zone_timeline) >= 2:
+                zone_timeline["next_time"] = zone_timeline["time"].shift(-1)
+                median_step = (
+                    zone_timeline["time"]
+                    .diff()
+                    .dropna()
+                    .median()
+                )
+                if pd.isna(median_step) or median_step <= pd.Timedelta(0):
+                    median_step = pd.Timedelta(minutes=15)
+                zone_timeline.loc[
+                    zone_timeline.index[-1],
+                    "next_time",
+                ] = zone_timeline.loc[
+                    zone_timeline.index[-1],
+                    "time",
+                ] + median_step
+
+                # Merge consecutive equal states so Plotly receives only a
+                # handful of background shapes instead of one per candidate.
+                zone_timeline["state_id"] = (
+                    zone_timeline["blocked"]
+                    .ne(zone_timeline["blocked"].shift())
+                    .cumsum()
+                )
+
+                for _, zone in zone_timeline.groupby("state_id", sort=True):
+                    is_blocked = bool(zone["blocked"].iloc[0])
+                    x0 = zone["time"].iloc[0]
+                    x1 = zone["next_time"].iloc[-1]
+                    fig.add_vrect(
+                        x0=x0,
+                        x1=x1,
+                        fillcolor=(
+                            "rgba(220, 53, 69, 0.13)"
+                            if is_blocked
+                            else "rgba(40, 167, 69, 0.08)"
+                        ),
+                        line_width=0,
+                        layer="below",
+                    )
+
+                # Legend-only traces for the background regime colors.
+                fig.add_trace(
+                    go.Scatter(
+                        x=[None],
+                        y=[None],
+                        mode="lines",
+                        line={
+                            "color": "rgba(40, 167, 69, 0.75)",
+                            "width": 8,
+                        },
+                        name="TRADING zone",
+                        hoverinfo="skip",
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=[None],
+                        y=[None],
+                        mode="lines",
+                        line={
+                            "color": "rgba(220, 53, 69, 0.75)",
+                            "width": 8,
+                        },
+                        name="NO TRADING zone",
+                        hoverinfo="skip",
+                    )
+                )
+
+        for label, curve in curves:
+            fig.add_trace(
+                go.Scatter(
+                    x=curve["time"],
+                    y=pd.to_numeric(curve["equity"], errors="coerce"),
+                    mode="lines+markers",
+                    name=label,
+                )
+            )
+        fig.add_hline(
+            y=200.0,
+            line_dash="dot",
+            annotation_text="Starting equity",
+            annotation_position="top left",
+        )
+        fig.update_layout(
+            title="Legacy V1 · baseline vs causal NO-TRADE gate",
+            xaxis_title="Time",
+            yaxis_title="Realized equity (USDT)",
+            hovermode="x unified",
+            margin={"l": 10, "r": 10, "t": 55, "b": 10},
+        )
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key="candidate_fast_regime_equity_comparison",
+            config={"displaylogo": False},
+        )
+        st.caption(
+            "Background bands: green = TRADING and red = NO TRADING according "
+            "to the causal gate at candidate decision times. For visualization, "
+            "the latest observed state is held until the next candidate timestamp; "
+            "the bands are not a continuous tick-by-tick market-regime feed."
+        )
+
+    gate_text = (
+        f" {combine_mode} ".join(active_desc)
+        if len(active_desc) == 2
+        else active_desc[0]
+    )
+    st.caption(
+        f"NO-TRADE rule tested: {gate_text}. Blocked candidates are counted before "
+        "portfolio slot selection; the gated portfolio is then replayed chronologically. "
+        f"Execution snapshot query: {float(result.get('elapsed_ms', 0.0)):.1f} ms."
+    )
+
+
 def render_candidate_fast_explorer():
     """DuckDB/Parquet explorer: filters only, no scanner/Redis/build work."""
     store = candidate_research_store
@@ -49142,6 +49829,8 @@ def render_candidate_fast_explorer():
         render_candidate_fast_legacy_v1_equity()
         st.divider()
         render_candidate_fast_legacy_v1_matrix()
+        st.divider()
+        render_candidate_fast_no_trade_lab()
 
 
 def render_candidate_research(
