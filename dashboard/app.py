@@ -49311,6 +49311,293 @@ def _candidate_fast_regime_auto_portfolio(resolved, blocked_mask):
     return portfolio, allowed
 
 
+
+def _candidate_fast_regime_portfolio_stability(
+    portfolio,
+    *,
+    starting_equity=200.0,
+):
+    """Low-cost stability diagnostics for one already-simulated portfolio.
+
+    These metrics never decide a trade. They only help Discovery avoid ranking a
+    curve highly just because one or two late days explain almost all the gain.
+    """
+    result = {
+        "Below start time %": np.nan,
+        "Underwater time %": np.nan,
+        "Positive days %": np.nan,
+        "Top 1 positive day share %": np.nan,
+        "Top 2 positive days share %": np.nan,
+        "Worst day $": np.nan,
+        "Positive blocks / 3": np.nan,
+        "Recovery factor": np.nan,
+    }
+    if not portfolio:
+        return result
+
+    curve = portfolio.get("equity_curve", pd.DataFrame())
+    if curve is not None and not curve.empty:
+        local = curve.copy()
+        local["timestamp"] = pd.to_numeric(
+            local.get("timestamp"),
+            errors="coerce",
+        )
+        local["equity"] = pd.to_numeric(
+            local.get("equity"),
+            errors="coerce",
+        )
+        local = (
+            local
+            .dropna(subset=["timestamp", "equity"])
+            .sort_values("timestamp", kind="stable")
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .reset_index(drop=True)
+        )
+        if len(local) >= 2:
+            ts = local["timestamp"].astype(float)
+            equity = local["equity"].astype(float)
+            durations = ts.shift(-1) - ts
+            valid_duration = durations.gt(0) & durations.notna()
+            total_duration = float(durations.loc[valid_duration].sum())
+            if total_duration > 0:
+                running_peak = equity.cummax()
+                below_start = equity.lt(float(starting_equity) - 1e-12)
+                underwater = equity.lt(running_peak - 1e-12)
+                result["Below start time %"] = float(
+                    durations.loc[valid_duration & below_start].sum()
+                    / total_duration
+                    * 100.0
+                )
+                result["Underwater time %"] = float(
+                    durations.loc[valid_duration & underwater].sum()
+                    / total_duration
+                    * 100.0
+                )
+
+    ledger = portfolio.get("ledger", pd.DataFrame())
+    if ledger is None or ledger.empty:
+        return result
+
+    accepted_mask = (
+        ledger.get(
+            "accepted",
+            pd.Series(False, index=ledger.index),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    accepted = ledger.loc[accepted_mask].copy()
+    if accepted.empty:
+        return result
+
+    exit_col = (
+        "exit_timestamp"
+        if "exit_timestamp" in accepted.columns
+        else "exit_ts"
+        if "exit_ts" in accepted.columns
+        else None
+    )
+    if exit_col is None or "pnl_usd" not in accepted.columns:
+        return result
+
+    accepted["_exit_ts"] = pd.to_numeric(
+        accepted[exit_col],
+        errors="coerce",
+    )
+    accepted["_pnl_usd"] = pd.to_numeric(
+        accepted["pnl_usd"],
+        errors="coerce",
+    )
+    accepted = accepted.dropna(subset=["_exit_ts", "_pnl_usd"]).copy()
+    if accepted.empty:
+        return result
+
+    exit_local = (
+        pd.to_datetime(
+            accepted["_exit_ts"],
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(TZ)
+    )
+    accepted["_day"] = exit_local.dt.date
+    daily = (
+        accepted
+        .dropna(subset=["_day"])
+        .groupby("_day", sort=True)["_pnl_usd"]
+        .sum()
+        .astype(float)
+    )
+    if daily.empty:
+        return result
+
+    result["Positive days %"] = float(daily.gt(0).mean() * 100.0)
+    result["Worst day $"] = float(daily.min())
+
+    positive_daily = daily.loc[daily.gt(0)].sort_values(ascending=False)
+    gross_positive = float(positive_daily.sum())
+    if gross_positive > 1e-12:
+        result["Top 1 positive day share %"] = float(
+            positive_daily.head(1).sum() / gross_positive * 100.0
+        )
+        result["Top 2 positive days share %"] = float(
+            positive_daily.head(2).sum() / gross_positive * 100.0
+        )
+
+    blocks = [part for part in np.array_split(daily.to_numpy(dtype=float), 3) if len(part)]
+    if blocks:
+        result["Positive blocks / 3"] = int(
+            sum(float(np.sum(part)) > 0.0 for part in blocks)
+        )
+
+    summary = portfolio.get("summary", {}) or {}
+    final_equity = pd.to_numeric(
+        pd.Series([summary.get("Final equity", np.nan)]),
+        errors="coerce",
+    ).iloc[0]
+    max_dd_usd = pd.to_numeric(
+        pd.Series([summary.get("Max drawdown $", np.nan)]),
+        errors="coerce",
+    ).iloc[0]
+    if pd.notna(final_equity) and pd.notna(max_dd_usd) and float(max_dd_usd) > 1e-12:
+        result["Recovery factor"] = float(
+            (float(final_equity) - float(starting_equity))
+            / float(max_dd_usd)
+        )
+
+    return result
+
+
+def _candidate_fast_regime_persisted_btc_corr_features(frame):
+    """Return BTC-correlation fields already present in the materialized event.
+
+    Important: this does NOT call BTCCorrelationAnalyzer or rebuild history. The
+    analyzer has no as_of timestamp, so historical research may only use these
+    fields when they were already persisted causally with the event/snapshot.
+    """
+    if frame is None or frame.empty:
+        return {}
+
+    candidates = {}
+    for timeframe in ("5m", "15m", "30m", "1h", "4h"):
+        candidates.update({
+            f"BTC corr {timeframe} · persisted": f"btc_corr_{timeframe}",
+            f"BTC beta {timeframe} · persisted": f"btc_beta_{timeframe}",
+            f"BTC R² {timeframe} · persisted": f"btc_r2_{timeframe}",
+            f"BTC residual {timeframe} % · persisted": (
+                f"btc_residual_move_{timeframe}_pct"
+            ),
+        })
+
+    for suffix, label in [
+        ("5m_1h", "recent 1h (5m returns)"),
+        ("5m_4h", "recent 4h (5m returns)"),
+        ("5m_24h", "recent 24h (5m returns)"),
+    ]:
+        candidates.update({
+            f"BTC corr {label} · persisted": f"btc_corr_{suffix}",
+            f"BTC beta {label} · persisted": f"btc_beta_{suffix}",
+            f"BTC R² {label} · persisted": f"btc_r2_{suffix}",
+        })
+
+    return {
+        label: column
+        for label, column in candidates.items()
+        if column in frame.columns
+    }
+
+
+def _candidate_fast_regime_rule_features(rule):
+    if not isinstance(rule, dict):
+        return set()
+    return {
+        str(feature)
+        for feature in (rule.get("feature1"), rule.get("feature2"))
+        if feature
+    }
+
+
+def _candidate_fast_regime_compare_qualified_on_strategy(
+    execution,
+    *,
+    strategy_label,
+    variant,
+    base_rule,
+    qualifier_rule,
+):
+    """Compare base component vs the SAME component qualified by C via AND."""
+    resolved, baseline_portfolio, baseline_summary = (
+        _candidate_fast_regime_variant_context(execution, variant)
+    )
+    if resolved.empty or not baseline_summary:
+        return None
+
+    base_mask = _candidate_fast_regime_auto_rule_mask(
+        resolved,
+        base_rule,
+    ).reindex(resolved.index, fill_value=False).fillna(False).astype(bool)
+    qualifier_mask = _candidate_fast_regime_auto_rule_mask(
+        resolved,
+        qualifier_rule,
+    ).reindex(resolved.index, fill_value=False).fillna(False).astype(bool)
+    qualified_mask = (base_mask & qualifier_mask).fillna(False).astype(bool)
+
+    base_gate_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+        resolved,
+        base_mask,
+    )
+    qualified_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+        resolved,
+        qualified_mask,
+    )
+    base_gate_summary = _candidate_fast_portfolio_summary(base_gate_portfolio)
+    qualified_summary = _candidate_fast_portfolio_summary(qualified_portfolio)
+    if not base_gate_summary or not qualified_summary:
+        return None
+
+    qualified_stability = _candidate_fast_regime_portfolio_stability(
+        qualified_portfolio
+    )
+    row = {
+        "Strategy": strategy_label,
+        "Base blocked %": float(base_mask.mean() * 100.0) if len(base_mask) else np.nan,
+        "+C blocked %": (
+            float(qualified_mask.mean() * 100.0)
+            if len(qualified_mask)
+            else np.nan
+        ),
+        "Baseline final": float(baseline_summary.get("Final equity", np.nan)),
+        "Base gate final": float(base_gate_summary.get("Final equity", np.nan)),
+        "+C final": float(qualified_summary.get("Final equity", np.nan)),
+        "Δ C vs base gate": float(
+            qualified_summary.get("Final equity", np.nan)
+            - base_gate_summary.get("Final equity", np.nan)
+        ),
+        "Base gate return %": float(base_gate_summary.get("Return %", np.nan)),
+        "+C return %": float(qualified_summary.get("Return %", np.nan)),
+        "Base gate Max DD %": float(base_gate_summary.get("Max DD %", np.nan)),
+        "+C Max DD %": float(qualified_summary.get("Max DD %", np.nan)),
+        "Base gate PF": float(base_gate_summary.get("PF", np.nan)),
+        "+C PF": float(qualified_summary.get("PF", np.nan)),
+        "Base gate accepted": int(base_gate_summary.get("Accepted", 0) or 0),
+        "+C accepted": int(qualified_summary.get("Accepted", 0) or 0),
+    }
+    row.update(qualified_stability)
+    return {
+        "row": row,
+        "resolved": resolved,
+        "base_mask": base_mask,
+        "qualified_mask": qualified_mask,
+        "baseline_portfolio": baseline_portfolio,
+        "base_gate_portfolio": base_gate_portfolio,
+        "qualified_portfolio": qualified_portfolio,
+        "baseline_summary": baseline_summary,
+        "base_gate_summary": base_gate_summary,
+        "qualified_summary": qualified_summary,
+    }
+
+
 def _candidate_fast_regime_auto_evaluate(
     resolved,
     rule,
@@ -49340,6 +49627,8 @@ def _candidate_fast_regime_auto_evaluate(
     base_dd = float(baseline_summary.get("Max DD %", np.nan))
     base_pf = float(baseline_summary.get("PF", np.nan))
 
+    stability = _candidate_fast_regime_portfolio_stability(portfolio)
+
     row = {
         "Rule": _candidate_fast_regime_auto_rule_text(rule, reverse_labels),
         "Kind": str(rule.get("kind", "rule")),
@@ -49360,6 +49649,7 @@ def _candidate_fast_regime_auto_evaluate(
         if pd.notna(summary.get("PF", np.nan)) and pd.notna(base_pf)
         else np.nan,
     }
+    row.update(stability)
     return row
 
 
@@ -49367,6 +49657,35 @@ def _candidate_fast_regime_sort_results(frame, objective):
     if frame is None or frame.empty:
         return pd.DataFrame()
     work = frame.copy()
+    if objective == "Balanced stability":
+        rank_specs = [
+            ("Final equity", False),
+            ("PF", False),
+            ("Max DD %", True),
+            ("Below start time %", True),
+            ("Top 2 positive days share %", True),
+            ("Positive days %", False),
+        ]
+        rank_columns = []
+        for column, ascending in rank_specs:
+            if column not in work.columns:
+                continue
+            values = pd.to_numeric(work[column], errors="coerce")
+            rank_col = f"_rank_{len(rank_columns)}"
+            work[rank_col] = values.rank(
+                method="average",
+                ascending=ascending,
+                na_option="bottom",
+            )
+            rank_columns.append(rank_col)
+        if rank_columns:
+            work["Stability rank"] = work[rank_columns].sum(axis=1)
+            return work.sort_values(
+                ["Stability rank", "Final equity", "Max DD %"],
+                ascending=[True, False, True],
+                na_position="last",
+                kind="stable",
+            )
     if objective == "Lowest Max DD":
         return work.sort_values(
             ["Max DD %", "Final equity", "PF"],
@@ -49404,11 +49723,13 @@ def _candidate_fast_regime_render_auto_equity(
     *,
     key,
     title,
+    baseline_label="Baseline",
+    gated_label="AUTO gate",
 ):
     curves = []
     for label, portfolio in [
-        ("Baseline", baseline_portfolio),
-        ("AUTO gate", gated_portfolio),
+        (str(baseline_label), baseline_portfolio),
+        (str(gated_label), gated_portfolio),
     ]:
         curve = portfolio.get("equity_curve", pd.DataFrame()) if portfolio else pd.DataFrame()
         if curve is None or curve.empty:
@@ -49817,7 +50138,13 @@ def _candidate_fast_render_auto_regime_scanner(
     )
     objective = a2.selectbox(
         "Rank by",
-        ["Highest final equity", "Highest Return", "Highest PF", "Lowest Max DD"],
+        [
+            "Highest final equity",
+            "Highest Return",
+            "Highest PF",
+            "Lowest Max DD",
+            "Balanced stability",
+        ],
         index=0,
         key="candidate_fast_regime_auto_objective",
     )
@@ -49972,11 +50299,22 @@ def _candidate_fast_render_auto_regime_scanner(
         "Rule ID", "Rule", "Kind", "Blocked", "Blocked %", "Blocked W", "Blocked L",
         "Accepted", "Final equity", "Δ equity", "Return %", "Δ Return pp",
         "Max DD %", "Δ Max DD pp", "PF", "Δ PF",
+        "Below start time %", "Underwater time %", "Positive days %",
+        "Top 2 positive days share %", "Worst day $", "Positive blocks / 3",
+        "Recovery factor", "Stability rank",
+    ]
+    display_cols = [
+        column
+        for column in display_cols
+        if column in ranked.columns
     ]
     display = ranked[display_cols].head(int(top_rows)).copy()
     for column in [
         "Blocked %", "Final equity", "Δ equity", "Return %", "Δ Return pp",
         "Max DD %", "Δ Max DD pp", "PF", "Δ PF",
+        "Below start time %", "Underwater time %", "Positive days %",
+        "Top 2 positive days share %", "Worst day $", "Positive blocks / 3",
+        "Recovery factor", "Stability rank",
     ]:
         if column in display.columns:
             display[column] = pd.to_numeric(display[column], errors="coerce").round(4)
@@ -50157,6 +50495,440 @@ def _candidate_fast_render_auto_regime_scanner(
     else:
         selected_component_label = "Selected rule"
         selected_component_rule = rule
+
+    # --------------------------------------------------------
+    # Optional C qualifier research
+    # --------------------------------------------------------
+    st.markdown("###### Optional C qualifier · stability research")
+    st.caption(
+        "OFF by default. C never replaces A/B/OR/AND: it only makes the currently "
+        "selected component more selective using **(selected gate) AND C**. This is "
+        "for testing whether a broad gate can be restricted to a more stable market "
+        "context without forcing a third condition into the strategy."
+    )
+    enable_c_qualifier = st.toggle(
+        "Enable optional C qualifier search",
+        value=False,
+        key="candidate_fast_regime_enable_c_qualifier",
+    )
+
+    if enable_c_qualifier:
+        experimental_corr = _candidate_fast_regime_persisted_btc_corr_features(
+            resolved
+        )
+        cq1, cq2, cq3, cq4 = st.columns(4)
+        c_objective = cq1.selectbox(
+            "C rank by",
+            [
+                "Balanced stability",
+                "Highest final equity",
+                "Highest PF",
+                "Lowest Max DD",
+                "Highest Return",
+            ],
+            index=0,
+            key="candidate_fast_regime_c_objective",
+        )
+        c_max_blocked = cq2.selectbox(
+            "C max blocked",
+            [20, 30, 40, 50, 60],
+            index=2,
+            format_func=lambda value: f"{value}%",
+            key="candidate_fast_regime_c_max_blocked",
+        )
+        c_top_rows = cq3.selectbox(
+            "C top rows",
+            [5, 10, 15, 20],
+            index=1,
+            key="candidate_fast_regime_c_top_rows",
+        )
+        include_corr = cq4.toggle(
+            "BTC corr fields",
+            value=False,
+            disabled=not bool(experimental_corr),
+            key="candidate_fast_regime_c_include_corr",
+            help=(
+                "Experimental. Uses only BTC correlation/beta/residual values already "
+                "persisted in the Candidate Parquet. It never recomputes historical "
+                "correlations from the current Redis buffer."
+            ),
+        )
+
+        local_reverse_labels = dict(reverse_labels)
+        c_feature_options = list(feature_options)
+        if include_corr and experimental_corr:
+            for label, column in experimental_corr.items():
+                local_reverse_labels[column] = label
+                if column not in c_feature_options:
+                    c_feature_options.append(column)
+            st.warning(
+                "BTC correlation fields are experimental in this lab. They are only "
+                "safe here when the values were persisted causally with the event. "
+                "No historical correlation is recomputed by this screen."
+            )
+        elif not experimental_corr:
+            st.caption(
+                "No persisted BTC-correlation fields are present in this Candidate "
+                "execution snapshot, so C currently uses the causal regime features "
+                "already materialized by Candidate."
+            )
+
+        used_features = _candidate_fast_regime_rule_features(
+            selected_component_rule
+        )
+        c_feature_options = [
+            feature
+            for feature in c_feature_options
+            if feature not in used_features
+        ]
+
+        base_component_mask = _candidate_fast_regime_auto_rule_mask(
+            resolved,
+            selected_component_rule,
+        ).reindex(
+            resolved.index,
+            fill_value=False,
+        ).fillna(False).astype(bool)
+        base_component_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+            resolved,
+            base_component_mask,
+        )
+        base_component_summary = _candidate_fast_portfolio_summary(
+            base_component_portfolio
+        )
+        base_component_stability = _candidate_fast_regime_portfolio_stability(
+            base_component_portfolio
+        )
+        if base_component_summary:
+            bc1, bc2, bc3, bc4 = st.columns(4)
+            bc1.metric(
+                f"{selected_component_label} final",
+                f"${float(base_component_summary.get('Final equity', np.nan)):.2f}",
+            )
+            bc2.metric(
+                "PF",
+                f"{float(base_component_summary.get('PF', np.nan)):.2f}",
+            )
+            bc3.metric(
+                "Max DD",
+                f"{float(base_component_summary.get('Max DD %', np.nan)):.2f}%",
+            )
+            bc4.metric(
+                "Below $200 time",
+                (
+                    f"{float(base_component_stability.get('Below start time %', np.nan)):.1f}%"
+                    if pd.notna(base_component_stability.get('Below start time %', np.nan))
+                    else "—"
+                ),
+            )
+
+        c_signature = (
+            signature,
+            str(selected_component_label),
+            json.dumps(selected_component_rule, sort_keys=True, default=str),
+            bool(include_corr),
+            tuple(sorted(c_feature_options)),
+        )
+        c_cache_key = "candidate_fast_regime_c_qualifier_cache"
+        c_cached = st.session_state.get(c_cache_key)
+
+        run_c_scan = st.button(
+            "🧪 Search optional C qualifiers",
+            use_container_width=True,
+            key="candidate_fast_regime_c_run",
+        )
+        if run_c_scan:
+            with st.spinner(
+                "Testing selected component AND optional C qualifiers..."
+            ):
+                c_rules = _candidate_fast_regime_auto_single_rules(
+                    resolved,
+                    c_feature_options,
+                )
+                c_rows = []
+                c_rules_by_id = {}
+                baseline_final = float(
+                    baseline_summary.get("Final equity", np.nan)
+                )
+                base_gate_final = float(
+                    base_component_summary.get("Final equity", np.nan)
+                    if base_component_summary
+                    else np.nan
+                )
+                base_gate_mask_count = int(base_component_mask.sum())
+                c_counter = 0
+                for c_rule in c_rules:
+                    c_mask = _candidate_fast_regime_auto_rule_mask(
+                        resolved,
+                        c_rule,
+                    ).reindex(
+                        resolved.index,
+                        fill_value=False,
+                    ).fillna(False).astype(bool)
+                    qualified_mask = (
+                        base_component_mask & c_mask
+                    ).fillna(False).astype(bool)
+                    blocked_count = int(qualified_mask.sum())
+                    if (
+                        blocked_count <= 0
+                        or blocked_count >= len(resolved)
+                        or blocked_count == base_gate_mask_count
+                    ):
+                        continue
+
+                    qualified_portfolio, _ = (
+                        _candidate_fast_regime_auto_portfolio(
+                            resolved,
+                            qualified_mask,
+                        )
+                    )
+                    q_summary = _candidate_fast_portfolio_summary(
+                        qualified_portfolio
+                    )
+                    if not q_summary:
+                        continue
+                    q_stability = _candidate_fast_regime_portfolio_stability(
+                        qualified_portfolio
+                    )
+                    c_id = f"C{c_counter:04d}"
+                    c_counter += 1
+                    c_text = _candidate_fast_regime_auto_rule_text(
+                        c_rule,
+                        local_reverse_labels,
+                    )
+                    combined_text = (
+                        "("
+                        + _candidate_fast_regime_auto_rule_text(
+                            selected_component_rule,
+                            local_reverse_labels,
+                        )
+                        + ") AND ("
+                        + c_text
+                        + ")"
+                    )
+                    q_pf = q_summary.get("PF", np.nan)
+                    base_pf = baseline_summary.get("PF", np.nan)
+                    c_row = {
+                        "C ID": c_id,
+                        "C qualifier": c_text,
+                        "Combined gate": combined_text,
+                        "Kind": str(c_rule.get("kind", "C")),
+                        "Blocked": blocked_count,
+                        "Blocked %": float(
+                            qualified_mask.mean() * 100.0
+                        ),
+                        "Accepted": int(q_summary.get("Accepted", 0) or 0),
+                        "Final equity": float(
+                            q_summary.get("Final equity", np.nan)
+                        ),
+                        "Δ equity": float(
+                            q_summary.get("Final equity", np.nan)
+                            - baseline_final
+                        ),
+                        "Δ vs base gate": float(
+                            q_summary.get("Final equity", np.nan)
+                            - base_gate_final
+                        ),
+                        "Return %": float(q_summary.get("Return %", np.nan)),
+                        "Δ Return pp": float(
+                            q_summary.get("Return %", np.nan)
+                            - baseline_summary.get("Return %", np.nan)
+                        ),
+                        "Max DD %": float(q_summary.get("Max DD %", np.nan)),
+                        "Δ Max DD pp": float(
+                            q_summary.get("Max DD %", np.nan)
+                            - baseline_summary.get("Max DD %", np.nan)
+                        ),
+                        "PF": float(q_pf) if pd.notna(q_pf) else np.nan,
+                        "Δ PF": (
+                            float(q_pf - base_pf)
+                            if pd.notna(q_pf) and pd.notna(base_pf)
+                            else np.nan
+                        ),
+                    }
+                    c_row.update(q_stability)
+                    c_rows.append(c_row)
+                    c_rules_by_id[c_id] = c_rule
+
+                c_results = pd.DataFrame(c_rows)
+                c_cached = {
+                    "signature": c_signature,
+                    "results": c_results,
+                    "rules": c_rules_by_id,
+                }
+                st.session_state[c_cache_key] = c_cached
+
+        if (
+            isinstance(c_cached, dict)
+            and c_cached.get("signature") == c_signature
+        ):
+            c_results = c_cached.get("results", pd.DataFrame())
+            c_rules_by_id = c_cached.get("rules", {})
+            if c_results is None or c_results.empty:
+                st.info(
+                    "No optional C qualifier produced a distinct usable gate for "
+                    "the currently selected component."
+                )
+            else:
+                c_filtered = c_results.loc[
+                    pd.to_numeric(
+                        c_results["Blocked %"], errors="coerce"
+                    ).between(
+                        2.0,
+                        float(c_max_blocked),
+                        inclusive="both",
+                    )
+                    & pd.to_numeric(
+                        c_results["Accepted"], errors="coerce"
+                    ).ge(5)
+                ].copy()
+                c_ranked = _candidate_fast_regime_sort_results(
+                    c_filtered,
+                    c_objective,
+                )
+                if c_ranked.empty:
+                    st.info(
+                        "No C qualifiers satisfy the current blocked/accepted "
+                        "guardrails."
+                    )
+                else:
+                    c_display_cols = [
+                        "C ID", "C qualifier", "Blocked %", "Accepted",
+                        "Final equity", "Δ vs base gate", "Return %", "PF",
+                        "Max DD %", "Below start time %", "Underwater time %",
+                        "Positive days %", "Top 2 positive days share %",
+                        "Worst day $", "Positive blocks / 3", "Recovery factor",
+                        "Stability rank",
+                    ]
+                    c_display_cols = [
+                        column
+                        for column in c_display_cols
+                        if column in c_ranked.columns
+                    ]
+                    c_display = c_ranked[c_display_cols].head(
+                        int(c_top_rows)
+                    ).copy()
+                    for column in c_display.columns:
+                        if column in {"C ID", "C qualifier"}:
+                            continue
+                        c_display[column] = pd.to_numeric(
+                            c_display[column],
+                            errors="coerce",
+                        ).round(4)
+                    st.dataframe(
+                        c_display,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="candidate_fast_regime_c_results",
+                    )
+                    st.caption(
+                        "C is a qualifier, not a mandatory third rule. Because it is "
+                        "combined with AND, it can only make the selected NO-TRADE "
+                        "gate more selective. Balanced stability is ordinal/rank-based "
+                        "rather than a hand-tuned weighted score."
+                    )
+
+                    c_ids = c_display["C ID"].astype(str).tolist()
+                    if c_ids:
+                        selected_c_id = st.selectbox(
+                            "Explore optional C qualifier",
+                            c_ids,
+                            key="candidate_fast_regime_c_selected",
+                            format_func=lambda cid: (
+                                f"{cid} · "
+                                + str(
+                                    c_ranked.loc[
+                                        c_ranked["C ID"].astype(str).eq(str(cid)),
+                                        "C qualifier",
+                                    ].iloc[0]
+                                )
+                            ),
+                        )
+                        selected_c_rule = c_rules_by_id.get(
+                            str(selected_c_id)
+                        )
+                        if selected_c_rule:
+                            st.markdown(
+                                "###### Optional C · cross-strategy robustness"
+                            )
+                            c_cross_rows = []
+                            c_cross_payloads = {}
+                            for strategy_label, strategy_variant in strategy_defs:
+                                payload = (
+                                    _candidate_fast_regime_compare_qualified_on_strategy(
+                                        execution,
+                                        strategy_label=strategy_label,
+                                        variant=strategy_variant,
+                                        base_rule=selected_component_rule,
+                                        qualifier_rule=selected_c_rule,
+                                    )
+                                )
+                                if payload is None:
+                                    continue
+                                c_cross_payloads[strategy_label] = payload
+                                c_cross_rows.append(payload["row"])
+
+                            if c_cross_rows:
+                                c_cross = pd.DataFrame(c_cross_rows)
+                                for column in c_cross.columns:
+                                    if column == "Strategy":
+                                        continue
+                                    c_cross[column] = pd.to_numeric(
+                                        c_cross[column],
+                                        errors="coerce",
+                                    ).round(4)
+                                st.dataframe(
+                                    c_cross,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key="candidate_fast_regime_c_cross_strategy",
+                                )
+
+                                c_tabs = st.tabs([
+                                    "Legacy V1 Base · component vs +C",
+                                    "Legacy V1 + Strength > 0 · component vs +C",
+                                ])
+                                for tab, (strategy_label, _strategy_variant) in zip(
+                                    c_tabs,
+                                    strategy_defs,
+                                ):
+                                    with tab:
+                                        payload = c_cross_payloads.get(strategy_label)
+                                        if payload is None:
+                                            st.info(
+                                                "No resolved portfolio is available "
+                                                "for this strategy."
+                                            )
+                                            continue
+                                        _candidate_fast_regime_render_auto_equity(
+                                            payload["resolved"],
+                                            payload["qualified_mask"],
+                                            payload["base_gate_portfolio"],
+                                            payload["qualified_portfolio"],
+                                            key=(
+                                                "candidate_fast_regime_c_equity_"
+                                                + (
+                                                    "base"
+                                                    if strategy_label.endswith("Base")
+                                                    else "strength"
+                                                )
+                                            ),
+                                            title=(
+                                                f"{strategy_label} · "
+                                                f"{selected_component_label} vs + optional C · "
+                                                + _candidate_fast_regime_auto_rule_text(
+                                                    selected_c_rule,
+                                                    local_reverse_labels,
+                                                )
+                                            ),
+                                            baseline_label=selected_component_label,
+                                            gated_label=f"{selected_component_label} + C",
+                                        )
+        else:
+            st.info(
+                "Press **Search optional C qualifiers** only when you want to test "
+                "whether the currently selected broad gate can be made more selective."
+            )
 
     st.markdown("###### Threshold robustness · ±10% / ±20%")
     robustness_rows = []
