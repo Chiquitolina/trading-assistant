@@ -50306,6 +50306,630 @@ def _candidate_fast_regime_feature_family_summary(
     )
 
 
+
+
+def _candidate_fast_reverse_zone_mask(frame, zones):
+    """Boolean mask for candidate entry timestamps inside any selected zone."""
+    if frame is None or frame.empty:
+        return pd.Series(False, index=frame.index if frame is not None else pd.RangeIndex(0))
+    entry_ts = pd.to_numeric(
+        frame.get("_entry_ts", pd.Series(index=frame.index, dtype=float)),
+        errors="coerce",
+    )
+    mask = pd.Series(False, index=frame.index, dtype=bool)
+    for zone in zones or []:
+        try:
+            start_ms = int(zone["start_ms"])
+            end_ms = int(zone["end_ms"])
+        except Exception:
+            continue
+        if end_ms < start_ms:
+            start_ms, end_ms = end_ms, start_ms
+        mask |= entry_ts.between(start_ms, end_ms, inclusive="both").fillna(False)
+    return mask.fillna(False).astype(bool)
+
+
+def _candidate_fast_reverse_detection_metrics(
+    frame,
+    detector_mask,
+    bad_zone_mask,
+):
+    detector_mask = (
+        detector_mask.reindex(frame.index, fill_value=False)
+        .fillna(False)
+        .astype(bool)
+    )
+    bad_zone_mask = (
+        bad_zone_mask.reindex(frame.index, fill_value=False)
+        .fillna(False)
+        .astype(bool)
+    )
+    bad_n = int(bad_zone_mask.sum())
+    outside_n = int((~bad_zone_mask).sum())
+    hit = int((detector_mask & bad_zone_mask).sum())
+    outside_hit = int((detector_mask & ~bad_zone_mask).sum())
+    total_hit = int(detector_mask.sum())
+    prevalence = float(bad_n / len(frame)) if len(frame) else np.nan
+    capture = float(hit / bad_n * 100.0) if bad_n else np.nan
+    precision = float(hit / total_hit * 100.0) if total_hit else np.nan
+    outside_block = float(outside_hit / outside_n * 100.0) if outside_n else np.nan
+    lift = (
+        float((hit / total_hit) / prevalence)
+        if total_hit and prevalence and prevalence > 0
+        else np.nan
+    )
+    return {
+        "Zone candidates": bad_n,
+        "Detected in zones": hit,
+        "Zone capture %": capture,
+        "Detector precision %": precision,
+        "Outside blocked": outside_hit,
+        "Outside blocked %": outside_block,
+        "Detector lift": lift,
+        "Detector total": total_hit,
+    }
+
+
+def _candidate_fast_reverse_sort(frame, objective):
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    work = frame.copy()
+    if objective == "Balanced zone detector":
+        specs = [
+            ("Zone capture %", False),
+            ("Detector precision %", False),
+            ("Outside blocked %", True),
+        ]
+        ranks = []
+        for i, (column, ascending) in enumerate(specs):
+            if column not in work.columns:
+                continue
+            rank_col = f"_reverse_rank_{i}"
+            work[rank_col] = pd.to_numeric(
+                work[column], errors="coerce"
+            ).rank(method="average", ascending=ascending, na_option="bottom")
+            ranks.append(rank_col)
+        if ranks:
+            work["Detection rank"] = work[ranks].sum(axis=1)
+            return work.sort_values(
+                ["Detection rank", "Outside blocked %", "Zone capture %"],
+                ascending=[True, True, False],
+                kind="stable",
+                na_position="last",
+            )
+    if objective == "Highest zone capture":
+        return work.sort_values(
+            ["Zone capture %", "Outside blocked %", "Detector precision %"],
+            ascending=[False, True, False],
+            kind="stable",
+            na_position="last",
+        )
+    if objective == "Highest detector precision":
+        return work.sort_values(
+            ["Detector precision %", "Zone capture %", "Outside blocked %"],
+            ascending=[False, False, True],
+            kind="stable",
+            na_position="last",
+        )
+    if objective == "Lowest outside block":
+        return work.sort_values(
+            ["Outside blocked %", "Zone capture %", "Detector precision %"],
+            ascending=[True, False, False],
+            kind="stable",
+            na_position="last",
+        )
+    return work.sort_values(
+        ["Final equity", "Max DD %", "PF"],
+        ascending=[False, True, False],
+        kind="stable",
+        na_position="last",
+    )
+
+
+def _candidate_fast_reverse_render_equity_with_zones(
+    portfolios,
+    zones,
+    *,
+    key,
+    title,
+):
+    fig = go.Figure()
+    real_trace = False
+    for label, portfolio in portfolios:
+        curve = portfolio.get("equity_curve", pd.DataFrame()) if portfolio else pd.DataFrame()
+        if curve is None or curve.empty:
+            continue
+        local = curve.copy()
+        local["time"] = (
+            pd.to_datetime(
+                pd.to_numeric(local.get("timestamp"), errors="coerce"),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+        )
+        local["equity"] = pd.to_numeric(local.get("equity"), errors="coerce")
+        local = local.dropna(subset=["time", "equity"])
+        if local.empty:
+            continue
+        real_trace = True
+        fig.add_trace(
+            go.Scatter(
+                x=local["time"],
+                y=local["equity"],
+                mode="lines+markers",
+                name=str(label),
+            )
+        )
+    if not real_trace:
+        return
+
+    for idx, zone in enumerate(zones or [], start=1):
+        try:
+            start = pd.to_datetime(int(zone["start_ms"]), unit="ms", utc=True).tz_convert(TZ)
+            end = pd.to_datetime(int(zone["end_ms"]), unit="ms", utc=True).tz_convert(TZ)
+        except Exception:
+            continue
+        if end < start:
+            start, end = end, start
+        fig.add_vrect(
+            x0=start,
+            x1=end,
+            fillcolor="rgba(255, 193, 7, 0.18)",
+            line_width=1,
+            line_color="rgba(255, 193, 7, 0.75)",
+            layer="below",
+            annotation_text=f"BAD {idx}",
+            annotation_position="top left",
+        )
+
+    fig.add_hline(
+        y=200.0,
+        line_dash="dot",
+        annotation_text="Starting equity",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        title=title,
+        xaxis={"title": "Time", "type": "date"},
+        yaxis_title="Realized equity (USDT)",
+        hovermode="x unified",
+        margin={"l": 10, "r": 10, "t": 55, "b": 10},
+    )
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=key,
+        config={"displaylogo": False},
+    )
+
+
+def _candidate_fast_render_reverse_regime_search(
+    *,
+    execution,
+    component_rule_map,
+    feature_options,
+    reverse_labels,
+    strategy_defs,
+):
+    """Discovery-only inverse search from user-selected bad equity intervals."""
+    if not component_rule_map:
+        return
+
+    st.markdown("###### 🎯 Reverse regime search · selected bad zones")
+    st.caption(
+        "Discovery tool only. Mark one or more bad intervals on a source equity, "
+        "then search causal features that distinguish candidates inside those zones "
+        "from the rest. Starting from A OR B, a discovered detector D is replayed as "
+        "**(A OR B) OR D**: it blocks additional risky contexts. Nothing here changes "
+        "Validation or any frozen rule."
+    )
+
+    rr1, rr2, rr3 = st.columns(3)
+    source_options = list(component_rule_map.keys())
+    source_default = "A OR B" if "A OR B" in source_options else source_options[0]
+    source_label = rr1.selectbox(
+        "Source gate",
+        source_options,
+        index=source_options.index(source_default),
+        key="candidate_fast_reverse_source_component",
+        help="A OR B is recommended because it is the first broad gate we want to diagnose further.",
+    )
+    strategy_labels = [label for label, _ in strategy_defs]
+    strategy_label = rr2.selectbox(
+        "Source strategy",
+        strategy_labels,
+        index=(strategy_labels.index("Legacy V1 + Strength > 0")
+               if "Legacy V1 + Strength > 0" in strategy_labels else 0),
+        key="candidate_fast_reverse_strategy",
+    )
+    zone_count = rr3.selectbox(
+        "Bad zones",
+        [1, 2, 3, 4, 5],
+        index=1,
+        key="candidate_fast_reverse_zone_count",
+    )
+
+    source_rule = component_rule_map[str(source_label)]
+    strategy_variant = dict(strategy_defs)[str(strategy_label)]
+    payload = _candidate_fast_regime_compare_rule_on_strategy(
+        execution,
+        strategy_label=strategy_label,
+        variant=strategy_variant,
+        rule=source_rule,
+    )
+    if payload is None:
+        st.info("No resolved execution is available for the selected source strategy.")
+        return
+
+    resolved = payload["resolved"].copy()
+    source_blocked = payload["blocked_mask"].reindex(
+        resolved.index, fill_value=False
+    ).fillna(False).astype(bool)
+    source_portfolio = payload["gated_portfolio"]
+    source_summary = payload["gated_summary"]
+
+    entry_ts = pd.to_numeric(resolved.get("_entry_ts"), errors="coerce").dropna()
+    if entry_ts.empty:
+        st.info("No entry timestamps are available for reverse-zone selection.")
+        return
+    min_local = pd.to_datetime(int(entry_ts.min()), unit="ms", utc=True).tz_convert(TZ).tz_localize(None)
+    max_local = pd.to_datetime(int(entry_ts.max()), unit="ms", utc=True).tz_convert(TZ).tz_localize(None)
+    total_seconds = max((max_local - min_local).total_seconds(), 60.0)
+
+    zones = []
+    st.markdown("**Select bad intervals**")
+    st.caption(
+        "Each slider has two markers: start and end. Add multiple zones when the same "
+        "kind of deterioration appears in separate parts of the equity curve."
+    )
+    for idx in range(int(zone_count)):
+        # Spread defaults across the latter part of the sample so multiple sliders
+        # start distinct instead of covering the entire history.
+        frac_start = min(0.45 + idx * 0.10, 0.88)
+        frac_end = min(frac_start + 0.08, 0.98)
+        default_start = min_local + pd.Timedelta(seconds=total_seconds * frac_start)
+        default_end = min_local + pd.Timedelta(seconds=total_seconds * frac_end)
+        selected = st.slider(
+            f"Bad zone {idx + 1}",
+            min_value=min_local.to_pydatetime(),
+            max_value=max_local.to_pydatetime(),
+            value=(default_start.to_pydatetime(), default_end.to_pydatetime()),
+            format="DD/MM HH:mm",
+            key=f"candidate_fast_reverse_zone_{idx}",
+        )
+        start_local = pd.Timestamp(selected[0]).tz_localize(TZ)
+        end_local = pd.Timestamp(selected[1]).tz_localize(TZ)
+        zones.append({
+            "start_ms": int(start_local.tz_convert("UTC").timestamp() * 1000),
+            "end_ms": int(end_local.tz_convert("UTC").timestamp() * 1000),
+        })
+
+    _candidate_fast_reverse_render_equity_with_zones(
+        [(str(source_label), source_portfolio)],
+        zones,
+        key="candidate_fast_reverse_source_equity",
+        title=f"{strategy_label} · {source_label} · selected bad zones",
+    )
+
+    full_bad_mask = _candidate_fast_reverse_zone_mask(resolved, zones)
+    scope_mode = st.radio(
+        "Discovery population",
+        [
+            f"Candidates allowed by {source_label} (recommended)",
+            "All resolved candidates",
+        ],
+        horizontal=True,
+        key="candidate_fast_reverse_scope",
+    )
+    if scope_mode.startswith("Candidates allowed"):
+        population_mask = ~source_blocked
+    else:
+        population_mask = pd.Series(True, index=resolved.index)
+
+    population = resolved.loc[population_mask].copy()
+    bad_population_mask = full_bad_mask.loc[population.index].fillna(False).astype(bool)
+    bad_n = int(bad_population_mask.sum())
+    outside_n = int((~bad_population_mask).sum())
+    zm1, zm2, zm3, zm4 = st.columns(4)
+    zm1.metric("Candidates in bad zones", bad_n)
+    zm2.metric("Candidates outside", outside_n)
+    zm3.metric("Bad-zone share", f"{(bad_n / len(population) * 100.0 if len(population) else 0.0):.1f}%")
+    zm4.metric(f"{source_label} final", f"${float(source_summary.get('Final equity', np.nan)):.2f}")
+
+    if bad_n < 3 or outside_n < 3:
+        st.warning(
+            "Select wider/more zones. Reverse search needs at least 3 candidates inside "
+            "and 3 outside to compare contexts."
+        )
+        return
+
+    sr1, sr2, sr3, sr4 = st.columns(4)
+    depth = sr1.selectbox(
+        "Detector search",
+        ["Singles", "Singles + pairs"],
+        index=1,
+        key="candidate_fast_reverse_depth",
+    )
+    objective = sr2.selectbox(
+        "Rank detectors by",
+        [
+            "Balanced zone detector",
+            "Highest zone capture",
+            "Highest detector precision",
+            "Lowest outside block",
+            "Highest final equity (exploratory)",
+        ],
+        index=0,
+        key="candidate_fast_reverse_objective",
+    )
+    max_outside = sr3.selectbox(
+        "Max outside blocked",
+        [10, 20, 30, 40, 50],
+        index=2,
+        format_func=lambda value: f"{value}%",
+        key="candidate_fast_reverse_max_outside",
+    )
+    top_n = sr4.selectbox(
+        "Top detectors",
+        [10, 15, 20, 30],
+        index=1,
+        key="candidate_fast_reverse_top_n",
+    )
+
+    zone_signature = tuple(
+        (int(z["start_ms"]), int(z["end_ms"])) for z in zones
+    )
+    reverse_signature = (
+        str(strategy_label),
+        str(source_label),
+        int(len(resolved)),
+        int(entry_ts.max()),
+        zone_signature,
+        str(scope_mode),
+        str(depth),
+    )
+    cache_key = "candidate_fast_reverse_regime_cache"
+    cached = st.session_state.get(cache_key)
+
+    if st.button(
+        "🔬 Search detectors for selected bad zones",
+        use_container_width=True,
+        key="candidate_fast_reverse_run",
+    ):
+        with st.spinner("Comparing causal contexts inside vs outside selected zones..."):
+            rules = _candidate_fast_regime_auto_single_rules(
+                population,
+                feature_options,
+            )
+            rows = []
+            rules_by_id = {}
+
+            def evaluate_detector(detector_rule, detector_id):
+                detector_pop_mask = _candidate_fast_regime_auto_rule_mask(
+                    population,
+                    detector_rule,
+                )
+                metrics = _candidate_fast_reverse_detection_metrics(
+                    population,
+                    detector_pop_mask,
+                    bad_population_mask,
+                )
+                if (
+                    metrics["Detected in zones"] < 2
+                    or metrics["Detector total"] <= 0
+                ):
+                    return None
+
+                detector_full_mask = _candidate_fast_regime_auto_rule_mask(
+                    resolved,
+                    detector_rule,
+                ).reindex(resolved.index, fill_value=False).fillna(False).astype(bool)
+                final_blocked = (source_blocked | detector_full_mask).fillna(False).astype(bool)
+                portfolio, _ = _candidate_fast_regime_auto_portfolio(
+                    resolved,
+                    final_blocked,
+                )
+                summary = _candidate_fast_portfolio_summary(portfolio)
+                if not summary:
+                    return None
+                stability = _candidate_fast_regime_portfolio_stability(portfolio)
+                row = {
+                    "Detector ID": detector_id,
+                    "Detector": _candidate_fast_regime_auto_rule_text(
+                        detector_rule,
+                        reverse_labels,
+                    ),
+                    "Kind": str(detector_rule.get("kind", "detector")),
+                    **metrics,
+                    "Extra blocked": int((detector_full_mask & ~source_blocked).sum()),
+                    "Final equity": float(summary.get("Final equity", np.nan)),
+                    "Δ vs source": float(
+                        summary.get("Final equity", np.nan)
+                        - source_summary.get("Final equity", np.nan)
+                    ),
+                    "Return %": float(summary.get("Return %", np.nan)),
+                    "Max DD %": float(summary.get("Max DD %", np.nan)),
+                    "PF": float(summary.get("PF", np.nan)),
+                    "Accepted": int(summary.get("Accepted", 0) or 0),
+                }
+                row.update(stability)
+                return row
+
+            simple_rows = []
+            for i, detector_rule in enumerate(rules):
+                detector_id = f"D{i:04d}"
+                row = evaluate_detector(detector_rule, detector_id)
+                if row is None:
+                    continue
+                simple_rows.append(row)
+                rules_by_id[detector_id] = detector_rule
+            rows.extend(simple_rows)
+
+            if depth == "Singles + pairs" and simple_rows:
+                seed = pd.DataFrame(simple_rows)
+                seed = _candidate_fast_reverse_sort(
+                    seed,
+                    "Balanced zone detector",
+                )
+                seed = seed.loc[
+                    pd.to_numeric(seed["Outside blocked %"], errors="coerce")
+                    .le(float(max_outside))
+                ].head(8)
+                seed_ids = seed["Detector ID"].astype(str).tolist()
+                pair_counter = 0
+                for i in range(len(seed_ids)):
+                    for j in range(i + 1, len(seed_ids)):
+                        left = rules_by_id.get(seed_ids[i])
+                        right = rules_by_id.get(seed_ids[j])
+                        if not left or not right:
+                            continue
+                        if left.get("feature2") or right.get("feature2"):
+                            continue
+                        if left.get("feature1") == right.get("feature1"):
+                            continue
+                        for combine in ("AND", "OR"):
+                            pair_rule = {
+                                "kind": f"reverse_pair_{combine.lower()}",
+                                "feature1": left.get("feature1"),
+                                "operator1": left.get("operator1"),
+                                "value1": left.get("value1"),
+                                "feature2": right.get("feature1"),
+                                "operator2": right.get("operator1"),
+                                "value2": right.get("value1"),
+                                "combine": combine,
+                            }
+                            detector_id = f"DP{pair_counter:04d}"
+                            pair_counter += 1
+                            row = evaluate_detector(pair_rule, detector_id)
+                            if row is None:
+                                continue
+                            rows.append(row)
+                            rules_by_id[detector_id] = pair_rule
+
+            cached = {
+                "signature": reverse_signature,
+                "results": pd.DataFrame(rows),
+                "rules": rules_by_id,
+            }
+            st.session_state[cache_key] = cached
+
+    if not isinstance(cached, dict) or cached.get("signature") != reverse_signature:
+        st.info(
+            "Set the bad zones and press **Search detectors for selected bad zones**. "
+            "The search is intentionally manual so moving the zone markers does not "
+            "continuously optimize the history."
+        )
+        return
+
+    results = cached.get("results", pd.DataFrame())
+    rules_by_id = cached.get("rules", {})
+    if results is None or results.empty:
+        st.info("No causal detector had enough support in the selected zones.")
+        return
+
+    filtered = results.loc[
+        pd.to_numeric(results["Outside blocked %"], errors="coerce").le(float(max_outside))
+        & pd.to_numeric(results["Zone capture %"], errors="coerce").ge(10.0)
+        & pd.to_numeric(results["Accepted"], errors="coerce").ge(5)
+    ].copy()
+    rank_objective = (
+        "Highest final equity"
+        if objective == "Highest final equity (exploratory)"
+        else objective
+    )
+    ranked = _candidate_fast_reverse_sort(filtered, rank_objective)
+    if ranked.empty:
+        st.info("No detector passes the current outside-block/capture guardrails.")
+        return
+
+    columns = [
+        "Detector ID", "Detector", "Kind", "Detected in zones", "Zone capture %",
+        "Detector precision %", "Detector lift", "Outside blocked %", "Extra blocked",
+        "Final equity", "Δ vs source", "Return %", "Max DD %", "PF", "Accepted",
+        "Below start time %", "Underwater time %", "Top 2 positive days share %",
+        "Recovery factor", "Detection rank",
+    ]
+    columns = [c for c in columns if c in ranked.columns]
+    display = ranked[columns].head(int(top_n)).copy()
+    for column in display.columns:
+        if column in {"Detector ID", "Detector", "Kind"}:
+            continue
+        display[column] = pd.to_numeric(display[column], errors="coerce").round(4)
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        key="candidate_fast_reverse_results",
+    )
+    st.caption(
+        "Detection metrics answer whether the rule recognizes your marked zones; "
+        "portfolio metrics are shown only as an exploratory replay. A detector found "
+        "from these intervals is NOT out-of-sample validation."
+    )
+
+    detector_ids = display["Detector ID"].astype(str).tolist()
+    if not detector_ids:
+        return
+    selected_id = st.selectbox(
+        "Replay reverse-search hypothesis",
+        detector_ids,
+        key="candidate_fast_reverse_selected_detector",
+        format_func=lambda rid: (
+            f"{rid} · "
+            + str(
+                ranked.loc[
+                    ranked["Detector ID"].astype(str).eq(str(rid)),
+                    "Detector",
+                ].iloc[0]
+            )
+        ),
+    )
+    detector_rule = rules_by_id.get(str(selected_id))
+    if not detector_rule:
+        return
+
+    detector_full_mask = _candidate_fast_regime_auto_rule_mask(
+        resolved,
+        detector_rule,
+    ).reindex(resolved.index, fill_value=False).fillna(False).astype(bool)
+    final_blocked = (source_blocked | detector_full_mask).fillna(False).astype(bool)
+    final_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+        resolved,
+        final_blocked,
+    )
+    final_summary = _candidate_fast_portfolio_summary(final_portfolio)
+    if final_summary:
+        hm1, hm2, hm3, hm4, hm5 = st.columns(5)
+        hm1.metric("Source final", f"${float(source_summary.get('Final equity', np.nan)):.2f}")
+        hm2.metric("Source + D final", f"${float(final_summary.get('Final equity', np.nan)):.2f}")
+        hm3.metric(
+            "Δ equity",
+            f"${float(final_summary.get('Final equity', np.nan) - source_summary.get('Final equity', np.nan)):+.2f}",
+        )
+        hm4.metric("PF", f"{float(final_summary.get('PF', np.nan)):.2f}")
+        hm5.metric("Max DD", f"{float(final_summary.get('Max DD %', np.nan)):.2f}%")
+
+    detector_text = _candidate_fast_regime_auto_rule_text(detector_rule, reverse_labels)
+    _candidate_fast_reverse_render_equity_with_zones(
+        [
+            (str(source_label), source_portfolio),
+            (f"{source_label} + D", final_portfolio),
+        ],
+        zones,
+        key="candidate_fast_reverse_replay_equity",
+        title=(
+            f"{strategy_label} · {source_label} vs {source_label} + reverse detector D · "
+            f"{detector_text}"
+        ),
+    )
+    st.warning(
+        "Hypothesis generated from user-selected bad intervals. Keep it in Discovery, "
+        "check threshold/family robustness, and only later freeze a clean candidate for "
+        "forward Validation."
+    )
+
 def _candidate_fast_render_auto_regime_scanner(
     resolved,
     *,
@@ -50696,6 +51320,17 @@ def _candidate_fast_render_auto_regime_scanner(
     else:
         selected_component_label = "Selected rule"
         selected_component_rule = rule
+
+    # --------------------------------------------------------
+    # Reverse regime search from user-selected bad zones
+    # --------------------------------------------------------
+    _candidate_fast_render_reverse_regime_search(
+        execution=execution,
+        component_rule_map=component_rule_map,
+        feature_options=feature_options,
+        reverse_labels=reverse_labels,
+        strategy_defs=strategy_defs,
+    )
 
     # --------------------------------------------------------
     # Optional C qualifier research
