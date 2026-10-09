@@ -93,6 +93,13 @@ from dashboard.analytics.candidate_v1_market_regime import (
 from config.strategies.v1 import SYMBOLS as CANDIDATE_V1_MARKET_SYMBOLS
 from config.market_sectors import MIN_SECTOR_SYMBOLS as CANDIDATE_V1_MIN_SECTOR_SYMBOLS
 from engine.live.data.market_sector_catalog import MarketSectorCatalog
+
+try:
+    from dashboard.services.candidate_research_store import (
+        CandidateResearchStore,
+    )
+except Exception:
+    CandidateResearchStore = None
 # Import the protocol module itself instead of hard-importing the new Micro Flow
 # names. Streamlit can hot-reload app.py while keeping an older imported module
 # object alive; using getattr fallbacks prevents the whole dashboard from
@@ -290,6 +297,13 @@ CANDIDATE_V1_SELECTED_CELL_HISTORY_FILE = (
     BASE_DIR / "reports" / "candidate_v1_analysis" / "selected_cell_history.csv"
 )
 
+# Fast Candidate Research materialization. The original CSV/pickle stores remain
+# authoritative compatibility sources; this layer is additive and query-only.
+CANDIDATE_V1_RAW_MONITOR_FILE = (
+    BASE_DIR / "reports" / "candidate_v1_analysis" / "legacy_v1_raw_monitor.csv"
+)
+CANDIDATE_FAST_SNAPSHOT_MAX_AGE_HOURS = 20.0
+
 # Prospective, append-only evidence of EVERY 15m REACTION before the Legacy V1
 # Room/RSI filters are applied. One Event ID may have more than one snapshot if
 # its Legacy decision context changes while the REACTION remains visible.
@@ -442,6 +456,13 @@ geometry_observation_journal = (
             GEOMETRY_OBSERVATIONS_FILE
         ),
     )
+)
+
+
+candidate_research_store = (
+    CandidateResearchStore(BASE_DIR)
+    if CandidateResearchStore is not None
+    else None
 )
 
 
@@ -48068,6 +48089,415 @@ def _candidate_v2_render_matrix(summary, key_prefix, metric):
     )
 
 
+
+def _candidate_fast_atomic_write_csv(frame, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    frame.to_csv(tmp, index=False)
+    tmp.replace(path)
+
+
+def _candidate_fast_read_csv(path):
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _candidate_fast_ensure_event_key(frame):
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    result = frame.copy()
+    if "candidate_v1_event_key" not in result.columns:
+        required = {"symbol", "signal", "retest_timestamp"}
+        if not required.issubset(result.columns):
+            return pd.DataFrame()
+        result["candidate_v1_event_key"] = (
+            result["symbol"].fillna("").astype(str)
+            + "|"
+            + result["signal"].fillna("").astype(str).str.upper()
+            + "|"
+            + pd.to_numeric(
+                result["retest_timestamp"],
+                errors="coerce",
+            ).fillna(-1).astype("int64").astype(str)
+        )
+    return result
+
+
+def _candidate_fast_archive_v1_bootstrap():
+    """Freeze the pre-refactor V1 sources once; never overwrite the archive."""
+    archive_dir = (
+        BASE_DIR
+        / "reports"
+        / "candidate_v1_analysis"
+        / "legacy_raw_bootstrap_archive"
+    )
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    sources = {
+        "candidate_v1_frozen_monitor_before_fast_refactor.csv": CANDIDATE_V1_HISTORY_FILE,
+        "candidate_v1_long_frozen_monitor_before_fast_refactor.csv": CANDIDATE_V1_LONG_HISTORY_FILE,
+        "legacy_prefilter_decision_ledger_before_fast_refactor.csv": CANDIDATE_V1_LEGACY_PREFILTER_LEDGER_FILE,
+        "legacy_prefilter_latest_before_fast_refactor.csv": CANDIDATE_V1_LEGACY_PREFILTER_LATEST_FILE,
+    }
+    for filename, source in sources.items():
+        source = Path(source)
+        target = archive_dir / filename
+        if source.exists() and not target.exists():
+            try:
+                shutil.copy2(source, target)
+            except OSError:
+                pass
+
+
+def _candidate_fast_build_v1_raw_universe(retests_df):
+    """Bootstrap + update the Legacy V1 pre-filter RAW universe safely.
+
+    Priority is current pre-filter evidence > prospective ledger latest >
+    previously materialized RAW > old accepted V1 SHORT/LONG history. Original
+    source files are never overwritten by this merge.
+    """
+    _candidate_fast_archive_v1_bootstrap()
+    frames = []
+
+    old_short = _candidate_fast_ensure_event_key(
+        _candidate_fast_read_csv(CANDIDATE_V1_HISTORY_FILE)
+    )
+    if not old_short.empty:
+        old_short["_candidate_fast_priority"] = 10
+        old_short["candidate_fast_source"] = "legacy_v1_short_history"
+        frames.append(old_short)
+
+    old_long = _candidate_fast_ensure_event_key(
+        _candidate_fast_read_csv(CANDIDATE_V1_LONG_HISTORY_FILE)
+    )
+    if not old_long.empty:
+        old_long["_candidate_fast_priority"] = 10
+        old_long["candidate_fast_source"] = "legacy_v1_long_history"
+        frames.append(old_long)
+
+    prior_raw = _candidate_fast_ensure_event_key(
+        _candidate_fast_read_csv(CANDIDATE_V1_RAW_MONITOR_FILE)
+    )
+    if not prior_raw.empty:
+        prior_raw["_candidate_fast_priority"] = 20
+        prior_raw["candidate_fast_source"] = prior_raw.get(
+            "candidate_fast_source",
+            pd.Series("legacy_v1_raw_monitor", index=prior_raw.index),
+        )
+        frames.append(prior_raw)
+
+    ledger_latest = _candidate_fast_ensure_event_key(
+        _candidate_fast_read_csv(CANDIDATE_V1_LEGACY_PREFILTER_LATEST_FILE)
+    )
+    if not ledger_latest.empty:
+        ledger_latest["_candidate_fast_priority"] = 30
+        ledger_latest["candidate_fast_source"] = "legacy_prefilter_latest"
+        frames.append(ledger_latest)
+
+    current = _candidate_v1_build_reaction_control_source(retests_df)
+    current = _candidate_fast_ensure_event_key(current)
+    if not current.empty:
+        current["_candidate_fast_priority"] = 40
+        current["candidate_fast_source"] = "current_prefilter_scan"
+        frames.append(current)
+
+    if not frames:
+        return pd.DataFrame()
+
+    raw = pd.concat(frames, ignore_index=True, sort=False)
+    raw = (
+        raw.sort_values(
+            ["_candidate_fast_priority"],
+            kind="stable",
+        )
+        .drop_duplicates(
+            subset=["candidate_v1_event_key"],
+            keep="last",
+        )
+        .drop(columns=["_candidate_fast_priority"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+    if "signal" not in raw.columns and "side" in raw.columns:
+        raw["signal"] = raw["side"]
+    raw["side"] = raw.get(
+        "side",
+        raw.get("signal", pd.Series("", index=raw.index)),
+    ).fillna("").astype(str).str.upper()
+    raw["candidate_analysis_profile"] = "v1"
+    raw["candidate_v2_event_key"] = raw["candidate_v1_event_key"].astype(str)
+
+    existing_cohort = raw.get(
+        "candidate_v1_cohort",
+        pd.Series("RAW", index=raw.index),
+    ).fillna("RAW").astype(str)
+    raw["candidate_v1_cohort"] = existing_cohort
+    raw["candidate_v2_cohort"] = existing_cohort
+
+    _candidate_fast_atomic_write_csv(
+        raw,
+        CANDIDATE_V1_RAW_MONITOR_FILE,
+    )
+    return raw
+
+
+def _candidate_fast_build_snapshot(
+    retests_df,
+    v1_short_config,
+    v1_long_config,
+):
+    if candidate_research_store is None:
+        raise RuntimeError("CandidateResearchStore is unavailable")
+    if not candidate_research_store.available:
+        raise RuntimeError("duckdb + pyarrow are required")
+
+    started = time.perf_counter()
+
+    # Keep the prospective audit ledger alive. This does not filter RAW rows.
+    ledger_result = _candidate_v1_persist_legacy_prefilter_ledger(
+        retests_df,
+        short_config=v1_short_config,
+        long_config=v1_long_config,
+    )
+
+    v1_raw = _candidate_fast_build_v1_raw_universe(retests_df)
+    if v1_raw.empty:
+        raise RuntimeError("Legacy V1 RAW universe is empty")
+
+    v2_history, v2_config, v2_newly_frozen = (
+        _candidate_v2_load_or_freeze_universe(retests_df)
+    )
+    if v2_history is None or v2_history.empty:
+        raise RuntimeError("Candidate V2 universe is empty")
+    v2_history = v2_history.copy()
+    v2_history["candidate_analysis_profile"] = "v2"
+
+    # Market context is heavy and belongs to BUILD, not EXPLORE. Existing
+    # persisted context stores are reused; only missing/current work is added.
+    v1_context, v1_sector_error = _candidate_v2_build_market_context(
+        v1_raw,
+        force=False,
+    )
+    v2_context, v2_sector_error = _candidate_v2_build_market_context(
+        v2_history,
+        force=False,
+    )
+    if v1_context is None or v1_context.empty:
+        v1_context = v1_raw.copy()
+    if v2_context is None or v2_context.empty:
+        v2_context = v2_history.copy()
+
+    v1_context["candidate_analysis_profile"] = "v1"
+    v2_context["candidate_analysis_profile"] = "v2"
+
+    reaction_count, reaction_digest, max_retest_ts = (
+        _candidate_analysis_retests_signature(retests_df)
+    )
+    manifest = candidate_research_store.write_bundle(
+        {
+            "v1_raw": v1_context,
+            "v2": v2_context,
+        },
+        source_meta={
+            "reaction_count": int(reaction_count),
+            "reaction_digest": str(reaction_digest),
+            "max_retest_timestamp": max_retest_ts,
+            "v1_raw_rows": int(len(v1_context)),
+            "v2_rows": int(len(v2_context)),
+            "v2_newly_frozen": bool(v2_newly_frozen),
+            "v1_sector_error": v1_sector_error,
+            "v2_sector_error": v2_sector_error,
+            "build_pipeline_seconds": float(time.perf_counter() - started),
+        },
+    )
+    return {
+        "manifest": manifest,
+        "ledger": ledger_result,
+        "v1_raw": v1_context,
+        "v2": v2_context,
+        "v2_config": v2_config,
+    }
+
+
+def render_candidate_fast_explorer():
+    """DuckDB/Parquet explorer: filters only, no scanner/Redis/build work."""
+    store = candidate_research_store
+    if store is None or not store.available or not store.snapshot_exists():
+        return
+
+    manifest = store.read_manifest()
+    age_hours = store.snapshot_age_hours()
+    profiles_meta = manifest.get("profiles", {}) if isinstance(manifest, dict) else {}
+
+    st.markdown("### ⚡ Candidate Research · Fast Explorer")
+    st.caption(
+        "This view reads materialized Parquet snapshots through DuckDB. "
+        "Changing filters does not run the REACTION scanner, Redis context, "
+        "swing reconstruction or Candidate persistence."
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(
+        "Snapshot age",
+        f"{age_hours:.1f}h" if age_hours is not None else "—",
+    )
+    m2.metric(
+        "V1 RAW rows",
+        int(profiles_meta.get("v1_raw", {}).get("rows", 0)),
+    )
+    m3.metric(
+        "V2 rows",
+        int(profiles_meta.get("v2", {}).get("rows", 0)),
+    )
+    m4.metric(
+        "Built",
+        str(manifest.get("built_at_utc", "—"))[:19].replace("T", " "),
+    )
+
+    profile_label = st.radio(
+        "Dataset",
+        options=["Legacy V1 RAW", "Candidate V2"],
+        horizontal=True,
+        key="candidate_fast_profile_label",
+    )
+    profile = "v1_raw" if profile_label == "Legacy V1 RAW" else "v2"
+
+    cohort_values = store.distinct_values(profile, "candidate_v2_cohort")
+    cohort_options = ["TOTAL"] + [
+        value for value in cohort_values if value and value.upper() != "TOTAL"
+    ]
+    market_values = store.distinct_values(profile, "Market alignment")
+    market_options = ["TOTAL"] + [
+        value for value in market_values if value and value.upper() != "TOTAL"
+    ]
+
+    with st.form(
+        key=f"candidate_fast_filters_{profile}",
+        clear_on_submit=False,
+    ):
+        f1, f2, f3 = st.columns(3)
+        side = f1.selectbox(
+            "Side",
+            ["TOTAL", "LONG", "SHORT"],
+            key=f"candidate_fast_side_{profile}",
+        )
+        cohort = f2.selectbox(
+            "Cohort",
+            cohort_options,
+            key=f"candidate_fast_cohort_{profile}",
+        )
+        market_alignment = f3.selectbox(
+            "Market alignment",
+            market_options,
+            key=f"candidate_fast_market_{profile}",
+        )
+
+        f4, f5, f6, f7 = st.columns(4)
+        room_choice = f4.selectbox(
+            "Min HTF Room",
+            ["OFF", 0.50, 0.75, 1.00, 1.50, 2.00, 3.00],
+            index=0,
+            key=f"candidate_fast_room_{profile}",
+            format_func=lambda value: value if value == "OFF" else f">= {float(value):g}%",
+        )
+        rsi_choice = f5.selectbox(
+            "Min aligned RSI TFs",
+            ["OFF", 1, 2, 3, 4],
+            index=0,
+            key=f"candidate_fast_rsi_{profile}",
+        )
+        strength_choice = f6.selectbox(
+            "Min Strength vs BTC 4h",
+            ["OFF", 0.00, 0.25, 0.50, 0.75, 1.00, 1.50],
+            index=0,
+            key=f"candidate_fast_strength_{profile}",
+            format_func=lambda value: value if value == "OFF" else f">= {float(value):g}%",
+        )
+        row_limit = f7.selectbox(
+            "Rows shown",
+            [250, 500, 1000, 2000, 5000],
+            index=2,
+            key=f"candidate_fast_limit_{profile}",
+        )
+        st.form_submit_button(
+            "Apply fast filters",
+            use_container_width=True,
+        )
+
+    result = store.query(
+        profile,
+        side=side,
+        cohort=cohort,
+        room_min=None if room_choice == "OFF" else float(room_choice),
+        rsi_min=None if rsi_choice == "OFF" else int(rsi_choice),
+        strength_min=(
+            None if strength_choice == "OFF" else float(strength_choice)
+        ),
+        market_alignment=market_alignment,
+        limit=int(row_limit),
+    )
+    data = result.get("frame", pd.DataFrame())
+
+    q1, q2, q3, q4, q5 = st.columns(5)
+    q1.metric("Matched", int(result.get("matched", 0)))
+    q2.metric("Dataset", int(result.get("total", 0)))
+    q3.metric(
+        "Symbols",
+        int(data["symbol"].nunique())
+        if not data.empty and "symbol" in data.columns
+        else 0,
+    )
+    q4.metric(
+        "LONG",
+        int(data.get("side", pd.Series("", index=data.index)).astype(str).str.upper().eq("LONG").sum())
+        if not data.empty
+        else 0,
+    )
+    q5.metric(
+        "DuckDB query",
+        f"{float(result.get('elapsed_ms', 0.0)):.1f} ms",
+    )
+
+    display_columns = [
+        "candidate_v1_event_key",
+        "symbol",
+        "side",
+        "candidate_v2_cohort",
+        "retest_timestamp",
+        "nearest_opposing_room_pct",
+        "aligned_rsi_extreme_count",
+        "rsi14_1m",
+        "rsi14_5m",
+        "rsi14_15m",
+        "rsi14_1h",
+        "side_adjusted_strength_vs_btc_4h",
+        "Market alignment",
+        "market_breadth_4h",
+        "btc_return_pct_4h",
+        "candidate_fast_source",
+    ]
+    display_columns = [column for column in display_columns if column in data.columns]
+    if data.empty:
+        st.info("No rows match the fast filters.")
+    else:
+        st.dataframe(
+            data[display_columns],
+            use_container_width=True,
+            hide_index=True,
+            key=f"candidate_fast_table_{profile}",
+        )
+
+    st.caption(
+        "Legacy original can now be reproduced as a query: HTF Room >= 1% "
+        "AND aligned RSI TFs >= 1. The RAW dataset itself remains unfiltered."
+    )
+
+
 def render_candidate_research(
     retests_df,
     candidate_version="Candidate V2",
@@ -76358,6 +76788,145 @@ if selected_section == "reaction_swing_lab":
                     )
                 ),
             )
+
+            fast_store = candidate_research_store
+            fast_status = (
+                fast_store.dependency_status()
+                if fast_store is not None
+                else {
+                    "available": False,
+                    "duckdb": False,
+                    "pyarrow": False,
+                }
+            )
+
+            st.markdown("#### ⚙️ Candidate data architecture")
+            arch1, arch2 = st.columns([3, 1])
+            with arch1:
+                if fast_status.get("available"):
+                    snapshot_age = fast_store.snapshot_age_hours()
+                    st.caption(
+                        "BUILD and EXPLORE are separated. A stale/missing snapshot "
+                        "is rebuilt when Candidate Research opens; after that, fast "
+                        "filters read only Parquet through DuckDB. "
+                        + (
+                            f"Current snapshot age: {snapshot_age:.1f}h."
+                            if snapshot_age is not None
+                            else "No snapshot has been built yet."
+                        )
+                    )
+                else:
+                    st.warning(
+                        "Fast Candidate store is disabled until `duckdb` and `pyarrow` "
+                        "are installed. The existing Candidate engine remains available."
+                    )
+            with arch2:
+                refresh_fast_snapshot = st.button(
+                    "🔄 Refresh Candidate Data",
+                    use_container_width=True,
+                    key="candidate_fast_refresh_button",
+                    disabled=not bool(fast_status.get("available")),
+                )
+
+            candidate_fast_build_result = None
+            auto_refresh_key = (
+                "candidate_fast_auto_refresh_"
+                + str(pd.Timestamp.now(tz="UTC").date())
+            )
+            auto_refresh_due = bool(
+                fast_status.get("available")
+                and fast_store.needs_refresh(
+                    CANDIDATE_FAST_SNAPSHOT_MAX_AGE_HOURS
+                )
+                and not st.session_state.get(auto_refresh_key, False)
+            )
+            if auto_refresh_due:
+                st.session_state[auto_refresh_key] = True
+
+            if refresh_fast_snapshot or auto_refresh_due:
+                refresh_reason = (
+                    "manual refresh"
+                    if refresh_fast_snapshot
+                    else "daily stale snapshot refresh"
+                )
+                try:
+                    with st.spinner(
+                        "BUILD: scanning REACTIONs + refreshing Candidate contexts "
+                        f"({refresh_reason})..."
+                    ):
+                        fast_retests_df = _reaction_lab_shared_candidate_scan_cached(
+                            symbols=structural_symbols,
+                            swing_timeframe=str(
+                                candidate_v1_config.get("swing_timeframe", "15m")
+                            ),
+                            swing_detector=str(
+                                candidate_v1_config.get("swing_detector", "3x3")
+                            ),
+                            min_swing_prominence_pct=float(
+                                candidate_v1_config.get(
+                                    "min_swing_prominence_pct",
+                                    0.0,
+                                )
+                            ),
+                            retest_tolerance_pct=float(
+                                candidate_v1_config.get(
+                                    "retest_tolerance_pct",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
+                                )
+                            ),
+                            min_departure_pct=float(
+                                candidate_v1_config.get(
+                                    "min_departure_pct",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
+                                )
+                            ),
+                            max_age_minutes=int(
+                                candidate_v1_config.get(
+                                    "max_confirmation_to_retest_min",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
+                                )
+                            ),
+                            max_retest_age_minutes=4320,
+                        )
+                        candidate_fast_build_result = _candidate_fast_build_snapshot(
+                            fast_retests_df,
+                            candidate_v1_config,
+                            candidate_v1_long_config,
+                        )
+                    st.success(
+                        "Candidate snapshot refreshed. Heavy BUILD work is now "
+                        "materialized; filter changes use DuckDB only."
+                    )
+                except Exception as exc:
+                    st.error(
+                        "Fast Candidate snapshot build failed; the original engine "
+                        f"is still available. Error: {exc}"
+                    )
+
+            fast_snapshot_ready = bool(
+                fast_status.get("available")
+                and fast_store.snapshot_exists()
+            )
+
+            if fast_snapshot_ready:
+                render_candidate_fast_explorer()
+                show_full_candidate_engine = st.checkbox(
+                    "Show full compatibility Candidate engine (heavy)",
+                    value=False,
+                    key="candidate_fast_show_full_engine",
+                    help=(
+                        "Turn this on only when you need execution matrix, portfolio "
+                        "or legacy sections that have not yet been migrated to the "
+                        "query-only architecture. Keeping it OFF is the speed test."
+                    ),
+                )
+                if not show_full_candidate_engine:
+                    st.info(
+                        "Fast mode active. The heavy compatibility engine below is "
+                        "not executed, so selector changes cannot trigger scanner/Redis "
+                        "or full Candidate recalculation."
+                    )
+                    st.stop()
 
             st.caption(
                 "V1 and V2 now share the same cached structural scan and the "
