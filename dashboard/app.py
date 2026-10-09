@@ -50574,36 +50574,94 @@ def _candidate_fast_render_reverse_regime_search(
     if entry_ts.empty:
         st.info("No entry timestamps are available for reverse-zone selection.")
         return
-    min_local = pd.to_datetime(int(entry_ts.min()), unit="ms", utc=True).tz_convert(TZ).tz_localize(None)
-    max_local = pd.to_datetime(int(entry_ts.max()), unit="ms", utc=True).tz_convert(TZ).tz_localize(None)
-    total_seconds = max((max_local - min_local).total_seconds(), 60.0)
+    min_local_raw = pd.to_datetime(
+        int(entry_ts.min()),
+        unit="ms",
+        utc=True,
+    ).tz_convert(TZ).tz_localize(None)
+    max_local_raw = pd.to_datetime(
+        int(entry_ts.max()),
+        unit="ms",
+        utc=True,
+    ).tz_convert(TZ).tz_localize(None)
+
+    # Reverse-zone selection intentionally uses a coarse 4h grid. This is
+    # precise enough to isolate a market regime while making it harder to
+    # cherry-pick individual losing trades/minutes. Align to local 00/04/08/...
+    # blocks so the selected intervals are also easy to compare with 1h/4h
+    # regime features.
+    reverse_zone_step = pd.Timedelta(hours=4)
+    min_local = min_local_raw.floor("4h")
+    max_local = max_local_raw.ceil("4h")
+    if max_local <= min_local:
+        max_local = min_local + reverse_zone_step
+
+    total_seconds = max(
+        (max_local - min_local).total_seconds(),
+        reverse_zone_step.total_seconds(),
+    )
 
     zones = []
-    st.markdown("**Select bad intervals**")
+    st.markdown("**Select bad intervals · 4h resolution**")
     st.caption(
-        "Each slider has two markers: start and end. Add multiple zones when the same "
-        "kind of deterioration appears in separate parts of the equity curve."
+        "Each slider has two markers aligned to local 4-hour blocks "
+        "(00:00 / 04:00 / 08:00 / 12:00 / 16:00 / 20:00). Add multiple zones "
+        "when the same kind of deterioration appears in separate parts of the "
+        "equity curve. The 4h grid is intentional to reduce minute-level "
+        "cherry-picking during Discovery."
     )
     for idx in range(int(zone_count)):
         # Spread defaults across the latter part of the sample so multiple sliders
-        # start distinct instead of covering the entire history.
+        # start distinct instead of covering the entire history, then snap each
+        # boundary to the same 4h grid exposed by the control.
         frac_start = min(0.45 + idx * 0.10, 0.88)
         frac_end = min(frac_start + 0.08, 0.98)
-        default_start = min_local + pd.Timedelta(seconds=total_seconds * frac_start)
-        default_end = min_local + pd.Timedelta(seconds=total_seconds * frac_end)
+        default_start = (
+            min_local
+            + pd.Timedelta(seconds=total_seconds * frac_start)
+        ).round("4h")
+        default_end = (
+            min_local
+            + pd.Timedelta(seconds=total_seconds * frac_end)
+        ).round("4h")
+
+        default_start = max(min_local, min(default_start, max_local))
+        default_end = max(min_local, min(default_end, max_local))
+        if default_end <= default_start:
+            default_end = min(
+                default_start + reverse_zone_step,
+                max_local,
+            )
+        if default_end <= default_start:
+            default_start = max(
+                min_local,
+                max_local - reverse_zone_step,
+            )
+            default_end = max_local
+
         selected = st.slider(
             f"Bad zone {idx + 1}",
             min_value=min_local.to_pydatetime(),
             max_value=max_local.to_pydatetime(),
-            value=(default_start.to_pydatetime(), default_end.to_pydatetime()),
+            value=(
+                default_start.to_pydatetime(),
+                default_end.to_pydatetime(),
+            ),
+            step=reverse_zone_step.to_pytimedelta(),
             format="DD/MM HH:mm",
             key=f"candidate_fast_reverse_zone_{idx}",
         )
         start_local = pd.Timestamp(selected[0]).tz_localize(TZ)
         end_local = pd.Timestamp(selected[1]).tz_localize(TZ)
         zones.append({
-            "start_ms": int(start_local.tz_convert("UTC").timestamp() * 1000),
-            "end_ms": int(end_local.tz_convert("UTC").timestamp() * 1000),
+            "start_ms": int(
+                start_local.tz_convert("UTC").timestamp()
+                * 1000
+            ),
+            "end_ms": int(
+                end_local.tz_convert("UTC").timestamp()
+                * 1000
+            ),
         })
 
     _candidate_fast_reverse_render_equity_with_zones(
