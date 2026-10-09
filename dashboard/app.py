@@ -50228,6 +50228,430 @@ def _candidate_fast_render_auto_regime_scanner(
         "perturbation. Then freeze the rule and evaluate only on later/forward data."
     )
 
+
+
+# ============================================================
+# Candidate Fast · NO-TRADE Discovery / Validation persistence
+# ============================================================
+CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE = (
+    BASE_DIR
+    / "reports"
+    / "research"
+    / "candidate"
+    / "no_trade_validation.json"
+)
+
+
+def _candidate_fast_no_trade_validation_candidates():
+    """Frozen candidate rules promoted from Discovery into forward Validation."""
+    common = {
+        "kind": "validation_pair",
+        "feature1": "btc_breadth_divergence_4h",
+        "operator1": "==",
+        "value1": "BTC_DOWN_BREADTH_UP",
+        "feature2": "btc_return_delta_4h",
+        "operator2": ">=",
+        "combine": "OR",
+    }
+    r1 = dict(common)
+    r1.update({"value2": 1.6282})
+    r2 = dict(common)
+    r2.update({"value2": 1.7910})
+    return {
+        "R1": r1,
+        "R2": r2,
+    }
+
+
+def _candidate_fast_no_trade_validation_load():
+    path = CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _candidate_fast_no_trade_validation_save(payload):
+    path = CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+
+def _candidate_fast_no_trade_validation_digest(payload):
+    frozen = {
+        "validation_start_timestamp": payload.get("validation_start_timestamp"),
+        "rules": payload.get("rules", {}),
+    }
+    raw = json.dumps(frozen, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _candidate_fast_no_trade_validation_start(reverse_labels):
+    rules = _candidate_fast_no_trade_validation_candidates()
+    started = pd.Timestamp.now(tz="UTC")
+    payload = {
+        "schema_version": 1,
+        "stage": "VALIDATION",
+        "validation_start_timestamp": int(started.timestamp() * 1000),
+        "validation_start_utc": started.isoformat(),
+        "primary_strategy": "Legacy V1 + Strength > 0",
+        "execution": {
+            "tp_pct": 0.5,
+            "sl_pct": 3.0,
+            "horizon_min": 180,
+            "starting_equity_usdt": 200.0,
+            "leverage": 3.0,
+            "slots": 1,
+            "margin_pct_equity": 80.0,
+            "priority": "Most HTF Room → Strength",
+            "market_flow_gate": "OFF",
+        },
+        "rules": rules,
+        "rule_text": {
+            rid: _candidate_fast_regime_auto_rule_text(rule, reverse_labels)
+            for rid, rule in rules.items()
+        },
+    }
+    payload["frozen_digest"] = _candidate_fast_no_trade_validation_digest(payload)
+    _candidate_fast_no_trade_validation_save(payload)
+    return payload
+
+
+def _candidate_fast_no_trade_validation_forward_resolved(
+    execution,
+    *,
+    variant,
+    start_ms,
+):
+    _, resolved = _candidate_v2_concurrency_source(
+        execution,
+        variant=variant,
+        strong_threshold=0.50,
+    )
+    if resolved is None or resolved.empty:
+        return pd.DataFrame()
+    work = resolved.copy()
+    work["_entry_ts"] = pd.to_numeric(
+        work.get("_entry_ts", pd.Series(index=work.index, dtype=float)),
+        errors="coerce",
+    )
+    work = work.loc[
+        work["_entry_ts"].notna()
+        & work["_entry_ts"].ge(float(start_ms))
+    ].copy()
+    return work.sort_values(
+        ["_entry_ts", "symbol"],
+        kind="stable",
+    )
+
+
+def _candidate_fast_no_trade_validation_run_strategy(
+    execution,
+    *,
+    strategy_label,
+    variant,
+    start_ms,
+    rules,
+):
+    resolved = _candidate_fast_no_trade_validation_forward_resolved(
+        execution,
+        variant=variant,
+        start_ms=start_ms,
+    )
+    if resolved.empty:
+        return [], {}, resolved
+
+    rows = []
+    payloads = {}
+    control_mask = pd.Series(False, index=resolved.index, dtype=bool)
+    control_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+        resolved,
+        control_mask,
+    )
+    control_summary = _candidate_fast_portfolio_summary(control_portfolio)
+    if not control_summary:
+        return [], {}, resolved
+
+    rows.append({
+        "Strategy": strategy_label,
+        "Candidate": "CONTROL",
+        "Rule": "No NO-TRADE gate",
+        "Forward resolved": int(len(resolved)),
+        "Blocked": 0,
+        "Blocked %": 0.0,
+        "Blocked W": 0,
+        "Blocked L": 0,
+        "Accepted": int(control_summary.get("Accepted", 0)),
+        "Final equity": float(control_summary.get("Final equity", np.nan)),
+        "Return %": float(control_summary.get("Return %", np.nan)),
+        "Max DD %": float(control_summary.get("Max DD %", np.nan)),
+        "PF": float(control_summary.get("PF", np.nan)),
+    })
+    payloads["CONTROL"] = {
+        "resolved": resolved,
+        "blocked_mask": control_mask,
+        "portfolio": control_portfolio,
+    }
+
+    for rid, rule in rules.items():
+        blocked_mask = _candidate_fast_regime_auto_rule_mask(
+            resolved,
+            rule,
+        ).reindex(
+            resolved.index,
+            fill_value=False,
+        ).fillna(False).astype(bool)
+
+        gated_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+            resolved,
+            blocked_mask,
+        )
+        summary = _candidate_fast_portfolio_summary(gated_portfolio)
+        if not summary:
+            continue
+        blocked = resolved.loc[blocked_mask].copy()
+        blocked_net = pd.to_numeric(
+            blocked.get("net_pnl_pct", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        rows.append({
+            "Strategy": strategy_label,
+            "Candidate": rid,
+            "Rule": "Frozen rule",
+            "Forward resolved": int(len(resolved)),
+            "Blocked": int(blocked_mask.sum()),
+            "Blocked %": float(blocked_mask.mean() * 100.0),
+            "Blocked W": int(blocked_net.gt(0).sum()),
+            "Blocked L": int(blocked_net.lt(0).sum()),
+            "Accepted": int(summary.get("Accepted", 0)),
+            "Final equity": float(summary.get("Final equity", np.nan)),
+            "Return %": float(summary.get("Return %", np.nan)),
+            "Max DD %": float(summary.get("Max DD %", np.nan)),
+            "PF": float(summary.get("PF", np.nan)),
+        })
+        payloads[rid] = {
+            "resolved": resolved,
+            "blocked_mask": blocked_mask,
+            "portfolio": gated_portfolio,
+        }
+
+    return rows, payloads, resolved
+
+
+def _candidate_fast_render_no_trade_validation(
+    execution,
+    *,
+    reverse_labels,
+):
+    st.markdown("##### 🧪 Validation · frozen forward test")
+    st.caption(
+        "Validation never searches thresholds. It evaluates fixed rules only on "
+        "Legacy V1 executions whose entry timestamp is AFTER the saved validation "
+        "start. Discovery can keep changing without altering this cohort."
+    )
+
+    validation = _candidate_fast_no_trade_validation_load()
+    candidate_rules = _candidate_fast_no_trade_validation_candidates()
+
+    if not validation:
+        st.info(
+            "Validation has not started yet. The two Discovery candidates below "
+            "will be frozen exactly as written when you press Start Validation now."
+        )
+        preview = pd.DataFrame([
+            {
+                "Candidate": rid,
+                "Frozen rule": _candidate_fast_regime_auto_rule_text(
+                    rule,
+                    reverse_labels,
+                ),
+            }
+            for rid, rule in candidate_rules.items()
+        ])
+        st.dataframe(
+            preview,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_fast_validation_preview",
+        )
+        st.caption(
+            "R1 keeps the Discovery threshold 1.6282. R2 uses the more selective "
+            "1.7910 robustness candidate. CONTROL is Legacy V1 + Strength > 0 "
+            "with no NO-TRADE gate."
+        )
+        if st.button(
+            "🧊 Start Validation now · freeze R1 / R2",
+            type="primary",
+            use_container_width=True,
+            key="candidate_fast_validation_start",
+        ):
+            validation = _candidate_fast_no_trade_validation_start(
+                reverse_labels
+            )
+            st.success(
+                "Validation started. Rules and start timestamp were persisted; "
+                "only later entries count from now on."
+            )
+        else:
+            return
+
+    start_ms = int(validation.get("validation_start_timestamp", 0) or 0)
+    rules = validation.get("rules", {})
+    if start_ms <= 0 or not isinstance(rules, dict) or not rules:
+        st.error(
+            "The persisted Validation file is incomplete. Leave it untouched and "
+            "inspect reports/research/candidate/no_trade_validation.json."
+        )
+        return
+
+    start_dt = pd.to_datetime(
+        start_ms,
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    )
+    try:
+        start_local = start_dt.tz_convert(TZ)
+    except Exception:
+        start_local = start_dt
+    frozen_digest = str(
+        validation.get("frozen_digest")
+        or _candidate_fast_no_trade_validation_digest(validation)
+    )
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric(
+        "Validation start",
+        start_local.strftime("%Y-%m-%d %H:%M") if pd.notna(start_local) else "—",
+    )
+    m2.metric("Frozen rules", len(rules))
+    m3.metric("Frozen digest", frozen_digest)
+
+    rule_table = pd.DataFrame([
+        {
+            "Candidate": rid,
+            "Frozen rule": _candidate_fast_regime_auto_rule_text(
+                rule,
+                reverse_labels,
+            ),
+        }
+        for rid, rule in rules.items()
+    ])
+    st.dataframe(
+        rule_table,
+        use_container_width=True,
+        hide_index=True,
+        key="candidate_fast_validation_rules",
+    )
+
+    strategy_defs = [
+        ("Legacy V1 + Strength > 0", "Candidate + Strength"),
+        ("Legacy V1 Base", "Candidate Base"),
+    ]
+    all_rows = []
+    all_payloads = {}
+    forward_counts = {}
+    for strategy_label, variant in strategy_defs:
+        rows, payloads, forward = (
+            _candidate_fast_no_trade_validation_run_strategy(
+                execution,
+                strategy_label=strategy_label,
+                variant=variant,
+                start_ms=start_ms,
+                rules=rules,
+            )
+        )
+        all_rows.extend(rows)
+        all_payloads[strategy_label] = payloads
+        forward_counts[strategy_label] = int(len(forward))
+
+    primary_count = int(
+        forward_counts.get("Legacy V1 + Strength > 0", 0)
+    )
+    if primary_count <= 0:
+        st.warning(
+            "Validation is correctly frozen, but there are no resolved Strength "
+            "executions with entry_timestamp after the Validation start yet. "
+            "Keep collecting/refreshing Candidate; this section will fill itself "
+            "without changing the rules."
+        )
+        st.caption(
+            f"Persistent file: {CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE}"
+        )
+        return
+
+    frame = pd.DataFrame(all_rows)
+    for metric in [
+        "Blocked %", "Final equity", "Return %", "Max DD %", "PF",
+    ]:
+        if metric in frame.columns:
+            frame[metric] = pd.to_numeric(
+                frame[metric],
+                errors="coerce",
+            ).round(4)
+
+    st.markdown("###### Forward results · CONTROL vs R1 vs R2")
+    st.dataframe(
+        frame,
+        use_container_width=True,
+        hide_index=True,
+        key="candidate_fast_validation_forward_results",
+    )
+
+    st.caption(
+        "Primary decision set = Legacy V1 + Strength > 0. Legacy V1 Base is shown "
+        "as a secondary robustness check. No row before Validation start is included."
+    )
+
+    primary_payloads = all_payloads.get(
+        "Legacy V1 + Strength > 0",
+        {},
+    )
+    control_payload = primary_payloads.get("CONTROL")
+    available_rules = [
+        rid for rid in rules if rid in primary_payloads
+    ]
+    if control_payload and available_rules:
+        tabs = st.tabs([
+            f"{rid} forward equity"
+            for rid in available_rules
+        ])
+        for tab, rid in zip(tabs, available_rules):
+            with tab:
+                payload = primary_payloads[rid]
+                _candidate_fast_regime_render_auto_equity(
+                    payload["resolved"],
+                    payload["blocked_mask"],
+                    control_payload["portfolio"],
+                    payload["portfolio"],
+                    key=f"candidate_fast_validation_equity_{rid}",
+                    title=(
+                        "VALIDATION · Strength CONTROL vs "
+                        f"{rid} · "
+                        + _candidate_fast_regime_auto_rule_text(
+                            rules[rid],
+                            reverse_labels,
+                        )
+                    ),
+                )
+
+    st.success(
+        "Validation is locked. New Candidate snapshots extend the forward sample; "
+        "they do not modify the start timestamp or frozen R1/R2 definitions."
+    )
+    st.caption(
+        f"Persistent validation file: {CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE}"
+    )
+
+
 def render_candidate_fast_no_trade_lab():
     """Causal NO-TRADE regime research on materialized Legacy V1 execution."""
     store = candidate_research_store
@@ -50277,6 +50701,32 @@ def render_candidate_fast_no_trade_lab():
         "180m, $200, x3, 1 slot, 80% margin, Room → Strength. Blocking a regime "
         "removes those candidate executions first and then reruns the chronological "
         "portfolio, so freed slots can be used by later signals."
+    )
+
+    reverse_labels = {column: label for label, column in feature_labels.items()}
+
+    research_stage = st.radio(
+        "Research stage",
+        ["Discovery", "Validation"],
+        index=0,
+        horizontal=True,
+        key="candidate_fast_regime_research_stage",
+        help=(
+            "Discovery searches and dissects rules on the existing historical sample. "
+            "Validation evaluates frozen rules only on entries after the saved start."
+        ),
+    )
+
+    if research_stage == "Validation":
+        _candidate_fast_render_no_trade_validation(
+            execution,
+            reverse_labels=reverse_labels,
+        )
+        return
+
+    st.info(
+        "DISCOVERY mode: scanner, component anatomy and robustness can continue to "
+        "change freely. Nothing changed here alters the frozen Validation cohort."
     )
 
     variant_labels = {
@@ -50337,7 +50787,6 @@ def render_candidate_fast_no_trade_lab():
         )
 
     feature_options = [feature_labels[label] for label in available_labels]
-    reverse_labels = {column: label for label, column in feature_labels.items()}
 
     st.markdown("##### Manual gate controls")
     gate1, gate2 = st.columns(2)
