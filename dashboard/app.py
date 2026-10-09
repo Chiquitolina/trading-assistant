@@ -48265,10 +48265,30 @@ def _candidate_fast_build_snapshot(
         long_config=v1_long_config,
     )
 
+    # --------------------------------------------------------------
+    # 1) RAW research universe: every observed 15m REACTION before
+    #    the Legacy Room/RSI filters. This remains the filter lab.
+    # --------------------------------------------------------------
     v1_raw = _candidate_fast_build_v1_raw_universe(retests_df)
     if v1_raw.empty:
         raise RuntimeError("Legacy V1 RAW universe is empty")
 
+    # --------------------------------------------------------------
+    # 2) Official/persisted Legacy V1 universe. This is intentionally
+    #    separate from RAW so the fast equity parity test can reproduce
+    #    the exact V1 candidate identity used by the compatibility engine.
+    # --------------------------------------------------------------
+    v1_legacy = _candidate_v1_unified_research_history(
+        retests_df,
+        v1_short_config,
+        v1_long_config,
+    )
+    if v1_legacy is None or v1_legacy.empty:
+        raise RuntimeError("Official Legacy V1 universe is empty")
+    v1_legacy = v1_legacy.copy()
+    v1_legacy["candidate_analysis_profile"] = "v1"
+
+    # V2 remains the threshold-agnostic REACTION universe.
     v2_history, v2_config, v2_newly_frozen = (
         _candidate_v2_load_or_freeze_universe(retests_df)
     )
@@ -48283,17 +48303,55 @@ def _candidate_fast_build_snapshot(
         v1_raw,
         force=False,
     )
+    v1_legacy_context, v1_legacy_sector_error = _candidate_v2_build_market_context(
+        v1_legacy,
+        force=False,
+    )
     v2_context, v2_sector_error = _candidate_v2_build_market_context(
         v2_history,
         force=False,
     )
     if v1_context is None or v1_context.empty:
         v1_context = v1_raw.copy()
+    if v1_legacy_context is None or v1_legacy_context.empty:
+        v1_legacy_context = v1_legacy.copy()
     if v2_context is None or v2_context.empty:
         v2_context = v2_history.copy()
 
     v1_context["candidate_analysis_profile"] = "v1"
+    v1_legacy_context["candidate_analysis_profile"] = "v1"
     v2_context["candidate_analysis_profile"] = "v2"
+
+    # --------------------------------------------------------------
+    # 3) Fixed Legacy parity execution snapshot.
+    #
+    # Same execution definition as the existing V1/V2 fixed benchmark:
+    # TP 0.5% / SL 3% / 180m, 0.05% entry + 0.05% exit fees,
+    # no slippage. This is materialized once during BUILD so equity
+    # exploration never needs scanner/Redis/path reconstruction.
+    # --------------------------------------------------------------
+    legacy_execution = _candidate_v2_execution_grid(
+        v1_legacy_context,
+        tp_values=(0.5,),
+        sl_values=(3.0,),
+        horizon_min=180,
+        entry_fee_pct=0.05,
+        exit_fee_pct=0.05,
+        entry_slippage_pct=0.0,
+        exit_slippage_pct=0.0,
+        notional_usdt=100.0,
+        force=False,
+    )
+    legacy_exec_context = _candidate_v2_merge_execution_context(
+        legacy_execution,
+        v1_legacy_context,
+    )
+    if legacy_exec_context is None or legacy_exec_context.empty:
+        raise RuntimeError(
+            "Legacy V1 fixed TP 0.5 / SL 3 / 180m execution snapshot is empty"
+        )
+    legacy_exec_context = legacy_exec_context.copy()
+    legacy_exec_context["candidate_analysis_profile"] = "v1"
 
     reaction_count, reaction_digest, max_retest_ts = (
         _candidate_analysis_retests_signature(retests_df)
@@ -48301,6 +48359,8 @@ def _candidate_fast_build_snapshot(
     manifest = candidate_research_store.write_bundle(
         {
             "v1_raw": v1_context,
+            "v1_legacy": v1_legacy_context,
+            "v1_legacy_execution": legacy_exec_context,
             "v2": v2_context,
         },
         source_meta={
@@ -48308,10 +48368,31 @@ def _candidate_fast_build_snapshot(
             "reaction_digest": str(reaction_digest),
             "max_retest_timestamp": max_retest_ts,
             "v1_raw_rows": int(len(v1_context)),
+            "v1_legacy_rows": int(len(v1_legacy_context)),
+            "v1_legacy_execution_rows": int(len(legacy_exec_context)),
             "v2_rows": int(len(v2_context)),
             "v2_newly_frozen": bool(v2_newly_frozen),
             "v1_sector_error": v1_sector_error,
+            "v1_legacy_sector_error": v1_legacy_sector_error,
             "v2_sector_error": v2_sector_error,
+            "legacy_execution_definition": {
+                "tp_pct": 0.5,
+                "sl_pct": 3.0,
+                "horizon_min": 180,
+                "entry_fee_pct": 0.05,
+                "exit_fee_pct": 0.05,
+                "entry_slippage_pct": 0.0,
+                "exit_slippage_pct": 0.0,
+            },
+            "legacy_portfolio_definition": {
+                "starting_equity": 200.0,
+                "leverage": 3.0,
+                "max_slots": 1,
+                "max_margin_pct": 80.0,
+                "margin_per_trade_pct": 80.0,
+                "priority_mode": "Most HTF Room → Strength",
+                "market_flow_gate_mode": "OFF",
+            },
             "build_pipeline_seconds": float(time.perf_counter() - started),
         },
     )
@@ -48319,9 +48400,192 @@ def _candidate_fast_build_snapshot(
         "manifest": manifest,
         "ledger": ledger_result,
         "v1_raw": v1_context,
+        "v1_legacy": v1_legacy_context,
+        "v1_legacy_execution": legacy_exec_context,
         "v2": v2_context,
         "v2_config": v2_config,
     }
+
+
+def _candidate_fast_portfolio_summary(portfolio):
+    if not portfolio:
+        return {}
+    summary = portfolio.get("summary", {}) or {}
+    return {
+        "Eligible": int(summary.get("Eligible trades", 0) or 0),
+        "Accepted": int(summary.get("Accepted trades", 0) or 0),
+        "Skipped": int(summary.get("Skipped trades", 0) or 0),
+        "Final equity": float(summary.get("Final equity", np.nan)),
+        "Return %": float(summary.get("Return %", np.nan)),
+        "Max DD %": float(summary.get("Max drawdown %", np.nan)),
+        "PF": (
+            float(summary.get("Portfolio PF"))
+            if pd.notna(summary.get("Portfolio PF", np.nan))
+            else np.nan
+        ),
+    }
+
+
+def _candidate_fast_legacy_v1_portfolio(execution, variant):
+    if execution is None or execution.empty:
+        return {}, pd.DataFrame()
+
+    _, resolved = _candidate_v2_concurrency_source(
+        execution,
+        variant=variant,
+        strong_threshold=0.50,
+    )
+    if resolved is None or resolved.empty:
+        return {}, pd.DataFrame()
+
+    portfolio = _candidate_v2_portfolio_simulation(
+        resolved,
+        starting_equity=200.0,
+        leverage=3.0,
+        max_slots=1,
+        risk_per_trade_pct=0.25,
+        selected_sl_pct=3.0,
+        max_margin_pct=80.0,
+        compound=True,
+        priority_mode="Most HTF Room → Strength",
+        sizing_mode="Margin % equity",
+        fixed_margin_usd=150.0,
+        margin_per_trade_pct=80.0,
+        market_flow_gate_mode="OFF",
+    )
+    return portfolio, resolved
+
+
+def render_candidate_fast_legacy_v1_equity():
+    """Rebuild the fixed Legacy V1 equity curve from materialized execution rows."""
+    store = candidate_research_store
+    if (
+        store is None
+        or not store.available
+        or not store.snapshot_exists("v1_legacy_execution")
+    ):
+        return
+
+    result = store.query(
+        "v1_legacy_execution",
+        limit=10000,
+    )
+    execution = result.get("frame", pd.DataFrame())
+    if execution is None or execution.empty:
+        st.info("No materialized Legacy V1 execution rows are available yet.")
+        return
+
+    st.markdown("#### 💰 Legacy V1 equity parity · Fast")
+    st.caption(
+        "Reconstructed from the official persisted Legacy V1 Event IDs using the "
+        "same fixed execution/portfolio semantics as the compatibility benchmark: "
+        "TP 0.5% / SL 3% / 180m · fees 0.05% + 0.05% · $200 · x3 · 1 slot · "
+        "80% realized-equity margin · Most HTF Room → Strength · Flow gate OFF."
+    )
+
+    variants = [
+        ("Legacy V1 Base", "Candidate Base"),
+        ("Legacy V1 + Strength > 0", "Candidate + Strength"),
+    ]
+    rows = []
+    curves = []
+
+    for label, variant in variants:
+        portfolio, resolved = _candidate_fast_legacy_v1_portfolio(
+            execution,
+            variant,
+        )
+        summary = _candidate_fast_portfolio_summary(portfolio)
+        if not summary:
+            continue
+
+        rows.append({
+            "Variant": label,
+            "Execution rows": int(len(execution)),
+            "Resolved eligible": int(len(resolved)),
+            **summary,
+        })
+
+        curve = portfolio.get("equity_curve", pd.DataFrame()) if portfolio else pd.DataFrame()
+        if curve is not None and not curve.empty:
+            curve = curve.copy()
+            curve["time"] = (
+                pd.to_datetime(
+                    pd.to_numeric(curve["timestamp"], errors="coerce"),
+                    unit="ms",
+                    utc=True,
+                    errors="coerce",
+                )
+                .dt.tz_convert(TZ)
+            )
+            curve["Variant"] = label
+            curves.append(curve)
+
+    summary_df = pd.DataFrame(rows)
+    if summary_df.empty:
+        st.warning("Legacy V1 portfolio could not be reconstructed from the snapshot.")
+        return
+
+    st.dataframe(
+        summary_df,
+        use_container_width=True,
+        hide_index=True,
+        key="candidate_fast_legacy_equity_summary",
+    )
+
+    base_row = summary_df.loc[
+        summary_df["Variant"].astype(str).eq("Legacy V1 Base")
+    ]
+    if not base_row.empty:
+        base = base_row.iloc[0]
+        e1, e2, e3, e4, e5 = st.columns(5)
+        e1.metric("Accepted", int(base.get("Accepted", 0) or 0))
+        e2.metric("Final equity", f"${float(base.get('Final equity', np.nan)):.2f}")
+        e3.metric("Return", f"{float(base.get('Return %', np.nan)):.2f}%")
+        e4.metric("Max DD", f"{float(base.get('Max DD %', np.nan)):.2f}%")
+        pf_value = base.get("PF", np.nan)
+        e5.metric(
+            "PF",
+            f"{float(pf_value):.2f}" if pd.notna(pf_value) and np.isfinite(float(pf_value)) else "∞",
+        )
+
+    if curves:
+        fig = go.Figure()
+        for curve in curves:
+            label = str(curve["Variant"].iloc[0])
+            fig.add_trace(
+                go.Scatter(
+                    x=curve["time"],
+                    y=pd.to_numeric(curve["equity"], errors="coerce"),
+                    mode="lines+markers",
+                    name=label,
+                )
+            )
+        fig.add_hline(
+            y=200.0,
+            line_dash="dot",
+            annotation_text="Starting equity",
+            annotation_position="top left",
+        )
+        fig.update_layout(
+            title="Legacy V1 · fixed portfolio equity parity",
+            xaxis_title="Time",
+            yaxis_title="Realized equity (USDT)",
+            hovermode="x unified",
+            margin={"l": 10, "r": 10, "t": 55, "b": 10},
+        )
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key="candidate_fast_legacy_v1_equity_curve",
+            config={"displaylogo": False},
+        )
+
+    st.caption(
+        f"Execution snapshot query: {float(result.get('elapsed_ms', 0.0)):.1f} ms. "
+        "If Legacy V1 Base does not match the compatibility benchmark, compare "
+        "Event IDs / executable / resolved counts before changing any strategy rule."
+    )
 
 
 def render_candidate_fast_explorer():
@@ -48496,6 +48760,10 @@ def render_candidate_fast_explorer():
         "Legacy original can now be reproduced as a query: HTF Room >= 1% "
         "AND aligned RSI TFs >= 1. The RAW dataset itself remains unfiltered."
     )
+
+    if profile == "v1_raw":
+        st.divider()
+        render_candidate_fast_legacy_v1_equity()
 
 
 def render_candidate_research(

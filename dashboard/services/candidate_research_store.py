@@ -28,9 +28,11 @@ class CandidateResearchStore:
     context builders.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     PROFILE_FILES = {
         "v1_raw": "candidate_v1_raw.parquet",
+        "v1_legacy": "candidate_v1_legacy.parquet",
+        "v1_legacy_execution": "candidate_v1_legacy_execution.parquet",
         "v2": "candidate_v2.parquet",
     }
 
