@@ -111,31 +111,67 @@ class CandidateResearchStore:
 
     @classmethod
     def _prepare_for_parquet(cls, frame: pd.DataFrame) -> pd.DataFrame:
+        """Normalize pandas object columns into Arrow-safe scalar columns.
+
+        Research frames contain payload columns such as first_touch_60m_results
+        that may be strings/None in early rows and dict/list objects later. A
+        sampled dtype check can miss those late complex values, so every non-null
+        object value is inspected before deciding how the column is encoded.
+        """
         result = frame.copy().infer_objects()
+
+        def _is_complex(value: Any) -> bool:
+            return isinstance(value, (dict, list, tuple, set))
+
+        def _encode_object(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            try:
+                if pd.isna(value):
+                    return None
+            except Exception:
+                pass
+            if _is_complex(value):
+                return json.dumps(
+                    cls._json_safe(value),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            if isinstance(value, pd.Timestamp):
+                return value.isoformat()
+            return str(value)
+
         for column in result.columns:
             series = result[column]
             if series.dtype != "object":
                 continue
-            sample = series.dropna().head(100)
-            if sample.empty:
+
+            non_null = series.dropna()
+            if non_null.empty:
                 continue
-            types = {type(value) for value in sample.tolist()}
-            if types.issubset({str}):
+
+            values = non_null.tolist()
+            has_complex = any(_is_complex(value) for value in values)
+
+            # Any dict/list anywhere means Arrow needs one homogeneous scalar
+            # representation for the entire column, not just those complex rows.
+            if has_complex:
+                result[column] = series.map(_encode_object)
                 continue
-            if all(isinstance(value, (bool, int, float)) for value in sample.tolist()):
+
+            if all(isinstance(value, str) for value in values):
+                continue
+
+            if all(
+                isinstance(value, (bool, int, float))
+                and not isinstance(value, complex)
+                for value in values
+            ):
                 result[column] = pd.to_numeric(series, errors="coerce")
                 continue
-            result[column] = series.map(
-                lambda value: (
-                    json.dumps(cls._json_safe(value), sort_keys=True)
-                    if isinstance(value, (dict, list, tuple, set))
-                    else (
-                        value.isoformat()
-                        if isinstance(value, pd.Timestamp)
-                        else (None if value is None else str(value))
-                    )
-                )
-            )
+
+            result[column] = series.map(_encode_object)
+
         return result
 
     @staticmethod
