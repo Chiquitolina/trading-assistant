@@ -50526,7 +50526,7 @@ def _candidate_fast_render_reverse_regime_search(
         "Validation or any frozen rule."
     )
 
-    rr1, rr2, rr3 = st.columns(3)
+    rr1, rr2 = st.columns(2)
     source_options = list(component_rule_map.keys())
     source_default = "A OR B" if "A OR B" in source_options else source_options[0]
     source_label = rr1.selectbox(
@@ -50543,12 +50543,6 @@ def _candidate_fast_render_reverse_regime_search(
         index=(strategy_labels.index("Legacy V1 + Strength > 0")
                if "Legacy V1 + Strength > 0" in strategy_labels else 0),
         key="candidate_fast_reverse_strategy",
-    )
-    zone_count = rr3.selectbox(
-        "Bad zones",
-        [1, 2, 3, 4, 5],
-        index=1,
-        key="candidate_fast_reverse_zone_count",
     )
 
     source_rule = component_rule_map[str(source_label)]
@@ -50604,13 +50598,26 @@ def _candidate_fast_render_reverse_regime_search(
     zones = []
     st.markdown("**Select bad intervals · 4h resolution**")
     st.caption(
-        "Each slider has two markers aligned to local 4-hour blocks "
-        "(00:00 / 04:00 / 08:00 / 12:00 / 16:00 / 20:00). Add multiple zones "
-        "when the same kind of deterioration appears in separate parts of the "
-        "equity curve. The 4h grid is intentional to reduce minute-level "
+        "Bad zone 1 is always active. Enable zones 2–5 only when a separate "
+        "deterioration really needs its own interval. Sliders stay mounted even "
+        "when disabled so their limits are preserved. Boundaries are aligned to "
+        "local 4-hour blocks (00:00 / 04:00 / 08:00 / 12:00 / 16:00 / 20:00). "
+        "Keeping a maximum of five zones is intentional to reduce drawdown-by-drawdown "
         "cherry-picking during Discovery."
     )
-    for idx in range(int(zone_count)):
+
+    enable_cols = st.columns(4)
+    zone_enabled = [True]
+    for optional_idx in range(1, 5):
+        default_enabled = optional_idx == 1
+        enabled = enable_cols[optional_idx - 1].checkbox(
+            f"Use bad zone {optional_idx + 1}",
+            value=default_enabled,
+            key=f"candidate_fast_reverse_zone_enabled_{optional_idx}",
+        )
+        zone_enabled.append(bool(enabled))
+
+    for idx in range(5):
         # Spread defaults across the latter part of the sample so multiple sliders
         # start distinct instead of covering the entire history, then snap each
         # boundary to the same 4h grid exposed by the control.
@@ -50650,7 +50657,12 @@ def _candidate_fast_render_reverse_regime_search(
             step=reverse_zone_step.to_pytimedelta(),
             format="DD/MM HH:mm",
             key=f"candidate_fast_reverse_zone_{idx}",
+            disabled=not zone_enabled[idx],
         )
+
+        if not zone_enabled[idx]:
+            continue
+
         start_local = pd.Timestamp(selected[0]).tz_localize(TZ)
         end_local = pd.Timestamp(selected[1]).tz_localize(TZ)
         zones.append({
@@ -50662,7 +50674,15 @@ def _candidate_fast_render_reverse_regime_search(
                 end_local.tz_convert("UTC").timestamp()
                 * 1000
             ),
+            "label": f"BAD {idx + 1}",
         })
+
+    active_zone_count = len(zones)
+    st.caption(
+        f"Active bad zones: **{active_zone_count} / 5**. "
+        "Enable another zone only when it represents a separate regime failure, "
+        "not merely another individual losing trade."
+    )
 
     _candidate_fast_reverse_render_equity_with_zones(
         [(str(source_label), source_portfolio)],
