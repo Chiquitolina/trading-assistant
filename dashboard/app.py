@@ -50125,6 +50125,39 @@ def _candidate_fast_render_auto_regime_scanner(
             key="candidate_fast_regime_component_anatomy",
         )
 
+    # --------------------------------------------------------
+    # Component explorer
+    # --------------------------------------------------------
+    component_rule_map = {
+        str(label): component_rule
+        for label, component_rule in component_rules
+    }
+    component_options = list(component_rule_map.keys())
+    if component_options:
+        default_component = (
+            "A OR B"
+            if "A OR B" in component_rule_map
+            else component_options[0]
+        )
+        component_index = component_options.index(default_component)
+        selected_component_label = st.selectbox(
+            "Explore component equity",
+            component_options,
+            index=component_index,
+            key="candidate_fast_regime_component_equity_choice",
+            help=(
+                "Draw the exact portfolio/equity for one component of the "
+                "selected scanner rule. A/B/OR/AND use the same execution and "
+                "portfolio semantics as the anatomy table above."
+            ),
+        )
+        selected_component_rule = component_rule_map[
+            str(selected_component_label)
+        ]
+    else:
+        selected_component_label = "Selected rule"
+        selected_component_rule = rule
+
     st.markdown("###### Threshold robustness · ±10% / ±20%")
     robustness_rows = []
     any_numeric = False
@@ -50190,7 +50223,71 @@ def _candidate_fast_render_auto_regime_scanner(
             "therefore assessed through component and cross-strategy consistency."
         )
 
-    st.markdown("###### Equity · same selected gate on both strategies")
+    st.markdown("###### Equity · selected component on both strategies")
+    st.caption(
+        f"Component shown below: **{selected_component_label}** · "
+        + _candidate_fast_regime_auto_rule_text(
+            selected_component_rule,
+            reverse_labels,
+        )
+    )
+
+    component_strategy_payloads = {}
+    component_summary_rows = []
+    for strategy_label, strategy_variant in strategy_defs:
+        payload = _candidate_fast_regime_compare_rule_on_strategy(
+            execution,
+            strategy_label=strategy_label,
+            variant=strategy_variant,
+            rule=selected_component_rule,
+        )
+        if payload is None:
+            continue
+        component_strategy_payloads[strategy_label] = payload
+        row = dict(payload.get("row", {}))
+        if row:
+            component_summary_rows.append(row)
+
+    if component_summary_rows:
+        component_summary = pd.DataFrame(component_summary_rows)
+        component_summary_cols = [
+            "Strategy",
+            "Blocked %",
+            "Baseline accepted",
+            "Gate accepted",
+            "Baseline final",
+            "Gate final",
+            "Δ equity",
+            "Baseline return %",
+            "Gate return %",
+            "Δ Return pp",
+            "Baseline Max DD %",
+            "Gate Max DD %",
+            "Δ Max DD pp",
+            "Baseline PF",
+            "Gate PF",
+            "Δ PF",
+        ]
+        component_summary_cols = [
+            column
+            for column in component_summary_cols
+            if column in component_summary.columns
+        ]
+        component_summary = component_summary[component_summary_cols].copy()
+        for column in component_summary.columns:
+            if column == "Strategy":
+                continue
+            component_summary[column] = pd.to_numeric(
+                component_summary[column],
+                errors="coerce",
+            ).round(4)
+        st.dataframe(
+            component_summary,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_fast_regime_component_equity_summary",
+        )
+
     equity_tabs = st.tabs([
         "Legacy V1 Base",
         "Legacy V1 + Strength > 0",
@@ -50200,7 +50297,7 @@ def _candidate_fast_render_auto_regime_scanner(
         strategy_defs,
     ):
         with tab:
-            payload = strategy_payloads.get(strategy_label)
+            payload = component_strategy_payloads.get(strategy_label)
             if payload is None:
                 st.info("No resolved portfolio available for this strategy.")
                 continue
@@ -50210,13 +50307,13 @@ def _candidate_fast_render_auto_regime_scanner(
                 payload["baseline_portfolio"],
                 payload["gated_portfolio"],
                 key=(
-                    "candidate_fast_regime_auto_equity_"
+                    "candidate_fast_regime_component_equity_"
                     + ("base" if strategy_label.endswith("Base") else "strength")
                 ),
                 title=(
-                    f"{strategy_label} · baseline vs AUTO NO-TRADE gate · "
+                    f"{strategy_label} · baseline vs {selected_component_label} · "
                     + _candidate_fast_regime_auto_rule_text(
-                        rule,
+                        selected_component_rule,
                         reverse_labels,
                     )
                 ),
