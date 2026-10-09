@@ -50333,7 +50333,10 @@ def _candidate_fast_reverse_detection_metrics(
     frame,
     detector_mask,
     bad_zone_mask,
+    good_zone_mask=None,
+    comparison_mode="Bad vs rest",
 ):
+    """Contrast detector prevalence across BAD / GOOD / REST populations."""
     detector_mask = (
         detector_mask.reindex(frame.index, fill_value=False)
         .fillna(False)
@@ -50344,42 +50347,114 @@ def _candidate_fast_reverse_detection_metrics(
         .fillna(False)
         .astype(bool)
     )
+    if good_zone_mask is None:
+        good_zone_mask = pd.Series(False, index=frame.index, dtype=bool)
+    else:
+        good_zone_mask = (
+            good_zone_mask.reindex(frame.index, fill_value=False)
+            .fillna(False)
+            .astype(bool)
+        )
+
+    # A candidate cannot be both a positive and negative example. If zones
+    # overlap, BAD wins and GOOD is removed from the overlap.
+    good_zone_mask = good_zone_mask & ~bad_zone_mask
+    rest_mask = ~(bad_zone_mask | good_zone_mask)
+
     bad_n = int(bad_zone_mask.sum())
-    outside_n = int((~bad_zone_mask).sum())
-    hit = int((detector_mask & bad_zone_mask).sum())
-    outside_hit = int((detector_mask & ~bad_zone_mask).sum())
+    good_n = int(good_zone_mask.sum())
+    rest_n = int(rest_mask.sum())
+
+    bad_hit = int((detector_mask & bad_zone_mask).sum())
+    good_hit = int((detector_mask & good_zone_mask).sum())
+    rest_hit = int((detector_mask & rest_mask).sum())
     total_hit = int(detector_mask.sum())
+
+    bad_capture = float(bad_hit / bad_n * 100.0) if bad_n else np.nan
+    good_capture = float(good_hit / good_n * 100.0) if good_n else np.nan
+    rest_capture = float(rest_hit / rest_n * 100.0) if rest_n else np.nan
+
+    bad_precision = float(bad_hit / total_hit * 100.0) if total_hit else np.nan
+    non_bad_n = int((~bad_zone_mask).sum())
+    non_bad_hit = int((detector_mask & ~bad_zone_mask).sum())
+    non_bad_block = (
+        float(non_bad_hit / non_bad_n * 100.0)
+        if non_bad_n
+        else np.nan
+    )
+
+    bad_good_lift = (
+        float(bad_capture / good_capture)
+        if pd.notna(bad_capture) and pd.notna(good_capture) and good_capture > 0
+        else (np.inf if pd.notna(bad_capture) and bad_capture > 0 and good_n else np.nan)
+    )
+    bad_rest_lift = (
+        float(bad_capture / rest_capture)
+        if pd.notna(bad_capture) and pd.notna(rest_capture) and rest_capture > 0
+        else (np.inf if pd.notna(bad_capture) and bad_capture > 0 and rest_n else np.nan)
+    )
+
+    # Backward-compatible lift: BAD prevalence among detector hits relative to
+    # BAD prevalence in the whole population.
     prevalence = float(bad_n / len(frame)) if len(frame) else np.nan
-    capture = float(hit / bad_n * 100.0) if bad_n else np.nan
-    precision = float(hit / total_hit * 100.0) if total_hit else np.nan
-    outside_block = float(outside_hit / outside_n * 100.0) if outside_n else np.nan
-    lift = (
-        float((hit / total_hit) / prevalence)
+    old_lift = (
+        float((bad_hit / total_hit) / prevalence)
         if total_hit and prevalence and prevalence > 0
         else np.nan
     )
+
     return {
-        "Zone candidates": bad_n,
-        "Detected in zones": hit,
-        "Zone capture %": capture,
-        "Detector precision %": precision,
-        "Outside blocked": outside_hit,
-        "Outside blocked %": outside_block,
-        "Detector lift": lift,
+        "Comparison mode": str(comparison_mode),
+        "Bad candidates": bad_n,
+        "Good candidates": good_n,
+        "Rest candidates": rest_n,
+        "Detected in BAD": bad_hit,
+        "Bad capture %": bad_capture,
+        "Detected in GOOD": good_hit,
+        "Good capture %": good_capture,
+        "Detected in REST": rest_hit,
+        "Rest capture %": rest_capture,
+        "Bad precision %": bad_precision,
+        "Bad/Good lift": bad_good_lift,
+        "Bad/Rest lift": bad_rest_lift,
+        "Non-BAD blocked": non_bad_hit,
+        "Non-BAD blocked %": non_bad_block,
+        "Detector lift": old_lift,
         "Detector total": total_hit,
+        # Old names retained for any older display/cache logic.
+        "Zone candidates": bad_n,
+        "Detected in zones": bad_hit,
+        "Zone capture %": bad_capture,
+        "Detector precision %": bad_precision,
+        "Outside blocked": non_bad_hit,
+        "Outside blocked %": non_bad_block,
     }
 
-
-def _candidate_fast_reverse_sort(frame, objective):
+def _candidate_fast_reverse_sort(frame, objective, comparison_mode="Bad vs rest"):
     if frame is None or frame.empty:
         return pd.DataFrame()
     work = frame.copy()
+
     if objective == "Balanced zone detector":
-        specs = [
-            ("Zone capture %", False),
-            ("Detector precision %", False),
-            ("Outside blocked %", True),
-        ]
+        if comparison_mode == "Bad vs good":
+            specs = [
+                ("Bad capture %", False),
+                ("Good capture %", True),
+                ("Bad precision %", False),
+            ]
+        elif comparison_mode == "Bad vs good vs rest":
+            specs = [
+                ("Bad capture %", False),
+                ("Good capture %", True),
+                ("Rest capture %", True),
+                ("Bad precision %", False),
+            ]
+        else:
+            specs = [
+                ("Bad capture %", False),
+                ("Bad precision %", False),
+                ("Non-BAD blocked %", True),
+            ]
         ranks = []
         for i, (column, ascending) in enumerate(specs):
             if column not in work.columns:
@@ -50391,29 +50466,54 @@ def _candidate_fast_reverse_sort(frame, objective):
             ranks.append(rank_col)
         if ranks:
             work["Detection rank"] = work[ranks].sum(axis=1)
+            secondary = ["Detection rank", "Non-BAD blocked %", "Bad capture %"]
+            secondary = [c for c in secondary if c in work.columns]
+            ascending = [True if c != "Bad capture %" else False for c in secondary]
             return work.sort_values(
-                ["Detection rank", "Outside blocked %", "Zone capture %"],
-                ascending=[True, True, False],
+                secondary,
+                ascending=ascending,
                 kind="stable",
                 na_position="last",
             )
-    if objective == "Highest zone capture":
+
+    if objective == "Highest bad capture":
         return work.sort_values(
-            ["Zone capture %", "Outside blocked %", "Detector precision %"],
-            ascending=[False, True, False],
+            ["Bad capture %", "Good capture %", "Rest capture %"],
+            ascending=[False, True, True],
+            kind="stable",
+            na_position="last",
+        )
+    if objective == "Highest bad/good lift":
+        return work.sort_values(
+            ["Bad/Good lift", "Bad capture %", "Good capture %"],
+            ascending=[False, False, True],
+            kind="stable",
+            na_position="last",
+        )
+    if objective == "Lowest good capture":
+        return work.sort_values(
+            ["Good capture %", "Bad capture %", "Rest capture %"],
+            ascending=[True, False, True],
+            kind="stable",
+            na_position="last",
+        )
+    if objective == "Lowest rest block":
+        return work.sort_values(
+            ["Rest capture %", "Bad capture %", "Good capture %"],
+            ascending=[True, False, True],
             kind="stable",
             na_position="last",
         )
     if objective == "Highest detector precision":
         return work.sort_values(
-            ["Detector precision %", "Zone capture %", "Outside blocked %"],
+            ["Bad precision %", "Bad capture %", "Non-BAD blocked %"],
             ascending=[False, False, True],
             kind="stable",
             na_position="last",
         )
     if objective == "Lowest outside block":
         return work.sort_values(
-            ["Outside blocked %", "Zone capture %", "Detector precision %"],
+            ["Non-BAD blocked %", "Bad capture %", "Bad precision %"],
             ascending=[True, False, False],
             kind="stable",
             na_position="last",
@@ -50425,13 +50525,13 @@ def _candidate_fast_reverse_sort(frame, objective):
         na_position="last",
     )
 
-
 def _candidate_fast_reverse_render_equity_with_zones(
     portfolios,
     zones,
     *,
     key,
     title,
+    good_zones=None,
 ):
     fig = go.Figure()
     real_trace = False
@@ -50464,6 +50564,26 @@ def _candidate_fast_reverse_render_equity_with_zones(
         )
     if not real_trace:
         return
+
+    # GOOD first so BAD remains visually dominant if intervals overlap.
+    for idx, zone in enumerate(good_zones or [], start=1):
+        try:
+            start = pd.to_datetime(int(zone["start_ms"]), unit="ms", utc=True).tz_convert(TZ)
+            end = pd.to_datetime(int(zone["end_ms"]), unit="ms", utc=True).tz_convert(TZ)
+        except Exception:
+            continue
+        if end < start:
+            start, end = end, start
+        fig.add_vrect(
+            x0=start,
+            x1=end,
+            fillcolor="rgba(46, 204, 113, 0.14)",
+            line_width=1,
+            line_color="rgba(46, 204, 113, 0.70)",
+            layer="below",
+            annotation_text=f"GOOD {idx}",
+            annotation_position="top right",
+        )
 
     for idx, zone in enumerate(zones or [], start=1):
         try:
@@ -50504,7 +50624,6 @@ def _candidate_fast_reverse_render_equity_with_zones(
         config={"displaylogo": False},
     )
 
-
 def _candidate_fast_render_reverse_regime_search(
     *,
     execution,
@@ -50513,17 +50632,16 @@ def _candidate_fast_render_reverse_regime_search(
     reverse_labels,
     strategy_defs,
 ):
-    """Discovery-only inverse search from user-selected bad equity intervals."""
+    """Discovery-only inverse search using BAD, GOOD and REST intervals."""
     if not component_rule_map:
         return
 
-    st.markdown("###### 🎯 Reverse regime search · selected bad zones")
+    st.markdown("###### 🎯 Reverse regime search · BAD vs GOOD zones")
     st.caption(
-        "Discovery tool only. Mark one or more bad intervals on a source equity, "
-        "then search causal features that distinguish candidates inside those zones "
-        "from the rest. Starting from A OR B, a discovered detector D is replayed as "
-        "**(A OR B) OR D**: it blocks additional risky contexts. Nothing here changes "
-        "Validation or any frozen rule."
+        "Discovery tool only. BAD zones are contexts we want a defensive detector to "
+        "recognize. GOOD zones are explicit counterexamples we do NOT want that detector "
+        "to block. REST is the remaining sample. Starting from A OR B, a discovered "
+        "detector D is replayed as **(A OR B) OR D**. Nothing here changes Validation."
     )
 
     rr1, rr2 = st.columns(2)
@@ -50568,130 +50686,158 @@ def _candidate_fast_render_reverse_regime_search(
     if entry_ts.empty:
         st.info("No entry timestamps are available for reverse-zone selection.")
         return
+
     min_local_raw = pd.to_datetime(
-        int(entry_ts.min()),
-        unit="ms",
-        utc=True,
+        int(entry_ts.min()), unit="ms", utc=True
     ).tz_convert(TZ).tz_localize(None)
     max_local_raw = pd.to_datetime(
-        int(entry_ts.max()),
-        unit="ms",
-        utc=True,
+        int(entry_ts.max()), unit="ms", utc=True
     ).tz_convert(TZ).tz_localize(None)
 
-    # Reverse-zone selection intentionally uses a coarse 4h grid. This is
-    # precise enough to isolate a market regime while making it harder to
-    # cherry-pick individual losing trades/minutes. Align to local 00/04/08/...
-    # blocks so the selected intervals are also easy to compare with 1h/4h
-    # regime features.
     reverse_zone_step = pd.Timedelta(hours=4)
     min_local = min_local_raw.floor("4h")
     max_local = max_local_raw.ceil("4h")
     if max_local <= min_local:
         max_local = min_local + reverse_zone_step
-
     total_seconds = max(
         (max_local - min_local).total_seconds(),
         reverse_zone_step.total_seconds(),
     )
 
-    zones = []
-    st.markdown("**Select bad intervals · 4h resolution**")
-    st.caption(
-        "Bad zone 1 is always active. Enable zones 2–5 only when a separate "
-        "deterioration really needs its own interval. Sliders stay mounted even "
-        "when disabled so their limits are preserved. Boundaries are aligned to "
-        "local 4-hour blocks (00:00 / 04:00 / 08:00 / 12:00 / 16:00 / 20:00). "
-        "Keeping a maximum of five zones is intentional to reduce drawdown-by-drawdown "
-        "cherry-picking during Discovery."
-    )
+    def zone_defaults(idx, *, good=False):
+        if good:
+            frac_start = min(0.18 + idx * 0.12, 0.82)
+        else:
+            frac_start = min(0.45 + idx * 0.10, 0.88)
+        frac_end = min(frac_start + 0.08, 0.98)
+        default_start = (
+            min_local + pd.Timedelta(seconds=total_seconds * frac_start)
+        ).round("4h")
+        default_end = (
+            min_local + pd.Timedelta(seconds=total_seconds * frac_end)
+        ).round("4h")
+        default_start = max(min_local, min(default_start, max_local))
+        default_end = max(min_local, min(default_end, max_local))
+        if default_end <= default_start:
+            default_end = min(default_start + reverse_zone_step, max_local)
+        if default_end <= default_start:
+            default_start = max(min_local, max_local - reverse_zone_step)
+            default_end = max_local
+        return default_start, default_end
 
-    enable_cols = st.columns(4)
-    zone_enabled = [True]
+    # ----------------------------------------------------------
+    # BAD zones: target contexts to detect
+    # ----------------------------------------------------------
+    bad_zones = []
+    st.markdown("**BAD zones · contexts we want to detect**")
+    st.caption(
+        "4h boundaries are deliberate: precise enough for regime analysis, coarse enough "
+        "to reduce loss-by-loss cherry-picking. Bad zone 1 is always active; zones 2–5 "
+        "are incremental."
+    )
+    bad_cols = st.columns(4)
+    bad_enabled = [True]
     for optional_idx in range(1, 5):
         default_enabled = optional_idx == 1
-        enabled = enable_cols[optional_idx - 1].checkbox(
+        enabled = bad_cols[optional_idx - 1].checkbox(
             f"Use bad zone {optional_idx + 1}",
             value=default_enabled,
             key=f"candidate_fast_reverse_zone_enabled_{optional_idx}",
         )
-        zone_enabled.append(bool(enabled))
+        bad_enabled.append(bool(enabled))
 
     for idx in range(5):
-        # Spread defaults across the latter part of the sample so multiple sliders
-        # start distinct instead of covering the entire history, then snap each
-        # boundary to the same 4h grid exposed by the control.
-        frac_start = min(0.45 + idx * 0.10, 0.88)
-        frac_end = min(frac_start + 0.08, 0.98)
-        default_start = (
-            min_local
-            + pd.Timedelta(seconds=total_seconds * frac_start)
-        ).round("4h")
-        default_end = (
-            min_local
-            + pd.Timedelta(seconds=total_seconds * frac_end)
-        ).round("4h")
-
-        default_start = max(min_local, min(default_start, max_local))
-        default_end = max(min_local, min(default_end, max_local))
-        if default_end <= default_start:
-            default_end = min(
-                default_start + reverse_zone_step,
-                max_local,
-            )
-        if default_end <= default_start:
-            default_start = max(
-                min_local,
-                max_local - reverse_zone_step,
-            )
-            default_end = max_local
-
+        default_start, default_end = zone_defaults(idx, good=False)
         selected = st.slider(
             f"Bad zone {idx + 1}",
             min_value=min_local.to_pydatetime(),
             max_value=max_local.to_pydatetime(),
-            value=(
-                default_start.to_pydatetime(),
-                default_end.to_pydatetime(),
-            ),
+            value=(default_start.to_pydatetime(), default_end.to_pydatetime()),
             step=reverse_zone_step.to_pytimedelta(),
             format="DD/MM HH:mm",
             key=f"candidate_fast_reverse_zone_{idx}",
-            disabled=not zone_enabled[idx],
+            disabled=not bad_enabled[idx],
         )
-
-        if not zone_enabled[idx]:
+        if not bad_enabled[idx]:
             continue
-
         start_local = pd.Timestamp(selected[0]).tz_localize(TZ)
         end_local = pd.Timestamp(selected[1]).tz_localize(TZ)
-        zones.append({
-            "start_ms": int(
-                start_local.tz_convert("UTC").timestamp()
-                * 1000
-            ),
-            "end_ms": int(
-                end_local.tz_convert("UTC").timestamp()
-                * 1000
-            ),
+        bad_zones.append({
+            "start_ms": int(start_local.tz_convert("UTC").timestamp() * 1000),
+            "end_ms": int(end_local.tz_convert("UTC").timestamp() * 1000),
             "label": f"BAD {idx + 1}",
         })
 
-    active_zone_count = len(zones)
     st.caption(
-        f"Active bad zones: **{active_zone_count} / 5**. "
-        "Enable another zone only when it represents a separate regime failure, "
-        "not merely another individual losing trade."
+        f"Active BAD zones: **{len(bad_zones)} / 5**. Add another only when it represents "
+        "a separate regime failure, not simply another losing trade."
+    )
+
+    # ----------------------------------------------------------
+    # GOOD zones: explicit counterexamples / preservation zones
+    # ----------------------------------------------------------
+    good_zones = []
+    st.markdown("**GOOD zones · contexts we explicitly want to preserve**")
+    st.caption(
+        "GOOD zones are optional. They are not a TRADE signal; they are counterexamples "
+        "used to penalize detectors that also fire during healthy equity periods."
+    )
+    good_cols = st.columns(5)
+    good_enabled = []
+    for idx in range(5):
+        enabled = good_cols[idx].checkbox(
+            f"Use good zone {idx + 1}",
+            value=False,
+            key=f"candidate_fast_reverse_good_enabled_{idx}",
+        )
+        good_enabled.append(bool(enabled))
+
+    for idx in range(5):
+        default_start, default_end = zone_defaults(idx, good=True)
+        selected = st.slider(
+            f"Good zone {idx + 1}",
+            min_value=min_local.to_pydatetime(),
+            max_value=max_local.to_pydatetime(),
+            value=(default_start.to_pydatetime(), default_end.to_pydatetime()),
+            step=reverse_zone_step.to_pytimedelta(),
+            format="DD/MM HH:mm",
+            key=f"candidate_fast_reverse_good_zone_{idx}",
+            disabled=not good_enabled[idx],
+        )
+        if not good_enabled[idx]:
+            continue
+        start_local = pd.Timestamp(selected[0]).tz_localize(TZ)
+        end_local = pd.Timestamp(selected[1]).tz_localize(TZ)
+        good_zones.append({
+            "start_ms": int(start_local.tz_convert("UTC").timestamp() * 1000),
+            "end_ms": int(end_local.tz_convert("UTC").timestamp() * 1000),
+            "label": f"GOOD {idx + 1}",
+        })
+
+    st.caption(
+        f"Active GOOD zones: **{len(good_zones)} / 5**. Leave all OFF if you want the "
+        "original BAD-vs-rest search."
     )
 
     _candidate_fast_reverse_render_equity_with_zones(
         [(str(source_label), source_portfolio)],
-        zones,
+        bad_zones,
+        good_zones=good_zones,
         key="candidate_fast_reverse_source_equity",
-        title=f"{strategy_label} · {source_label} · selected bad zones",
+        title=f"{strategy_label} · {source_label} · BAD / GOOD discovery zones",
     )
 
-    full_bad_mask = _candidate_fast_reverse_zone_mask(resolved, zones)
+    full_bad_mask = _candidate_fast_reverse_zone_mask(resolved, bad_zones)
+    raw_good_mask = _candidate_fast_reverse_zone_mask(resolved, good_zones)
+    overlap_mask = (full_bad_mask & raw_good_mask).fillna(False).astype(bool)
+    overlap_n = int(overlap_mask.sum())
+    full_good_mask = (raw_good_mask & ~full_bad_mask).fillna(False).astype(bool)
+    if overlap_n:
+        st.warning(
+            f"BAD and GOOD zones overlap for {overlap_n} resolved candidates. "
+            "BAD takes precedence, so those candidates are removed from GOOD."
+        )
+
     scope_mode = st.radio(
         "Discovery population",
         [
@@ -50708,20 +50854,46 @@ def _candidate_fast_render_reverse_regime_search(
 
     population = resolved.loc[population_mask].copy()
     bad_population_mask = full_bad_mask.loc[population.index].fillna(False).astype(bool)
-    bad_n = int(bad_population_mask.sum())
-    outside_n = int((~bad_population_mask).sum())
-    zm1, zm2, zm3, zm4 = st.columns(4)
-    zm1.metric("Candidates in bad zones", bad_n)
-    zm2.metric("Candidates outside", outside_n)
-    zm3.metric("Bad-zone share", f"{(bad_n / len(population) * 100.0 if len(population) else 0.0):.1f}%")
-    zm4.metric(f"{source_label} final", f"${float(source_summary.get('Final equity', np.nan)):.2f}")
+    good_population_mask = full_good_mask.loc[population.index].fillna(False).astype(bool)
+    rest_population_mask = ~(bad_population_mask | good_population_mask)
 
-    if bad_n < 3 or outside_n < 3:
+    bad_n = int(bad_population_mask.sum())
+    good_n = int(good_population_mask.sum())
+    rest_n = int(rest_population_mask.sum())
+    zm1, zm2, zm3, zm4, zm5 = st.columns(5)
+    zm1.metric("BAD candidates", bad_n)
+    zm2.metric("GOOD candidates", good_n)
+    zm3.metric("REST candidates", rest_n)
+    zm4.metric(
+        "BAD share",
+        f"{(bad_n / len(population) * 100.0 if len(population) else 0.0):.1f}%",
+    )
+    zm5.metric(
+        f"{source_label} final",
+        f"${float(source_summary.get('Final equity', np.nan)):.2f}",
+    )
+
+    if bad_n < 3 or (good_n + rest_n) < 3:
         st.warning(
-            "Select wider/more zones. Reverse search needs at least 3 candidates inside "
-            "and 3 outside to compare contexts."
+            "Reverse search needs at least 3 BAD candidates and at least 3 non-BAD "
+            "candidates to compare contexts."
         )
         return
+
+    comparison_options = ["Bad vs rest"]
+    if good_n >= 3:
+        comparison_options.extend(["Bad vs good", "Bad vs good vs rest"])
+    comparison_mode = st.radio(
+        "Contrast",
+        comparison_options,
+        index=(len(comparison_options) - 1),
+        horizontal=True,
+        key="candidate_fast_reverse_comparison_mode",
+        help=(
+            "Bad vs good vs rest is recommended when GOOD zones exist: detect BAD, "
+            "avoid GOOD, and avoid over-blocking the remaining sample."
+        ),
+    )
 
     sr1, sr2, sr3, sr4 = st.columns(4)
     depth = sr1.selectbox(
@@ -50730,20 +50902,25 @@ def _candidate_fast_render_reverse_regime_search(
         index=1,
         key="candidate_fast_reverse_depth",
     )
+    objective_options = [
+        "Balanced zone detector",
+        "Highest bad capture",
+        "Highest detector precision",
+        "Lowest outside block",
+        "Highest final equity (exploratory)",
+    ]
+    if good_n >= 3:
+        objective_options[2:2] = ["Highest bad/good lift", "Lowest good capture"]
+        if rest_n >= 3:
+            objective_options.insert(4, "Lowest rest block")
     objective = sr2.selectbox(
         "Rank detectors by",
-        [
-            "Balanced zone detector",
-            "Highest zone capture",
-            "Highest detector precision",
-            "Lowest outside block",
-            "Highest final equity (exploratory)",
-        ],
+        objective_options,
         index=0,
         key="candidate_fast_reverse_objective",
     )
     max_outside = sr3.selectbox(
-        "Max outside blocked",
+        "Max non-BAD blocked",
         [10, 20, 30, 40, 50],
         index=2,
         format_func=lambda value: f"{value}%",
@@ -50756,27 +50933,28 @@ def _candidate_fast_render_reverse_regime_search(
         key="candidate_fast_reverse_top_n",
     )
 
-    zone_signature = tuple(
-        (int(z["start_ms"]), int(z["end_ms"])) for z in zones
-    )
+    bad_signature = tuple((int(z["start_ms"]), int(z["end_ms"])) for z in bad_zones)
+    good_signature = tuple((int(z["start_ms"]), int(z["end_ms"])) for z in good_zones)
     reverse_signature = (
         str(strategy_label),
         str(source_label),
         int(len(resolved)),
         int(entry_ts.max()),
-        zone_signature,
+        bad_signature,
+        good_signature,
         str(scope_mode),
+        str(comparison_mode),
         str(depth),
     )
     cache_key = "candidate_fast_reverse_regime_cache"
     cached = st.session_state.get(cache_key)
 
     if st.button(
-        "🔬 Search detectors for selected bad zones",
+        "🔬 Search detectors for selected BAD / GOOD zones",
         use_container_width=True,
         key="candidate_fast_reverse_run",
     ):
-        with st.spinner("Comparing causal contexts inside vs outside selected zones..."):
+        with st.spinner("Comparing causal contexts across BAD / GOOD / REST..."):
             rules = _candidate_fast_regime_auto_single_rules(
                 population,
                 feature_options,
@@ -50793,11 +50971,10 @@ def _candidate_fast_render_reverse_regime_search(
                     population,
                     detector_pop_mask,
                     bad_population_mask,
+                    good_population_mask,
+                    comparison_mode=comparison_mode,
                 )
-                if (
-                    metrics["Detected in zones"] < 2
-                    or metrics["Detector total"] <= 0
-                ):
+                if metrics["Detected in BAD"] < 2 or metrics["Detector total"] <= 0:
                     return None
 
                 detector_full_mask = _candidate_fast_regime_auto_rule_mask(
@@ -50850,9 +51027,10 @@ def _candidate_fast_render_reverse_regime_search(
                 seed = _candidate_fast_reverse_sort(
                     seed,
                     "Balanced zone detector",
+                    comparison_mode=comparison_mode,
                 )
                 seed = seed.loc[
-                    pd.to_numeric(seed["Outside blocked %"], errors="coerce")
+                    pd.to_numeric(seed["Non-BAD blocked %"], errors="coerce")
                     .le(float(max_outside))
                 ].head(8)
                 seed_ids = seed["Detector ID"].astype(str).tolist()
@@ -50895,21 +51073,20 @@ def _candidate_fast_render_reverse_regime_search(
 
     if not isinstance(cached, dict) or cached.get("signature") != reverse_signature:
         st.info(
-            "Set the bad zones and press **Search detectors for selected bad zones**. "
-            "The search is intentionally manual so moving the zone markers does not "
-            "continuously optimize the history."
+            "Set the zones and press **Search detectors for selected BAD / GOOD zones**. "
+            "Moving markers never re-optimizes automatically."
         )
         return
 
     results = cached.get("results", pd.DataFrame())
     rules_by_id = cached.get("rules", {})
     if results is None or results.empty:
-        st.info("No causal detector had enough support in the selected zones.")
+        st.info("No causal detector had enough support in the selected BAD zones.")
         return
 
     filtered = results.loc[
-        pd.to_numeric(results["Outside blocked %"], errors="coerce").le(float(max_outside))
-        & pd.to_numeric(results["Zone capture %"], errors="coerce").ge(10.0)
+        pd.to_numeric(results["Non-BAD blocked %"], errors="coerce").le(float(max_outside))
+        & pd.to_numeric(results["Bad capture %"], errors="coerce").ge(10.0)
         & pd.to_numeric(results["Accepted"], errors="coerce").ge(5)
     ].copy()
     rank_objective = (
@@ -50917,14 +51094,21 @@ def _candidate_fast_render_reverse_regime_search(
         if objective == "Highest final equity (exploratory)"
         else objective
     )
-    ranked = _candidate_fast_reverse_sort(filtered, rank_objective)
+    ranked = _candidate_fast_reverse_sort(
+        filtered,
+        rank_objective,
+        comparison_mode=comparison_mode,
+    )
     if ranked.empty:
-        st.info("No detector passes the current outside-block/capture guardrails.")
+        st.info("No detector passes the current capture/non-BAD guardrails.")
         return
 
     columns = [
-        "Detector ID", "Detector", "Kind", "Detected in zones", "Zone capture %",
-        "Detector precision %", "Detector lift", "Outside blocked %", "Extra blocked",
+        "Detector ID", "Detector", "Kind",
+        "Detected in BAD", "Bad capture %",
+        "Detected in GOOD", "Good capture %", "Bad/Good lift",
+        "Detected in REST", "Rest capture %", "Bad/Rest lift",
+        "Bad precision %", "Non-BAD blocked %", "Extra blocked",
         "Final equity", "Δ vs source", "Return %", "Max DD %", "PF", "Accepted",
         "Below start time %", "Underwater time %", "Top 2 positive days share %",
         "Recovery factor", "Detection rank",
@@ -50942,9 +51126,9 @@ def _candidate_fast_render_reverse_regime_search(
         key="candidate_fast_reverse_results",
     )
     st.caption(
-        "Detection metrics answer whether the rule recognizes your marked zones; "
-        "portfolio metrics are shown only as an exploratory replay. A detector found "
-        "from these intervals is NOT out-of-sample validation."
+        "Preferred detectors capture BAD, avoid GOOD, and avoid firing throughout REST. "
+        "Portfolio columns remain exploratory because the intervals themselves were "
+        "selected from this same history."
     )
 
     detector_ids = display["Detector ID"].astype(str).tolist()
@@ -50995,7 +51179,8 @@ def _candidate_fast_render_reverse_regime_search(
             (str(source_label), source_portfolio),
             (f"{source_label} + D", final_portfolio),
         ],
-        zones,
+        bad_zones,
+        good_zones=good_zones,
         key="candidate_fast_reverse_replay_equity",
         title=(
             f"{strategy_label} · {source_label} vs {source_label} + reverse detector D · "
@@ -51003,7 +51188,7 @@ def _candidate_fast_render_reverse_regime_search(
         ),
     )
     st.warning(
-        "Hypothesis generated from user-selected bad intervals. Keep it in Discovery, "
+        "Hypothesis generated from user-selected BAD/GOOD intervals. Keep it in Discovery, "
         "check threshold/family robustness, and only later freeze a clean candidate for "
         "forward Validation."
     )
