@@ -49147,6 +49147,673 @@ def _candidate_fast_render_regime_condition(
     return mask, f"{feature} == {value}"
 
 
+
+
+def _candidate_fast_regime_auto_rule_mask(frame, rule):
+    """Build a causal block mask for one auto-scanner rule specification."""
+    if frame is None or frame.empty or not isinstance(rule, dict):
+        return pd.Series(False, index=frame.index if frame is not None else pd.RangeIndex(0))
+
+    def one(feature, operator, value):
+        return _candidate_fast_regime_condition_mask(
+            frame,
+            feature,
+            operator,
+            value,
+        ).reindex(frame.index, fill_value=False).fillna(False).astype(bool)
+
+    mask1 = one(
+        rule.get("feature1"),
+        rule.get("operator1"),
+        rule.get("value1"),
+    )
+    if not rule.get("feature2"):
+        return mask1
+
+    mask2 = one(
+        rule.get("feature2"),
+        rule.get("operator2"),
+        rule.get("value2"),
+    )
+    if str(rule.get("combine", "AND")).upper() == "OR":
+        return (mask1 | mask2).fillna(False).astype(bool)
+    return (mask1 & mask2).fillna(False).astype(bool)
+
+
+def _candidate_fast_regime_auto_rule_text(rule, reverse_labels):
+    def part(feature, operator, value):
+        label = reverse_labels.get(feature, feature)
+        if operator in {"<=", ">="}:
+            return f"{label} {operator} {float(value):.4f}"
+        return f"{label} == {value}"
+
+    text1 = part(
+        rule.get("feature1"),
+        rule.get("operator1"),
+        rule.get("value1"),
+    )
+    if not rule.get("feature2"):
+        return text1
+    text2 = part(
+        rule.get("feature2"),
+        rule.get("operator2"),
+        rule.get("value2"),
+    )
+    return f"({text1}) {str(rule.get('combine', 'AND')).upper()} ({text2})"
+
+
+def _candidate_fast_regime_auto_single_rules(frame, feature_options):
+    """Generate data-driven threshold/category gates without outcome lookahead."""
+    rules = []
+    seen = set()
+
+    for feature in feature_options:
+        if feature not in frame.columns:
+            continue
+        numeric = pd.to_numeric(frame[feature], errors="coerce")
+        coverage = float(numeric.notna().mean()) if len(frame) else 0.0
+        is_numeric = coverage >= 0.75 and int(numeric.nunique(dropna=True)) >= 4
+
+        if is_numeric:
+            valid = numeric.dropna().astype(float)
+            if valid.empty:
+                continue
+            # Decile-derived one-sided gates.
+            quantile_values = valid.quantile(
+                [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
+            ).dropna().tolist()
+            thresholds = []
+            for value in quantile_values:
+                value = float(value)
+                key = round(value, 10)
+                if key not in {round(x, 10) for x in thresholds}:
+                    thresholds.append(value)
+            for threshold in thresholds:
+                for operator in ("<=", ">="):
+                    key = (feature, operator, round(float(threshold), 10))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rules.append({
+                        "kind": "single",
+                        "feature1": feature,
+                        "operator1": operator,
+                        "value1": float(threshold),
+                    })
+
+            # Same-feature inside/outside ranges from robust quintile boundaries.
+            range_values = valid.quantile([0.20, 0.40, 0.60, 0.80]).dropna().tolist()
+            bounds = []
+            for value in range_values:
+                value = float(value)
+                if round(value, 10) not in {round(x, 10) for x in bounds}:
+                    bounds.append(value)
+            for i in range(len(bounds)):
+                for j in range(i + 1, len(bounds)):
+                    low = float(bounds[i])
+                    high = float(bounds[j])
+                    rules.append({
+                        "kind": "range_inside",
+                        "feature1": feature,
+                        "operator1": ">=",
+                        "value1": low,
+                        "feature2": feature,
+                        "operator2": "<=",
+                        "value2": high,
+                        "combine": "AND",
+                    })
+                    rules.append({
+                        "kind": "range_outside",
+                        "feature1": feature,
+                        "operator1": "<=",
+                        "value1": low,
+                        "feature2": feature,
+                        "operator2": ">=",
+                        "value2": high,
+                        "combine": "OR",
+                    })
+        else:
+            values = frame[feature].fillna("UNKNOWN").astype(str)
+            counts = values.value_counts(dropna=False)
+            min_count = max(3, int(len(frame) * 0.02))
+            for value, count in counts.items():
+                if int(count) < min_count:
+                    continue
+                rules.append({
+                    "kind": "category",
+                    "feature1": feature,
+                    "operator1": "==",
+                    "value1": str(value),
+                })
+
+    return rules
+
+
+def _candidate_fast_regime_auto_portfolio(resolved, blocked_mask):
+    allowed = resolved.loc[
+        ~blocked_mask.reindex(resolved.index, fill_value=False).fillna(False).astype(bool)
+    ].copy()
+    portfolio = _candidate_v2_portfolio_simulation(
+        allowed,
+        starting_equity=200.0,
+        leverage=3.0,
+        max_slots=1,
+        risk_per_trade_pct=0.25,
+        selected_sl_pct=3.0,
+        max_margin_pct=80.0,
+        compound=True,
+        priority_mode="Most HTF Room → Strength",
+        sizing_mode="Margin % equity",
+        fixed_margin_usd=150.0,
+        margin_per_trade_pct=80.0,
+        market_flow_gate_mode="OFF",
+    )
+    return portfolio, allowed
+
+
+def _candidate_fast_regime_auto_evaluate(
+    resolved,
+    rule,
+    reverse_labels,
+    baseline_summary,
+):
+    blocked_mask = _candidate_fast_regime_auto_rule_mask(resolved, rule)
+    blocked_count = int(blocked_mask.sum())
+    if blocked_count <= 0 or blocked_count >= len(resolved):
+        return None
+
+    portfolio, allowed = _candidate_fast_regime_auto_portfolio(
+        resolved,
+        blocked_mask,
+    )
+    summary = _candidate_fast_portfolio_summary(portfolio)
+    if not summary:
+        return None
+
+    blocked = resolved.loc[blocked_mask].copy()
+    blocked_net = pd.to_numeric(
+        blocked.get("net_pnl_pct", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    base_final = float(baseline_summary.get("Final equity", np.nan))
+    base_return = float(baseline_summary.get("Return %", np.nan))
+    base_dd = float(baseline_summary.get("Max DD %", np.nan))
+    base_pf = float(baseline_summary.get("PF", np.nan))
+
+    row = {
+        "Rule": _candidate_fast_regime_auto_rule_text(rule, reverse_labels),
+        "Kind": str(rule.get("kind", "rule")),
+        "Blocked": blocked_count,
+        "Blocked %": float(blocked_count / len(resolved) * 100.0),
+        "Blocked W": int(blocked_net.gt(0).sum()),
+        "Blocked L": int(blocked_net.lt(0).sum()),
+        "Eligible": int(summary.get("Eligible", 0)),
+        "Accepted": int(summary.get("Accepted", 0)),
+        "Final equity": float(summary.get("Final equity", np.nan)),
+        "Δ equity": float(summary.get("Final equity", np.nan) - base_final),
+        "Return %": float(summary.get("Return %", np.nan)),
+        "Δ Return pp": float(summary.get("Return %", np.nan) - base_return),
+        "Max DD %": float(summary.get("Max DD %", np.nan)),
+        "Δ Max DD pp": float(summary.get("Max DD %", np.nan) - base_dd),
+        "PF": float(summary.get("PF", np.nan)),
+        "Δ PF": float(summary.get("PF", np.nan) - base_pf)
+        if pd.notna(summary.get("PF", np.nan)) and pd.notna(base_pf)
+        else np.nan,
+    }
+    return row
+
+
+def _candidate_fast_regime_sort_results(frame, objective):
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    work = frame.copy()
+    if objective == "Lowest Max DD":
+        return work.sort_values(
+            ["Max DD %", "Final equity", "PF"],
+            ascending=[True, False, False],
+            na_position="last",
+            kind="stable",
+        )
+    if objective == "Highest PF":
+        return work.sort_values(
+            ["PF", "Final equity", "Max DD %"],
+            ascending=[False, False, True],
+            na_position="last",
+            kind="stable",
+        )
+    if objective == "Highest Return":
+        return work.sort_values(
+            ["Return %", "Max DD %", "PF"],
+            ascending=[False, True, False],
+            na_position="last",
+            kind="stable",
+        )
+    return work.sort_values(
+        ["Final equity", "Max DD %", "PF"],
+        ascending=[False, True, False],
+        na_position="last",
+        kind="stable",
+    )
+
+
+def _candidate_fast_regime_render_auto_equity(
+    resolved,
+    blocked_mask,
+    baseline_portfolio,
+    gated_portfolio,
+    *,
+    key,
+    title,
+):
+    curves = []
+    for label, portfolio in [
+        ("Baseline", baseline_portfolio),
+        ("AUTO gate", gated_portfolio),
+    ]:
+        curve = portfolio.get("equity_curve", pd.DataFrame()) if portfolio else pd.DataFrame()
+        if curve is None or curve.empty:
+            continue
+        curve = curve.copy()
+        curve["time"] = (
+            pd.to_datetime(
+                pd.to_numeric(curve["timestamp"], errors="coerce"),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+        )
+        curves.append((label, curve))
+    if not curves:
+        return
+
+    fig = go.Figure()
+    for label, curve in curves:
+        fig.add_trace(
+            go.Scatter(
+                x=curve["time"],
+                y=pd.to_numeric(curve["equity"], errors="coerce"),
+                mode="lines+markers",
+                name=label,
+            )
+        )
+
+    zone_frame = pd.DataFrame({
+        "time": (
+            pd.to_datetime(
+                pd.to_numeric(
+                    resolved.get(
+                        "_entry_ts",
+                        pd.Series(index=resolved.index, dtype=float),
+                    ),
+                    errors="coerce",
+                ),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+        ),
+        "blocked": (
+            blocked_mask
+            .reindex(resolved.index, fill_value=False)
+            .fillna(False)
+            .astype(bool)
+        ),
+    }).dropna(subset=["time"])
+
+    if not zone_frame.empty:
+        timeline = (
+            zone_frame
+            .groupby("time", as_index=False, sort=True)
+            .agg(blocked=("blocked", "all"))
+            .sort_values("time", kind="stable")
+            .reset_index(drop=True)
+        )
+        if len(timeline) >= 2:
+            timeline["next_time"] = timeline["time"].shift(-1)
+            step = timeline["time"].diff().dropna().median()
+            if pd.isna(step) or step <= pd.Timedelta(0):
+                step = pd.Timedelta(minutes=15)
+            timeline.loc[timeline.index[-1], "next_time"] = (
+                timeline.loc[timeline.index[-1], "time"] + step
+            )
+            timeline["state_id"] = timeline["blocked"].ne(
+                timeline["blocked"].shift()
+            ).cumsum()
+            for _, zone in timeline.groupby("state_id", sort=True):
+                is_blocked = bool(zone["blocked"].iloc[0])
+                fig.add_vrect(
+                    x0=zone["time"].iloc[0],
+                    x1=zone["next_time"].iloc[-1],
+                    fillcolor=(
+                        "rgba(220, 53, 69, 0.13)"
+                        if is_blocked
+                        else "rgba(40, 167, 69, 0.08)"
+                    ),
+                    line_width=0,
+                    layer="below",
+                )
+            fig.add_trace(
+                go.Scatter(
+                    x=[None], y=[None], mode="lines",
+                    line={"color": "rgba(40, 167, 69, 0.75)", "width": 8},
+                    name="TRADING zone", hoverinfo="skip",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[None], y=[None], mode="lines",
+                    line={"color": "rgba(220, 53, 69, 0.75)", "width": 8},
+                    name="NO TRADING zone", hoverinfo="skip",
+                )
+            )
+
+    fig.add_hline(
+        y=200.0,
+        line_dash="dot",
+        annotation_text="Starting equity",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        title=title,
+        xaxis={"title": "Time", "type": "date"},
+        yaxis_title="Realized equity (USDT)",
+        hovermode="x unified",
+        margin={"l": 10, "r": 10, "t": 55, "b": 10},
+    )
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=key,
+        config={"displaylogo": False},
+    )
+
+
+def _candidate_fast_render_auto_regime_scanner(
+    resolved,
+    *,
+    feature_options,
+    reverse_labels,
+    baseline_portfolio,
+    baseline_summary,
+    variant,
+):
+    """Explicit-run automatic causal regime gate search."""
+    st.markdown("##### 2. Automatic NO-TRADE regime scanner")
+    st.caption(
+        "Searches data-driven thresholds/categories across the causal regime fields, "
+        "then optionally combines the strongest single-feature gates with AND/OR. "
+        "This is a discovery tool: the top historical row is not automatically a "
+        "production rule and should later be checked on forward data."
+    )
+
+    a1, a2, a3, a4 = st.columns(4)
+    search_mode = a1.selectbox(
+        "Search",
+        ["Singles + ranges", "Extended pairs"],
+        index=1,
+        key="candidate_fast_regime_auto_search_mode",
+        help=(
+            "Extended pairs first evaluates all single/range rules, then combines "
+            "the strongest simple gates across features with AND/OR."
+        ),
+    )
+    objective = a2.selectbox(
+        "Rank by",
+        ["Highest final equity", "Highest Return", "Highest PF", "Lowest Max DD"],
+        index=0,
+        key="candidate_fast_regime_auto_objective",
+    )
+    max_blocked_pct = a3.selectbox(
+        "Max candidates blocked",
+        [20, 30, 40, 50, 60, 75],
+        index=3,
+        format_func=lambda value: f"{value}%",
+        key="candidate_fast_regime_auto_max_blocked",
+    )
+    top_rows = a4.selectbox(
+        "Top rows",
+        [10, 15, 20, 30],
+        index=2,
+        key="candidate_fast_regime_auto_top_rows",
+    )
+
+    run_scan = st.button(
+        "🔎 Run automatic regime scan",
+        use_container_width=True,
+        key="candidate_fast_regime_auto_run",
+    )
+
+    entry_ts = pd.to_numeric(
+        resolved.get("_entry_ts", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    signature = (
+        str(variant),
+        int(len(resolved)),
+        int(entry_ts.max()) if not entry_ts.empty else 0,
+    )
+    cache_key = "candidate_fast_regime_auto_scan_cache"
+    cached = st.session_state.get(cache_key)
+
+    if run_scan:
+        with st.spinner("Scanning causal NO-TRADE gates and replaying portfolios..."):
+            simple_rules = _candidate_fast_regime_auto_single_rules(
+                resolved,
+                feature_options,
+            )
+            rows = []
+            rules_by_id = {}
+            for idx, rule in enumerate(simple_rules):
+                row = _candidate_fast_regime_auto_evaluate(
+                    resolved,
+                    rule,
+                    reverse_labels,
+                    baseline_summary,
+                )
+                if row is None:
+                    continue
+                rule_id = f"S{idx:04d}"
+                row["Rule ID"] = rule_id
+                rows.append(row)
+                rules_by_id[rule_id] = rule
+
+            results = pd.DataFrame(rows)
+
+            if (
+                search_mode == "Extended pairs"
+                and results is not None
+                and not results.empty
+            ):
+                seed = results.loc[
+                    results["Blocked %"].between(5.0, float(max_blocked_pct), inclusive="both")
+                ].copy()
+                seed = _candidate_fast_regime_sort_results(
+                    seed,
+                    "Highest final equity",
+                ).head(10)
+                seed_ids = seed["Rule ID"].astype(str).tolist()
+                pair_rows = []
+                pair_counter = 0
+                for i in range(len(seed_ids)):
+                    for j in range(i + 1, len(seed_ids)):
+                        left = rules_by_id.get(seed_ids[i])
+                        right = rules_by_id.get(seed_ids[j])
+                        if not left or not right:
+                            continue
+                        # Keep stage-2 interpretable: pair only simple one-condition rules
+                        # from different causal features.
+                        if left.get("feature2") or right.get("feature2"):
+                            continue
+                        if left.get("feature1") == right.get("feature1"):
+                            continue
+                        for combine in ("AND", "OR"):
+                            pair = {
+                                "kind": f"pair_{combine.lower()}",
+                                "feature1": left.get("feature1"),
+                                "operator1": left.get("operator1"),
+                                "value1": left.get("value1"),
+                                "feature2": right.get("feature1"),
+                                "operator2": right.get("operator1"),
+                                "value2": right.get("value1"),
+                                "combine": combine,
+                            }
+                            row = _candidate_fast_regime_auto_evaluate(
+                                resolved,
+                                pair,
+                                reverse_labels,
+                                baseline_summary,
+                            )
+                            if row is None:
+                                continue
+                            rule_id = f"P{pair_counter:04d}"
+                            pair_counter += 1
+                            row["Rule ID"] = rule_id
+                            pair_rows.append(row)
+                            rules_by_id[rule_id] = pair
+                if pair_rows:
+                    results = pd.concat(
+                        [results, pd.DataFrame(pair_rows)],
+                        ignore_index=True,
+                    )
+
+            cached = {
+                "signature": signature,
+                "results": results,
+                "rules": rules_by_id,
+                "created_at": time.time(),
+                "search_mode": search_mode,
+            }
+            st.session_state[cache_key] = cached
+
+    if not isinstance(cached, dict) or cached.get("signature") != signature:
+        st.info(
+            "Run the automatic scan once. Results are cached in-session, so sorting "
+            "and inspecting the top gates stays fast afterwards."
+        )
+        return
+
+    results = cached.get("results", pd.DataFrame())
+    rules_by_id = cached.get("rules", {})
+    if results is None or results.empty:
+        st.info("The automatic scan produced no usable regime gates.")
+        return
+
+    filtered = results.loc[
+        pd.to_numeric(results["Blocked %"], errors="coerce").le(float(max_blocked_pct))
+        & pd.to_numeric(results["Blocked %"], errors="coerce").ge(2.0)
+        & pd.to_numeric(results["Accepted"], errors="coerce").ge(5)
+    ].copy()
+    ranked = _candidate_fast_regime_sort_results(filtered, objective)
+    if ranked.empty:
+        st.info("No scanned gates satisfy the current guardrails.")
+        return
+
+    display_cols = [
+        "Rule ID", "Rule", "Kind", "Blocked", "Blocked %", "Blocked W", "Blocked L",
+        "Accepted", "Final equity", "Δ equity", "Return %", "Δ Return pp",
+        "Max DD %", "Δ Max DD pp", "PF", "Δ PF",
+    ]
+    display = ranked[display_cols].head(int(top_rows)).copy()
+    for column in [
+        "Blocked %", "Final equity", "Δ equity", "Return %", "Δ Return pp",
+        "Max DD %", "Δ Max DD pp", "PF", "Δ PF",
+    ]:
+        if column in display.columns:
+            display[column] = pd.to_numeric(display[column], errors="coerce").round(4)
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        key="candidate_fast_regime_auto_results",
+    )
+
+    st.caption(
+        f"Scanned {len(results):,} usable rules. Guardrail shown: block 2–{int(max_blocked_pct)}% "
+        "of resolved candidates and keep at least 5 accepted portfolio trades. "
+        "Positive Δ equity / Δ Return and negative Δ Max DD are improvements."
+    )
+
+    top_ids = display["Rule ID"].astype(str).tolist()
+    if not top_ids:
+        return
+    selected_rule_id = st.selectbox(
+        "Draw scanned rule",
+        top_ids,
+        index=0,
+        key="candidate_fast_regime_auto_selected_rule",
+        format_func=lambda rid: (
+            f"{rid} · "
+            + str(
+                ranked.loc[ranked["Rule ID"].astype(str).eq(str(rid)), "Rule"].iloc[0]
+            )
+        ),
+    )
+    rule = rules_by_id.get(str(selected_rule_id))
+    if not rule:
+        return
+
+    blocked_mask = _candidate_fast_regime_auto_rule_mask(resolved, rule)
+    gated_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+        resolved,
+        blocked_mask,
+    )
+    gate_summary = _candidate_fast_portfolio_summary(gated_portfolio)
+    selected_row = ranked.loc[
+        ranked["Rule ID"].astype(str).eq(str(selected_rule_id))
+    ].iloc[0]
+
+    b1, b2, b3, b4, b5 = st.columns(5)
+    b1.metric(
+        "Final equity",
+        f"${float(gate_summary.get('Final equity', np.nan)):.2f}",
+        delta=f"${float(selected_row['Δ equity']):+.2f}",
+    )
+    b2.metric(
+        "Return",
+        f"{float(gate_summary.get('Return %', np.nan)):.2f}%",
+        delta=f"{float(selected_row['Δ Return pp']):+.2f} pp",
+    )
+    b3.metric(
+        "Max DD",
+        f"{float(gate_summary.get('Max DD %', np.nan)):.2f}%",
+        delta=f"{float(selected_row['Δ Max DD pp']):+.2f} pp",
+        delta_color="inverse",
+    )
+    pf = gate_summary.get("PF", np.nan)
+    b4.metric(
+        "PF",
+        "∞" if pd.notna(pf) and not np.isfinite(float(pf)) else (
+            f"{float(pf):.2f}" if pd.notna(pf) else "—"
+        ),
+        delta=(
+            f"{float(selected_row['Δ PF']):+.2f}"
+            if pd.notna(selected_row.get("Δ PF", np.nan))
+            else None
+        ),
+    )
+    b5.metric(
+        "Blocked",
+        f"{int(selected_row['Blocked'])} ({float(selected_row['Blocked %']):.1f}%)",
+    )
+
+    _candidate_fast_regime_render_auto_equity(
+        resolved,
+        blocked_mask,
+        baseline_portfolio,
+        gated_portfolio,
+        key="candidate_fast_regime_auto_equity",
+        title=(
+            "Legacy V1 · baseline vs AUTO NO-TRADE gate · "
+            + _candidate_fast_regime_auto_rule_text(rule, reverse_labels)
+        ),
+    )
+    st.caption(
+        "Automatic ranking is discovery, not proof. After we find stable candidates, "
+        "the next validation step should freeze the rule and test it on later/forward data."
+    )
+
 def render_candidate_fast_no_trade_lab():
     """Causal NO-TRADE regime research on materialized Legacy V1 execution."""
     store = candidate_research_store
@@ -49258,7 +49925,7 @@ def render_candidate_fast_no_trade_lab():
     feature_options = [feature_labels[label] for label in available_labels]
     reverse_labels = {column: label for label, column in feature_labels.items()}
 
-    st.markdown("##### 2. Simulate causal NO-TRADE gate")
+    st.markdown("##### Manual gate controls")
     gate1, gate2 = st.columns(2)
     with gate1:
         mask1, desc1 = _candidate_fast_render_regime_condition(
@@ -49325,6 +49992,19 @@ def render_candidate_fast_no_trade_lab():
         margin_per_trade_pct=80.0,
         market_flow_gate_mode="OFF",
     )
+
+    base_summary_for_scan = _candidate_fast_portfolio_summary(baseline_portfolio)
+    if base_summary_for_scan:
+        _candidate_fast_render_auto_regime_scanner(
+            resolved,
+            feature_options=feature_options,
+            reverse_labels=reverse_labels,
+            baseline_portfolio=baseline_portfolio,
+            baseline_summary=base_summary_for_scan,
+            variant=variant,
+        )
+
+    st.markdown("##### 3. Manual causal NO-TRADE gate")
 
     if not active_masks:
         st.info(
