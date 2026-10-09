@@ -49488,6 +49488,18 @@ def render_candidate_fast_no_trade_lab():
     if curves:
         fig = go.Figure()
 
+        # Add the real time-series traces FIRST so Plotly infers a date axis
+        # before the legend-only regime traces (which intentionally use x=None).
+        for label, curve in curves:
+            fig.add_trace(
+                go.Scatter(
+                    x=curve["time"],
+                    y=pd.to_numeric(curve["equity"], errors="coerce"),
+                    mode="lines+markers",
+                    name=label,
+                )
+            )
+
         # --------------------------------------------------------------
         # Causal regime background bands. These bands are derived only
         # from the gate state available at each candidate entry time.
@@ -49604,15 +49616,6 @@ def render_candidate_fast_no_trade_lab():
                     )
                 )
 
-        for label, curve in curves:
-            fig.add_trace(
-                go.Scatter(
-                    x=curve["time"],
-                    y=pd.to_numeric(curve["equity"], errors="coerce"),
-                    mode="lines+markers",
-                    name=label,
-                )
-            )
         fig.add_hline(
             y=200.0,
             line_dash="dot",
@@ -49621,7 +49624,7 @@ def render_candidate_fast_no_trade_lab():
         )
         fig.update_layout(
             title="Legacy V1 · baseline vs causal NO-TRADE gate",
-            xaxis_title="Time",
+            xaxis={"title": "Time", "type": "date"},
             yaxis_title="Realized equity (USDT)",
             hovermode="x unified",
             margin={"l": 10, "r": 10, "t": 55, "b": 10},
