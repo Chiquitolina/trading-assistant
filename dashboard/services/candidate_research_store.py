@@ -35,6 +35,8 @@ class CandidateResearchStore:
         "v1_legacy_execution": "candidate_v1_legacy_execution.parquet",
         "v1_legacy_matrix_execution": "candidate_v1_legacy_matrix_execution.parquet",
         "v2": "candidate_v2.parquet",
+        "v2_execution": "candidate_v2_execution.parquet",
+        "v2_matrix_execution": "candidate_v2_matrix_execution.parquet",
     }
 
     def __init__(self, base_dir: Path | str):
@@ -73,19 +75,29 @@ class CandidateResearchStore:
             return self.profile_path(profile).exists()
         return all(self.profile_path(name).exists() for name in self.PROFILE_FILES)
 
-    def snapshot_age_hours(self) -> Optional[float]:
+    def snapshot_age_hours(self, profile: Optional[str] = None) -> Optional[float]:
+        """Age of one profile, not the last build of a different Candidate version.
+
+        Older manifests had one global build timestamp. Preserve that timestamp
+        as a migration fallback until a profile is refreshed independently.
+        """
         manifest = self.read_manifest()
         built_at_epoch = manifest.get("built_at_epoch")
+        if profile is not None:
+            metadata = (manifest.get("profiles", {}) or {}).get(str(profile).lower(), {})
+            built_at_epoch = metadata.get("built_at_epoch", built_at_epoch)
         try:
             built_at_epoch = float(built_at_epoch)
         except (TypeError, ValueError):
             return None
         return max(0.0, (time.time() - built_at_epoch) / 3600.0)
 
-    def needs_refresh(self, max_age_hours: float = 20.0) -> bool:
-        if not self.snapshot_exists():
+    def needs_refresh(
+        self, max_age_hours: float = 20.0, *, profile: Optional[str] = None
+    ) -> bool:
+        if not self.snapshot_exists(profile):
             return True
-        age = self.snapshot_age_hours()
+        age = self.snapshot_age_hours(profile)
         if age is None:
             return True
         return age >= float(max_age_hours)
@@ -206,17 +218,30 @@ class CandidateResearchStore:
         *,
         source_meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """Atomic partial profile update; other versions are not overwritten.
+
+        V1 writes v1_raw/legacy/execution/matrix. V2 writes v2/context/execution/matrix. Existing
+        profile metadata and timestamps survive either update. This is critical
+        for independent refresh scheduling and for preserving V1 research history.
+        """
         if not self.available:
             raise RuntimeError(
                 "Candidate Research Fast Store requires duckdb and pyarrow."
             )
 
         started = time.perf_counter()
-        profile_meta: Dict[str, Any] = {}
+        previous = self.read_manifest()
+        previous_epoch = previous.get("built_at_epoch")
+        profile_meta: Dict[str, Any] = dict(previous.get("profiles", {}) or {})
+        source = dict(previous.get("source", {}) or {})
+        built_at = pd.Timestamp.now(tz="UTC")
+        build_epoch = float(built_at.timestamp())
+        written = []
+
         for profile, frame in profiles.items():
             profile = str(profile).lower()
             if profile not in self.PROFILE_FILES:
-                continue
+                raise ValueError(f"Unknown Candidate Research profile: {profile}")
             frame = frame.copy() if frame is not None else pd.DataFrame()
             path = self.profile_path(profile)
             self._atomic_parquet(frame, path)
@@ -234,16 +259,31 @@ class CandidateResearchStore:
                     else 0
                 ),
                 "columns": int(len(frame.columns)),
+                "built_at_utc": built_at.isoformat(),
+                "built_at_epoch": build_epoch,
             }
+            written.append(profile)
 
-        built_at = pd.Timestamp.now(tz="UTC")
+        # The legacy manifest had only global time. Preserve it separately for
+        # profiles not touched in this partial update (do not mark them fresh).
+        for name, meta in profile_meta.items():
+            if name in written or not isinstance(meta, dict):
+                continue
+            if "built_at_epoch" not in meta and previous_epoch is not None:
+                meta["built_at_epoch"] = previous_epoch
+                meta["built_at_utc"] = previous.get("built_at_utc")
+
+        if source_meta:
+            source.update(source_meta)
+
         manifest = {
             "schema_version": self.SCHEMA_VERSION,
             "built_at_utc": built_at.isoformat(),
-            "built_at_epoch": float(time.time()),
+            "built_at_epoch": build_epoch,
             "build_seconds": float(time.perf_counter() - started),
             "profiles": profile_meta,
-            "source": source_meta or {},
+            "source": source,
+            "last_written_profiles": written,
         }
         self._atomic_json(manifest, self.manifest_path)
         return manifest
@@ -304,12 +344,20 @@ class CandidateResearchStore:
             }
 
         escaped = str(path).replace("'", "''")
-        limit = max(1, min(int(limit), 250000))
+        limit = max(1, min(int(limit), 1000000))
         con = duckdb.connect(database=":memory:")
         started = time.perf_counter()
         try:
+            total = int(con.execute(
+                f"SELECT COUNT(*) FROM read_parquet('{escaped}')"
+            ).fetchone()[0])
+            if total > limit:
+                raise RuntimeError(
+                    f"{profile}: {total} execution rows exceed the {limit} row "
+                    "research read limit; refusing to truncate analytics silently."
+                )
             frame = con.execute(
-                f"SELECT * FROM read_parquet('{escaped}') LIMIT {limit}"
+                f"SELECT * FROM read_parquet('{escaped}')"
             ).fetchdf()
         finally:
             con.close()

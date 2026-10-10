@@ -45031,6 +45031,7 @@ def _candidate_v2_portfolio_simulation(
                 ),
             },
             "ledger": pd.DataFrame(),
+            "ledger_raw": pd.DataFrame(),
             "equity_curve": pd.DataFrame(),
         }
 
@@ -45547,6 +45548,10 @@ def _candidate_v2_portfolio_simulation(
     ledger = pd.DataFrame(
         ledger_rows
     )
+    # Preserve the machine-readable trade identities, entry/exit timestamps,
+    # accepted flag and unrounded PnL before making a display-only ledger.
+    # The display ledger below renames these columns for Streamlit tables.
+    ledger_raw = ledger.copy()
     equity_curve = pd.DataFrame(
         equity_rows
     )
@@ -45960,7 +45965,8 @@ def _candidate_v2_portfolio_simulation(
 
     return {
         "summary": summary,
-        "ledger": ledger,
+        "ledger": ledger,       # Human-readable Streamlit presentation
+        "ledger_raw": ledger_raw,  # Canonical, unrounded accounting data
         "equity_curve": equity_curve,
     }
 
@@ -48246,10 +48252,39 @@ def _candidate_fast_build_v1_raw_universe(retests_df):
     return raw
 
 
+
+def _candidate_fast_current_version():
+    """Set by the selected Candidate page before build/explore; defaults to V1."""
+    return str(st.session_state.get("_candidate_fast_active_version", "v1"))
+
+
+def _candidate_fast_widget_key(value):
+    value = str(value)
+    return ("v2_" + value) if _candidate_fast_current_version() == "v2" else value
+
+
+def _candidate_fast_version_path(path):
+    """V2 never reads/writes V1 discovery, forward, or validation artifacts."""
+    path = Path(path)
+    return path.with_name("v2_" + path.name) if _candidate_fast_current_version() == "v2" else path
+
+
+def _candidate_fast_strategy_label(label):
+    label = str(label)
+    if _candidate_fast_current_version() == "v2":
+        return label.replace("Legacy V1", "Candidate V2")
+    return label
+
+
+def _candidate_fast_version_caption(text):
+    return str(text).replace("Legacy V1", "Candidate V2") if _candidate_fast_current_version() == "v2" else str(text)
+
+
 def _candidate_fast_build_snapshot(
     retests_df,
     v1_short_config,
     v1_long_config,
+    candidate_version="v1",
 ):
     if candidate_research_store is None:
         raise RuntimeError("CandidateResearchStore is unavailable")
@@ -48257,6 +48292,100 @@ def _candidate_fast_build_snapshot(
         raise RuntimeError("duckdb + pyarrow are required")
 
     started = time.perf_counter()
+    candidate_version = str(candidate_version).lower()
+    if candidate_version not in {"v1", "v2"}:
+        raise ValueError(f"Unknown Candidate version: {candidate_version}")
+
+    # V2 refresh is intentionally independent. It reuses the shared REACTION
+    # scan but never rebuilds V1 or resets V1 discovery/forward history.
+    if candidate_version == "v2":
+        # Full V2 fast research is based on the immutable V2 REACTION universe,
+        # never on official filtered Legacy V1 candidate IDs.
+        v2_history, v2_config, v2_newly_frozen = (
+            _candidate_v2_load_or_freeze_universe(retests_df)
+        )
+        if v2_history is None or v2_history.empty:
+            raise RuntimeError("Candidate V2 universe is empty")
+        v2_history = v2_history.copy()
+        v2_history["candidate_analysis_profile"] = "v2"
+        v2_context, v2_sector_error = _candidate_v2_build_market_context(
+            v2_history, force=False
+        )
+        if v2_context is None or v2_context.empty:
+            v2_context = v2_history.copy()
+        v2_context["candidate_analysis_profile"] = "v2"
+
+        # Same fixed, fee-aware execution as V1, but different universe and
+        # isolated persisted 1m paths. NO-TRADE needs executable outcomes.
+        execution_kwargs = dict(
+            horizon_min=180,
+            entry_fee_pct=0.05, exit_fee_pct=0.05,
+            entry_slippage_pct=0.0, exit_slippage_pct=0.0,
+            notional_usdt=100.0, force=False,
+        )
+        v2_execution = _candidate_v2_execution_grid(
+            v2_context, tp_values=(0.5,), sl_values=(3.0,),
+            **execution_kwargs,
+        )
+        v2_fixed = _candidate_v2_merge_execution_context(v2_execution, v2_context)
+        if v2_fixed is None or v2_fixed.empty:
+            raise RuntimeError("V2 execution grid is empty; inspect causal 1m path coverage")
+        v2_fixed["candidate_analysis_profile"] = "v2"
+
+        v2_matrix = _candidate_v2_execution_grid(
+            v2_context,
+            tp_values=(0.25, 0.35, 0.50, 0.75, 1.00, 1.50, 2.00, 2.50, 3.00),
+            sl_values=(0.50, 1.00, 1.50, 2.00, 2.50, 3.00),
+            **execution_kwargs,
+        )
+        v2_matrix = _candidate_v2_merge_execution_context(v2_matrix, v2_context)
+        if v2_matrix is None or v2_matrix.empty:
+            raise RuntimeError("V2 TP/SL matrix is empty")
+        v2_matrix["candidate_analysis_profile"] = "v2"
+
+        reaction_count, reaction_digest, max_retest_ts = (
+            _candidate_analysis_retests_signature(retests_df)
+        )
+        manifest = candidate_research_store.write_bundle(
+            {
+                "v2": v2_context,
+                "v2_execution": v2_fixed,
+                "v2_matrix_execution": v2_matrix,
+            },
+            source_meta={
+                "refreshed_candidate": "v2",
+                "reaction_count": int(reaction_count),
+                "reaction_digest": str(reaction_digest),
+                "max_retest_timestamp": max_retest_ts,
+                "v2_rows": int(len(v2_context)),
+                "v2_execution_rows": int(len(v2_fixed)),
+                "v2_matrix_execution_rows": int(len(v2_matrix)),
+                "v2_newly_frozen": bool(v2_newly_frozen),
+                "v2_sector_error": v2_sector_error,
+                "v2_execution_definition": {
+                    "tp_pct": 0.5, "sl_pct": 3.0, "horizon_min": 180,
+                    "entry_fee_pct": 0.05, "exit_fee_pct": 0.05,
+                    "slippage_pct": 0.0,
+                },
+            },
+        )
+        old_version = st.session_state.get("_candidate_fast_active_version", "v1")
+        try:
+            st.session_state["_candidate_fast_active_version"] = "v2"
+            history_result = _candidate_fast_discovery_history_capture(
+                v2_fixed,
+                reaction_digest=reaction_digest,
+                max_retest_timestamp=max_retest_ts,
+            )
+        except Exception as exc:
+            history_result = {"status": "error", "error": str(exc)}
+        finally:
+            st.session_state["_candidate_fast_active_version"] = old_version
+        return {
+            "manifest": manifest,
+            "v2_config": v2_config,
+            "discovery_history": history_result,
+        }
 
     # Keep the prospective audit ledger alive. This does not filter RAW rows.
     ledger_result = _candidate_v1_persist_legacy_prefilter_ledger(
@@ -48288,15 +48417,6 @@ def _candidate_fast_build_snapshot(
     v1_legacy = v1_legacy.copy()
     v1_legacy["candidate_analysis_profile"] = "v1"
 
-    # V2 remains the threshold-agnostic REACTION universe.
-    v2_history, v2_config, v2_newly_frozen = (
-        _candidate_v2_load_or_freeze_universe(retests_df)
-    )
-    if v2_history is None or v2_history.empty:
-        raise RuntimeError("Candidate V2 universe is empty")
-    v2_history = v2_history.copy()
-    v2_history["candidate_analysis_profile"] = "v2"
-
     # Market context is heavy and belongs to BUILD, not EXPLORE. Existing
     # persisted context stores are reused; only missing/current work is added.
     v1_context, v1_sector_error = _candidate_v2_build_market_context(
@@ -48307,20 +48427,13 @@ def _candidate_fast_build_snapshot(
         v1_legacy,
         force=False,
     )
-    v2_context, v2_sector_error = _candidate_v2_build_market_context(
-        v2_history,
-        force=False,
-    )
     if v1_context is None or v1_context.empty:
         v1_context = v1_raw.copy()
     if v1_legacy_context is None or v1_legacy_context.empty:
         v1_legacy_context = v1_legacy.copy()
-    if v2_context is None or v2_context.empty:
-        v2_context = v2_history.copy()
 
     v1_context["candidate_analysis_profile"] = "v1"
     v1_legacy_context["candidate_analysis_profile"] = "v1"
-    v2_context["candidate_analysis_profile"] = "v2"
 
     # --------------------------------------------------------------
     # 3) Fixed Legacy parity execution snapshot.
@@ -48394,7 +48507,6 @@ def _candidate_fast_build_snapshot(
             "v1_legacy": v1_legacy_context,
             "v1_legacy_execution": legacy_exec_context,
             "v1_legacy_matrix_execution": legacy_matrix_exec_context,
-            "v2": v2_context,
         },
         source_meta={
             "reaction_count": int(reaction_count),
@@ -48404,11 +48516,9 @@ def _candidate_fast_build_snapshot(
             "v1_legacy_rows": int(len(v1_legacy_context)),
             "v1_legacy_execution_rows": int(len(legacy_exec_context)),
             "v1_legacy_matrix_execution_rows": int(len(legacy_matrix_exec_context)),
-            "v2_rows": int(len(v2_context)),
-            "v2_newly_frozen": bool(v2_newly_frozen),
             "v1_sector_error": v1_sector_error,
+            "refreshed_candidate": "v1",
             "v1_legacy_sector_error": v1_legacy_sector_error,
-            "v2_sector_error": v2_sector_error,
             "legacy_execution_definition": {
                 "tp_pct": 0.5,
                 "sl_pct": 3.0,
@@ -48465,8 +48575,6 @@ def _candidate_fast_build_snapshot(
         "v1_legacy": v1_legacy_context,
         "v1_legacy_execution": legacy_exec_context,
         "v1_legacy_matrix_execution": legacy_matrix_exec_context,
-        "v2": v2_context,
-        "v2_config": v2_config,
     }
 
 
@@ -48519,36 +48627,39 @@ def _candidate_fast_legacy_v1_portfolio(execution, variant, selected_sl_pct=3.0)
     return portfolio, resolved
 
 
-def render_candidate_fast_legacy_v1_equity():
+def render_candidate_fast_legacy_v1_equity(candidate_version="v1"):
     """Rebuild the fixed Legacy V1 equity curve from materialized execution rows."""
+    is_v2 = str(candidate_version).lower() == "v2"
+    execution_profile = "v2_execution" if is_v2 else "v1_legacy_execution"
+    candidate_name = "Candidate V2" if is_v2 else "Legacy V1"
     store = candidate_research_store
     if (
         store is None
         or not store.available
-        or not store.snapshot_exists("v1_legacy_execution")
+        or not store.snapshot_exists(execution_profile)
     ):
         return
 
-    result = store.query(
-        "v1_legacy_execution",
-        limit=10000,
+    result = store.read_profile(
+        execution_profile,
+        limit=1000000,
     )
     execution = result.get("frame", pd.DataFrame())
     if execution is None or execution.empty:
-        st.info("No materialized Legacy V1 execution rows are available yet.")
+        st.info(f"No materialized {candidate_name} execution rows are available yet.")
         return
 
-    st.markdown("#### 💰 Legacy V1 equity parity · Fast")
+    st.markdown(f"#### 💰 {candidate_name} fixed equity · Fast")
     st.caption(
-        "Reconstructed from the official persisted Legacy V1 Event IDs using the "
+        f"Reconstructed from {candidate_name} Event IDs using the "
         "same fixed execution/portfolio semantics as the compatibility benchmark: "
         "TP 0.5% / SL 3% / 180m · fees 0.05% + 0.05% · $200 · x3 · 1 slot · "
         "80% realized-equity margin · Most HTF Room → Strength · Flow gate OFF."
     )
 
     variants = [
-        ("Legacy V1 Base", "Candidate Base"),
-        ("Legacy V1 + Strength > 0", "Candidate + Strength"),
+        (f"{candidate_name} Base", "Candidate Base"),
+        (f"{candidate_name} + Strength > 0", "Candidate + Strength"),
     ]
     rows = []
     curves = []
@@ -48586,18 +48697,18 @@ def render_candidate_fast_legacy_v1_equity():
 
     summary_df = pd.DataFrame(rows)
     if summary_df.empty:
-        st.warning("Legacy V1 portfolio could not be reconstructed from the snapshot.")
+        st.warning(f"{candidate_name} portfolio could not be reconstructed from the snapshot.")
         return
 
     st.dataframe(
         summary_df,
         use_container_width=True,
         hide_index=True,
-        key="candidate_fast_legacy_equity_summary",
+        key=f"candidate_fast_{candidate_version}_equity_summary",
     )
 
     base_row = summary_df.loc[
-        summary_df["Variant"].astype(str).eq("Legacy V1 Base")
+        summary_df["Variant"].astype(str).eq(f"{candidate_name} Base")
     ]
     if not base_row.empty:
         base = base_row.iloc[0]
@@ -48631,7 +48742,7 @@ def render_candidate_fast_legacy_v1_equity():
             annotation_position="top left",
         )
         fig.update_layout(
-            title="Legacy V1 · fixed portfolio equity parity",
+            title=f"{candidate_name} · fixed portfolio equity",
             xaxis_title="Time",
             yaxis_title="Realized equity (USDT)",
             hovermode="x unified",
@@ -48640,30 +48751,31 @@ def render_candidate_fast_legacy_v1_equity():
         st.plotly_chart(
             fig,
             use_container_width=True,
-            key="candidate_fast_legacy_v1_equity_curve",
+            key=f"candidate_fast_{candidate_version}_equity_curve",
             config={"displaylogo": False},
         )
 
     st.caption(
         f"Execution snapshot query: {float(result.get('elapsed_ms', 0.0)):.1f} ms. "
-        "If Legacy V1 Base does not match the compatibility benchmark, compare "
+        "Check resolved/executable Event IDs and portfolio parity; compare "
         "Event IDs / executable / resolved counts before changing any strategy rule."
     )
 
 
 
-def _candidate_fast_load_matrix_execution():
+def _candidate_fast_load_matrix_execution(candidate_version="v1"):
+    profile = "v2_matrix_execution" if str(candidate_version).lower() == "v2" else "v1_legacy_matrix_execution"
     store = candidate_research_store
     if (
         store is None
         or not store.available
-        or not store.snapshot_exists("v1_legacy_matrix_execution")
+        or not store.snapshot_exists(profile)
     ):
         return pd.DataFrame(), 0.0
 
     manifest = store.read_manifest()
-    built_at = str(manifest.get("built_at_utc", ""))
-    cache_key = "candidate_fast_legacy_matrix_cache"
+    built_at = str((manifest.get("profiles", {}) or {}).get(profile, {}).get("built_at_utc", ""))
+    cache_key = f"candidate_fast_{candidate_version}_matrix_cache"
     cached = st.session_state.get(cache_key)
     if (
         isinstance(cached, dict)
@@ -48673,8 +48785,8 @@ def _candidate_fast_load_matrix_execution():
         return cached["frame"].copy(), float(cached.get("elapsed_ms", 0.0))
 
     result = store.read_profile(
-        "v1_legacy_matrix_execution",
-        limit=250000,
+        profile,
+        limit=1000000,
     )
     frame = result.get("frame", pd.DataFrame())
     st.session_state[cache_key] = {
@@ -48685,23 +48797,25 @@ def _candidate_fast_load_matrix_execution():
     return frame, float(result.get("elapsed_ms", 0.0))
 
 
-def render_candidate_fast_legacy_v1_matrix():
+def render_candidate_fast_legacy_v1_matrix(candidate_version="v1"):
     """Fast Legacy V1 TP/SL matrix from materialized 180m execution rows."""
-    execution, load_ms = _candidate_fast_load_matrix_execution()
+    is_v2 = str(candidate_version).lower() == "v2"
+    candidate_name = "Candidate V2" if is_v2 else "Legacy V1"
+    execution, load_ms = _candidate_fast_load_matrix_execution(candidate_version)
     if execution is None or execution.empty:
         return
 
-    st.markdown("#### 🧮 Legacy V1 execution matrix · Fast")
+    st.markdown(f"#### 🧮 {candidate_name} execution matrix · Fast")
     st.caption(
-        "Official Legacy V1 universe (already Room >= 1% + aligned RSI >= 1). "
-        "The 180m TP/SL grid is materialized during BUILD, so changing variant, "
+        f"{candidate_name} universe: " + ("threshold-agnostic REACTION IDs. " if is_v2 else "official Room/RSI-filtered Legacy IDs. ")
+        + "The 180m TP/SL grid is materialized during BUILD, so changing variant, "
         "side, cohort, metric or inspected cell does not rebuild Candidate paths. "
         "Fees 0.05% + 0.05% · slippage 0% · matrix notional $100/trade."
     )
 
     variant_labels = {
-        "Legacy V1 Base": "Candidate Base",
-        "Legacy V1 + Strength > 0": "Candidate + Strength",
+        f"{candidate_name} Base": "Candidate Base",
+        f"{candidate_name} + Strength > 0": "Candidate + Strength",
     }
     cohort_values = (
         execution.get("candidate_v2_cohort", pd.Series(dtype=str))
@@ -48717,19 +48831,19 @@ def render_candidate_fast_legacy_v1_matrix():
         "Variant",
         list(variant_labels),
         index=1,
-        key="candidate_fast_legacy_matrix_variant",
+        key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_variant"),
     )
     side_scope = c2.selectbox(
         "Side",
         ["TOTAL", "LONG", "SHORT"],
         index=0,
-        key="candidate_fast_legacy_matrix_side",
+        key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_side"),
     )
     cohort_scope = c3.selectbox(
         "Cohort",
         ["TOTAL"] + cohort_values,
         index=0,
-        key="candidate_fast_legacy_matrix_cohort",
+        key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_cohort"),
     )
     metric = c4.selectbox(
         "Matrix metric",
@@ -48744,7 +48858,7 @@ def render_candidate_fast_legacy_v1_matrix():
             "Resolved",
         ],
         index=0,
-        key="candidate_fast_legacy_matrix_metric",
+        key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_metric"),
     )
 
     variant = variant_labels[variant_label]
@@ -48767,14 +48881,14 @@ def render_candidate_fast_legacy_v1_matrix():
         ].copy()
 
     if work.empty:
-        st.info("No Legacy V1 execution rows match this selection.")
+        st.info(f"No {candidate_name} execution rows match this selection.")
         return
 
     summary_started = time.perf_counter()
     summary = _candidate_v1_execution_grid_summary(work)
     summary_ms = (time.perf_counter() - summary_started) * 1000.0
     if summary is None or summary.empty:
-        st.info("No Legacy V1 matrix cells are available.")
+        st.info(f"No {candidate_name} matrix cells are available.")
         return
 
     if metric in {"Net PnL % pts", "Net PnL USDT"}:
@@ -48800,7 +48914,7 @@ def render_candidate_fast_legacy_v1_matrix():
     st.dataframe(
         matrix,
         use_container_width=True,
-        key="candidate_fast_legacy_matrix_table",
+        key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_table"),
     )
 
     event_col = (
@@ -48814,7 +48928,7 @@ def render_candidate_fast_legacy_v1_matrix():
         else 0
     )
     st.caption(
-        f"{candidate_count} Legacy V1 candidates · execution rows {len(work):,} · "
+        f"{candidate_count} {candidate_name} candidates · execution rows {len(work):,} · "
         f"Parquet load {load_ms:.1f} ms · matrix summary {summary_ms:.1f} ms. "
         "PnL cells show PnL (WR · PF), matching the compatibility semantics."
     )
@@ -48842,14 +48956,14 @@ def render_candidate_fast_legacy_v1_matrix():
         tp_values,
         index=default_tp,
         format_func=lambda value: f"{float(value):g}%",
-        key="candidate_fast_legacy_matrix_inspect_tp",
+        key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_inspect_tp"),
     )
     selected_sl = i2.selectbox(
         "Inspect SL",
         sl_values,
         index=default_sl,
         format_func=lambda value: f"{float(value):g}%",
-        key="candidate_fast_legacy_matrix_inspect_sl",
+        key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_inspect_sl"),
     )
 
     selected_summary = summary.loc[
@@ -48966,7 +49080,7 @@ def render_candidate_fast_legacy_v1_matrix():
     )
     fig.update_layout(
         title=(
-            f"Legacy V1 · {variant_label} · TP {float(selected_tp):g}% / "
+            f"{candidate_name} · {variant_label} · TP {float(selected_tp):g}% / "
             f"SL {float(selected_sl):g}% · 180m"
         ),
         xaxis_title="Time",
@@ -48977,7 +49091,7 @@ def render_candidate_fast_legacy_v1_matrix():
     st.plotly_chart(
         fig,
         use_container_width=True,
-        key="candidate_fast_legacy_matrix_selected_equity",
+        key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_selected_equity"),
         config={"displaylogo": False},
     )
 
@@ -49099,11 +49213,12 @@ def _candidate_fast_render_regime_condition(
     label,
     display_labels=None,
 ):
+    key_prefix = _candidate_fast_widget_key(key_prefix)
     display_labels = display_labels or {}
     feature = st.selectbox(
         label,
         ["OFF"] + list(feature_options),
-        key=f"{key_prefix}_feature",
+        key=_candidate_fast_widget_key(f"{key_prefix}_feature"),
         format_func=lambda value: (
             "OFF" if value == "OFF" else display_labels.get(value, value)
         ),
@@ -49120,7 +49235,7 @@ def _candidate_fast_render_regime_condition(
         operator = c1.selectbox(
             "Block when",
             ["<=", ">="],
-            key=f"{key_prefix}_operator",
+            key=_candidate_fast_widget_key(f"{key_prefix}_operator"),
         )
         valid = numeric.dropna().astype(float)
         default_quantile = 0.20 if operator == "<=" else 0.80
@@ -49134,7 +49249,7 @@ def _candidate_fast_render_regime_condition(
             value=float(default_value),
             step=float(step),
             format="%.4f",
-            key=f"{key_prefix}_threshold",
+            key=_candidate_fast_widget_key(f"{key_prefix}_threshold"),
         )
         mask = _candidate_fast_regime_condition_mask(
             frame,
@@ -49154,7 +49269,7 @@ def _candidate_fast_render_regime_condition(
     value = st.selectbox(
         "Block category",
         categories,
-        key=f"{key_prefix}_category",
+        key=_candidate_fast_widget_key(f"{key_prefix}_category"),
     )
     mask = _candidate_fast_regime_condition_mask(
         frame,
@@ -49392,7 +49507,7 @@ def _candidate_fast_regime_portfolio_stability(
                     * 100.0
                 )
 
-    ledger = portfolio.get("ledger", pd.DataFrame())
+    ledger = portfolio.get("ledger_raw", pd.DataFrame())
     if ledger is None or ledger.empty:
         return result
 
@@ -50422,7 +50537,7 @@ def _candidate_fast_discovery_snapshot_id(
 
 
 def _candidate_fast_discovery_history_load():
-    path = CANDIDATE_FAST_DISCOVERY_HISTORY_FILE
+    path = _candidate_fast_version_path(CANDIDATE_FAST_DISCOVERY_HISTORY_FILE)
     if not path.exists():
         return pd.DataFrame()
     try:
@@ -50432,7 +50547,7 @@ def _candidate_fast_discovery_history_load():
 
 
 def _candidate_fast_discovery_forward_load():
-    path = CANDIDATE_FAST_DISCOVERY_FORWARD_FILE
+    path = _candidate_fast_version_path(CANDIDATE_FAST_DISCOVERY_FORWARD_FILE)
     if not path.exists():
         return pd.DataFrame()
     try:
@@ -50534,7 +50649,7 @@ def _candidate_fast_discovery_forward_accepted_stats(portfolio):
     }
     if not portfolio:
         return result
-    ledger = portfolio.get("ledger", pd.DataFrame())
+    ledger = portfolio.get("ledger_raw", pd.DataFrame())
     if ledger is None or ledger.empty:
         return result
     accepted_mask = (
@@ -50711,6 +50826,7 @@ def _candidate_fast_discovery_forward_update(
             "forward_resolved": int(len(forward)),
             "new_forward_resolved": int(max(len(forward) - prev_forward_n, 0)),
             "status": "awaiting_forward",
+            "diagnostics_schema_version": 2,
         }
 
         if forward.empty:
@@ -50849,7 +50965,7 @@ def _candidate_fast_discovery_forward_update(
     )
     _candidate_fast_atomic_write_csv(
         combined,
-        CANDIDATE_FAST_DISCOVERY_FORWARD_FILE,
+        _candidate_fast_version_path(CANDIDATE_FAST_DISCOVERY_FORWARD_FILE),
     )
     return {
         "status": "updated",
@@ -50912,8 +51028,8 @@ def _candidate_fast_discovery_history_capture(
     created_utc = pd.Timestamp.now(tz="UTC")
     discovery_cutoff_timestamp = int(created_utc.value // 1_000_000)
     strategies = [
-        ("Legacy V1 + Strength > 0", "Candidate + Strength"),
-        ("Legacy V1 Base", "Candidate Base"),
+        (_candidate_fast_strategy_label("Legacy V1 + Strength > 0"), "Candidate + Strength"),
+        (_candidate_fast_strategy_label("Legacy V1 Base"), "Candidate Base"),
     ]
     output_rows = []
 
@@ -51097,7 +51213,7 @@ def _candidate_fast_discovery_history_capture(
     )
     _candidate_fast_atomic_write_csv(
         combined,
-        CANDIDATE_FAST_DISCOVERY_HISTORY_FILE,
+        _candidate_fast_version_path(CANDIDATE_FAST_DISCOVERY_HISTORY_FILE),
     )
     forward_status = _candidate_fast_discovery_forward_update(
         execution,
@@ -51189,7 +51305,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
             top1_display,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_discovery_history_top1",
+            key=_candidate_fast_widget_key("candidate_fast_discovery_history_top1"),
         )
 
     # Top-3 family persistence by snapshot. Count a family at most once per snapshot.
@@ -51224,7 +51340,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
             persistence,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_discovery_history_families",
+            key=_candidate_fast_widget_key("candidate_fast_discovery_history_families"),
         )
 
 
@@ -51273,7 +51389,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
         "Inspect saved Top 10 from snapshot",
         snapshot_labels,
         index=max(len(snapshot_labels) - 1, 0),
-        key="candidate_fast_discovery_history_top10_snapshot_selector",
+        key=_candidate_fast_widget_key("candidate_fast_discovery_history_top10_snapshot_selector"),
     )
     selected_snapshot_id = snapshot_map[selected_snapshot_label]
     selected_top10 = work.loc[
@@ -51347,7 +51463,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
             top10_display,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_discovery_history_selected_top10",
+            key=_candidate_fast_widget_key("candidate_fast_discovery_history_selected_top10"),
         )
 
         bar_data = selected_top10.copy()
@@ -51390,7 +51506,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
             st.plotly_chart(
                 fig_top10,
                 use_container_width=True,
-                key="candidate_fast_discovery_history_selected_top10_chart",
+                key=_candidate_fast_widget_key("candidate_fast_discovery_history_selected_top10_chart"),
             )
 
     def _snapshot_rule_family_signature(row):
@@ -51481,7 +51597,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
             family_summary.head(20),
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_discovery_history_top10_family_summary",
+            key=_candidate_fast_widget_key("candidate_fast_discovery_history_top10_family_summary"),
         )
 
         default_families = family_summary.head(min(5, len(family_summary)))[
@@ -51492,7 +51608,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
             family_summary["Rule family"].astype(str).tolist(),
             default=default_families,
             max_selections=8,
-            key="candidate_fast_discovery_history_top10_family_selector",
+            key=_candidate_fast_widget_key("candidate_fast_discovery_history_top10_family_selector"),
         )
         if selected_families:
             fig_rank = go.Figure()
@@ -51540,7 +51656,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
             st.plotly_chart(
                 fig_rank,
                 use_container_width=True,
-                key="candidate_fast_discovery_history_top10_rank_evolution",
+                key=_candidate_fast_widget_key("candidate_fast_discovery_history_top10_rank_evolution"),
             )
 
         family_options = family_summary["Rule family"].astype(str).tolist()
@@ -51560,7 +51676,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
                 "Inspect one family through every saved snapshot",
                 family_options,
                 index=family_default_index,
-                key="candidate_fast_discovery_history_family_inspector",
+                key=_candidate_fast_widget_key("candidate_fast_discovery_history_family_inspector"),
             )
             family_detail = family_best.loc[
                 family_best["Rule family"].astype(str).eq(str(inspect_family))
@@ -51603,7 +51719,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
                     detail_display,
                     use_container_width=True,
                     hide_index=True,
-                    key="candidate_fast_discovery_history_family_detail",
+                    key=_candidate_fast_widget_key("candidate_fast_discovery_history_family_detail"),
                 )
 
     forward_history = _candidate_fast_discovery_forward_load()
@@ -51615,6 +51731,25 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
             ].copy()
 
         if not forward_work.empty:
+            version = pd.to_numeric(
+                forward_work.get(
+                    "diagnostics_schema_version",
+                    pd.Series(np.nan, index=forward_work.index),
+                ),
+                errors="coerce",
+            )
+            old_evaluated = (
+                forward_work.get("status", pd.Series("", index=forward_work.index))
+                .astype(str).eq("evaluated")
+                & (version.isna() | version.lt(2))
+            )
+            if old_evaluated.any():
+                st.warning(
+                    "Some forward history rows predate the raw-ledger accounting fix. "
+                    "Their accepted W/L, accepted PnL and day-stability diagnostics "
+                    "may be missing/zero. Frozen rules and equity/PF/DD were not "
+                    "changed; only new evaluations carry corrected diagnostics."
+                )
             st.markdown("###### 🔭 Forward since discovery · frozen snapshot winners")
             st.caption(
                 "Every snapshot #1 rule is frozen exactly as discovered. Forward uses only "
@@ -51706,7 +51841,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
                 latest_display,
                 use_container_width=True,
                 hide_index=True,
-                key="candidate_fast_discovery_forward_latest",
+                key=_candidate_fast_widget_key("candidate_fast_discovery_forward_latest"),
             )
 
             selector_rows = latest_forward.dropna(subset=["Discovery #"]).copy()
@@ -51728,7 +51863,7 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
                     "Inspect one frozen winner forward trajectory",
                     list(selector_map.keys()),
                     index=len(selector_map) - 1,
-                    key="candidate_fast_discovery_forward_selector",
+                    key=_candidate_fast_widget_key("candidate_fast_discovery_forward_selector"),
                 )
                 selected_discovery_id = selector_map[selected_forward_label]
                 trajectory = forward_work.loc[
@@ -51817,15 +51952,15 @@ def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
                     trajectory_display,
                     use_container_width=True,
                     hide_index=True,
-                    key="candidate_fast_discovery_forward_trajectory",
+                    key=_candidate_fast_widget_key("candidate_fast_discovery_forward_trajectory"),
                 )
 
             st.caption(
-                f"Forward file: {CANDIDATE_FAST_DISCOVERY_FORWARD_FILE.relative_to(BASE_DIR)}"
+                f"Forward file: {_candidate_fast_version_path(CANDIDATE_FAST_DISCOVERY_FORWARD_FILE).relative_to(BASE_DIR)}"
             )
 
     st.caption(
-        f"History file: {CANDIDATE_FAST_DISCOVERY_HISTORY_FILE.relative_to(BASE_DIR)} · "
+        f"History file: {_candidate_fast_version_path(CANDIDATE_FAST_DISCOVERY_HISTORY_FILE).relative_to(BASE_DIR)} · "
         f"{int(work['snapshot_id'].astype(str).nunique())} unique snapshot(s) for this strategy."
     )
 
@@ -52173,16 +52308,16 @@ def _candidate_fast_render_reverse_regime_search(
         "Source gate",
         source_options,
         index=source_options.index(source_default),
-        key="candidate_fast_reverse_source_component",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_source_component"),
         help="A OR B is recommended because it is the first broad gate we want to diagnose further.",
     )
     strategy_labels = [label for label, _ in strategy_defs]
     strategy_label = rr2.selectbox(
         "Source strategy",
         strategy_labels,
-        index=(strategy_labels.index("Legacy V1 + Strength > 0")
-               if "Legacy V1 + Strength > 0" in strategy_labels else 0),
-        key="candidate_fast_reverse_strategy",
+        index=(strategy_labels.index(_candidate_fast_strategy_label("Legacy V1 + Strength > 0"))
+               if _candidate_fast_strategy_label("Legacy V1 + Strength > 0") in strategy_labels else 0),
+        key=_candidate_fast_widget_key("candidate_fast_reverse_strategy"),
     )
 
     source_rule = component_rule_map[str(source_label)]
@@ -52264,7 +52399,7 @@ def _candidate_fast_render_reverse_regime_search(
         enabled = bad_cols[optional_idx - 1].checkbox(
             f"Use bad zone {optional_idx + 1}",
             value=default_enabled,
-            key=f"candidate_fast_reverse_zone_enabled_{optional_idx}",
+            key=_candidate_fast_widget_key(f"candidate_fast_reverse_zone_enabled_{optional_idx}"),
         )
         bad_enabled.append(bool(enabled))
 
@@ -52277,7 +52412,7 @@ def _candidate_fast_render_reverse_regime_search(
             value=(default_start.to_pydatetime(), default_end.to_pydatetime()),
             step=reverse_zone_step.to_pytimedelta(),
             format="DD/MM HH:mm",
-            key=f"candidate_fast_reverse_zone_{idx}",
+            key=_candidate_fast_widget_key(f"candidate_fast_reverse_zone_{idx}"),
             disabled=not bad_enabled[idx],
         )
         if not bad_enabled[idx]:
@@ -52310,7 +52445,7 @@ def _candidate_fast_render_reverse_regime_search(
         enabled = good_cols[idx].checkbox(
             f"Use good zone {idx + 1}",
             value=False,
-            key=f"candidate_fast_reverse_good_enabled_{idx}",
+            key=_candidate_fast_widget_key(f"candidate_fast_reverse_good_enabled_{idx}"),
         )
         good_enabled.append(bool(enabled))
 
@@ -52323,7 +52458,7 @@ def _candidate_fast_render_reverse_regime_search(
             value=(default_start.to_pydatetime(), default_end.to_pydatetime()),
             step=reverse_zone_step.to_pytimedelta(),
             format="DD/MM HH:mm",
-            key=f"candidate_fast_reverse_good_zone_{idx}",
+            key=_candidate_fast_widget_key(f"candidate_fast_reverse_good_zone_{idx}"),
             disabled=not good_enabled[idx],
         )
         if not good_enabled[idx]:
@@ -52345,7 +52480,7 @@ def _candidate_fast_render_reverse_regime_search(
         [(str(source_label), source_portfolio)],
         bad_zones,
         good_zones=good_zones,
-        key="candidate_fast_reverse_source_equity",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_source_equity"),
         title=f"{strategy_label} · {source_label} · BAD / GOOD discovery zones",
     )
 
@@ -52367,7 +52502,7 @@ def _candidate_fast_render_reverse_regime_search(
             "All resolved candidates",
         ],
         horizontal=True,
-        key="candidate_fast_reverse_scope",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_scope"),
     )
     if scope_mode.startswith("Candidates allowed"):
         population_mask = ~source_blocked
@@ -52410,7 +52545,7 @@ def _candidate_fast_render_reverse_regime_search(
         comparison_options,
         index=(len(comparison_options) - 1),
         horizontal=True,
-        key="candidate_fast_reverse_comparison_mode",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_comparison_mode"),
         help=(
             "Bad vs good vs rest is recommended when GOOD zones exist: detect BAD, "
             "avoid GOOD, and avoid over-blocking the remaining sample."
@@ -52422,7 +52557,7 @@ def _candidate_fast_render_reverse_regime_search(
         "Detector search",
         ["Singles", "Singles + pairs"],
         index=1,
-        key="candidate_fast_reverse_depth",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_depth"),
     )
     objective_options = [
         "Balanced zone detector",
@@ -52439,20 +52574,20 @@ def _candidate_fast_render_reverse_regime_search(
         "Rank detectors by",
         objective_options,
         index=0,
-        key="candidate_fast_reverse_objective",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_objective"),
     )
     max_outside = sr3.selectbox(
         "Max non-BAD blocked",
         [10, 20, 30, 40, 50],
         index=2,
         format_func=lambda value: f"{value}%",
-        key="candidate_fast_reverse_max_outside",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_max_outside"),
     )
     top_n = sr4.selectbox(
         "Top detectors",
         [10, 15, 20, 30],
         index=1,
-        key="candidate_fast_reverse_top_n",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_top_n"),
     )
 
     bad_signature = tuple((int(z["start_ms"]), int(z["end_ms"])) for z in bad_zones)
@@ -52468,13 +52603,13 @@ def _candidate_fast_render_reverse_regime_search(
         str(comparison_mode),
         str(depth),
     )
-    cache_key = "candidate_fast_reverse_regime_cache"
+    cache_key = _candidate_fast_widget_key("candidate_fast_reverse_regime_cache")
     cached = st.session_state.get(cache_key)
 
     if st.button(
         "🔬 Search detectors for selected BAD / GOOD zones",
         use_container_width=True,
-        key="candidate_fast_reverse_run",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_run"),
     ):
         with st.spinner("Comparing causal contexts across BAD / GOOD / REST..."):
             rules = _candidate_fast_regime_auto_single_rules(
@@ -52645,7 +52780,7 @@ def _candidate_fast_render_reverse_regime_search(
         display,
         use_container_width=True,
         hide_index=True,
-        key="candidate_fast_reverse_results",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_results"),
     )
     st.caption(
         "Preferred detectors capture BAD, avoid GOOD, and avoid firing throughout REST. "
@@ -52659,7 +52794,7 @@ def _candidate_fast_render_reverse_regime_search(
     selected_id = st.selectbox(
         "Replay reverse-search hypothesis",
         detector_ids,
-        key="candidate_fast_reverse_selected_detector",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_selected_detector"),
         format_func=lambda rid: (
             f"{rid} · "
             + str(
@@ -52703,7 +52838,7 @@ def _candidate_fast_render_reverse_regime_search(
         ],
         bad_zones,
         good_zones=good_zones,
-        key="candidate_fast_reverse_replay_equity",
+        key=_candidate_fast_widget_key("candidate_fast_reverse_replay_equity"),
         title=(
             f"{strategy_label} · {source_label} vs {source_label} + reverse detector D · "
             f"{detector_text}"
@@ -52731,7 +52866,7 @@ def _candidate_fast_render_auto_regime_scanner(
     st.caption(
         "The ranking is optimized against the Strategy selected above: "
         f"**{variant_label}**. After selecting a rule, the same untouched gate is "
-        "replayed on BOTH Legacy V1 Base and Legacy V1 + Strength > 0, then "
+        "replayed on both Base and Strength > 0 for this Candidate version, then "
         "decomposed into components and threshold sensitivity tests."
     )
 
@@ -52740,7 +52875,7 @@ def _candidate_fast_render_auto_regime_scanner(
         "Search",
         ["Singles + ranges", "Extended pairs"],
         index=1,
-        key="candidate_fast_regime_auto_search_mode",
+        key=_candidate_fast_widget_key("candidate_fast_regime_auto_search_mode"),
         help=(
             "Extended pairs first evaluates all single/range rules, then combines "
             "the strongest simple gates across features with AND/OR."
@@ -52756,26 +52891,26 @@ def _candidate_fast_render_auto_regime_scanner(
             "Balanced stability",
         ],
         index=0,
-        key="candidate_fast_regime_auto_objective",
+        key=_candidate_fast_widget_key("candidate_fast_regime_auto_objective"),
     )
     max_blocked_pct = a3.selectbox(
         "Max candidates blocked",
         [20, 30, 40, 50, 60, 75],
         index=3,
         format_func=lambda value: f"{value}%",
-        key="candidate_fast_regime_auto_max_blocked",
+        key=_candidate_fast_widget_key("candidate_fast_regime_auto_max_blocked"),
     )
     top_rows = a4.selectbox(
         "Top rows",
         [10, 15, 20, 30],
         index=2,
-        key="candidate_fast_regime_auto_top_rows",
+        key=_candidate_fast_widget_key("candidate_fast_regime_auto_top_rows"),
     )
 
     run_scan = st.button(
         "🔎 Run automatic regime scan",
         use_container_width=True,
-        key="candidate_fast_regime_auto_run",
+        key=_candidate_fast_widget_key("candidate_fast_regime_auto_run"),
     )
 
     entry_ts = pd.to_numeric(
@@ -52787,7 +52922,7 @@ def _candidate_fast_render_auto_regime_scanner(
         int(len(resolved)),
         int(entry_ts.max()) if not entry_ts.empty else 0,
     )
-    cache_key = "candidate_fast_regime_auto_scan_cache"
+    cache_key = _candidate_fast_widget_key("candidate_fast_regime_auto_scan_cache")
     cached = st.session_state.get(cache_key)
 
     if run_scan:
@@ -52932,7 +53067,7 @@ def _candidate_fast_render_auto_regime_scanner(
         display,
         use_container_width=True,
         hide_index=True,
-        key="candidate_fast_regime_auto_results",
+        key=_candidate_fast_widget_key("candidate_fast_regime_auto_results"),
     )
     st.caption(
         f"Discovery basis: {variant_label}. Scanned {len(results):,} usable rules. "
@@ -52961,7 +53096,7 @@ def _candidate_fast_render_auto_regime_scanner(
             family_display,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_regime_feature_families",
+            key=_candidate_fast_widget_key("candidate_fast_regime_feature_families"),
         )
         st.caption(
             "Repeated features across independently ranked top rules are more "
@@ -52975,7 +53110,7 @@ def _candidate_fast_render_auto_regime_scanner(
         "Draw / dissect scanned rule",
         top_ids,
         index=0,
-        key="candidate_fast_regime_auto_selected_rule",
+        key=_candidate_fast_widget_key("candidate_fast_regime_auto_selected_rule"),
         format_func=lambda rid: (
             f"{rid} · "
             + str(
@@ -52992,8 +53127,8 @@ def _candidate_fast_render_auto_regime_scanner(
 
     st.markdown("###### Cross-strategy replay · same gate, untouched")
     strategy_defs = [
-        ("Legacy V1 Base", "Candidate Base"),
-        ("Legacy V1 + Strength > 0", "Candidate + Strength"),
+        (_candidate_fast_strategy_label("Legacy V1 Base"), "Candidate Base"),
+        (_candidate_fast_strategy_label("Legacy V1 + Strength > 0"), "Candidate + Strength"),
     ]
     strategy_results = []
     strategy_payloads = {}
@@ -53027,7 +53162,7 @@ def _candidate_fast_render_auto_regime_scanner(
             cross_display,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_regime_cross_strategy",
+            key=_candidate_fast_widget_key("candidate_fast_regime_cross_strategy"),
         )
 
     st.markdown("###### Component anatomy · what actually adds value?")
@@ -53070,7 +53205,7 @@ def _candidate_fast_render_auto_regime_scanner(
             component_display,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_regime_component_anatomy",
+            key=_candidate_fast_widget_key("candidate_fast_regime_component_anatomy"),
         )
 
     # --------------------------------------------------------
@@ -53092,7 +53227,7 @@ def _candidate_fast_render_auto_regime_scanner(
             "Explore component equity",
             component_options,
             index=component_index,
-            key="candidate_fast_regime_component_equity_choice",
+            key=_candidate_fast_widget_key("candidate_fast_regime_component_equity_choice"),
             help=(
                 "Draw the exact portfolio/equity for one component of the "
                 "selected scanner rule. A/B/OR/AND use the same execution and "
@@ -53130,7 +53265,7 @@ def _candidate_fast_render_auto_regime_scanner(
     enable_c_qualifier = st.toggle(
         "Enable optional C qualifier search",
         value=False,
-        key="candidate_fast_regime_enable_c_qualifier",
+        key=_candidate_fast_widget_key("candidate_fast_regime_enable_c_qualifier"),
     )
 
     if enable_c_qualifier:
@@ -53148,26 +53283,26 @@ def _candidate_fast_render_auto_regime_scanner(
                 "Highest Return",
             ],
             index=0,
-            key="candidate_fast_regime_c_objective",
+            key=_candidate_fast_widget_key("candidate_fast_regime_c_objective"),
         )
         c_max_blocked = cq2.selectbox(
             "C max blocked",
             [20, 30, 40, 50, 60],
             index=2,
             format_func=lambda value: f"{value}%",
-            key="candidate_fast_regime_c_max_blocked",
+            key=_candidate_fast_widget_key("candidate_fast_regime_c_max_blocked"),
         )
         c_top_rows = cq3.selectbox(
             "C top rows",
             [5, 10, 15, 20],
             index=1,
-            key="candidate_fast_regime_c_top_rows",
+            key=_candidate_fast_widget_key("candidate_fast_regime_c_top_rows"),
         )
         include_corr = cq4.toggle(
             "BTC corr fields",
             value=False,
             disabled=not bool(experimental_corr),
-            key="candidate_fast_regime_c_include_corr",
+            key=_candidate_fast_widget_key("candidate_fast_regime_c_include_corr"),
             help=(
                 "Experimental. Uses only BTC correlation/beta/residual values already "
                 "persisted in the Candidate Parquet. It never recomputes historical "
@@ -53250,13 +53385,13 @@ def _candidate_fast_render_auto_regime_scanner(
             bool(include_corr),
             tuple(sorted(c_feature_options)),
         )
-        c_cache_key = "candidate_fast_regime_c_qualifier_cache"
+        c_cache_key = _candidate_fast_widget_key("candidate_fast_regime_c_qualifier_cache")
         c_cached = st.session_state.get(c_cache_key)
 
         run_c_scan = st.button(
             "🧪 Search optional C qualifiers",
             use_container_width=True,
-            key="candidate_fast_regime_c_run",
+            key=_candidate_fast_widget_key("candidate_fast_regime_c_run"),
         )
         if run_c_scan:
             with st.spinner(
@@ -53440,7 +53575,7 @@ def _candidate_fast_render_auto_regime_scanner(
                         c_display,
                         use_container_width=True,
                         hide_index=True,
-                        key="candidate_fast_regime_c_results",
+                        key=_candidate_fast_widget_key("candidate_fast_regime_c_results"),
                     )
                     st.caption(
                         "C is a qualifier, not a mandatory third rule. Because it is "
@@ -53454,7 +53589,7 @@ def _candidate_fast_render_auto_regime_scanner(
                         selected_c_id = st.selectbox(
                             "Explore optional C qualifier",
                             c_ids,
-                            key="candidate_fast_regime_c_selected",
+                            key=_candidate_fast_widget_key("candidate_fast_regime_c_selected"),
                             format_func=lambda cid: (
                                 f"{cid} · "
                                 + str(
@@ -53502,12 +53637,12 @@ def _candidate_fast_render_auto_regime_scanner(
                                     c_cross,
                                     use_container_width=True,
                                     hide_index=True,
-                                    key="candidate_fast_regime_c_cross_strategy",
+                                    key=_candidate_fast_widget_key("candidate_fast_regime_c_cross_strategy"),
                                 )
 
                                 c_tabs = st.tabs([
-                                    "Legacy V1 Base · component vs +C",
-                                    "Legacy V1 + Strength > 0 · component vs +C",
+                                    f"{_candidate_fast_strategy_label('Legacy V1 Base')} · component vs +C",
+                                    f"{_candidate_fast_strategy_label('Legacy V1 + Strength > 0')} · component vs +C",
                                 ])
                                 for tab, (strategy_label, _strategy_variant) in zip(
                                     c_tabs,
@@ -53537,7 +53672,7 @@ def _candidate_fast_render_auto_regime_scanner(
                                             payload["base_mask"],
                                             payload["baseline_portfolio"],
                                             payload["base_gate_portfolio"],
-                                            key=(
+                                            key=_candidate_fast_widget_key(
                                                 "candidate_fast_regime_c_graph1_"
                                                 + strategy_slug
                                             ),
@@ -53556,7 +53691,7 @@ def _candidate_fast_render_auto_regime_scanner(
                                             payload["qualified_mask"],
                                             payload["base_gate_portfolio"],
                                             payload["qualified_portfolio"],
-                                            key=(
+                                            key=_candidate_fast_widget_key(
                                                 "candidate_fast_regime_c_graph2_"
                                                 + strategy_slug
                                             ),
@@ -53626,7 +53761,7 @@ def _candidate_fast_render_auto_regime_scanner(
             robustness_display,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_regime_threshold_robustness",
+            key=_candidate_fast_widget_key("candidate_fast_regime_threshold_robustness"),
         )
         st.caption(
             "Only numeric thresholds move; categorical components stay fixed. "
@@ -53701,12 +53836,12 @@ def _candidate_fast_render_auto_regime_scanner(
             component_summary,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_regime_component_equity_summary",
+            key=_candidate_fast_widget_key("candidate_fast_regime_component_equity_summary"),
         )
 
     equity_tabs = st.tabs([
-        "Legacy V1 Base",
-        "Legacy V1 + Strength > 0",
+        _candidate_fast_strategy_label("Legacy V1 Base"),
+        _candidate_fast_strategy_label("Legacy V1 + Strength > 0"),
     ])
     for tab, (strategy_label, _strategy_variant) in zip(
         equity_tabs,
@@ -53722,7 +53857,7 @@ def _candidate_fast_render_auto_regime_scanner(
                 payload["blocked_mask"],
                 payload["baseline_portfolio"],
                 payload["gated_portfolio"],
-                key=(
+                key=_candidate_fast_widget_key(
                     "candidate_fast_regime_component_equity_"
                     + ("base" if strategy_label.endswith("Base") else "strength")
                 ),
@@ -53777,7 +53912,7 @@ def _candidate_fast_no_trade_validation_candidates():
 
 
 def _candidate_fast_no_trade_validation_load():
-    path = CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE
+    path = _candidate_fast_version_path(CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE)
     if not path.exists():
         return {}
     try:
@@ -53788,7 +53923,7 @@ def _candidate_fast_no_trade_validation_load():
 
 
 def _candidate_fast_no_trade_validation_save(payload):
-    path = CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE
+    path = _candidate_fast_version_path(CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(
@@ -53815,7 +53950,8 @@ def _candidate_fast_no_trade_validation_start(reverse_labels):
         "stage": "VALIDATION",
         "validation_start_timestamp": int(started.timestamp() * 1000),
         "validation_start_utc": started.isoformat(),
-        "primary_strategy": "Legacy V1 + Strength > 0",
+        "primary_strategy": _candidate_fast_strategy_label("Legacy V1 + Strength > 0"),
+        "candidate_version": _candidate_fast_current_version(),
         "execution": {
             "tp_pct": 0.5,
             "sl_pct": 3.0,
@@ -53967,7 +54103,7 @@ def _candidate_fast_render_no_trade_validation(
     st.markdown("##### 🧪 Validation · frozen forward test")
     st.caption(
         "Validation never searches thresholds. It evaluates fixed rules only on "
-        "Legacy V1 executions whose entry timestamp is AFTER the saved validation "
+        f"{_candidate_fast_strategy_label('Legacy V1')} executions whose entry timestamp is AFTER the saved validation "
         "start. Discovery can keep changing without altering this cohort."
     )
 
@@ -53993,18 +54129,18 @@ def _candidate_fast_render_no_trade_validation(
             preview,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_validation_preview",
+            key=_candidate_fast_widget_key("candidate_fast_validation_preview"),
         )
         st.caption(
             "R1 keeps the Discovery threshold 1.6282. R2 uses the more selective "
-            "1.7910 robustness candidate. CONTROL is Legacy V1 + Strength > 0 "
+            f"1.7910 robustness candidate. CONTROL is {_candidate_fast_strategy_label('Legacy V1 + Strength > 0')} "
             "with no NO-TRADE gate."
         )
         if st.button(
             "🧊 Start Validation now · freeze R1 / R2",
             type="primary",
             use_container_width=True,
-            key="candidate_fast_validation_start",
+            key=_candidate_fast_widget_key("candidate_fast_validation_start"),
         ):
             validation = _candidate_fast_no_trade_validation_start(
                 reverse_labels
@@ -54062,12 +54198,12 @@ def _candidate_fast_render_no_trade_validation(
         rule_table,
         use_container_width=True,
         hide_index=True,
-        key="candidate_fast_validation_rules",
+        key=_candidate_fast_widget_key("candidate_fast_validation_rules"),
     )
 
     strategy_defs = [
-        ("Legacy V1 + Strength > 0", "Candidate + Strength"),
-        ("Legacy V1 Base", "Candidate Base"),
+        (_candidate_fast_strategy_label("Legacy V1 + Strength > 0"), "Candidate + Strength"),
+        (_candidate_fast_strategy_label("Legacy V1 Base"), "Candidate Base"),
     ]
     all_rows = []
     all_payloads = {}
@@ -54087,7 +54223,7 @@ def _candidate_fast_render_no_trade_validation(
         forward_counts[strategy_label] = int(len(forward))
 
     primary_count = int(
-        forward_counts.get("Legacy V1 + Strength > 0", 0)
+        forward_counts.get(_candidate_fast_strategy_label("Legacy V1 + Strength > 0"), 0)
     )
     if primary_count <= 0:
         st.warning(
@@ -54097,7 +54233,7 @@ def _candidate_fast_render_no_trade_validation(
             "without changing the rules."
         )
         st.caption(
-            f"Persistent file: {CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE}"
+            f"Persistent file: {_candidate_fast_version_path(CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE)}"
         )
         return
 
@@ -54116,16 +54252,16 @@ def _candidate_fast_render_no_trade_validation(
         frame,
         use_container_width=True,
         hide_index=True,
-        key="candidate_fast_validation_forward_results",
+        key=_candidate_fast_widget_key("candidate_fast_validation_forward_results"),
     )
 
     st.caption(
-        "Primary decision set = Legacy V1 + Strength > 0. Legacy V1 Base is shown "
+        f"Primary decision set = {_candidate_fast_strategy_label('Legacy V1 + Strength > 0')}. {_candidate_fast_strategy_label('Legacy V1 Base')} is shown "
         "as a secondary robustness check. No row before Validation start is included."
     )
 
     primary_payloads = all_payloads.get(
-        "Legacy V1 + Strength > 0",
+        _candidate_fast_strategy_label("Legacy V1 + Strength > 0"),
         {},
     )
     control_payload = primary_payloads.get("CONTROL")
@@ -54145,7 +54281,7 @@ def _candidate_fast_render_no_trade_validation(
                     payload["blocked_mask"],
                     control_payload["portfolio"],
                     payload["portfolio"],
-                    key=f"candidate_fast_validation_equity_{rid}",
+                    key=_candidate_fast_widget_key(f"candidate_fast_validation_equity_{rid}"),
                     title=(
                         "VALIDATION · Strength CONTROL vs "
                         f"{rid} · "
@@ -54161,23 +54297,24 @@ def _candidate_fast_render_no_trade_validation(
         "they do not modify the start timestamp or frozen R1/R2 definitions."
     )
     st.caption(
-        f"Persistent validation file: {CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE}"
+        f"Persistent validation file: {_candidate_fast_version_path(CANDIDATE_FAST_NO_TRADE_VALIDATION_FILE)}"
     )
 
 
-def render_candidate_fast_no_trade_lab():
+def render_candidate_fast_no_trade_lab(candidate_version="v1"):
     """Causal NO-TRADE regime research on materialized Legacy V1 execution."""
+    execution_profile = "v2_execution" if str(candidate_version).lower() == "v2" else "v1_legacy_execution"
     store = candidate_research_store
     if (
         store is None
         or not store.available
-        or not store.snapshot_exists("v1_legacy_execution")
+        or not store.snapshot_exists(execution_profile)
     ):
         return
 
-    result = store.query(
-        "v1_legacy_execution",
-        limit=10000,
+    result = store.read_profile(
+        execution_profile,
+        limit=1000000,
     )
     execution = result.get("frame", pd.DataFrame())
     if execution is None or execution.empty:
@@ -54207,10 +54344,10 @@ def render_candidate_fast_no_trade_lab():
         st.info("No causal market-regime columns are available in the current snapshot.")
         return
 
-    st.markdown("#### 🌎 Market Regime / NO-TRADE Lab · Fast")
+    st.markdown(f"#### 🌎 {_candidate_fast_strategy_label('Legacy V1')} Market Regime / NO-TRADE Lab · Fast")
     st.caption(
-        "Research-only gate on information already available before each Legacy V1 "
-        "entry. Baseline = official Legacy V1 + Strength > 0, TP 0.5% / SL 3% / "
+        f"Research-only gate on information already available before each {_candidate_fast_strategy_label('Legacy V1')} "
+        f"entry. Baseline = {_candidate_fast_strategy_label('Legacy V1 + Strength > 0')}, TP 0.5% / SL 3% / "
         "180m, $200, x3, 1 slot, 80% margin, Room → Strength. Blocking a regime "
         "removes those candidate executions first and then reruns the chronological "
         "portfolio, so freed slots can be used by later signals."
@@ -54223,7 +54360,7 @@ def render_candidate_fast_no_trade_lab():
         ["Discovery", "Validation"],
         index=0,
         horizontal=True,
-        key="candidate_fast_regime_research_stage",
+        key=_candidate_fast_widget_key("candidate_fast_regime_research_stage"),
         help=(
             "Discovery searches and dissects rules on the existing historical sample. "
             "Validation evaluates frozen rules only on entries after the saved start."
@@ -54243,21 +54380,21 @@ def render_candidate_fast_no_trade_lab():
     )
 
     variant_labels = {
-        "Legacy V1 + Strength > 0": "Candidate + Strength",
-        "Legacy V1 Base": "Candidate Base",
+        _candidate_fast_strategy_label("Legacy V1 + Strength > 0"): "Candidate + Strength",
+        _candidate_fast_strategy_label("Legacy V1 Base"): "Candidate Base",
     }
     top1, top2 = st.columns([1, 2])
     variant_label = top1.selectbox(
         "Strategy",
         list(variant_labels),
         index=0,
-        key="candidate_fast_regime_variant",
+        key=_candidate_fast_widget_key("candidate_fast_regime_variant"),
     )
     analysis_label = top2.selectbox(
         "Bucket feature",
         available_labels,
         index=available_labels.index("BTC return 1h") if "BTC return 1h" in available_labels else 0,
-        key="candidate_fast_regime_bucket_feature",
+        key=_candidate_fast_widget_key("candidate_fast_regime_bucket_feature"),
     )
     variant = variant_labels[variant_label]
 
@@ -54267,7 +54404,7 @@ def render_candidate_fast_no_trade_lab():
         strong_threshold=0.50,
     )
     if resolved is None or resolved.empty:
-        st.info("No resolved Legacy V1 executions are available for this strategy.")
+        st.info(f"No resolved {_candidate_fast_strategy_label('Legacy V1')} executions are available for this strategy.")
         return
 
     analysis_feature = feature_labels[analysis_label]
@@ -54291,7 +54428,7 @@ def render_candidate_fast_no_trade_lab():
             display,
             use_container_width=True,
             hide_index=True,
-            key="candidate_fast_regime_bucket_table",
+            key=_candidate_fast_widget_key("candidate_fast_regime_bucket_table"),
         )
         st.caption(
             "Numeric features use equal-frequency buckets (quintiles when coverage allows). "
@@ -54346,7 +54483,7 @@ def render_candidate_fast_no_trade_lab():
             "Combine conditions",
             ["AND", "OR"],
             horizontal=True,
-            key="candidate_fast_regime_combine",
+            key=_candidate_fast_widget_key("candidate_fast_regime_combine"),
             help=(
                 "AND blocks only when both conditions are true. OR blocks when either "
                 "condition is true."
@@ -54439,7 +54576,7 @@ def render_candidate_fast_no_trade_lab():
     blocked_losers = int(blocked_net.lt(0).sum())
 
     baseline_ledger = (
-        baseline_portfolio.get("ledger", pd.DataFrame())
+        baseline_portfolio.get("ledger_raw", pd.DataFrame())
         if baseline_portfolio
         else pd.DataFrame()
     )
@@ -54490,7 +54627,7 @@ def render_candidate_fast_no_trade_lab():
         comparison,
         use_container_width=True,
         hide_index=True,
-        key="candidate_fast_regime_gate_comparison",
+        key=_candidate_fast_widget_key("candidate_fast_regime_gate_comparison"),
     )
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -54523,6 +54660,38 @@ def render_candidate_fast_no_trade_lab():
         f"and {blocked_losers} losers before slot selection. The accepted W/L metric "
         "above is the stricter portfolio-level opportunity-cost view."
     )
+
+    with st.expander("🔎 Baseline positions actually blocked (audit)", expanded=False):
+        if accepted_blocked.empty:
+            st.info("No baseline-accepted positions matched the blocked event IDs.")
+            if (
+                len(blocked) > 0
+                and abs(
+                    float(gate_summary["Final equity"])
+                    - float(base_summary["Final equity"])
+                ) > 1e-7
+            ):
+                st.error(
+                    "INCONSISTENT GATE AUDIT: equity changed without blocking "
+                    "an accepted baseline position. Check event identity and "
+                    "portfolio replay parity before interpreting this result."
+                )
+        else:
+            cols = [
+                "candidate_v1_event_key", "entry_timestamp", "symbol",
+                "side", "outcome", "raw_net_pnl_pct", "pnl_usd",
+            ]
+            cols = [column for column in cols if column in accepted_blocked.columns]
+            st.dataframe(
+                accepted_blocked[cols],
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "Only positions accepted in the ungated 1-slot baseline are "
+                "counted here. Later replacement trades are tracked by the "
+                "separate gated-portfolio simulation."
+            )
 
     curves = []
     for label, portfolio in [
@@ -54682,7 +54851,7 @@ def render_candidate_fast_no_trade_lab():
             annotation_position="top left",
         )
         fig.update_layout(
-            title="Legacy V1 · baseline vs causal NO-TRADE gate",
+            title=f"{_candidate_fast_strategy_label('Legacy V1')} · baseline vs causal NO-TRADE gate",
             xaxis={"title": "Time", "type": "date"},
             yaxis_title="Realized equity (USDT)",
             hovermode="x unified",
@@ -54691,7 +54860,7 @@ def render_candidate_fast_no_trade_lab():
         st.plotly_chart(
             fig,
             use_container_width=True,
-            key="candidate_fast_regime_equity_comparison",
+            key=_candidate_fast_widget_key("candidate_fast_regime_equity_comparison"),
             config={"displaylogo": False},
         )
         st.caption(
@@ -54713,48 +54882,43 @@ def render_candidate_fast_no_trade_lab():
     )
 
 
-def render_candidate_fast_explorer():
-    """DuckDB/Parquet explorer: filters only, no scanner/Redis/build work."""
+def render_candidate_fast_explorer(candidate_version="v1"):
+    """DuckDB explorer restricted to the Candidate selected in the top radio."""
     store = candidate_research_store
-    if store is None or not store.available or not store.snapshot_exists():
+    profile = "v1_raw" if str(candidate_version).lower() == "v1" else "v2"
+    if store is None or not store.available or not store.snapshot_exists(profile):
         return
 
     manifest = store.read_manifest()
-    age_hours = store.snapshot_age_hours()
+    age_hours = store.snapshot_age_hours(profile)
     profiles_meta = manifest.get("profiles", {}) if isinstance(manifest, dict) else {}
+    own_meta = profiles_meta.get(profile, {})
+    version_label = "Legacy V1 RAW" if profile == "v1_raw" else "Candidate V2"
 
-    st.markdown("### ⚡ Candidate Research · Fast Explorer")
+    st.markdown(f"### ⚡ {version_label} · Fast Explorer")
     st.caption(
-        "This view reads materialized Parquet snapshots through DuckDB. "
-        "Changing filters does not run the REACTION scanner, Redis context, "
-        "swing reconstruction or Candidate persistence."
+        "Only the selected Candidate's Parquet snapshot is queried. "
+        "Filters do not rerun the scanner, Redis or candle reconstruction."
     )
-
     m1, m2, m3, m4 = st.columns(4)
     m1.metric(
         "Snapshot age",
         f"{age_hours:.1f}h" if age_hours is not None else "—",
     )
-    m2.metric(
-        "V1 RAW rows",
-        int(profiles_meta.get("v1_raw", {}).get("rows", 0)),
-    )
-    m3.metric(
-        "V2 rows",
-        int(profiles_meta.get("v2", {}).get("rows", 0)),
-    )
+    m2.metric("Rows", int(own_meta.get("rows", 0)))
+    m3.metric("Unique events", int(own_meta.get("events", 0)))
     m4.metric(
         "Built",
-        str(manifest.get("built_at_utc", "—"))[:19].replace("T", " "),
+        str(own_meta.get("built_at_utc", manifest.get("built_at_utc", "—")))
+        [:19].replace("T", " "),
     )
-
-    profile_label = st.radio(
-        "Dataset",
-        options=["Legacy V1 RAW", "Candidate V2"],
-        horizontal=True,
-        key="candidate_fast_profile_label",
-    )
-    profile = "v1_raw" if profile_label == "Legacy V1 RAW" else "v2"
+    if profile == "v2":
+        st.info(
+            "Candidate V2 · threshold-agnostic REACTION universe. "
+            "Discovery/Forward cohorts, market context and causal features "
+            "come from V2, not the Legacy V1 frozen/execution snapshot. "
+            "Its fixed equity, TP/SL matrix and NO-TRADE lab are separate from V1."
+        )
 
     cohort_values = store.distinct_values(profile, "candidate_v2_cohort")
     cohort_options = ["TOTAL"] + [
@@ -54881,18 +55045,30 @@ def render_candidate_fast_explorer():
             key=f"candidate_fast_table_{profile}",
         )
 
-    st.caption(
-        "Legacy original can now be reproduced as a query: HTF Room >= 1% "
-        "AND aligned RSI TFs >= 1. The RAW dataset itself remains unfiltered."
-    )
-
     if profile == "v1_raw":
+        st.caption(
+            "Legacy original can be reproduced with HTF Room >= 1% "
+            "AND aligned RSI TFs >= 1. The RAW dataset itself is unfiltered."
+        )
         st.divider()
-        render_candidate_fast_legacy_v1_equity()
+        render_candidate_fast_legacy_v1_equity(candidate_version="v1")
         st.divider()
-        render_candidate_fast_legacy_v1_matrix()
+        render_candidate_fast_legacy_v1_matrix(candidate_version="v1")
         st.divider()
-        render_candidate_fast_no_trade_lab()
+        render_candidate_fast_no_trade_lab(candidate_version="v1")
+    else:
+        if not all(store.snapshot_exists(p) for p in ("v2_execution", "v2_matrix_execution")):
+            st.warning(
+                "V2 causal execution and TP/SL matrix have not been built yet. "
+                "Press Refresh Candidate V2 to materialize them, independently of V1."
+            )
+        else:
+            st.divider()
+            render_candidate_fast_legacy_v1_equity(candidate_version="v2")
+            st.divider()
+            render_candidate_fast_legacy_v1_matrix(candidate_version="v2")
+            st.divider()
+            render_candidate_fast_no_trade_lab(candidate_version="v2")
 
 
 def render_candidate_research(
@@ -83186,6 +83362,15 @@ if selected_section == "reaction_swing_lab":
                 ),
             )
 
+            selected_profile = (
+                "v1_raw" if "V1" in candidate_version else "v2"
+            )
+            selected_name = (
+                "Candidate V1" if selected_profile == "v1_raw" else "Candidate V2"
+            )
+            st.session_state["_candidate_fast_active_version"] = (
+                "v1" if selected_profile == "v1_raw" else "v2"
+            )
             fast_store = candidate_research_store
             fast_status = (
                 fast_store.dependency_status()
@@ -83201,11 +83386,11 @@ if selected_section == "reaction_swing_lab":
             arch1, arch2 = st.columns([3, 1])
             with arch1:
                 if fast_status.get("available"):
-                    snapshot_age = fast_store.snapshot_age_hours()
+                    snapshot_age = fast_store.snapshot_age_hours(selected_profile)
                     st.caption(
-                        "BUILD and EXPLORE are separated. A stale/missing snapshot "
-                        "is rebuilt when Candidate Research opens; after that, fast "
-                        "filters read only Parquet through DuckDB. "
+                        f"{selected_name} has its own materialized snapshot. "
+                        "Its age/refresh are independent; the structural REACTION "
+                        "scan may still be shared. Fast filters use DuckDB. "
                         + (
                             f"Current snapshot age: {snapshot_age:.1f}h."
                             if snapshot_age is not None
@@ -83219,21 +83404,25 @@ if selected_section == "reaction_swing_lab":
                     )
             with arch2:
                 refresh_fast_snapshot = st.button(
-                    "🔄 Refresh Candidate Data",
+                    f"🔄 Refresh {selected_name}",
                     use_container_width=True,
-                    key="candidate_fast_refresh_button",
+                    key=f"candidate_fast_refresh_button_{selected_profile}",
                     disabled=not bool(fast_status.get("available")),
                 )
 
             candidate_fast_build_result = None
             auto_refresh_key = (
-                "candidate_fast_auto_refresh_"
+                f"candidate_fast_auto_refresh_{selected_profile}_"
                 + str(pd.Timestamp.now(tz="UTC").date())
             )
             auto_refresh_due = bool(
                 fast_status.get("available")
-                and fast_store.needs_refresh(
-                    CANDIDATE_FAST_SNAPSHOT_MAX_AGE_HOURS
+                and (
+                    fast_store.needs_refresh(
+                        CANDIDATE_FAST_SNAPSHOT_MAX_AGE_HOURS,
+                        profile=selected_profile,
+                    )
+
                 )
                 and not st.session_state.get(auto_refresh_key, False)
             )
@@ -83248,7 +83437,7 @@ if selected_section == "reaction_swing_lab":
                 )
                 try:
                     with st.spinner(
-                        "BUILD: scanning REACTIONs + refreshing Candidate contexts "
+                        f"BUILD: refreshing {selected_name} contexts "
                         f"({refresh_reason})..."
                     ):
                         fast_retests_df = _reaction_lab_shared_candidate_scan_cached(
@@ -83289,10 +83478,11 @@ if selected_section == "reaction_swing_lab":
                             fast_retests_df,
                             candidate_v1_config,
                             candidate_v1_long_config,
+                            candidate_version="v1" if selected_profile == "v1_raw" else "v2",
                         )
                     st.success(
-                        "Candidate snapshot refreshed. Heavy BUILD work is now "
-                        "materialized; filter changes use DuckDB only."
+                        f"{selected_name} snapshot refreshed independently. "
+                        "Its Parquet is now ready; filters use DuckDB only."
                     )
                     history_status = (
                         candidate_fast_build_result.get("discovery_history", {})
@@ -83337,19 +83527,21 @@ if selected_section == "reaction_swing_lab":
 
             fast_snapshot_ready = bool(
                 fast_status.get("available")
-                and fast_store.snapshot_exists()
+                and fast_store.snapshot_exists(selected_profile)
             )
 
             if fast_snapshot_ready:
-                render_candidate_fast_explorer()
+                render_candidate_fast_explorer(
+                    candidate_version="v1" if selected_profile == "v1_raw" else "v2"
+                )
                 show_full_candidate_engine = st.checkbox(
                     "Show full compatibility Candidate engine (heavy)",
                     value=False,
-                    key="candidate_fast_show_full_engine",
+                    key=f"candidate_fast_show_full_engine_{selected_profile}",
                     help=(
-                        "Turn this on only when you need execution matrix, portfolio "
-                        "or legacy sections that have not yet been migrated to the "
-                        "query-only architecture. Keeping it OFF is the speed test."
+                        "Fast now provides execution matrix, portfolio and NO-TRADE "
+                        "for both Candidate versions. Turn this on only for "
+                        "additional original compatibility panels."
                     ),
                 )
                 if not show_full_candidate_engine:
@@ -83396,37 +83588,35 @@ if selected_section == "reaction_swing_lab":
                     max_retest_age_minutes=4320,
                 )
 
-            legacy_prefilter_ledger = (
-                _candidate_v1_persist_legacy_prefilter_ledger(
-                    candidate_shared_retests_df,
-                    short_config=candidate_v1_config,
-                    long_config=candidate_v1_long_config,
+            selected_candidate_label = selected_name
+            if selected_profile == "v1_raw":
+                legacy_prefilter_ledger = (
+                    _candidate_v1_persist_legacy_prefilter_ledger(
+                        candidate_shared_retests_df,
+                        short_config=candidate_v1_config,
+                        long_config=candidate_v1_long_config,
+                    )
                 )
-            )
 
-            render_candidate_v1_legacy_prefilter_ledger_status(
-                legacy_prefilter_ledger
-            )
+                render_candidate_v1_legacy_prefilter_ledger_status(
+                    legacy_prefilter_ledger
+                )
 
-            st.caption(
-                "Historical Legacy reconstruction is intentionally not rendered. "
-                "From this version forward, the dashboard records the actual "
-                "pre-filter Legacy decision evidence prospectively instead."
-            )
+                st.caption(
+                    "Historical Legacy reconstruction is intentionally not rendered. "
+                    "From this version forward, the dashboard records the actual "
+                    "pre-filter Legacy decision evidence prospectively instead."
+                )
 
-            st.divider()
+                st.divider()
 
-            render_candidate_v1_v2_fixed_benchmark(
-                retests_df=candidate_shared_retests_df,
-                v1_short_config=candidate_v1_config,
-                v1_long_config=candidate_v1_long_config,
-            )
+                render_candidate_v1_v2_fixed_benchmark(
+                    retests_df=candidate_shared_retests_df,
+                    v1_short_config=candidate_v1_config,
+                    v1_long_config=candidate_v1_long_config,
+                )
 
-            st.divider()
-
-            selected_candidate_label = (
-                "Candidate V1" if "V1" in candidate_version else "Candidate V2"
-            )
+                st.divider()
 
             render_candidate_research(
                 retests_df=candidate_shared_retests_df,
