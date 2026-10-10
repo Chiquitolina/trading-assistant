@@ -20,11 +20,21 @@ import numpy as np
 
 import math
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 # =========================
 # CONFIG
 # =========================
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(BASE_DIR))
+
+from dashboard.services.candidate_regime_scan_optimizer import (
+    PreparedOneSlot,
+    scanner_fingerprint,
+    cache_load as _candidate_scan_cache_load,
+    cache_save as _candidate_scan_cache_save,
+    verify_parity as _candidate_scan_verify_parity,
+)
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -48253,8 +48263,14 @@ def _candidate_fast_build_v1_raw_universe(retests_df):
 
 
 
+_CANDIDATE_SCAN_THREAD_CONTEXT = threading.local()
+
+
 def _candidate_fast_current_version():
-    """Set by the selected Candidate page before build/explore; defaults to V1."""
+    """Script selection, or explicit worker-local version (never shared across V1/V2)."""
+    worker_version = getattr(_CANDIDATE_SCAN_THREAD_CONTEXT, "version", None)
+    if worker_version is not None:
+        return str(worker_version)
     return str(st.session_state.get("_candidate_fast_active_version", "v1"))
 
 
@@ -48369,18 +48385,11 @@ def _candidate_fast_build_snapshot(
                 },
             },
         )
-        old_version = st.session_state.get("_candidate_fast_active_version", "v1")
-        try:
-            st.session_state["_candidate_fast_active_version"] = "v2"
-            history_result = _candidate_fast_discovery_history_capture(
-                v2_fixed,
-                reaction_digest=reaction_digest,
-                max_retest_timestamp=max_retest_ts,
-            )
-        except Exception as exc:
-            history_result = {"status": "error", "error": str(exc)}
-        finally:
-            st.session_state["_candidate_fast_active_version"] = old_version
+        history_result = _candidate_fast_discovery_history_queue(
+            v2_fixed, candidate_version="v2",
+            reaction_digest=reaction_digest,
+            max_retest_timestamp=max_retest_ts,
+        )
         return {
             "manifest": manifest,
             "v2_config": v2_config,
@@ -48550,22 +48559,11 @@ def _candidate_fast_build_snapshot(
             "build_pipeline_seconds": float(time.perf_counter() - started),
         },
     )
-    discovery_history = {"status": "not_attempted", "rows_added": 0}
-    try:
-        discovery_history = _candidate_fast_discovery_history_capture(
-            legacy_exec_context,
-            reaction_digest=str(reaction_digest),
-            max_retest_timestamp=max_retest_ts,
-            top_n=10,
-        )
-    except Exception as exc:
-        # Snapshot BUILD must remain successful even if the research-history
-        # journal cannot be updated. The error is surfaced to the UI.
-        discovery_history = {
-            "status": "error",
-            "rows_added": 0,
-            "error": str(exc),
-        }
+    discovery_history = _candidate_fast_discovery_history_queue(
+        legacy_exec_context, candidate_version="v1",
+        reaction_digest=reaction_digest,
+        max_retest_timestamp=max_retest_ts,
+    )
 
     return {
         "manifest": manifest,
@@ -49736,16 +49734,21 @@ def _candidate_fast_regime_auto_evaluate(
     rule,
     reverse_labels,
     baseline_summary,
+    *,
+    prepared=None,
 ):
     blocked_mask = _candidate_fast_regime_auto_rule_mask(resolved, rule)
     blocked_count = int(blocked_mask.sum())
     if blocked_count <= 0 or blocked_count >= len(resolved):
         return None
 
-    portfolio, allowed = _candidate_fast_regime_auto_portfolio(
-        resolved,
-        blocked_mask,
-    )
+    if prepared is not None:
+        portfolio = prepared.simulate(blocked_mask.to_numpy(dtype=bool))
+    else:
+        portfolio, _ = _candidate_fast_regime_auto_portfolio(
+            resolved,
+            blocked_mask,
+        )
     summary = _candidate_fast_portfolio_summary(portfolio)
     if not summary:
         return None
@@ -49785,6 +49788,143 @@ def _candidate_fast_regime_auto_evaluate(
     row.update(stability)
     return row
 
+
+
+def _candidate_fast_regime_scan_shared(
+    resolved,
+    feature_options,
+    reverse_labels,
+    baseline_summary,
+    *,
+    variant,
+    search_mode="Extended pairs",
+    max_blocked_pct=50.0,
+    on_progress=None,
+):
+    """One canonical exhaustive search for manual UI and Discovery snapshots.
+
+    Cache only FULL evaluated records keyed by feature+execution+priority digest,
+    variant and version. Changing max blocked / objective never drops singles.
+    Extended-pair seeds are computed exactly as before from the saved singles.
+    """
+    started = time.perf_counter()
+    root = BASE_DIR / "reports" / "research" / "candidate" / "scanner_cache"
+    version = _candidate_fast_current_version()
+    fingerprint = scanner_fingerprint(resolved, feature_options, version, variant)
+    root = root / version / str(variant).replace(" ", "_")
+    simple_path = root / f"{fingerprint}_singles.json"
+    cached_simple = _candidate_scan_cache_load(simple_path)
+    cache_hits = []
+    prepared = None
+
+    def get_prepared():
+        nonlocal prepared
+        if prepared is not None:
+            return prepared
+        try:
+            candidate = PreparedOneSlot(resolved, _candidate_v2_portfolio_priority)
+            def canonical(allowed):
+                zero = pd.Series(False, index=allowed.index, dtype=bool)
+                return _candidate_fast_regime_auto_portfolio(allowed, zero)[0]
+            valid, parity = _candidate_scan_verify_parity(
+                candidate, resolved, canonical,
+                _candidate_fast_portfolio_summary,
+                _candidate_fast_regime_portfolio_stability,
+            )
+            if valid:
+                prepared = candidate
+            else:
+                print(f"[CANDIDATE SCAN] parity fallback to canonical: {parity}", flush=True)
+        except Exception as exc:
+            print(f"[CANDIDATE SCAN] optimizer unavailable; canonical fallback: {exc}", flush=True)
+        return prepared
+
+    if cached_simple is not None and 'rows' in cached_simple and 'rules' in cached_simple:
+        rows = cached_simple['rows']
+        rules_by_id = cached_simple['rules']
+        cache_hits.append('singles')
+    else:
+        simple_rules = _candidate_fast_regime_auto_single_rules(resolved, feature_options)
+        rows, rules_by_id = [], {}
+        replay = get_prepared()
+        for idx, rule in enumerate(simple_rules):
+            row = _candidate_fast_regime_auto_evaluate(
+                resolved, rule, reverse_labels, baseline_summary, prepared=replay,
+            )
+            if row is not None:
+                rule_id = f"S{idx:04d}"
+                row['Rule ID'] = rule_id
+                rows.append(row)
+                rules_by_id[rule_id] = rule
+            if on_progress and (idx % 20 == 0 or idx + 1 == len(simple_rules)):
+                on_progress('singles', idx + 1, len(simple_rules))
+        _candidate_scan_cache_save(simple_path, {'rows': rows, 'rules': rules_by_id})
+
+    results = pd.DataFrame(rows)
+    if search_mode == 'Extended pairs' and not results.empty:
+        seed = results.loc[
+            pd.to_numeric(results['Blocked %'], errors='coerce').between(
+                5.0, float(max_blocked_pct), inclusive='both'
+            )
+        ].copy()
+        seed = _candidate_fast_regime_sort_results(seed, 'Highest final equity').head(10)
+        seed_ids = seed['Rule ID'].astype(str).tolist()
+        seed_digest = hashlib.sha1('|'.join(seed_ids).encode()).hexdigest()[:12]
+        pair_path = root / f"{fingerprint}_pairs_{seed_digest}.json"
+        cached_pairs = _candidate_scan_cache_load(pair_path)
+        if cached_pairs is not None and 'rows' in cached_pairs and 'rules' in cached_pairs:
+            pair_rows = cached_pairs['rows']
+            pair_rules = cached_pairs['rules']
+            cache_hits.append('pairs')
+        else:
+            pair_rows, pair_rules = [], {}
+            replay = get_prepared()
+            pairs = []
+            for i in range(len(seed_ids)):
+                for j in range(i + 1, len(seed_ids)):
+                    left = rules_by_id.get(seed_ids[i])
+                    right = rules_by_id.get(seed_ids[j])
+                    if not left or not right:
+                        continue
+                    if left.get('feature2') or right.get('feature2'):
+                        continue
+                    if left.get('feature1') == right.get('feature1'):
+                        continue
+                    for combine in ('AND', 'OR'):
+                        pairs.append({
+                            'kind': f'pair_{combine.lower()}',
+                            'feature1': left.get('feature1'),
+                            'operator1': left.get('operator1'),
+                            'value1': left.get('value1'),
+                            'feature2': right.get('feature1'),
+                            'operator2': right.get('operator1'),
+                            'value2': right.get('value1'),
+                            'combine': combine,
+                        })
+            pair_counter = 0
+            for idx, pair in enumerate(pairs):
+                row = _candidate_fast_regime_auto_evaluate(
+                    resolved, pair, reverse_labels, baseline_summary, prepared=replay,
+                )
+                if row is not None:
+                    rule_id = f"P{pair_counter:04d}"
+                    pair_counter += 1
+                    row['Rule ID'] = rule_id
+                    pair_rows.append(row)
+                    pair_rules[rule_id] = pair
+                if on_progress and (idx % 10 == 0 or idx + 1 == len(pairs)):
+                    on_progress('pairs', idx + 1, len(pairs))
+            _candidate_scan_cache_save(pair_path, {'rows': pair_rows, 'rules': pair_rules})
+        if pair_rows:
+            results = pd.concat([results, pd.DataFrame(pair_rows)], ignore_index=True)
+            rules_by_id.update(pair_rules)
+
+    elapsed = time.perf_counter() - started
+    return results, rules_by_id, {
+        'seconds': elapsed, 'cache_hits': ', '.join(cache_hits) or 'none',
+        'accelerated': prepared is not None,
+        'fingerprint': fingerprint,
+    }
 
 def _candidate_fast_regime_sort_results(frame, objective):
     if frame is None or frame.empty:
@@ -50976,12 +51116,154 @@ def _candidate_fast_discovery_forward_update(
     }
 
 
+
+@st.cache_resource(show_spinner=False)
+def _candidate_fast_discovery_executor():
+    # One scanner at a time: bounded CPU/RAM on the trading VPS.
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="candidate-discovery")
+
+
+def _candidate_fast_discovery_job_dir(version):
+    return BASE_DIR / "reports" / "research" / "candidate" / "discovery_jobs" / str(version)
+
+
+def _candidate_fast_discovery_job_worker(path, version, digest, last_retest, snapshot_id):
+    """Do not touch st.session_state/UI from a worker thread."""
+    _CANDIDATE_SCAN_THREAD_CONTEXT.version = str(version)
+    meta_path = path.with_suffix('.json')
+    try:
+        old_meta = _candidate_scan_cache_load(meta_path) or {}
+        _candidate_scan_cache_save(meta_path, {
+            'queued_at': old_meta.get('queued_at', ''),
+            'status': 'running', 'snapshot_id': snapshot_id,
+            'started_at': pd.Timestamp.now(tz='UTC').isoformat(),
+            'reaction_digest': digest, 'max_retest_timestamp': last_retest,
+        })
+        execution = pd.read_parquet(path)
+        def notify_progress(variant, stage, done, total):
+            _candidate_scan_cache_save(meta_path, {
+                'status': 'running', 'snapshot_id': snapshot_id,
+                'queued_at': old_meta.get('queued_at', ''),
+                'reaction_digest': digest, 'max_retest_timestamp': last_retest,
+                'progress': {'variant': variant, 'stage': stage,
+                             'done': int(done), 'total': int(total)},
+            })
+        outcome = _candidate_fast_discovery_history_capture(
+            execution, reaction_digest=digest,
+            max_retest_timestamp=last_retest,
+            snapshot_id_override=snapshot_id,
+            on_progress=notify_progress,
+        )
+        _candidate_scan_cache_save(meta_path, {
+            'queued_at': old_meta.get('queued_at', ''),
+            'status': 'completed', 'snapshot_id': snapshot_id,
+            'completed_at': pd.Timestamp.now(tz='UTC').isoformat(),
+            'reaction_digest': digest, 'max_retest_timestamp': last_retest,
+            'result': outcome,
+        })
+        print(f"[CANDIDATE HISTORY] {version} {snapshot_id}: {outcome}", flush=True)
+    except Exception as exc:
+        _candidate_scan_cache_save(meta_path, {
+            'queued_at': (locals().get('old_meta') or {}).get('queued_at', ''),
+            'status': 'failed', 'snapshot_id': snapshot_id,
+            'reaction_digest': digest, 'max_retest_timestamp': last_retest,
+            'error': f'{type(exc).__name__}: {exc}',
+        })
+        print(f"[CANDIDATE HISTORY] {version} {snapshot_id} FAILED: {exc}", flush=True)
+    finally:
+        _CANDIDATE_SCAN_THREAD_CONTEXT.version = None
+
+
+def _candidate_fast_discovery_history_queue(
+    execution, *, candidate_version, reaction_digest='', max_retest_timestamp=None,
+):
+    """Spool immutable execution before scheduling: Refresh ends without waiting.
+
+    Pending snapshots survive process restarts and can be resumed next visit.
+    Never mix V1/V2 or silently skip a snapshot's frozen cohort.
+    """
+    version = str(candidate_version)
+    snapshot_id = _candidate_fast_discovery_snapshot_id(
+        execution, reaction_digest=reaction_digest,
+        max_retest_timestamp=max_retest_timestamp,
+    )
+    directory = _candidate_fast_discovery_job_dir(version)
+    directory.mkdir(parents=True, exist_ok=True)
+    parquet = directory / f'{snapshot_id}.parquet'
+    meta_path = parquet.with_suffix('.json')
+    existing = _candidate_scan_cache_load(meta_path)
+    if existing and existing.get('status') == 'completed':
+        return {'status': 'already_recorded', 'snapshot_id': snapshot_id}
+    if not parquet.exists():
+        tmp = directory / f'.{snapshot_id}.{os.getpid()}.tmp.parquet'
+        execution.to_parquet(tmp, index=False)
+        os.replace(tmp, parquet)
+    meta = {
+        'status': 'queued', 'snapshot_id': snapshot_id,
+        'reaction_digest': str(reaction_digest or ''),
+        'max_retest_timestamp': max_retest_timestamp,
+        'queued_at': pd.Timestamp.now(tz='UTC').isoformat(),
+    }
+    if not existing or existing.get('status') not in ('running', 'queued'):
+        _candidate_scan_cache_save(meta_path, meta)
+    _candidate_fast_discovery_schedule_pending(version)
+    return {'status': 'queued', 'snapshot_id': snapshot_id}
+
+
+def _candidate_fast_discovery_schedule_pending(version):
+    """Resume queued/interrupted jobs in snapshot creation order, not hash order."""
+    executor = _candidate_fast_discovery_executor()
+    scheduled = _candidate_fast_discovery_scheduled()
+    ready = []
+    for meta_path in _candidate_fast_discovery_job_dir(version).glob('*.json'):
+        data = _candidate_scan_cache_load(meta_path)
+        if not data or data.get('status') in ('completed', 'failed'):
+            continue
+        parquet = meta_path.with_suffix('.parquet')
+        if parquet.exists():
+            ready.append((str(data.get('queued_at', '')), meta_path, data, parquet))
+    for _, meta_path, data, parquet in sorted(ready, key=lambda item: item[0]):
+        job_id = (str(version), str(meta_path.stem))
+        with scheduled['lock']:
+            future = scheduled['futures'].get(job_id)
+            if future is not None and not future.done():
+                continue
+            scheduled['futures'][job_id] = executor.submit(
+                _candidate_fast_discovery_job_worker,
+                parquet, version, data.get('reaction_digest', ''),
+                data.get('max_retest_timestamp'), str(meta_path.stem),
+            )
+
+
+@st.cache_resource(show_spinner=False)
+def _candidate_fast_discovery_scheduled():
+    return {'lock': threading.Lock(), 'futures': {}}
+
+
+def _candidate_fast_discovery_status(version):
+    jobs = []
+    for meta_path in _candidate_fast_discovery_job_dir(version).glob('*.json'):
+        meta = _candidate_scan_cache_load(meta_path)
+        if meta:
+            jobs.append(meta)
+    states = [job.get('status', 'unknown') for job in jobs]
+    running = [job.get('progress', {}) for job in jobs if job.get('status') == 'running']
+    return {
+        'total': len(jobs),
+        'pending': sum(state in ('queued', 'running', 'failed') for state in states),
+        'failed': sum(state == 'failed' for state in states),
+        'completed': sum(state == 'completed' for state in states),
+        'progress': running[0] if running else {},
+    }
+
 def _candidate_fast_discovery_history_capture(
     execution,
     *,
     reaction_digest="",
     max_retest_timestamp=None,
     top_n=10,
+    snapshot_id_override=None,
+    on_progress=None,
 ):
     """Persist a canonical scanner leaderboard for each unique data snapshot.
 
@@ -50993,7 +51275,7 @@ def _candidate_fast_discovery_history_capture(
     if execution is None or execution.empty:
         return {"status": "empty", "rows_added": 0}
 
-    snapshot_id = _candidate_fast_discovery_snapshot_id(
+    snapshot_id = snapshot_id_override or _candidate_fast_discovery_snapshot_id(
         execution,
         reaction_digest=reaction_digest,
         max_retest_timestamp=max_retest_timestamp,
@@ -51045,85 +51327,23 @@ def _candidate_fast_discovery_history_capture(
         if resolved is None or resolved.empty or not baseline_summary:
             continue
 
-        rules_by_id = {}
-        scan_rows = []
-        simple_rules = _candidate_fast_regime_auto_single_rules(
-            resolved,
-            feature_options,
+        results, rules_by_id, scan_meta = _candidate_fast_regime_scan_shared(
+            resolved, feature_options, reverse_labels, baseline_summary,
+            variant=variant, search_mode=search_mode,
+            max_blocked_pct=max_blocked_pct,
+            on_progress=(
+                (lambda stage, done, total: on_progress(variant, stage, done, total))
+                if on_progress is not None else None
+            ),
         )
-        for idx, rule in enumerate(simple_rules):
-            row = _candidate_fast_regime_auto_evaluate(
-                resolved,
-                rule,
-                reverse_labels,
-                baseline_summary,
-            )
-            if row is None:
-                continue
-            rule_id = f"S{idx:04d}"
-            row["Rule ID"] = rule_id
-            scan_rows.append(row)
-            rules_by_id[rule_id] = rule
-
-        results = pd.DataFrame(scan_rows)
+        print(
+            f"[CANDIDATE HISTORY] {_candidate_fast_current_version()} "
+            f"{variant} {len(results)} rules in {scan_meta['seconds']:.1f}s "
+            f"(cache={scan_meta['cache_hits']}, fast={scan_meta['accelerated']})",
+            flush=True,
+        )
         if results.empty:
             continue
-
-        seed = results.loc[
-            pd.to_numeric(results["Blocked %"], errors="coerce").between(
-                5.0,
-                max_blocked_pct,
-                inclusive="both",
-            )
-        ].copy()
-        seed = _candidate_fast_regime_sort_results(
-            seed,
-            "Highest final equity",
-        ).head(10)
-        seed_ids = seed["Rule ID"].astype(str).tolist()
-
-        pair_rows = []
-        pair_counter = 0
-        for i in range(len(seed_ids)):
-            for j in range(i + 1, len(seed_ids)):
-                left = rules_by_id.get(seed_ids[i])
-                right = rules_by_id.get(seed_ids[j])
-                if not left or not right:
-                    continue
-                if left.get("feature2") or right.get("feature2"):
-                    continue
-                if left.get("feature1") == right.get("feature1"):
-                    continue
-                for combine in ("AND", "OR"):
-                    pair = {
-                        "kind": f"pair_{combine.lower()}",
-                        "feature1": left.get("feature1"),
-                        "operator1": left.get("operator1"),
-                        "value1": left.get("value1"),
-                        "feature2": right.get("feature1"),
-                        "operator2": right.get("operator1"),
-                        "value2": right.get("value1"),
-                        "combine": combine,
-                    }
-                    row = _candidate_fast_regime_auto_evaluate(
-                        resolved,
-                        pair,
-                        reverse_labels,
-                        baseline_summary,
-                    )
-                    if row is None:
-                        continue
-                    rule_id = f"P{pair_counter:04d}"
-                    pair_counter += 1
-                    row["Rule ID"] = rule_id
-                    pair_rows.append(row)
-                    rules_by_id[rule_id] = pair
-
-        if pair_rows:
-            results = pd.concat(
-                [results, pd.DataFrame(pair_rows)],
-                ignore_index=True,
-            )
 
         filtered = results.loc[
             pd.to_numeric(results["Blocked %"], errors="coerce").le(max_blocked_pct)
@@ -52917,107 +53137,47 @@ def _candidate_fast_render_auto_regime_scanner(
         resolved.get("_entry_ts", pd.Series(dtype=float)),
         errors="coerce",
     ).dropna()
-    signature = (
-        str(variant),
-        int(len(resolved)),
-        int(entry_ts.max()) if not entry_ts.empty else 0,
+    signature = scanner_fingerprint(
+        resolved, feature_options, _candidate_fast_current_version(), variant
     )
     cache_key = _candidate_fast_widget_key("candidate_fast_regime_auto_scan_cache")
     cached = st.session_state.get(cache_key)
 
     if run_scan:
         with st.spinner("Scanning causal NO-TRADE gates and replaying portfolios..."):
-            simple_rules = _candidate_fast_regime_auto_single_rules(
-                resolved,
-                feature_options,
+            progress = st.progress(0.0, text="Preparing causal scanner...")
+            def scan_progress(stage, done, total):
+                # Singles=0-80%, extended pairs=80-100%.
+                share = float(done) / max(float(total), 1.0)
+                weight = (0.80 if search_mode == 'Extended pairs' else 1.0)
+                value = (share * weight if stage == 'singles'
+                         else 0.80 + 0.20 * share)
+                progress.progress(min(max(value, 0.0), 1.0),
+                                  text=f"{stage}: {done:,}/{total:,} rules")
+            results, rules_by_id, scan_meta = _candidate_fast_regime_scan_shared(
+                resolved, feature_options, reverse_labels, baseline_summary,
+                variant=variant, search_mode=search_mode,
+                max_blocked_pct=max_blocked_pct,
+                on_progress=scan_progress,
             )
-            rows = []
-            rules_by_id = {}
-            for idx, rule in enumerate(simple_rules):
-                row = _candidate_fast_regime_auto_evaluate(
-                    resolved,
-                    rule,
-                    reverse_labels,
-                    baseline_summary,
-                )
-                if row is None:
-                    continue
-                rule_id = f"S{idx:04d}"
-                row["Rule ID"] = rule_id
-                rows.append(row)
-                rules_by_id[rule_id] = rule
-
-            results = pd.DataFrame(rows)
-
-            if (
-                search_mode == "Extended pairs"
-                and results is not None
-                and not results.empty
-            ):
-                seed = results.loc[
-                    results["Blocked %"].between(
-                        5.0,
-                        float(max_blocked_pct),
-                        inclusive="both",
-                    )
-                ].copy()
-                seed = _candidate_fast_regime_sort_results(
-                    seed,
-                    "Highest final equity",
-                ).head(10)
-                seed_ids = seed["Rule ID"].astype(str).tolist()
-                pair_rows = []
-                pair_counter = 0
-                for i in range(len(seed_ids)):
-                    for j in range(i + 1, len(seed_ids)):
-                        left = rules_by_id.get(seed_ids[i])
-                        right = rules_by_id.get(seed_ids[j])
-                        if not left or not right:
-                            continue
-                        if left.get("feature2") or right.get("feature2"):
-                            continue
-                        if left.get("feature1") == right.get("feature1"):
-                            continue
-                        for combine in ("AND", "OR"):
-                            pair = {
-                                "kind": f"pair_{combine.lower()}",
-                                "feature1": left.get("feature1"),
-                                "operator1": left.get("operator1"),
-                                "value1": left.get("value1"),
-                                "feature2": right.get("feature1"),
-                                "operator2": right.get("operator1"),
-                                "value2": right.get("value1"),
-                                "combine": combine,
-                            }
-                            row = _candidate_fast_regime_auto_evaluate(
-                                resolved,
-                                pair,
-                                reverse_labels,
-                                baseline_summary,
-                            )
-                            if row is None:
-                                continue
-                            rule_id = f"P{pair_counter:04d}"
-                            pair_counter += 1
-                            row["Rule ID"] = rule_id
-                            pair_rows.append(row)
-                            rules_by_id[rule_id] = pair
-                if pair_rows:
-                    results = pd.concat(
-                        [results, pd.DataFrame(pair_rows)],
-                        ignore_index=True,
-                    )
-
+            progress.progress(1.0, text="Scan completed")
             cached = {
                 "signature": signature,
                 "results": results,
                 "rules": rules_by_id,
                 "created_at": time.time(),
                 "search_mode": search_mode,
+                "max_blocked_pct": float(max_blocked_pct),
+                "scan_meta": scan_meta,
             }
             st.session_state[cache_key] = cached
 
-    if not isinstance(cached, dict) or cached.get("signature") != signature:
+    if (
+        not isinstance(cached, dict)
+        or cached.get("signature") != signature
+        or cached.get("search_mode") != search_mode
+        or cached.get("max_blocked_pct") != float(max_blocked_pct)
+    ):
         st.info(
             "Run the automatic scan once. Results are cached in-session, so sorting "
             "and inspecting the top gates stays fast afterwards."
@@ -53069,6 +53229,14 @@ def _candidate_fast_render_auto_regime_scanner(
         hide_index=True,
         key=_candidate_fast_widget_key("candidate_fast_regime_auto_results"),
     )
+    scan_meta = cached.get("scan_meta", {})
+    if scan_meta:
+        st.caption(
+            f"Scanner: {scan_meta.get('seconds', 0):.1f}s · "
+            f"reused: {scan_meta.get('cache_hits', 'none')} · "
+            f"fast replay: {scan_meta.get('accelerated', False)}. "
+            "Ranking and all gates remain unchanged."
+        )
     st.caption(
         f"Discovery basis: {variant_label}. Scanned {len(results):,} usable rules. "
         f"Guardrail shown: block 2–{int(max_blocked_pct)}% of resolved candidates "
@@ -83410,6 +83578,37 @@ if selected_section == "reaction_swing_lab":
                     disabled=not bool(fast_status.get("available")),
                 )
 
+            # Resume durable jobs (including interrupted process restarts).
+            selected_version = 'v1' if selected_profile == 'v1_raw' else 'v2'
+            if fast_status.get('available'):
+                _candidate_fast_discovery_schedule_pending(selected_version)
+                history_jobs = _candidate_fast_discovery_status(selected_version)
+                if history_jobs['pending']:
+                    st.info(
+                        f"{selected_name}: Discovery History runs separately "
+                        f"({history_jobs['pending']} pending/running, "
+                        f"{history_jobs['completed']} completed). "
+                        "Snapshots, scanner results and Forward remain isolated. "
+                        "Refreshing the browser does not discard queued jobs."
+                    )
+                    active_progress = history_jobs.get('progress') or {}
+                    if active_progress and active_progress.get('total'):
+                        st.caption(
+                            f"Discovery background: {active_progress.get('variant')} · "
+                            f"{active_progress.get('stage')} "
+                            f"{active_progress.get('done')}/{active_progress.get('total')} rules"
+                        )
+                if history_jobs['failed']:
+                    st.warning(f"{history_jobs['failed']} Discovery job(s) failed; "
+                               "see PM2 logs. No frozen results have been overwritten.")
+                    if st.button("Retry failed Discovery jobs", key=f"discovery_retry_{selected_version}"):
+                        for failed_job_path in _candidate_fast_discovery_job_dir(selected_version).glob('*.json'):
+                            failed = _candidate_scan_cache_load(failed_job_path)
+                            if failed and failed.get('status') == 'failed':
+                                failed['status'] = 'queued'
+                                _candidate_scan_cache_save(failed_job_path, failed)
+                        _candidate_fast_discovery_schedule_pending(selected_version)
+
             candidate_fast_build_result = None
             auto_refresh_key = (
                 f"candidate_fast_auto_refresh_{selected_profile}_"
@@ -83489,7 +83688,13 @@ if selected_section == "reaction_swing_lab":
                         if isinstance(candidate_fast_build_result, dict)
                         else {}
                     )
-                    if history_status.get("status") == "recorded":
+                    if history_status.get("status") == "queued":
+                        st.caption(
+                            "Snapshot ready. Discovery History and Forward queued "
+                            f"independently for {history_status.get('snapshot_id', '—')}. "
+                            "You can use Fast Explorer while the scanner finishes."
+                        )
+                    elif history_status.get("status") == "recorded":
                         st.caption(
                             "Scanner history recorded for this new snapshot · "
                             f"{int(history_status.get('rows_added', 0))} leaderboard rows · "
