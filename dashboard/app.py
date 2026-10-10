@@ -48292,6 +48292,24 @@ def _candidate_fast_strategy_label(label):
     return label
 
 
+def _candidate_fast_strategy_definitions(candidate_version=None):
+    """Fast execution/research variants; V2 retains its causal Strength+Flow cohort.
+
+    V1 remains unchanged.  Flow is a PRE-ENTRY eligibility filter, not a
+    post-hoc portfolio filter: strength > 0 and 4h market alignment TAILWIND.
+    All downstream portfolio rules, TP/SL outcomes and NO-TRADE rules are shared.
+    """
+    version = str(candidate_version or _candidate_fast_current_version()).lower()
+    label = "Candidate V2" if version == "v2" else "Legacy V1"
+    variants = [
+        (f"{label} Base", "Candidate Base"),
+        (f"{label} + Strength > 0", "Candidate + Strength"),
+    ]
+    if version == "v2":
+        variants.append((f"{label} + Strength + Flow", "Candidate + Strength + Flow"))
+    return variants
+
+
 def _candidate_fast_version_caption(text):
     return str(text).replace("Legacy V1", "Candidate V2") if _candidate_fast_current_version() == "v2" else str(text)
 
@@ -48652,13 +48670,11 @@ def render_candidate_fast_legacy_v1_equity(candidate_version="v1"):
         f"Reconstructed from {candidate_name} Event IDs using the "
         "same fixed execution/portfolio semantics as the compatibility benchmark: "
         "TP 0.5% / SL 3% / 180m · fees 0.05% + 0.05% · $200 · x3 · 1 slot · "
-        "80% realized-equity margin · Most HTF Room → Strength · Flow gate OFF."
+        "80% realized-equity margin · Most HTF Room → Strength · portfolio Flow gate OFF "
+        "(Strength + Flow variant prefilters 4h TAILWIND causally)."
     )
 
-    variants = [
-        (f"{candidate_name} Base", "Candidate Base"),
-        (f"{candidate_name} + Strength > 0", "Candidate + Strength"),
-    ]
+    variants = _candidate_fast_strategy_definitions(candidate_version)
     rows = []
     curves = []
 
@@ -48811,10 +48827,7 @@ def render_candidate_fast_legacy_v1_matrix(candidate_version="v1"):
         "Fees 0.05% + 0.05% · slippage 0% · matrix notional $100/trade."
     )
 
-    variant_labels = {
-        f"{candidate_name} Base": "Candidate Base",
-        f"{candidate_name} + Strength > 0": "Candidate + Strength",
-    }
+    variant_labels = dict(_candidate_fast_strategy_definitions(candidate_version))
     cohort_values = (
         execution.get("candidate_v2_cohort", pd.Series(dtype=str))
         .dropna()
@@ -51309,10 +51322,11 @@ def _candidate_fast_discovery_history_capture(
 
     created_utc = pd.Timestamp.now(tz="UTC")
     discovery_cutoff_timestamp = int(created_utc.value // 1_000_000)
-    strategies = [
-        (_candidate_fast_strategy_label("Legacy V1 + Strength > 0"), "Candidate + Strength"),
-        (_candidate_fast_strategy_label("Legacy V1 Base"), "Candidate Base"),
-    ]
+    strategy_defs = _candidate_fast_strategy_definitions()
+    # Keep canonical V1/V2 strength/base history ordering and IDs intact.
+    # The third V2 cohort is added only on FUTURE snapshot discoveries: old
+    # historical cutoffs and frozen Validation are never backfilled/retrained.
+    strategies = [strategy_defs[1], strategy_defs[0]] + strategy_defs[2:]
     output_rows = []
 
     # Canonical history settings deliberately match the scanner defaults.
@@ -53294,10 +53308,7 @@ def _candidate_fast_render_auto_regime_scanner(
         return
 
     st.markdown("###### Cross-strategy replay · same gate, untouched")
-    strategy_defs = [
-        (_candidate_fast_strategy_label("Legacy V1 Base"), "Candidate Base"),
-        (_candidate_fast_strategy_label("Legacy V1 + Strength > 0"), "Candidate + Strength"),
-    ]
+    strategy_defs = _candidate_fast_strategy_definitions()
     strategy_results = []
     strategy_payloads = {}
     for strategy_label, strategy_variant in strategy_defs:
@@ -53809,10 +53820,10 @@ def _candidate_fast_render_auto_regime_scanner(
                                 )
 
                                 c_tabs = st.tabs([
-                                    f"{_candidate_fast_strategy_label('Legacy V1 Base')} · component vs +C",
-                                    f"{_candidate_fast_strategy_label('Legacy V1 + Strength > 0')} · component vs +C",
+                                    f"{strategy_label} · component vs +C"
+                                    for strategy_label, _ in strategy_defs
                                 ])
-                                for tab, (strategy_label, _strategy_variant) in zip(
+                                for tab, (strategy_label, strategy_variant) in zip(
                                     c_tabs,
                                     strategy_defs,
                                 ):
@@ -53825,8 +53836,8 @@ def _candidate_fast_render_auto_regime_scanner(
                                             )
                                             continue
                                         strategy_slug = (
-                                            "base"
-                                            if strategy_label.endswith("Base")
+                                            "base" if strategy_variant == "Candidate Base"
+                                            else "strength_flow" if strategy_variant == "Candidate + Strength + Flow"
                                             else "strength"
                                         )
                                         c_text = _candidate_fast_regime_auto_rule_text(
@@ -53942,7 +53953,7 @@ def _candidate_fast_render_auto_regime_scanner(
             "therefore assessed through component and cross-strategy consistency."
         )
 
-    st.markdown("###### Equity · selected component on both strategies")
+    st.markdown("###### Equity · selected component across available strategies")
     st.caption(
         f"Component shown below: **{selected_component_label}** · "
         + _candidate_fast_regime_auto_rule_text(
@@ -54007,11 +54018,8 @@ def _candidate_fast_render_auto_regime_scanner(
             key=_candidate_fast_widget_key("candidate_fast_regime_component_equity_summary"),
         )
 
-    equity_tabs = st.tabs([
-        _candidate_fast_strategy_label("Legacy V1 Base"),
-        _candidate_fast_strategy_label("Legacy V1 + Strength > 0"),
-    ])
-    for tab, (strategy_label, _strategy_variant) in zip(
+    equity_tabs = st.tabs([label for label, _ in strategy_defs])
+    for tab, (strategy_label, strategy_variant) in zip(
         equity_tabs,
         strategy_defs,
     ):
@@ -54027,7 +54035,11 @@ def _candidate_fast_render_auto_regime_scanner(
                 payload["gated_portfolio"],
                 key=_candidate_fast_widget_key(
                     "candidate_fast_regime_component_equity_"
-                    + ("base" if strategy_label.endswith("Base") else "strength")
+                    + (
+                        "base" if strategy_variant == "Candidate Base"
+                        else "strength_flow" if strategy_variant == "Candidate + Strength + Flow"
+                        else "strength"
+                    )
                 ),
                 title=(
                     f"{strategy_label} · baseline vs {selected_component_label} · "
@@ -54039,7 +54051,7 @@ def _candidate_fast_render_auto_regime_scanner(
             )
 
     st.caption(
-        "Discovery is not validation. Prefer rules that improve BOTH strategy views, "
+        "Discovery is not validation. Prefer rules that improve multiple strategy views, "
         "retain useful performance when decomposed, and remain stable under threshold "
         "perturbation. Then freeze the rule and evaluate only on later/forward data."
     )
@@ -54515,7 +54527,7 @@ def render_candidate_fast_no_trade_lab(candidate_version="v1"):
     st.markdown(f"#### 🌎 {_candidate_fast_strategy_label('Legacy V1')} Market Regime / NO-TRADE Lab · Fast")
     st.caption(
         f"Research-only gate on information already available before each {_candidate_fast_strategy_label('Legacy V1')} "
-        f"entry. Baseline = {_candidate_fast_strategy_label('Legacy V1 + Strength > 0')}, TP 0.5% / SL 3% / "
+        "entry. Each chosen strategy has its own no-gate baseline, TP 0.5% / SL 3% / "
         "180m, $200, x3, 1 slot, 80% margin, Room → Strength. Blocking a regime "
         "removes those candidate executions first and then reruns the chronological "
         "portfolio, so freed slots can be used by later signals."
@@ -54547,10 +54559,8 @@ def render_candidate_fast_no_trade_lab(candidate_version="v1"):
         "change freely. Nothing changed here alters the frozen Validation cohort."
     )
 
-    variant_labels = {
-        _candidate_fast_strategy_label("Legacy V1 + Strength > 0"): "Candidate + Strength",
-        _candidate_fast_strategy_label("Legacy V1 Base"): "Candidate Base",
-    }
+    strategy_defs = _candidate_fast_strategy_definitions(candidate_version)
+    variant_labels = dict([strategy_defs[1], strategy_defs[0]] + strategy_defs[2:])
     top1, top2 = st.columns([1, 2])
     variant_label = top1.selectbox(
         "Strategy",
