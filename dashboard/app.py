@@ -48440,9 +48440,27 @@ def _candidate_fast_build_snapshot(
             "build_pipeline_seconds": float(time.perf_counter() - started),
         },
     )
+    discovery_history = {"status": "not_attempted", "rows_added": 0}
+    try:
+        discovery_history = _candidate_fast_discovery_history_capture(
+            legacy_exec_context,
+            reaction_digest=str(reaction_digest),
+            max_retest_timestamp=max_retest_ts,
+            top_n=10,
+        )
+    except Exception as exc:
+        # Snapshot BUILD must remain successful even if the research-history
+        # journal cannot be updated. The error is surfaced to the UI.
+        discovery_history = {
+            "status": "error",
+            "rows_added": 0,
+            "error": str(exc),
+        }
+
     return {
         "manifest": manifest,
         "ledger": ledger_result,
+        "discovery_history": discovery_history,
         "v1_raw": v1_context,
         "v1_legacy": v1_legacy_context,
         "v1_legacy_execution": legacy_exec_context,
@@ -50306,6 +50324,1510 @@ def _candidate_fast_regime_feature_family_summary(
     )
 
 
+
+
+
+CANDIDATE_FAST_DISCOVERY_HISTORY_FILE = (
+    BASE_DIR
+    / "reports"
+    / "research"
+    / "candidate"
+    / "no_trade_discovery_history.csv"
+)
+
+CANDIDATE_FAST_DISCOVERY_FORWARD_FILE = (
+    BASE_DIR
+    / "reports"
+    / "research"
+    / "candidate"
+    / "no_trade_discovery_forward.csv"
+)
+
+
+def _candidate_fast_discovery_history_feature_labels():
+    """Canonical causal feature set tracked across Candidate snapshots."""
+    return {
+        "BTC return 1h": "btc_return_pct_1h",
+        "BTC return 4h": "btc_return_pct_4h",
+        "BTC return delta 1h": "btc_return_delta_1h",
+        "BTC return delta 4h": "btc_return_delta_4h",
+        "Market breadth 1h": "market_breadth_1h",
+        "Market breadth 4h": "market_breadth_4h",
+        "Breadth delta 1h": "breadth_delta_1h",
+        "Breadth delta 4h": "breadth_delta_4h",
+        "Market alignment 1h": "Market alignment 1h",
+        "BTC/breadth divergence 1h": "btc_breadth_divergence_1h",
+        "BTC/breadth divergence 4h": "btc_breadth_divergence_4h",
+        "Sector-side alignment": "Sector-side alignment",
+        "Market alignment 4h": "Market alignment",
+    }
+
+
+def _candidate_fast_discovery_snapshot_id(
+    execution,
+    *,
+    reaction_digest="",
+    max_retest_timestamp=None,
+):
+    """Stable ID for one unique materialized Candidate research snapshot."""
+    event_count = int(len(execution)) if execution is not None else 0
+    entry_ts = pd.to_numeric(
+        execution.get("_entry_ts", execution.get("entry_timestamp", pd.Series(dtype=float)))
+        if execution is not None and not execution.empty
+        else pd.Series(dtype=float),
+        errors="coerce",
+    ).dropna()
+    max_entry_ts = int(entry_ts.max()) if not entry_ts.empty else 0
+
+    # Include execution maturity/outcomes in the signature. Two refreshes may have
+    # the same Candidate IDs but different newly-resolved exits; those are distinct
+    # research snapshots and must both be journaled.
+    execution_digest = ""
+    if execution is not None and not execution.empty:
+        signature_cols = [
+            column
+            for column in [
+                "candidate_v1_event_key",
+                "entry_timestamp",
+                "_entry_ts",
+                "Outcome",
+                "exit_timestamp",
+                "net_pnl_pct",
+                "first_touch_min",
+            ]
+            if column in execution.columns
+        ]
+        if signature_cols:
+            signature_frame = execution[signature_cols].copy()
+            signature_frame = signature_frame.astype(str).sort_values(
+                signature_cols,
+                kind="stable",
+            )
+            hashed = pd.util.hash_pandas_object(
+                signature_frame,
+                index=False,
+            ).values
+            execution_digest = hashlib.sha1(hashed.tobytes()).hexdigest()[:16]
+
+    payload = "|".join(
+        [
+            str(reaction_digest or ""),
+            str(max_retest_timestamp or ""),
+            str(event_count),
+            str(max_entry_ts),
+            str(execution_digest),
+        ]
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _candidate_fast_discovery_history_load():
+    path = CANDIDATE_FAST_DISCOVERY_HISTORY_FILE
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _candidate_fast_discovery_forward_load():
+    path = CANDIDATE_FAST_DISCOVERY_FORWARD_FILE
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _candidate_fast_discovery_history_rule_from_row(row):
+    """Rebuild the exact frozen scanner rule stored on a historical winner row."""
+    if row is None:
+        return {}
+
+    raw_json = row.get("rule_json", "") if hasattr(row, "get") else ""
+    if raw_json is not None and str(raw_json).strip() not in {"", "nan", "None"}:
+        try:
+            parsed = json.loads(str(raw_json))
+            if isinstance(parsed, dict) and parsed.get("feature1"):
+                return parsed
+        except Exception:
+            pass
+
+    def clean_text(value):
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        text_value = str(value).strip()
+        return "" if text_value.lower() in {"", "nan", "none"} else text_value
+
+    def clean_value(operator, value):
+        if operator in {"<=", ">="}:
+            numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+            return float(numeric) if pd.notna(numeric) else None
+        return clean_text(value)
+
+    feature1 = clean_text(row.get("feature1"))
+    operator1 = clean_text(row.get("operator1"))
+    if not feature1 or not operator1:
+        return {}
+
+    rule = {
+        "kind": clean_text(row.get("kind")) or "historical_winner",
+        "feature1": feature1,
+        "operator1": operator1,
+        "value1": clean_value(operator1, row.get("value1")),
+    }
+    feature2 = clean_text(row.get("feature2"))
+    operator2 = clean_text(row.get("operator2"))
+    if feature2 and operator2:
+        rule.update({
+            "feature2": feature2,
+            "operator2": operator2,
+            "value2": clean_value(operator2, row.get("value2")),
+            "combine": clean_text(row.get("combine")) or "AND",
+        })
+    return rule
+
+
+def _candidate_fast_discovery_cutoff_ms(row):
+    """Strict out-of-sample frontier for one discovery snapshot winner.
+
+    Prefer the wall-clock instant at which the snapshot/scanner winner was frozen.
+    This is stricter than max resolved entry: a Candidate that was already pending at
+    discovery time must never become "forward" merely because it resolved later.
+    """
+    snapshot_time = pd.to_datetime(
+        row.get("snapshot_created_utc") if hasattr(row, "get") else None,
+        utc=True,
+        errors="coerce",
+    )
+    if pd.notna(snapshot_time):
+        return int(snapshot_time.value // 1_000_000)
+
+    fallback_values = []
+    for column in (
+        "discovery_cutoff_timestamp",
+        "max_retest_timestamp",
+        "max_entry_timestamp",
+    ):
+        value = pd.to_numeric(
+            pd.Series([row.get(column, np.nan)]),
+            errors="coerce",
+        ).iloc[0]
+        if pd.notna(value):
+            fallback_values.append(int(value))
+    return max(fallback_values) if fallback_values else 0
+
+
+def _candidate_fast_discovery_forward_accepted_stats(portfolio):
+    result = {
+        "accepted_winners": 0,
+        "accepted_losers": 0,
+        "accepted_flat": 0,
+        "net_pnl_usd": np.nan,
+    }
+    if not portfolio:
+        return result
+    ledger = portfolio.get("ledger", pd.DataFrame())
+    if ledger is None or ledger.empty:
+        return result
+    accepted_mask = (
+        ledger.get("accepted", pd.Series(False, index=ledger.index))
+        .fillna(False)
+        .astype(bool)
+    )
+    accepted = ledger.loc[accepted_mask].copy()
+    if accepted.empty:
+        result["net_pnl_usd"] = 0.0
+        return result
+    pnl = pd.to_numeric(
+        accepted.get("pnl_usd", pd.Series(np.nan, index=accepted.index)),
+        errors="coerce",
+    ).dropna()
+    result.update({
+        "accepted_winners": int(pnl.gt(0).sum()),
+        "accepted_losers": int(pnl.lt(0).sum()),
+        "accepted_flat": int(pnl.eq(0).sum()),
+        "net_pnl_usd": float(pnl.sum()) if len(pnl) else 0.0,
+    })
+    return result
+
+
+def _candidate_fast_discovery_forward_update(
+    execution,
+    *,
+    current_snapshot_id,
+    history=None,
+):
+    """Forward-test every frozen snapshot winner on strictly later Candidates.
+
+    Each winner is immutable. On every materialized Candidate snapshot we append one
+    cumulative evaluation using only resolved Candidates whose entry happened after
+    that winner's discovery wall-clock cutoff. Portfolios are rebased to $200 so the
+    baseline-vs-gate deltas are directly comparable across discovery snapshots.
+    """
+    if execution is None or execution.empty:
+        return {"status": "empty", "rows_added": 0}
+
+    history = (
+        history.copy()
+        if history is not None and not history.empty
+        else _candidate_fast_discovery_history_load()
+    )
+    if history is None or history.empty or "rank" not in history.columns:
+        return {"status": "no_winners", "rows_added": 0}
+
+    ranks = pd.to_numeric(history["rank"], errors="coerce")
+    winners = history.loc[ranks.eq(1)].copy()
+    if winners.empty:
+        return {"status": "no_winners", "rows_added": 0}
+
+    current_rows = history.loc[
+        history.get("snapshot_id", pd.Series("", index=history.index))
+        .astype(str)
+        .eq(str(current_snapshot_id))
+    ].copy()
+    current_created = pd.Timestamp.now(tz="UTC")
+    if not current_rows.empty and "snapshot_created_utc" in current_rows.columns:
+        parsed = pd.to_datetime(
+            current_rows["snapshot_created_utc"],
+            utc=True,
+            errors="coerce",
+        ).dropna()
+        if not parsed.empty:
+            current_created = parsed.max()
+
+    forward_existing = _candidate_fast_discovery_forward_load()
+    existing_keys = set()
+    if forward_existing is not None and not forward_existing.empty:
+        required = {
+            "discovery_snapshot_id",
+            "strategy",
+            "evaluation_snapshot_id",
+        }
+        if required.issubset(set(forward_existing.columns)):
+            existing_keys = set(
+                zip(
+                    forward_existing["discovery_snapshot_id"].astype(str),
+                    forward_existing["strategy"].astype(str),
+                    forward_existing["evaluation_snapshot_id"].astype(str),
+                )
+            )
+
+    new_rows = []
+    for _, winner in winners.sort_values(
+        "snapshot_created_utc" if "snapshot_created_utc" in winners.columns else "snapshot_id",
+        kind="stable",
+    ).iterrows():
+        discovery_snapshot_id = str(winner.get("snapshot_id", ""))
+        strategy = str(winner.get("strategy", ""))
+        variant = str(winner.get("variant", ""))
+        eval_key = (
+            discovery_snapshot_id,
+            strategy,
+            str(current_snapshot_id),
+        )
+        if eval_key in existing_keys:
+            continue
+
+        rule = _candidate_fast_discovery_history_rule_from_row(winner)
+        cutoff_ms = _candidate_fast_discovery_cutoff_ms(winner)
+        resolved, _, _ = _candidate_fast_regime_variant_context(execution, variant)
+        if resolved is None:
+            resolved = pd.DataFrame()
+
+        entry_ts = pd.to_numeric(
+            resolved.get("_entry_ts", pd.Series(np.nan, index=resolved.index)),
+            errors="coerce",
+        ) if not resolved.empty else pd.Series(dtype=float)
+        forward = resolved.loc[entry_ts.gt(int(cutoff_ms))].copy() if cutoff_ms else pd.DataFrame()
+
+        previous_eval = pd.DataFrame()
+        if forward_existing is not None and not forward_existing.empty:
+            previous_eval = forward_existing.loc[
+                forward_existing.get(
+                    "discovery_snapshot_id",
+                    pd.Series("", index=forward_existing.index),
+                ).astype(str).eq(discovery_snapshot_id)
+                & forward_existing.get(
+                    "strategy",
+                    pd.Series("", index=forward_existing.index),
+                ).astype(str).eq(strategy)
+            ].copy()
+        prev_forward_n = 0
+        evaluation_index = 1
+        if not previous_eval.empty:
+            prev_forward_n = int(
+                pd.to_numeric(
+                    previous_eval.get("forward_resolved", pd.Series(dtype=float)),
+                    errors="coerce",
+                ).fillna(0).max()
+            )
+            evaluation_index = int(len(previous_eval)) + 1
+
+        discovery_time = pd.to_datetime(
+            winner.get("snapshot_created_utc"),
+            utc=True,
+            errors="coerce",
+        )
+        elapsed_hours = (
+            float((current_created - discovery_time).total_seconds() / 3600.0)
+            if pd.notna(discovery_time)
+            else np.nan
+        )
+
+        base_row = {
+            "discovery_snapshot_id": discovery_snapshot_id,
+            "discovery_snapshot_created_utc": winner.get("snapshot_created_utc"),
+            "discovery_cutoff_timestamp": int(cutoff_ms) if cutoff_ms else np.nan,
+            "strategy": strategy,
+            "variant": variant,
+            "winner_rule": str(winner.get("rule", "")),
+            "winner_rule_json": json.dumps(rule, sort_keys=True, default=str) if rule else "",
+            "feature1": winner.get("feature1"),
+            "feature1_label": winner.get("feature1_label"),
+            "operator1": winner.get("operator1"),
+            "value1": winner.get("value1"),
+            "combine": winner.get("combine"),
+            "feature2": winner.get("feature2"),
+            "feature2_label": winner.get("feature2_label"),
+            "operator2": winner.get("operator2"),
+            "value2": winner.get("value2"),
+            "discovery_resolved_candidates": winner.get("resolved_candidates"),
+            "discovery_final_equity": winner.get("final_equity"),
+            "discovery_return_pct": winner.get("return_pct"),
+            "discovery_max_dd_pct": winner.get("max_dd_pct"),
+            "discovery_pf": winner.get("pf"),
+            "evaluation_snapshot_id": str(current_snapshot_id),
+            "evaluation_snapshot_created_utc": current_created.isoformat(),
+            "evaluation_index": int(evaluation_index),
+            "elapsed_hours": elapsed_hours,
+            "forward_resolved": int(len(forward)),
+            "new_forward_resolved": int(max(len(forward) - prev_forward_n, 0)),
+            "status": "awaiting_forward",
+        }
+
+        if forward.empty:
+            new_rows.append(base_row)
+            continue
+
+        first_ts = pd.to_numeric(forward.get("_entry_ts"), errors="coerce").dropna()
+        if not first_ts.empty:
+            base_row["forward_first_entry_timestamp"] = int(first_ts.min())
+            base_row["forward_last_entry_timestamp"] = int(first_ts.max())
+
+        required_features = {
+            str(value)
+            for value in (rule.get("feature1"), rule.get("feature2"))
+            if value
+        }
+        missing_features = sorted(
+            feature for feature in required_features if feature not in forward.columns
+        )
+        if not rule or missing_features:
+            base_row["status"] = "missing_feature"
+            base_row["missing_features"] = ", ".join(missing_features)
+            new_rows.append(base_row)
+            continue
+
+        zero_mask = pd.Series(False, index=forward.index, dtype=bool)
+        baseline_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+            forward,
+            zero_mask,
+        )
+        blocked_mask = _candidate_fast_regime_auto_rule_mask(
+            forward,
+            rule,
+        ).reindex(forward.index, fill_value=False).fillna(False).astype(bool)
+        gated_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+            forward,
+            blocked_mask,
+        )
+        baseline_summary = _candidate_fast_portfolio_summary(baseline_portfolio)
+        gated_summary = _candidate_fast_portfolio_summary(gated_portfolio)
+        if not baseline_summary or not gated_summary:
+            base_row["status"] = "portfolio_unavailable"
+            new_rows.append(base_row)
+            continue
+
+        blocked = forward.loc[blocked_mask].copy()
+        blocked_net = pd.to_numeric(
+            blocked.get("net_pnl_pct", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        baseline_accepted = _candidate_fast_discovery_forward_accepted_stats(
+            baseline_portfolio
+        )
+        gate_accepted = _candidate_fast_discovery_forward_accepted_stats(
+            gated_portfolio
+        )
+        baseline_stability = _candidate_fast_regime_portfolio_stability(
+            baseline_portfolio
+        )
+        gate_stability = _candidate_fast_regime_portfolio_stability(
+            gated_portfolio
+        )
+
+        baseline_final = float(baseline_summary.get("Final equity", np.nan))
+        gate_final = float(gated_summary.get("Final equity", np.nan))
+        baseline_return = float(baseline_summary.get("Return %", np.nan))
+        gate_return = float(gated_summary.get("Return %", np.nan))
+        baseline_dd = float(baseline_summary.get("Max DD %", np.nan))
+        gate_dd = float(gated_summary.get("Max DD %", np.nan))
+        baseline_pf = float(baseline_summary.get("PF", np.nan))
+        gate_pf = float(gated_summary.get("PF", np.nan))
+
+        base_row.update({
+            "status": "evaluated",
+            "blocked": int(blocked_mask.sum()),
+            "blocked_pct": float(blocked_mask.mean() * 100.0),
+            "blocked_winners": int(blocked_net.gt(0).sum()),
+            "blocked_losers": int(blocked_net.lt(0).sum()),
+            "blocked_flat": int(blocked_net.eq(0).sum()),
+            "blocked_net_pnl_pct_pts": float(blocked_net.sum()) if len(blocked_net) else 0.0,
+            "baseline_accepted": int(baseline_summary.get("Accepted", 0)),
+            "gate_accepted": int(gated_summary.get("Accepted", 0)),
+            "baseline_accepted_winners": baseline_accepted["accepted_winners"],
+            "baseline_accepted_losers": baseline_accepted["accepted_losers"],
+            "gate_accepted_winners": gate_accepted["accepted_winners"],
+            "gate_accepted_losers": gate_accepted["accepted_losers"],
+            "baseline_net_pnl_usd": baseline_accepted["net_pnl_usd"],
+            "gate_net_pnl_usd": gate_accepted["net_pnl_usd"],
+            "baseline_final_equity": baseline_final,
+            "gate_final_equity": gate_final,
+            "delta_final_equity": gate_final - baseline_final,
+            "baseline_return_pct": baseline_return,
+            "gate_return_pct": gate_return,
+            "delta_return_pp": gate_return - baseline_return,
+            "baseline_max_dd_pct": baseline_dd,
+            "gate_max_dd_pct": gate_dd,
+            "dd_improvement_pp": baseline_dd - gate_dd,
+            "baseline_pf": baseline_pf,
+            "gate_pf": gate_pf,
+            "delta_pf": (
+                gate_pf - baseline_pf
+                if pd.notna(gate_pf) and pd.notna(baseline_pf)
+                else np.nan
+            ),
+            "baseline_underwater_time_pct": baseline_stability.get("Underwater time %", np.nan),
+            "gate_underwater_time_pct": gate_stability.get("Underwater time %", np.nan),
+            "baseline_positive_days_pct": baseline_stability.get("Positive days %", np.nan),
+            "gate_positive_days_pct": gate_stability.get("Positive days %", np.nan),
+            "baseline_worst_day_usd": baseline_stability.get("Worst day $", np.nan),
+            "gate_worst_day_usd": gate_stability.get("Worst day $", np.nan),
+            "baseline_recovery_factor": baseline_stability.get("Recovery factor", np.nan),
+            "gate_recovery_factor": gate_stability.get("Recovery factor", np.nan),
+        })
+        new_rows.append(base_row)
+
+    if not new_rows:
+        return {
+            "status": "already_evaluated",
+            "rows_added": 0,
+            "winners_tracked": int(len(winners)),
+        }
+
+    new_frame = pd.DataFrame(new_rows)
+    combined = (
+        pd.concat([forward_existing, new_frame], ignore_index=True, sort=False)
+        if forward_existing is not None and not forward_existing.empty
+        else new_frame
+    )
+    combined = combined.drop_duplicates(
+        subset=[
+            "discovery_snapshot_id",
+            "strategy",
+            "evaluation_snapshot_id",
+        ],
+        keep="last",
+    )
+    _candidate_fast_atomic_write_csv(
+        combined,
+        CANDIDATE_FAST_DISCOVERY_FORWARD_FILE,
+    )
+    return {
+        "status": "updated",
+        "rows_added": int(len(new_frame)),
+        "winners_tracked": int(len(winners)),
+        "evaluated": int(new_frame.get("status", pd.Series(dtype=str)).eq("evaluated").sum()),
+        "awaiting_forward": int(new_frame.get("status", pd.Series(dtype=str)).eq("awaiting_forward").sum()),
+    }
+
+
+def _candidate_fast_discovery_history_capture(
+    execution,
+    *,
+    reaction_digest="",
+    max_retest_timestamp=None,
+    top_n=10,
+):
+    """Persist a canonical scanner leaderboard for each unique data snapshot.
+
+    This is NOT model training and never changes Validation. It reruns the same
+    deterministic Discovery search on the expanding historical sample so we can
+    measure whether feature families, thresholds and ranks remain stable as new
+    resolved candidates arrive.
+    """
+    if execution is None or execution.empty:
+        return {"status": "empty", "rows_added": 0}
+
+    snapshot_id = _candidate_fast_discovery_snapshot_id(
+        execution,
+        reaction_digest=reaction_digest,
+        max_retest_timestamp=max_retest_timestamp,
+    )
+    existing = _candidate_fast_discovery_history_load()
+    if not existing.empty and "snapshot_id" in existing.columns:
+        if existing["snapshot_id"].astype(str).eq(snapshot_id).any():
+            forward_status = _candidate_fast_discovery_forward_update(
+                execution,
+                current_snapshot_id=snapshot_id,
+                history=existing,
+            )
+            return {
+                "status": "already_recorded",
+                "snapshot_id": snapshot_id,
+                "rows_added": 0,
+                "forward": forward_status,
+            }
+
+    feature_labels = _candidate_fast_discovery_history_feature_labels()
+    feature_options = [
+        column for column in feature_labels.values() if column in execution.columns
+    ]
+    reverse_labels = {column: label for label, column in feature_labels.items()}
+    if not feature_options:
+        return {
+            "status": "no_features",
+            "snapshot_id": snapshot_id,
+            "rows_added": 0,
+        }
+
+    created_utc = pd.Timestamp.now(tz="UTC")
+    discovery_cutoff_timestamp = int(created_utc.value // 1_000_000)
+    strategies = [
+        ("Legacy V1 + Strength > 0", "Candidate + Strength"),
+        ("Legacy V1 Base", "Candidate Base"),
+    ]
+    output_rows = []
+
+    # Canonical history settings deliberately match the scanner defaults.
+    max_blocked_pct = 50.0
+    objective = "Highest final equity"
+    search_mode = "Extended pairs"
+
+    for strategy_label, variant in strategies:
+        resolved, baseline_portfolio, baseline_summary = (
+            _candidate_fast_regime_variant_context(execution, variant)
+        )
+        if resolved is None or resolved.empty or not baseline_summary:
+            continue
+
+        rules_by_id = {}
+        scan_rows = []
+        simple_rules = _candidate_fast_regime_auto_single_rules(
+            resolved,
+            feature_options,
+        )
+        for idx, rule in enumerate(simple_rules):
+            row = _candidate_fast_regime_auto_evaluate(
+                resolved,
+                rule,
+                reverse_labels,
+                baseline_summary,
+            )
+            if row is None:
+                continue
+            rule_id = f"S{idx:04d}"
+            row["Rule ID"] = rule_id
+            scan_rows.append(row)
+            rules_by_id[rule_id] = rule
+
+        results = pd.DataFrame(scan_rows)
+        if results.empty:
+            continue
+
+        seed = results.loc[
+            pd.to_numeric(results["Blocked %"], errors="coerce").between(
+                5.0,
+                max_blocked_pct,
+                inclusive="both",
+            )
+        ].copy()
+        seed = _candidate_fast_regime_sort_results(
+            seed,
+            "Highest final equity",
+        ).head(10)
+        seed_ids = seed["Rule ID"].astype(str).tolist()
+
+        pair_rows = []
+        pair_counter = 0
+        for i in range(len(seed_ids)):
+            for j in range(i + 1, len(seed_ids)):
+                left = rules_by_id.get(seed_ids[i])
+                right = rules_by_id.get(seed_ids[j])
+                if not left or not right:
+                    continue
+                if left.get("feature2") or right.get("feature2"):
+                    continue
+                if left.get("feature1") == right.get("feature1"):
+                    continue
+                for combine in ("AND", "OR"):
+                    pair = {
+                        "kind": f"pair_{combine.lower()}",
+                        "feature1": left.get("feature1"),
+                        "operator1": left.get("operator1"),
+                        "value1": left.get("value1"),
+                        "feature2": right.get("feature1"),
+                        "operator2": right.get("operator1"),
+                        "value2": right.get("value1"),
+                        "combine": combine,
+                    }
+                    row = _candidate_fast_regime_auto_evaluate(
+                        resolved,
+                        pair,
+                        reverse_labels,
+                        baseline_summary,
+                    )
+                    if row is None:
+                        continue
+                    rule_id = f"P{pair_counter:04d}"
+                    pair_counter += 1
+                    row["Rule ID"] = rule_id
+                    pair_rows.append(row)
+                    rules_by_id[rule_id] = pair
+
+        if pair_rows:
+            results = pd.concat(
+                [results, pd.DataFrame(pair_rows)],
+                ignore_index=True,
+            )
+
+        filtered = results.loc[
+            pd.to_numeric(results["Blocked %"], errors="coerce").le(max_blocked_pct)
+            & pd.to_numeric(results["Blocked %"], errors="coerce").ge(2.0)
+            & pd.to_numeric(results["Accepted"], errors="coerce").ge(5)
+        ].copy()
+        ranked = _candidate_fast_regime_sort_results(filtered, objective)
+        if ranked.empty:
+            continue
+
+        entry_ts = pd.to_numeric(
+            resolved.get("_entry_ts", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        max_entry_ts = int(entry_ts.max()) if not entry_ts.empty else 0
+
+        for rank, (_, result_row) in enumerate(
+            ranked.head(int(top_n)).iterrows(),
+            start=1,
+        ):
+            rid = str(result_row.get("Rule ID", ""))
+            rule = rules_by_id.get(rid, {})
+            feature1 = str(rule.get("feature1") or "")
+            feature2 = str(rule.get("feature2") or "")
+            output_rows.append({
+                "snapshot_id": snapshot_id,
+                "snapshot_created_utc": created_utc.isoformat(),
+                "discovery_cutoff_timestamp": discovery_cutoff_timestamp,
+                "reaction_digest": str(reaction_digest or ""),
+                "max_retest_timestamp": max_retest_timestamp,
+                "strategy": strategy_label,
+                "variant": variant,
+                "resolved_candidates": int(len(resolved)),
+                "max_entry_timestamp": max_entry_ts,
+                "search_mode": search_mode,
+                "objective": objective,
+                "max_blocked_pct": max_blocked_pct,
+                "rank": int(rank),
+                "rule_id": rid,
+                "rule": str(result_row.get("Rule", "")),
+                "rule_json": json.dumps(rule, sort_keys=True, default=str),
+                "kind": str(rule.get("kind") or result_row.get("Kind", "")),
+                "feature1": feature1,
+                "feature1_label": reverse_labels.get(feature1, feature1),
+                "operator1": rule.get("operator1"),
+                "value1": rule.get("value1"),
+                "combine": rule.get("combine"),
+                "feature2": feature2,
+                "feature2_label": reverse_labels.get(feature2, feature2),
+                "operator2": rule.get("operator2"),
+                "value2": rule.get("value2"),
+                "blocked_pct": result_row.get("Blocked %", np.nan),
+                "accepted": result_row.get("Accepted", np.nan),
+                "final_equity": result_row.get("Final equity", np.nan),
+                "delta_equity": result_row.get("Δ equity", np.nan),
+                "return_pct": result_row.get("Return %", np.nan),
+                "max_dd_pct": result_row.get("Max DD %", np.nan),
+                "pf": result_row.get("PF", np.nan),
+                "baseline_final_equity": baseline_summary.get("Final equity", np.nan),
+                "baseline_return_pct": baseline_summary.get("Return %", np.nan),
+                "baseline_max_dd_pct": baseline_summary.get("Max DD %", np.nan),
+                "baseline_pf": baseline_summary.get("PF", np.nan),
+            })
+
+    if not output_rows:
+        return {
+            "status": "no_ranked_rules",
+            "snapshot_id": snapshot_id,
+            "rows_added": 0,
+        }
+
+    new_rows = pd.DataFrame(output_rows)
+    combined = (
+        pd.concat([existing, new_rows], ignore_index=True, sort=False)
+        if existing is not None and not existing.empty
+        else new_rows
+    )
+    dedupe_cols = [
+        "snapshot_id",
+        "strategy",
+        "objective",
+        "rank",
+    ]
+    combined = combined.drop_duplicates(
+        subset=[c for c in dedupe_cols if c in combined.columns],
+        keep="last",
+    )
+    _candidate_fast_atomic_write_csv(
+        combined,
+        CANDIDATE_FAST_DISCOVERY_HISTORY_FILE,
+    )
+    forward_status = _candidate_fast_discovery_forward_update(
+        execution,
+        current_snapshot_id=snapshot_id,
+        history=combined,
+    )
+    return {
+        "status": "recorded",
+        "snapshot_id": snapshot_id,
+        "rows_added": int(len(new_rows)),
+        "strategies": int(new_rows["strategy"].nunique()),
+        "forward": forward_status,
+    }
+
+
+def _candidate_fast_render_discovery_snapshot_history(current_strategy_label):
+    """Show how the canonical scanner winner/families evolve snapshot by snapshot."""
+    history = _candidate_fast_discovery_history_load()
+    if history is None or history.empty:
+        st.caption(
+            "Scanner snapshot history will start after the next Candidate Data refresh."
+        )
+        return
+
+    work = history.copy()
+    if "strategy" in work.columns:
+        work = work.loc[
+            work["strategy"].astype(str).eq(str(current_strategy_label))
+        ].copy()
+    if work.empty:
+        st.caption(
+            "No scanner history is recorded yet for this strategy. Refresh Candidate Data once."
+        )
+        return
+
+    st.markdown("##### 📚 Scanner history · snapshot stability")
+    st.caption(
+        "Each unique Candidate snapshot is rescanned with the same canonical Discovery "
+        "settings: Extended pairs · Highest final equity · max 50% blocked. This does "
+        "not train or modify Validation; it records whether winners, feature families "
+        "and thresholds remain stable as new resolved candidates arrive. The full Top 10 "
+        "is persisted for every unique snapshot."
+    )
+
+    work["rank"] = pd.to_numeric(work.get("rank"), errors="coerce")
+    work["snapshot_created_utc"] = pd.to_datetime(
+        work.get("snapshot_created_utc"),
+        utc=True,
+        errors="coerce",
+    )
+    latest_order = (
+        work[["snapshot_id", "snapshot_created_utc"]]
+        .drop_duplicates("snapshot_id", keep="last")
+        .sort_values("snapshot_created_utc", kind="stable")
+    )
+    snapshot_order = {
+        sid: idx + 1 for idx, sid in enumerate(latest_order["snapshot_id"].astype(str))
+    }
+    work["Snapshot #"] = work["snapshot_id"].astype(str).map(snapshot_order)
+
+    top1 = work.loc[work["rank"].eq(1)].copy()
+    top1 = top1.sort_values("snapshot_created_utc", kind="stable")
+    if not top1.empty:
+        top1["Snapshot"] = top1["snapshot_created_utc"].dt.tz_convert(TZ).dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        show_cols = [
+            "Snapshot #", "Snapshot", "resolved_candidates", "rule",
+            "blocked_pct", "final_equity", "return_pct", "max_dd_pct", "pf",
+        ]
+        show_cols = [c for c in show_cols if c in top1.columns]
+        top1_display = top1[show_cols].tail(20).copy()
+        rename = {
+            "resolved_candidates": "Resolved",
+            "rule": "#1 rule",
+            "blocked_pct": "Blocked %",
+            "final_equity": "Final equity",
+            "return_pct": "Return %",
+            "max_dd_pct": "Max DD %",
+            "pf": "PF",
+        }
+        top1_display = top1_display.rename(columns=rename)
+        for column in ["Blocked %", "Final equity", "Return %", "Max DD %", "PF"]:
+            if column in top1_display.columns:
+                top1_display[column] = pd.to_numeric(
+                    top1_display[column], errors="coerce"
+                ).round(4)
+        st.dataframe(
+            top1_display,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_fast_discovery_history_top1",
+        )
+
+    # Top-3 family persistence by snapshot. Count a family at most once per snapshot.
+    top3 = work.loc[work["rank"].between(1, 3, inclusive="both")].copy()
+    family_rows = []
+    for _, row in top3.iterrows():
+        sid = str(row.get("snapshot_id", ""))
+        for feature_col in ("feature1_label", "feature2_label"):
+            feature = str(row.get(feature_col, "") or "").strip()
+            if feature and feature.lower() != "nan":
+                family_rows.append({"snapshot_id": sid, "Feature family": feature})
+    if family_rows:
+        family_frame = pd.DataFrame(family_rows).drop_duplicates(
+            ["snapshot_id", "Feature family"]
+        )
+        n_snapshots = max(int(work["snapshot_id"].astype(str).nunique()), 1)
+        persistence = (
+            family_frame.groupby("Feature family", as_index=False)["snapshot_id"]
+            .nunique()
+            .rename(columns={"snapshot_id": "Top-3 snapshots"})
+        )
+        persistence["Persistence %"] = (
+            persistence["Top-3 snapshots"] / n_snapshots * 100.0
+        ).round(2)
+        persistence = persistence.sort_values(
+            ["Top-3 snapshots", "Feature family"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        st.markdown("###### Feature-family persistence in snapshot Top 3")
+        st.dataframe(
+            persistence,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_fast_discovery_history_families",
+        )
+
+
+    # ------------------------------------------------------------------
+    # Saved Top-10 explorer + family/rank evolution across snapshots.
+    # The history capture already persists rank 1..10 for every unique
+    # snapshot. This UI makes the complete leaderboard inspectable and
+    # shows whether the same rule families keep resurfacing as data grows.
+    # ------------------------------------------------------------------
+    st.markdown("###### 🧭 Saved Top 10 · snapshot explorer")
+    st.caption(
+        "Every unique refresh stores the canonical scanner Top 10 for this strategy. "
+        "Use the selector to inspect the exact rules and thresholds that were known at "
+        "that snapshot; older rows are never recalibrated when new data arrives."
+    )
+
+    snapshot_meta = (
+        work[["snapshot_id", "snapshot_created_utc", "resolved_candidates"]]
+        .drop_duplicates("snapshot_id", keep="last")
+        .sort_values("snapshot_created_utc", kind="stable")
+        .copy()
+    )
+    snapshot_meta["Snapshot #"] = (
+        snapshot_meta["snapshot_id"].astype(str).map(snapshot_order)
+    )
+    snapshot_meta["Snapshot local"] = (
+        snapshot_meta["snapshot_created_utc"]
+        .dt.tz_convert(TZ)
+        .dt.strftime("%Y-%m-%d %H:%M")
+    )
+    snapshot_meta["Resolved"] = pd.to_numeric(
+        snapshot_meta.get("resolved_candidates"), errors="coerce"
+    ).fillna(0).astype(int)
+    snapshot_meta["_label"] = snapshot_meta.apply(
+        lambda row: (
+            f"Snapshot #{int(row['Snapshot #'])} · {row['Snapshot local']} · "
+            f"{int(row['Resolved'])} resolved"
+        ),
+        axis=1,
+    )
+    snapshot_labels = snapshot_meta["_label"].tolist()
+    snapshot_map = dict(
+        zip(snapshot_meta["_label"], snapshot_meta["snapshot_id"].astype(str))
+    )
+    selected_snapshot_label = st.selectbox(
+        "Inspect saved Top 10 from snapshot",
+        snapshot_labels,
+        index=max(len(snapshot_labels) - 1, 0),
+        key="candidate_fast_discovery_history_top10_snapshot_selector",
+    )
+    selected_snapshot_id = snapshot_map[selected_snapshot_label]
+    selected_top10 = work.loc[
+        work["snapshot_id"].astype(str).eq(selected_snapshot_id)
+        & work["rank"].between(1, 10, inclusive="both")
+    ].copy().sort_values("rank", kind="stable")
+
+    if not selected_top10.empty:
+        winner = selected_top10.iloc[0]
+        metric_cols = st.columns(4)
+        metric_cols[0].metric(
+            "Rules saved",
+            f"{int(len(selected_top10))}/10",
+        )
+        metric_cols[1].metric(
+            "Resolved",
+            int(pd.to_numeric(
+                pd.Series([winner.get("resolved_candidates", 0)]),
+                errors="coerce",
+            ).fillna(0).iloc[0]),
+        )
+        winner_delta = pd.to_numeric(
+            pd.Series([winner.get("delta_equity", np.nan)]), errors="coerce"
+        ).iloc[0]
+        metric_cols[2].metric(
+            "#1 Δ equity",
+            f"${winner_delta:+.2f}" if pd.notna(winner_delta) else "—",
+        )
+        winner_pf = pd.to_numeric(
+            pd.Series([winner.get("pf", np.nan)]), errors="coerce"
+        ).iloc[0]
+        metric_cols[3].metric(
+            "#1 PF",
+            f"{winner_pf:.3f}" if pd.notna(winner_pf) else "—",
+        )
+
+        top10_cols = [
+            "rank", "rule", "feature1_label", "operator1", "value1",
+            "combine", "feature2_label", "operator2", "value2",
+            "blocked_pct", "accepted", "final_equity", "delta_equity",
+            "return_pct", "max_dd_pct", "pf",
+        ]
+        top10_cols = [column for column in top10_cols if column in selected_top10.columns]
+        top10_display = selected_top10[top10_cols].copy().rename(columns={
+            "rank": "Rank",
+            "rule": "Rule",
+            "feature1_label": "Feature A",
+            "operator1": "Op A",
+            "value1": "Threshold A",
+            "combine": "Join",
+            "feature2_label": "Feature B",
+            "operator2": "Op B",
+            "value2": "Threshold B",
+            "blocked_pct": "Blocked %",
+            "accepted": "Accepted",
+            "final_equity": "Final equity",
+            "delta_equity": "Δ equity",
+            "return_pct": "Return %",
+            "max_dd_pct": "Max DD %",
+            "pf": "PF",
+        })
+        for column in [
+            "Threshold A", "Threshold B", "Blocked %", "Final equity",
+            "Δ equity", "Return %", "Max DD %", "PF",
+        ]:
+            if column in top10_display.columns:
+                numeric = pd.to_numeric(top10_display[column], errors="coerce")
+                if numeric.notna().any():
+                    top10_display[column] = numeric.round(4)
+        st.dataframe(
+            top10_display,
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_fast_discovery_history_selected_top10",
+        )
+
+        bar_data = selected_top10.copy()
+        bar_data["_rank_label"] = bar_data["rank"].map(
+            lambda value: f"#{int(value)}" if pd.notna(value) else "—"
+        )
+        bar_data["_delta_equity"] = pd.to_numeric(
+            bar_data.get("delta_equity"), errors="coerce"
+        )
+        bar_data = bar_data.dropna(subset=["_delta_equity"])
+        if not bar_data.empty:
+            fig_top10 = go.Figure()
+            fig_top10.add_trace(
+                go.Bar(
+                    x=bar_data["_delta_equity"],
+                    y=bar_data["_rank_label"],
+                    orientation="h",
+                    customdata=np.column_stack([
+                        bar_data.get("rule", pd.Series("", index=bar_data.index)).astype(str),
+                        pd.to_numeric(bar_data.get("blocked_pct"), errors="coerce"),
+                        pd.to_numeric(bar_data.get("pf"), errors="coerce"),
+                    ]),
+                    hovertemplate=(
+                        "<b>%{y}</b><br>%{customdata[0]}<br>"
+                        "Δ equity: $%{x:.2f}<br>"
+                        "Blocked: %{customdata[1]:.2f}%<br>"
+                        "PF: %{customdata[2]:.3f}<extra></extra>"
+                    ),
+                    name="Δ equity",
+                )
+            )
+            fig_top10.update_layout(
+                title=f"Top 10 at {selected_snapshot_label}",
+                xaxis_title="Δ equity vs baseline (USDT)",
+                yaxis_title="Scanner rank",
+                yaxis={"autorange": "reversed"},
+                height=390,
+                margin=dict(l=45, r=20, t=55, b=45),
+            )
+            st.plotly_chart(
+                fig_top10,
+                use_container_width=True,
+                key="candidate_fast_discovery_history_selected_top10_chart",
+            )
+
+    def _snapshot_rule_family_signature(row):
+        """Stable family identity: features + operator direction, excluding thresholds."""
+        parts = []
+        for suffix in ("1", "2"):
+            feature = str(row.get(f"feature{suffix}_label", "") or "").strip()
+            operator = str(row.get(f"operator{suffix}", "") or "").strip()
+            if feature and feature.lower() != "nan":
+                part = feature
+                if operator and operator.lower() != "nan":
+                    part = f"{part} {operator}"
+                parts.append(part)
+        if not parts:
+            return "Unknown"
+        combine = str(row.get("combine", "") or "").strip().upper()
+        if len(parts) == 1:
+            return parts[0]
+        if combine not in {"AND", "OR"}:
+            combine = "PAIR"
+        # AND/OR are commutative; normalize ordering so A/B swaps remain one family.
+        normalized = sorted(parts, key=lambda value: value.lower())
+        return f" {combine} ".join(normalized)
+
+    top10_history = work.loc[
+        work["rank"].between(1, 10, inclusive="both")
+    ].copy()
+    if not top10_history.empty:
+        top10_history["Rule family"] = top10_history.apply(
+            _snapshot_rule_family_signature,
+            axis=1,
+        )
+        top10_history["Snapshot"] = (
+            top10_history["snapshot_created_utc"]
+            .dt.tz_convert(TZ)
+            .dt.strftime("%m-%d %H:%M")
+        )
+
+        family_best = (
+            top10_history
+            .sort_values(["Snapshot #", "rank"], kind="stable")
+            .drop_duplicates(["snapshot_id", "Rule family"], keep="first")
+            .copy()
+        )
+        n_snapshots_top10 = max(
+            int(top10_history["snapshot_id"].astype(str).nunique()),
+            1,
+        )
+        family_summary = (
+            family_best.groupby("Rule family", as_index=False)
+            .agg(
+                **{
+                    "Top-10 snapshots": ("snapshot_id", "nunique"),
+                    "Best rank": ("rank", "min"),
+                    "Median rank": ("rank", "median"),
+                    "Latest snapshot #": ("Snapshot #", "max"),
+                }
+            )
+        )
+        family_summary["Top-10 persistence %"] = (
+            family_summary["Top-10 snapshots"] / n_snapshots_top10 * 100.0
+        ).round(2)
+
+        latest_family_rows = (
+            family_best.sort_values(["Rule family", "Snapshot #"], kind="stable")
+            .drop_duplicates("Rule family", keep="last")
+            [["Rule family", "rank"]]
+            .rename(columns={"rank": "Latest rank"})
+        )
+        family_summary = family_summary.merge(
+            latest_family_rows,
+            on="Rule family",
+            how="left",
+        )
+        family_summary = family_summary.sort_values(
+            ["Top-10 snapshots", "Best rank", "Median rank"],
+            ascending=[False, True, True],
+            kind="stable",
+        ).reset_index(drop=True)
+
+        st.markdown("###### 📈 Top-10 family evolution across snapshots")
+        st.caption(
+            "Rules are grouped by feature family and operator direction while thresholds "
+            "are allowed to move. This lets us see convergence: the same market idea can "
+            "remain near the top even when its exact threshold is refined by new data."
+        )
+        st.dataframe(
+            family_summary.head(20),
+            use_container_width=True,
+            hide_index=True,
+            key="candidate_fast_discovery_history_top10_family_summary",
+        )
+
+        default_families = family_summary.head(min(5, len(family_summary)))[
+            "Rule family"
+        ].astype(str).tolist()
+        selected_families = st.multiselect(
+            "Families to draw · best rank in each snapshot",
+            family_summary["Rule family"].astype(str).tolist(),
+            default=default_families,
+            max_selections=8,
+            key="candidate_fast_discovery_history_top10_family_selector",
+        )
+        if selected_families:
+            fig_rank = go.Figure()
+            all_snapshot_numbers = sorted(
+                int(value)
+                for value in top10_history["Snapshot #"].dropna().unique().tolist()
+            )
+            for family in selected_families:
+                family_rows_plot = family_best.loc[
+                    family_best["Rule family"].astype(str).eq(str(family))
+                ].copy()
+                rank_by_snapshot = {
+                    int(row["Snapshot #"]): float(row["rank"])
+                    for _, row in family_rows_plot.iterrows()
+                    if pd.notna(row.get("Snapshot #")) and pd.notna(row.get("rank"))
+                }
+                y_values = [rank_by_snapshot.get(number, np.nan) for number in all_snapshot_numbers]
+                fig_rank.add_trace(
+                    go.Scatter(
+                        x=all_snapshot_numbers,
+                        y=y_values,
+                        mode="lines+markers",
+                        connectgaps=False,
+                        name=str(family),
+                        hovertemplate=(
+                            "Snapshot #%{x}<br>Best Top-10 rank: %{y:.0f}<extra></extra>"
+                        ),
+                    )
+                )
+            fig_rank.update_layout(
+                title="How the same rule families move through the Top 10",
+                xaxis_title="Snapshot #",
+                yaxis_title="Best rank in snapshot",
+                yaxis={
+                    "autorange": "reversed",
+                    "tickmode": "linear",
+                    "tick0": 1,
+                    "dtick": 1,
+                    "range": [10.5, 0.5],
+                },
+                height=470,
+                margin=dict(l=45, r=20, t=55, b=45),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
+            st.plotly_chart(
+                fig_rank,
+                use_container_width=True,
+                key="candidate_fast_discovery_history_top10_rank_evolution",
+            )
+
+        family_options = family_summary["Rule family"].astype(str).tolist()
+        if family_options:
+            latest_winner_family = None
+            latest_top1 = top1.tail(1)
+            if not latest_top1.empty:
+                latest_winner_family = _snapshot_rule_family_signature(
+                    latest_top1.iloc[0]
+                )
+            family_default_index = (
+                family_options.index(latest_winner_family)
+                if latest_winner_family in family_options
+                else 0
+            )
+            inspect_family = st.selectbox(
+                "Inspect one family through every saved snapshot",
+                family_options,
+                index=family_default_index,
+                key="candidate_fast_discovery_history_family_inspector",
+            )
+            family_detail = family_best.loc[
+                family_best["Rule family"].astype(str).eq(str(inspect_family))
+            ].copy().sort_values("Snapshot #", kind="stable")
+            if not family_detail.empty:
+                family_detail["Snapshot local"] = (
+                    family_detail["snapshot_created_utc"]
+                    .dt.tz_convert(TZ)
+                    .dt.strftime("%Y-%m-%d %H:%M")
+                )
+                detail_cols = [
+                    "Snapshot #", "Snapshot local", "rank", "resolved_candidates",
+                    "rule", "blocked_pct", "accepted", "final_equity",
+                    "delta_equity", "return_pct", "max_dd_pct", "pf",
+                ]
+                detail_cols = [
+                    column for column in detail_cols if column in family_detail.columns
+                ]
+                detail_display = family_detail[detail_cols].copy().rename(columns={
+                    "rank": "Rank",
+                    "resolved_candidates": "Resolved",
+                    "rule": "Exact rule / threshold",
+                    "blocked_pct": "Blocked %",
+                    "accepted": "Accepted",
+                    "final_equity": "Final equity",
+                    "delta_equity": "Δ equity",
+                    "return_pct": "Return %",
+                    "max_dd_pct": "Max DD %",
+                    "pf": "PF",
+                })
+                for column in [
+                    "Blocked %", "Final equity", "Δ equity", "Return %",
+                    "Max DD %", "PF",
+                ]:
+                    if column in detail_display.columns:
+                        detail_display[column] = pd.to_numeric(
+                            detail_display[column], errors="coerce"
+                        ).round(4)
+                st.dataframe(
+                    detail_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="candidate_fast_discovery_history_family_detail",
+                )
+
+    forward_history = _candidate_fast_discovery_forward_load()
+    if forward_history is not None and not forward_history.empty:
+        forward_work = forward_history.copy()
+        if "strategy" in forward_work.columns:
+            forward_work = forward_work.loc[
+                forward_work["strategy"].astype(str).eq(str(current_strategy_label))
+            ].copy()
+
+        if not forward_work.empty:
+            st.markdown("###### 🔭 Forward since discovery · frozen snapshot winners")
+            st.caption(
+                "Every snapshot #1 rule is frozen exactly as discovered. Forward uses only "
+                "Candidates whose entry timestamp is strictly AFTER that snapshot's actual "
+                "discovery time, so pending/pre-existing trades cannot leak into the test. "
+                "Baseline and gate are both rebased to $200 for each winner. Positive Δ equity, "
+                "Δ Return, Δ PF and DD improvement mean the frozen rule helped out-of-sample."
+            )
+
+            forward_work["evaluation_snapshot_created_utc"] = pd.to_datetime(
+                forward_work.get("evaluation_snapshot_created_utc"),
+                utc=True,
+                errors="coerce",
+            )
+            forward_work["discovery_snapshot_created_utc"] = pd.to_datetime(
+                forward_work.get("discovery_snapshot_created_utc"),
+                utc=True,
+                errors="coerce",
+            )
+            forward_work["Discovery #"] = (
+                forward_work.get("discovery_snapshot_id", pd.Series("", index=forward_work.index))
+                .astype(str)
+                .map(snapshot_order)
+            )
+
+            latest_forward = (
+                forward_work
+                .sort_values("evaluation_snapshot_created_utc", kind="stable")
+                .drop_duplicates(
+                    subset=["discovery_snapshot_id", "strategy"],
+                    keep="last",
+                )
+                .sort_values("Discovery #", kind="stable")
+            )
+            latest_forward["Discovered"] = (
+                latest_forward["discovery_snapshot_created_utc"]
+                .dt.tz_convert(TZ)
+                .dt.strftime("%Y-%m-%d %H:%M")
+            )
+            latest_forward["Forward span h"] = pd.to_numeric(
+                latest_forward.get("elapsed_hours"), errors="coerce"
+            ).round(1)
+
+            latest_cols = [
+                "Discovery #", "Discovered", "winner_rule", "status",
+                "Forward span h", "forward_resolved", "new_forward_resolved",
+                "blocked_pct", "blocked_winners", "blocked_losers",
+                "baseline_accepted", "gate_accepted",
+                "baseline_final_equity", "gate_final_equity", "delta_final_equity",
+                "baseline_return_pct", "gate_return_pct", "delta_return_pp",
+                "baseline_max_dd_pct", "gate_max_dd_pct", "dd_improvement_pp",
+                "baseline_pf", "gate_pf", "delta_pf",
+            ]
+            latest_cols = [c for c in latest_cols if c in latest_forward.columns]
+            latest_display = latest_forward[latest_cols].copy().rename(columns={
+                "winner_rule": "Frozen #1 rule",
+                "status": "Status",
+                "forward_resolved": "Forward resolved",
+                "new_forward_resolved": "New resolved",
+                "blocked_pct": "Blocked %",
+                "blocked_winners": "Blocked W",
+                "blocked_losers": "Blocked L",
+                "baseline_accepted": "Base accepted",
+                "gate_accepted": "Gate accepted",
+                "baseline_final_equity": "Base final",
+                "gate_final_equity": "Gate final",
+                "delta_final_equity": "Δ equity",
+                "baseline_return_pct": "Base return %",
+                "gate_return_pct": "Gate return %",
+                "delta_return_pp": "Δ Return pp",
+                "baseline_max_dd_pct": "Base DD %",
+                "gate_max_dd_pct": "Gate DD %",
+                "dd_improvement_pp": "DD improvement pp",
+                "baseline_pf": "Base PF",
+                "gate_pf": "Gate PF",
+                "delta_pf": "Δ PF",
+            })
+            numeric_display = [
+                "Forward span h", "Blocked %", "Base final", "Gate final", "Δ equity",
+                "Base return %", "Gate return %", "Δ Return pp", "Base DD %",
+                "Gate DD %", "DD improvement pp", "Base PF", "Gate PF", "Δ PF",
+            ]
+            for column in numeric_display:
+                if column in latest_display.columns:
+                    latest_display[column] = pd.to_numeric(
+                        latest_display[column], errors="coerce"
+                    ).round(4)
+            st.dataframe(
+                latest_display,
+                use_container_width=True,
+                hide_index=True,
+                key="candidate_fast_discovery_forward_latest",
+            )
+
+            selector_rows = latest_forward.dropna(subset=["Discovery #"]).copy()
+            if not selector_rows.empty:
+                selector_rows["_selector"] = selector_rows.apply(
+                    lambda row: (
+                        f"Snapshot #{int(row['Discovery #'])} · "
+                        f"{row.get('Discovered', '—')} · {row.get('winner_rule', '')}"
+                    ),
+                    axis=1,
+                )
+                selector_map = dict(
+                    zip(
+                        selector_rows["_selector"],
+                        selector_rows["discovery_snapshot_id"].astype(str),
+                    )
+                )
+                selected_forward_label = st.selectbox(
+                    "Inspect one frozen winner forward trajectory",
+                    list(selector_map.keys()),
+                    index=len(selector_map) - 1,
+                    key="candidate_fast_discovery_forward_selector",
+                )
+                selected_discovery_id = selector_map[selected_forward_label]
+                trajectory = forward_work.loc[
+                    forward_work["discovery_snapshot_id"].astype(str).eq(
+                        selected_discovery_id
+                    )
+                ].copy().sort_values(
+                    "evaluation_snapshot_created_utc",
+                    kind="stable",
+                )
+                trajectory["Evaluated"] = (
+                    trajectory["evaluation_snapshot_created_utc"]
+                    .dt.tz_convert(TZ)
+                    .dt.strftime("%Y-%m-%d %H:%M")
+                )
+                trajectory["Evaluation snapshot #"] = (
+                    trajectory.get("evaluation_snapshot_id", pd.Series("", index=trajectory.index))
+                    .astype(str)
+                    .map(snapshot_order)
+                )
+                trajectory_cols = [
+                    "Evaluation snapshot #", "Evaluated", "status",
+                    "forward_resolved", "new_forward_resolved",
+                    "blocked", "blocked_pct", "blocked_winners", "blocked_losers",
+                    "blocked_net_pnl_pct_pts",
+                    "baseline_accepted", "gate_accepted",
+                    "baseline_accepted_winners", "baseline_accepted_losers",
+                    "gate_accepted_winners", "gate_accepted_losers",
+                    "baseline_final_equity", "gate_final_equity", "delta_final_equity",
+                    "baseline_return_pct", "gate_return_pct", "delta_return_pp",
+                    "baseline_max_dd_pct", "gate_max_dd_pct", "dd_improvement_pp",
+                    "baseline_pf", "gate_pf", "delta_pf",
+                    "baseline_underwater_time_pct", "gate_underwater_time_pct",
+                    "baseline_positive_days_pct", "gate_positive_days_pct",
+                    "baseline_worst_day_usd", "gate_worst_day_usd",
+                    "baseline_recovery_factor", "gate_recovery_factor",
+                ]
+                trajectory_cols = [c for c in trajectory_cols if c in trajectory.columns]
+                trajectory_display = trajectory[trajectory_cols].copy().rename(columns={
+                    "status": "Status",
+                    "forward_resolved": "Forward resolved",
+                    "new_forward_resolved": "New resolved",
+                    "blocked": "Blocked",
+                    "blocked_pct": "Blocked %",
+                    "blocked_winners": "Blocked W",
+                    "blocked_losers": "Blocked L",
+                    "blocked_net_pnl_pct_pts": "Blocked net pnl pts",
+                    "baseline_accepted": "Base accepted",
+                    "gate_accepted": "Gate accepted",
+                    "baseline_accepted_winners": "Base W",
+                    "baseline_accepted_losers": "Base L",
+                    "gate_accepted_winners": "Gate W",
+                    "gate_accepted_losers": "Gate L",
+                    "baseline_final_equity": "Base final",
+                    "gate_final_equity": "Gate final",
+                    "delta_final_equity": "Δ equity",
+                    "baseline_return_pct": "Base return %",
+                    "gate_return_pct": "Gate return %",
+                    "delta_return_pp": "Δ Return pp",
+                    "baseline_max_dd_pct": "Base DD %",
+                    "gate_max_dd_pct": "Gate DD %",
+                    "dd_improvement_pp": "DD improvement pp",
+                    "baseline_pf": "Base PF",
+                    "gate_pf": "Gate PF",
+                    "delta_pf": "Δ PF",
+                    "baseline_underwater_time_pct": "Base underwater %",
+                    "gate_underwater_time_pct": "Gate underwater %",
+                    "baseline_positive_days_pct": "Base positive days %",
+                    "gate_positive_days_pct": "Gate positive days %",
+                    "baseline_worst_day_usd": "Base worst day $",
+                    "gate_worst_day_usd": "Gate worst day $",
+                    "baseline_recovery_factor": "Base recovery",
+                    "gate_recovery_factor": "Gate recovery",
+                })
+                for column in trajectory_display.columns:
+                    if column in {"Status", "Evaluated"}:
+                        continue
+                    if column.startswith("Evaluation snapshot"):
+                        continue
+                    converted = pd.to_numeric(
+                        trajectory_display[column], errors="coerce"
+                    )
+                    if converted.notna().any():
+                        trajectory_display[column] = converted.round(4)
+                st.dataframe(
+                    trajectory_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="candidate_fast_discovery_forward_trajectory",
+                )
+
+            st.caption(
+                f"Forward file: {CANDIDATE_FAST_DISCOVERY_FORWARD_FILE.relative_to(BASE_DIR)}"
+            )
+
+    st.caption(
+        f"History file: {CANDIDATE_FAST_DISCOVERY_HISTORY_FILE.relative_to(BASE_DIR)} · "
+        f"{int(work['snapshot_id'].astype(str).nunique())} unique snapshot(s) for this strategy."
+    )
 
 
 def _candidate_fast_reverse_zone_mask(frame, zones):
@@ -52849,6 +54371,7 @@ def render_candidate_fast_no_trade_lab():
 
     base_summary_for_scan = _candidate_fast_portfolio_summary(baseline_portfolio)
     if base_summary_for_scan:
+        _candidate_fast_render_discovery_snapshot_history(variant_label)
         _candidate_fast_render_auto_regime_scanner(
             resolved,
             execution=execution,
@@ -81771,6 +83294,41 @@ if selected_section == "reaction_swing_lab":
                         "Candidate snapshot refreshed. Heavy BUILD work is now "
                         "materialized; filter changes use DuckDB only."
                     )
+                    history_status = (
+                        candidate_fast_build_result.get("discovery_history", {})
+                        if isinstance(candidate_fast_build_result, dict)
+                        else {}
+                    )
+                    if history_status.get("status") == "recorded":
+                        st.caption(
+                            "Scanner history recorded for this new snapshot · "
+                            f"{int(history_status.get('rows_added', 0))} leaderboard rows · "
+                            f"snapshot {history_status.get('snapshot_id', '—')}."
+                        )
+                        forward_status = history_status.get("forward", {}) or {}
+                        if forward_status:
+                            st.caption(
+                                "Forward since discovery updated · "
+                                f"{int(forward_status.get('rows_added', 0))} winner evaluation row(s) · "
+                                f"{int(forward_status.get('evaluated', 0))} with forward data · "
+                                f"{int(forward_status.get('awaiting_forward', 0))} awaiting new entries."
+                            )
+                    elif history_status.get("status") == "already_recorded":
+                        st.caption(
+                            "This exact data snapshot was already present in Scanner History; "
+                            "no duplicate history rows were added."
+                        )
+                        forward_status = history_status.get("forward", {}) or {}
+                        if forward_status.get("rows_added", 0):
+                            st.caption(
+                                "Forward since discovery backfilled/updated for this snapshot · "
+                                f"{int(forward_status.get('rows_added', 0))} winner evaluation row(s)."
+                            )
+                    elif history_status.get("status") == "error":
+                        st.warning(
+                            "Candidate snapshot refreshed, but Scanner History could not be "
+                            f"updated: {history_status.get('error', 'unknown error')}"
+                        )
                 except Exception as exc:
                     st.error(
                         "Fast Candidate snapshot build failed; the original engine "
