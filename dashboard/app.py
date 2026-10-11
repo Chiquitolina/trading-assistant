@@ -49479,6 +49479,240 @@ def _candidate_fast_load_matrix_execution(candidate_version="v1"):
     return frame, float(result.get("elapsed_ms", 0.0))
 
 
+def _candidate_fast_render_v2_selected_cell_ledgers(
+    selected_pair,
+    portfolio,
+    variant,
+    variant_label,
+    selected_tp,
+    selected_sl,
+):
+    """Read-only Candidate V2 Fast inspection; never recalculates portfolio PnL."""
+    slug = (
+        str(variant_label).lower()
+        .replace(" ", "_")
+        .replace("+", "plus")
+        .replace(">", "gt")
+        .replace("/", "_")
+    )
+    suffix = f"{slug}_tp{float(selected_tp):g}_sl{float(selected_sl):g}_180m"
+    st.markdown("##### 🔎 Selected-cell audit · events and portfolio decisions")
+    st.caption(
+        "Both tables inherit the selected variant, side, cohort, TP and SL. "
+        "Events include pending/unresolved candidates; the portfolio ledger "
+        "contains only resolved eligible signals (ACCEPTED or SKIPPED). "
+        "Downloads of the full data preserve original columns and precision."
+    )
+
+    def local_entry_dates(frame):
+        if "entry_timestamp" not in frame.columns:
+            return pd.Series(pd.NaT, index=frame.index)
+        return (
+            pd.to_datetime(
+                pd.to_numeric(frame["entry_timestamp"], errors="coerce"),
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+            .dt.tz_convert(TZ)
+        )
+
+    def filter_entry_dates(frame, dates, selection):
+        if not isinstance(selection, (tuple, list)) or len(selection) != 2:
+            return frame
+        low, high = selection
+        return frame.loc[dates.dt.date.ge(low) & dates.dt.date.le(high)].copy()
+
+    def date_selector(frame, key):
+        dates = local_entry_dates(frame)
+        valid = dates.dropna()
+        if valid.empty:
+            return dates, None
+        lo, hi = valid.min().date(), valid.max().date()
+        chosen = st.date_input(
+            "Entry date range (Argentina)",
+            value=(lo, hi),
+            min_value=lo,
+            max_value=hi,
+            key=key,
+        )
+        return dates, chosen
+
+    def options_for(frame, column):
+        if column not in frame.columns:
+            return []
+        return sorted(frame[column].dropna().astype(str).unique().tolist())
+
+    # Same source/deduplication function used by the fixed portfolio benchmark.
+    event_rows, _ = _candidate_v2_concurrency_source(
+        selected_pair, variant=variant, strong_threshold=0.50,
+    )
+    if event_rows is not None and not event_rows.empty:
+        with st.expander("📋 All events · selected TP/SL cell", expanded=False):
+            st.caption(
+                f"{len(event_rows):,} distinct Event IDs before resolved-only "
+                "portfolio eligibility. CSV exports all original event columns."
+            )
+            side_col = "side" if "side" in event_rows.columns else None
+            outcome_col = (
+                "Outcome" if "Outcome" in event_rows.columns
+                else "outcome" if "outcome" in event_rows.columns else None
+            )
+            e1, e2 = st.columns(2)
+            event_side = e1.selectbox(
+                "Side", ["ALL"] + options_for(event_rows, side_col),
+                key="candidate_fast_v2_audit_event_side",
+            )
+            event_outcome = e2.selectbox(
+                "Outcome", ["ALL"] + options_for(event_rows, outcome_col),
+                key="candidate_fast_v2_audit_event_outcome",
+            )
+            event_dates, chosen = date_selector(
+                event_rows, "candidate_fast_v2_audit_event_dates",
+            )
+            filtered_events = filter_entry_dates(event_rows, event_dates, chosen)
+            if event_side != "ALL" and side_col:
+                filtered_events = filtered_events.loc[
+                    filtered_events[side_col].astype(str).eq(event_side)
+                ].copy()
+            if event_outcome != "ALL" and outcome_col:
+                filtered_events = filtered_events.loc[
+                    filtered_events[outcome_col].astype(str).eq(event_outcome)
+                ].copy()
+
+            event_display = filtered_events.copy()
+            event_id_col = (
+                "candidate_v2_event_key"
+                if "candidate_v2_event_key" in event_display.columns
+                else "candidate_v1_event_key"
+            )
+            if event_id_col in event_display.columns:
+                event_display.insert(0, "Event ID", event_display[event_id_col])
+            event_display.insert(
+                1 if "Event ID" in event_display.columns else 0,
+                "Entry (ARG)",
+                local_entry_dates(event_display).dt.strftime("%Y-%m-%d %H:%M"),
+            )
+            preferred = [
+                "Event ID", "Entry (ARG)", "symbol", "side",
+                "candidate_v2_cohort", "retest_timestamp", "entry_timestamp",
+                "exit_timestamp", "entry_price", "exit_price", "Outcome",
+                "outcome", "net_pnl_pct", "side_adjusted_strength_vs_btc_4h",
+                "Market alignment", "nearest_opposing_room_pct",
+            ]
+            visible = [col for col in preferred if col in event_display.columns]
+            st.caption(f"Showing {len(filtered_events):,} / {len(event_rows):,} events")
+            st.dataframe(
+                event_display[visible], use_container_width=True,
+                hide_index=True, key="candidate_fast_v2_audit_event_table",
+            )
+            b1, b2 = st.columns(2)
+            b1.download_button(
+                "Download filtered events CSV",
+                data=filtered_events.to_csv(index=False).encode("utf-8"),
+                file_name=f"candidate_v2_events_filtered_{suffix}.csv",
+                mime="text/csv", key="candidate_fast_v2_audit_events_filtered_download",
+            )
+            b2.download_button(
+                "Download ALL events CSV (full precision)",
+                data=event_rows.to_csv(index=False).encode("utf-8"),
+                file_name=f"candidate_v2_events_full_{suffix}.csv",
+                mime="text/csv", key="candidate_fast_v2_audit_events_full_download",
+            )
+
+    ledger_raw = portfolio.get("ledger_raw", pd.DataFrame()) if portfolio else pd.DataFrame()
+    if ledger_raw is None or ledger_raw.empty:
+        st.info("No resolved portfolio ledger is available for this cell.")
+        return
+
+    with st.expander("💼 Portfolio trade-by-trade · accepted + skipped", expanded=False):
+        accepted = ledger_raw["accepted"].fillna(False).astype(bool)
+        st.caption(
+            f"{len(ledger_raw):,} portfolio decisions · "
+            f"{int(accepted.sum()):,} ACCEPTED · "
+            f"{int((~accepted).sum()):,} SKIPPED. "
+            "The full export comes from ledger_raw, without display rounding."
+        )
+        p1, p2, p3 = st.columns(3)
+        status_filter = p1.selectbox(
+            "Decision", ["ALL", "ACCEPTED", "SKIPPED"],
+            key="candidate_fast_v2_audit_portfolio_status",
+        )
+        side_filter = p2.selectbox(
+            "Side", ["ALL"] + options_for(ledger_raw, "side"),
+            key="candidate_fast_v2_audit_portfolio_side",
+        )
+        outcome_filter = p3.selectbox(
+            "Outcome", ["ALL"] + options_for(ledger_raw, "outcome"),
+            key="candidate_fast_v2_audit_portfolio_outcome",
+        )
+        ledger_dates, chosen = date_selector(
+            ledger_raw, "candidate_fast_v2_audit_portfolio_dates",
+        )
+        filtered_ledger = filter_entry_dates(ledger_raw, ledger_dates, chosen)
+        if status_filter != "ALL":
+            expected = status_filter == "ACCEPTED"
+            filtered_ledger = filtered_ledger.loc[
+                filtered_ledger["accepted"].fillna(False).astype(bool).eq(expected)
+            ].copy()
+        if side_filter != "ALL" and "side" in filtered_ledger.columns:
+            filtered_ledger = filtered_ledger.loc[
+                filtered_ledger["side"].astype(str).eq(side_filter)
+            ].copy()
+        if outcome_filter != "ALL" and "outcome" in filtered_ledger.columns:
+            filtered_ledger = filtered_ledger.loc[
+                filtered_ledger["outcome"].astype(str).eq(outcome_filter)
+            ].copy()
+
+        ledger_display = filtered_ledger.copy()
+        event_id_col = (
+            "candidate_v2_event_key"
+            if "candidate_v2_event_key" in ledger_display.columns
+            else "candidate_v1_event_key"
+        )
+        if event_id_col in ledger_display.columns:
+            ledger_display.insert(0, "Event ID", ledger_display[event_id_col])
+        ledger_display.insert(
+            1 if "Event ID" in ledger_display.columns else 0,
+            "Entry (ARG)",
+            local_entry_dates(ledger_display).dt.strftime("%Y-%m-%d %H:%M"),
+        )
+        if "exit_timestamp" in ledger_display.columns:
+            ledger_display["Exit (ARG)"] = (
+                pd.to_datetime(
+                    pd.to_numeric(ledger_display["exit_timestamp"], errors="coerce"),
+                    unit="ms", utc=True, errors="coerce",
+                )
+                .dt.tz_convert(TZ)
+                .dt.strftime("%Y-%m-%d %H:%M")
+            )
+        preferred = [
+            "Event ID", "Entry (ARG)", "Exit (ARG)", "symbol", "side",
+            "outcome", "accepted", "skip_reason", "entry_timestamp",
+            "exit_timestamp", "entry_equity_usd", "margin_usd",
+            "notional_usd", "raw_net_pnl_pct", "pnl_usd",
+        ]
+        visible = [col for col in preferred if col in ledger_display.columns]
+        st.caption(f"Showing {len(filtered_ledger):,} / {len(ledger_raw):,} decisions")
+        st.dataframe(
+            ledger_display[visible], use_container_width=True,
+            hide_index=True, key="candidate_fast_v2_audit_portfolio_table",
+        )
+        b1, b2 = st.columns(2)
+        b1.download_button(
+            "Download filtered portfolio CSV",
+            data=filtered_ledger.to_csv(index=False).encode("utf-8"),
+            file_name=f"candidate_v2_portfolio_filtered_{suffix}.csv",
+            mime="text/csv", key="candidate_fast_v2_audit_portfolio_filtered_download",
+        )
+        b2.download_button(
+            "Download FULL portfolio CSV (raw fidelity)",
+            data=ledger_raw.to_csv(index=False).encode("utf-8"),
+            file_name=f"candidate_v2_portfolio_full_{suffix}.csv",
+            mime="text/csv", key="candidate_fast_v2_audit_portfolio_full_download",
+        )
+
+
 def render_candidate_fast_legacy_v1_matrix(candidate_version="v1"):
     """Fast Legacy V1 TP/SL matrix from materialized 180m execution rows."""
     is_v2 = str(candidate_version).lower() == "v2"
@@ -49773,6 +50007,16 @@ def render_candidate_fast_legacy_v1_matrix(candidate_version="v1"):
         key=_candidate_fast_widget_key("candidate_fast_legacy_matrix_selected_equity"),
         config={"displaylogo": False},
     )
+
+    if is_v2:
+        _candidate_fast_render_v2_selected_cell_ledgers(
+            selected_pair=selected_pair,
+            portfolio=portfolio,
+            variant=variant,
+            variant_label=variant_label,
+            selected_tp=selected_tp,
+            selected_sl=selected_sl,
+        )
 
 
 
