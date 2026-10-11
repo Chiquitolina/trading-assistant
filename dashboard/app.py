@@ -25059,213 +25059,118 @@ def _lh_fetch_klines_partition(
     *,
     force=False,
 ):
-    """Fetch one persistent Binance partition.
+    """Load Binance klines, incrementally repairing a stale month/day cache.
 
-    15m data is cached monthly.
-    1m data is cached daily, but only for days that are actually needed by
-    a potential structural REACTION. This keeps the 6-12 month study far
-    smaller than storing a full 1m market history.
+    The original implementation returned any nonempty partition forever. A
+    current-month cache downloaded on October 7 was therefore reused on
+    October 11, silently producing zero historical events. Completed closed
+    candles are now appended from the last cached candle; old partitions
+    with complete coverage continue to be reused without a network call.
     """
-    symbol = (
-        str(
-            symbol
-        )
-        .upper()
-        .strip()
-    )
-    interval = str(
-        interval
-    )
-
+    symbol = str(symbol).upper().strip()
+    interval = str(interval)
+    interval_ms = _lh_interval_ms(interval)
+    part_start_ms = int(part_start_ms)
+    part_end_ms = int(part_end_ms)
     cache_path = (
-        CANDIDATE_LONG_HORIZON_CACHE
-        / interval
-        / symbol
-        / (
-            f"{partition_label}.pkl.gz"
-        )
+        CANDIDATE_LONG_HORIZON_CACHE / interval / symbol
+        / f"{partition_label}.pkl.gz"
     )
 
-    if (
-        cache_path.exists()
-        and not force
-    ):
-        try:
-            cached = pd.read_pickle(
-                cache_path,
-                compression="gzip",
-            )
-            if (
-                cached is not None
-                and not cached.empty
-            ):
-                return cached
-        except Exception:
-            pass
-
-    now_ms = int(
-        pd.Timestamp.now(
-            tz="UTC"
-        ).timestamp()
-        * 1000
-    )
-
-    safe_end_ms = min(
-        int(
-            part_end_ms
-        ),
-        now_ms
-        - 1,
-    )
-
-    if safe_end_ms < int(
-        part_start_ms
-    ):
+    # Never ingest a currently forming candle or request a future one.
+    now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+    safe_end_ms = min(part_end_ms, now_ms - interval_ms)
+    last_closed_open_ms = (safe_end_ms // interval_ms) * interval_ms
+    if last_closed_open_ms < part_start_ms:
         return pd.DataFrame()
 
-    cursor = int(
-        part_start_ms
-    )
-    frames = []
-    interval_ms = (
-        _lh_interval_ms(
-            interval
-        )
-    )
+    cached = pd.DataFrame()
+    if cache_path.exists() and not force:
+        try:
+            cached = pd.read_pickle(cache_path, compression="gzip")
+            if cached is None or "timestamp" not in cached.columns:
+                cached = pd.DataFrame()
+            elif not cached.empty:
+                cached = cached.copy()
+                cached["timestamp"] = pd.to_numeric(
+                    cached["timestamp"], errors="coerce"
+                )
+                cached = (
+                    cached.dropna(subset=["timestamp"])
+                    .loc[lambda f: f["timestamp"].between(
+                        part_start_ms, last_closed_open_ms
+                    )]
+                    .sort_values("timestamp", kind="stable")
+                    .drop_duplicates(subset=["timestamp"], keep="last")
+                    .reset_index(drop=True)
+                )
+        except Exception:
+            cached = pd.DataFrame()
+
+    if not cached.empty:
+        last_cached_open_ms = int(cached["timestamp"].max())
+        if last_cached_open_ms >= last_closed_open_ms:
+            return cached
+        # Avoid repeated Binance calls when a symbol has no more klines
+        # (for example, a delisted contract). Recheck a partial partition
+        # after a short interval; never pretend that it is fully covered.
+        if (
+            last_closed_open_ms - last_cached_open_ms <= 2 * interval_ms
+            and time.time() - cache_path.stat().st_mtime < 600
+        ):
+            return cached
+        cursor = last_cached_open_ms + interval_ms
+    else:
+        cursor = part_start_ms
+
+    new_frames = []
     safety = 0
-
-    while (
-        cursor
-        <= safe_end_ms
-        and safety
-        < 500
-    ):
+    while cursor <= last_closed_open_ms and safety < 500:
         safety += 1
-
-        payload = (
-            _lh_binance_request_json(
-                _LH_BINANCE_KLINES_URL,
-                params={
-                    "symbol": symbol,
-                    "interval": interval,
-                    "startTime": int(
-                        cursor
-                    ),
-                    "endTime": int(
-                        safe_end_ms
-                    ),
-                    "limit": 1000,
-                },
-            )
+        payload = _lh_binance_request_json(
+            _LH_BINANCE_KLINES_URL,
+            params={
+                "symbol": symbol,
+                "interval": interval,
+                "startTime": int(cursor),
+                "endTime": int(last_closed_open_ms + interval_ms - 1),
+                "limit": 1000,
+            },
         )
-
-        frame = _lh_normalize_klines(
-            payload
-        )
-
+        frame = _lh_normalize_klines(payload)
         if frame.empty:
             break
-
         frame = frame.loc[
-            (
-                frame[
-                    "timestamp"
-                ]
-                >= int(
-                    part_start_ms
-                )
-            )
-            & (
-                frame[
-                    "timestamp"
-                ]
-                <= int(
-                    part_end_ms
-                )
+            pd.to_numeric(frame["timestamp"], errors="coerce").between(
+                cursor, last_closed_open_ms
             )
         ].copy()
-
         if frame.empty:
             break
-
-        frames.append(
-            frame
-        )
-
-        last_ts = int(
-            frame[
-                "timestamp"
-            ].max()
-        )
-
-        next_cursor = (
-            last_ts
-            + interval_ms
-        )
-
+        new_frames.append(frame)
+        next_cursor = int(frame["timestamp"].max()) + interval_ms
         if next_cursor <= cursor:
             break
-
-        cursor = int(
-            next_cursor
-        )
-
-        if len(
-            payload
-        ) < 1000:
+        cursor = next_cursor
+        if len(payload) < 1000:
             break
+        time.sleep(0.02)
 
-        # Small cooperative pause. Cached reruns do not pay this cost.
-        time.sleep(
-            0.02
-        )
-
-    if not frames:
-        return pd.DataFrame()
+    if not new_frames:
+        # Retain the original partition even if Binance temporarily returns
+        # no new rows. The Fidelity Audit has a separate coverage gate.
+        return cached
 
     result = (
-        pd.concat(
-            frames,
-            ignore_index=True,
-            sort=False,
-        )
-        .sort_values(
-            "timestamp",
-            kind="stable",
-        )
-        .drop_duplicates(
-            subset=[
-                "timestamp"
-            ],
-            keep="last",
-        )
-        .reset_index(
-            drop=True
-        )
+        pd.concat([cached, *new_frames], ignore_index=True, sort=False)
+        .sort_values("timestamp", kind="stable")
+        .drop_duplicates(subset=["timestamp"], keep="last")
+        .reset_index(drop=True)
     )
-
-    cache_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    try:
-        tmp_path = (
-            cache_path
-            .with_suffix(
-                ".tmp.gz"
-            )
-        )
-        result.to_pickle(
-            tmp_path,
-            compression="gzip",
-        )
-        tmp_path.replace(
-            cache_path
-        )
-    except Exception:
-        pass
-
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_suffix(".tmp.gz")
+    result.to_pickle(tmp_path, compression="gzip")
+    tmp_path.replace(cache_path)
     return result
 
 
@@ -34296,26 +34201,55 @@ def render_candidate_historical_replay_fidelity_audit(
         "long-horizon replay."
     )
 
-    r1, r2 = st.columns(
-        2
-    )
+    r1, r2, r3 = st.columns(3)
 
     run_audit = r1.button(
         "🔬 Run / resume fidelity batch",
-        key=(
-            "candidate_fidelity_run"
-        ),
+        key="candidate_fidelity_run",
         use_container_width=True,
         type="primary",
     )
 
-    reset_audit = r2.button(
-        "🗑️ Reset fidelity audit",
-        key=(
-            "candidate_fidelity_reset"
+    retry_audit = r2.button(
+        "🔁 Rebuild history · keep reference",
+        key="candidate_fidelity_retry_keep_reference",
+        use_container_width=True,
+        help=(
+            "Reprocess all symbols with refreshed Binance candles. "
+            "Keeps the frozen Candidate V1/V2 references and Run ID."
         ),
+    )
+
+    reset_audit = r3.button(
+        "🗑️ Reset fidelity audit",
+        key="candidate_fidelity_reset",
         use_container_width=True,
     )
+
+    if retry_audit:
+        # Do not delete frozen reference_v1.csv/reference_v2.csv or state ID.
+        # Archive reconstructed events so a retry cannot silently mix the old
+        # incomplete result with the newly reconstructed result.
+        historical_path = paths["historical"]
+        if historical_path.exists():
+            stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%S%f")
+            historical_path.replace(
+                historical_path.with_name(
+                    f"historical_events.before_rebuild_{stamp}.csv.bak"
+                )
+            )
+        state["processed_symbols"] = []
+        state["errors"] = {}
+        state.pop("last_batch", None)
+        state["historical_rebuild_requested_at_utc"] = (
+            pd.Timestamp.now(tz="UTC").isoformat()
+        )
+        _lh_atomic_json_write(state, paths["state"])
+        st.success(
+            "Historical work requeued. Frozen Candidate references were kept. "
+            "Press Run / resume fidelity batch to reconstruct again."
+        )
+        st.rerun()
 
     if reset_audit:
         try:
@@ -34474,11 +34408,43 @@ def render_candidate_historical_replay_fidelity_audit(
                                 fresh
                             )
 
-                    processed_symbols.add(
-                        str(
-                            symbol
-                        ).upper()
-                    )
+                    # A successful symbol still needs adequate native 15m
+                    # candle coverage for its frozen REACTION references. An
+                    # empty result with an older cache is NOT a successful
+                    # fidelity comparison.
+                    symbol_reference_ts = pd.to_numeric(
+                        current_v2_raw.loc[
+                            current_v2_raw["symbol"].astype(str).str.upper()
+                            == str(symbol).upper(),
+                            "retest_timestamp",
+                        ],
+                        errors="coerce",
+                    ).dropna()
+                    if not symbol_reference_ts.empty:
+                        latest_reference_ms = int(symbol_reference_ts.max())
+                        end_window_ms = min(
+                            latest_reference_ms,
+                            int(pd.Timestamp.now(tz="UTC").timestamp() * 1000),
+                        )
+                        coverage = _lh_fetch_klines_range(
+                            symbol, "15m",
+                            end_window_ms - 60 * 60_000,
+                            end_window_ms,
+                        )
+                        last_15m_open = (
+                            int(coverage["timestamp"].max())
+                            if not coverage.empty else -1
+                        )
+                        if last_15m_open + 2 * 15 * 60_000 < end_window_ms:
+                            raise RuntimeError(
+                                "INCOMPLETE_15M_CACHE_COVERAGE: "
+                                f"{symbol} latest candle open {last_15m_open}; "
+                                f"reference retest {latest_reference_ms}. "
+                                "Refresh failed or Binance has missing klines."
+                            )
+
+                    processed_symbols.add(str(symbol).upper())
+                    state.setdefault("errors", {}).pop(str(symbol).upper(), None)
 
                 except Exception as exc:
                     message = (
@@ -34648,11 +34614,24 @@ def render_candidate_historical_replay_fidelity_audit(
             audit_symbols
         )
         > 0
+        and not historical.empty
     ):
         st.success(
             "✅ Fidelity audit COMPLETE for this frozen symbol sample. "
             f"{len(processed_symbols)}/{len(audit_symbols)} symbols processed. "
             "Results below remain pinned to the same frozen Candidate reference."
+        )
+
+    if (
+        len(processed_symbols) >= len(audit_symbols)
+        and len(audit_symbols) > 0
+        and historical.empty
+        and not reference_v2.empty
+    ):
+        st.error(
+            "No historical REACTIONs were reconstructed despite having "
+            "V2 reference events. This is not a fidelity COMPLETE. "
+            "Use Rebuild history · keep reference to retry with fresh candles."
         )
 
     processed_reference_v2 = (
