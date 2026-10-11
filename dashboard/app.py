@@ -51401,6 +51401,9 @@ def _candidate_fast_discovery_history_queue(
     meta_path = parquet.with_suffix('.json')
     existing = _candidate_scan_cache_load(meta_path)
     if existing and existing.get('status') == 'completed':
+        manual_forward_scheduler = globals().get('_candidate_fast_manual_c_forward_schedule')
+        if manual_forward_scheduler is not None:
+            manual_forward_scheduler(version)
         return {'status': 'already_recorded', 'snapshot_id': snapshot_id}
     if not parquet.exists():
         tmp = directory / f'.{snapshot_id}.{os.getpid()}.tmp.parquet'
@@ -51414,6 +51417,9 @@ def _candidate_fast_discovery_history_queue(
     }
     if not existing or existing.get('status') not in ('running', 'queued'):
         _candidate_scan_cache_save(meta_path, meta)
+    manual_forward_scheduler = globals().get('_candidate_fast_manual_c_forward_schedule')
+    if manual_forward_scheduler is not None:
+        manual_forward_scheduler(version)
     _candidate_fast_discovery_schedule_pending(version)
     return {'status': 'queued', 'snapshot_id': snapshot_id}
 
@@ -53897,6 +53903,40 @@ def _candidate_fast_render_auto_regime_scanner(
                             str(selected_c_id)
                         )
                         if selected_c_rule:
+                            selected_c_text = _candidate_fast_regime_auto_rule_text(
+                                selected_c_rule, local_reverse_labels,
+                            )
+                            st.caption(
+                                f"Freeze exact hypothesis: ({_candidate_fast_regime_auto_rule_text(selected_component_rule, local_reverse_labels)}) "
+                                f"AND ({selected_c_text}). Frozen thresholds never follow future C rankings."
+                            )
+                            if st.button(
+                                "🧊 Freeze selected A/B + C for Forward",
+                                use_container_width=True,
+                                key=_candidate_fast_widget_key("candidate_fast_manual_c_freeze_button"),
+                            ):
+                                frozen, created = _candidate_fast_manual_c_freeze(
+                                    version=_candidate_fast_current_version(),
+                                    strategy_label=variant_label, variant=variant,
+                                    base_rule=selected_component_rule,
+                                    qualifier_rule=selected_c_rule,
+                                    component_label=selected_component_label,
+                                    reverse_labels=local_reverse_labels,
+                                    source_fingerprint=signature,
+                                )
+                                if created:
+                                    st.success(
+                                        f"Frozen {frozen['freeze_id']} at {frozen['frozen_at_utc']}. "
+                                        "Only later Candidate entries will count in Forward."
+                                    )
+                                else:
+                                    st.info(
+                                        f"This exact hypothesis is already frozen as {frozen['freeze_id']}; "
+                                        "its original cutoff and rules were preserved."
+                                    )
+                                _candidate_fast_manual_c_forward_schedule(
+                                    _candidate_fast_current_version()
+                                )
                             st.markdown(
                                 "###### Optional C · cross-strategy robustness"
                             )
@@ -54170,6 +54210,348 @@ def _candidate_fast_render_auto_regime_scanner(
         "perturbation. Then freeze the rule and evaluate only on later/forward data."
     )
 
+
+
+
+
+# ============================================================
+# Candidate Fast · manually frozen A/B + optional C hypotheses
+# ============================================================
+# Separate from automatic top-10 Discovery and frozen Validation. A manual
+# freeze is immutable, recorded at the actual button-click time, and evaluated
+# only on strictly later entry timestamps from future materialized snapshots.
+
+def _candidate_fast_manual_c_root(version):
+    version = str(version).lower()
+    if version not in {"v1", "v2"}:
+        raise ValueError(f"Unsupported manual freeze Candidate version: {version}")
+    return BASE_DIR / "reports" / "research" / "candidate" / "manual_frozen_c" / version
+
+
+def _candidate_fast_manual_c_json_write_once(path, payload):
+    """Atomic exclusive publish: a second button click never changes a freeze."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    try:
+        try:
+            os.link(temporary, path)  # exclusive, atomic; file already there => no write
+            return True
+        except FileExistsError:
+            return False
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _candidate_fast_manual_c_freeze(
+    *, version, strategy_label, variant, base_rule, qualifier_rule,
+    component_label, reverse_labels, source_fingerprint,
+):
+    """Freeze exact raw feature keys/thresholds and real wall-clock cutoff."""
+    for rule in (base_rule, qualifier_rule):
+        if not isinstance(rule, dict) or not rule.get('feature1'):
+            raise ValueError('A/B and C must each be complete scanner rules')
+    identity = {
+        'version': str(version).lower(),
+        'variant': str(variant),
+        'base_rule': base_rule,
+        'qualifier_rule': qualifier_rule,
+    }
+    raw = json.dumps(identity, sort_keys=True, separators=(',', ':'), default=str)
+    freeze_id = 'C-' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:18]
+    now = pd.Timestamp.now(tz='UTC')
+    root = _candidate_fast_manual_c_root(version)
+    path = root / 'rules' / f'{freeze_id}.json'
+    payload = {
+        'schema_version': 1, 'stage': 'MANUAL_C_FORWARD',
+        'freeze_id': freeze_id, 'candidate_version': identity['version'],
+        'strategy': str(strategy_label), 'variant': identity['variant'],
+        'component_label': str(component_label),
+        'base_rule': base_rule, 'qualifier_rule': qualifier_rule,
+        'base_rule_text': _candidate_fast_regime_auto_rule_text(base_rule, reverse_labels),
+        'qualifier_rule_text': _candidate_fast_regime_auto_rule_text(qualifier_rule, reverse_labels),
+        'combine': 'AND',
+        'source_fingerprint': str(source_fingerprint),
+        'frozen_at_utc': now.isoformat(),
+        'cutoff_entry_timestamp_ms': int(now.value // 1_000_000),
+        'execution': {
+            'tp_pct': 0.5, 'sl_pct': 3.0, 'horizon_min': 180,
+            'starting_equity_usdt': 200.0, 'leverage': 3.0,
+            'max_slots': 1, 'max_margin_pct': 80.0,
+            'priority': 'Most HTF Room → Strength', 'market_flow_gate': 'OFF',
+        },
+    }
+    created = _candidate_fast_manual_c_json_write_once(path, payload)
+    # Reload the original immutable record in case the rule was frozen already.
+    return json.loads(path.read_text(encoding='utf-8')), created
+
+
+def _candidate_fast_manual_c_frozen(version):
+    root = _candidate_fast_manual_c_root(version)
+    result = []
+    for path in sorted((root / 'rules').glob('*.json')):
+        try:
+            row = json.loads(path.read_text(encoding='utf-8'))
+            if row.get('stage') == 'MANUAL_C_FORWARD':
+                result.append(row)
+        except (OSError, ValueError):
+            continue
+    return sorted(result, key=lambda row: str(row.get('frozen_at_utc', '')))
+
+
+def _candidate_fast_manual_c_forward_one(execution, freeze, snapshot_id):
+    """Three identical $200 starting portfolios; NEVER use pre-freeze entries."""
+    frozen_at_ms = int(freeze['cutoff_entry_timestamp_ms'])
+    record = {
+        'freeze_id': str(freeze['freeze_id']),
+        'candidate_version': str(freeze['candidate_version']),
+        'strategy': str(freeze['strategy']),
+        'variant': str(freeze['variant']),
+        'frozen_at_utc': str(freeze['frozen_at_utc']),
+        'evaluation_snapshot_id': str(snapshot_id),
+        'evaluated_at_utc': pd.Timestamp.now(tz='UTC').isoformat(),
+        'cutoff_entry_timestamp_ms': frozen_at_ms,
+        'status': 'awaiting_forward', 'forward_resolved': 0,
+    }
+    resolved, _, _ = _candidate_fast_regime_variant_context(
+        execution, freeze['variant']
+    )
+    if resolved is None or resolved.empty:
+        return record
+    entry_ts = pd.to_numeric(
+        resolved.get('_entry_ts', pd.Series(np.nan, index=resolved.index)),
+        errors='coerce',
+    )
+    forward = resolved.loc[entry_ts.gt(frozen_at_ms)].copy()
+    record['forward_resolved'] = int(len(forward))
+    if forward.empty:
+        return record
+    # Fail closed: a missing context feature must never be treated as 'no block'.
+    features = {
+        str(value) for rule in (freeze['base_rule'], freeze['qualifier_rule'])
+        for value in (rule.get('feature1'), rule.get('feature2')) if value
+    }
+    missing = sorted(features - set(forward.columns))
+    if missing:
+        record.update({'status': 'missing_features', 'missing_features': ', '.join(missing)})
+        return record
+    ab_mask = _candidate_fast_regime_auto_rule_mask(
+        forward, freeze['base_rule']
+    ).reindex(forward.index, fill_value=False).fillna(False).astype(bool)
+    c_mask = _candidate_fast_regime_auto_rule_mask(
+        forward, freeze['qualifier_rule']
+    ).reindex(forward.index, fill_value=False).fillna(False).astype(bool)
+    final_mask = (ab_mask & c_mask).fillna(False).astype(bool)
+    no_mask = pd.Series(False, index=forward.index, dtype=bool)
+    baseline, _ = _candidate_fast_regime_auto_portfolio(forward, no_mask)
+    ab_portfolio, _ = _candidate_fast_regime_auto_portfolio(forward, ab_mask)
+    final_portfolio, _ = _candidate_fast_regime_auto_portfolio(forward, final_mask)
+    summary_baseline = _candidate_fast_portfolio_summary(baseline)
+    summary_ab = _candidate_fast_portfolio_summary(ab_portfolio)
+    summary_final = _candidate_fast_portfolio_summary(final_portfolio)
+    if not summary_baseline or not summary_ab or not summary_final:
+        record['status'] = 'portfolio_unavailable'
+        return record
+    def number(summary, field):
+        value = pd.to_numeric(pd.Series([summary.get(field, np.nan)]), errors='coerce').iloc[0]
+        return float(value) if pd.notna(value) and np.isfinite(value) else None
+    base_equity = number(summary_baseline, 'Final equity')
+    ab_equity = number(summary_ab, 'Final equity')
+    final_equity = number(summary_final, 'Final equity')
+    record.update({
+        'status': 'evaluated',
+        'forward_first_entry_timestamp_ms': int(entry_ts.loc[forward.index].min()),
+        'forward_last_entry_timestamp_ms': int(entry_ts.loc[forward.index].max()),
+        'ab_blocked': int(ab_mask.sum()),
+        'final_blocked': int(final_mask.sum()),
+        'ab_blocked_pct': float(ab_mask.mean() * 100.0),
+        'final_blocked_pct': float(final_mask.mean() * 100.0),
+        'c_reenabled': int((ab_mask & ~c_mask).sum()),
+        'baseline_accepted': int(summary_baseline.get('Accepted', 0)),
+        'ab_accepted': int(summary_ab.get('Accepted', 0)),
+        'final_accepted': int(summary_final.get('Accepted', 0)),
+        'baseline_final': base_equity,
+        'ab_final': ab_equity,
+        'final_equity': final_equity,
+        'delta_vs_baseline': final_equity - base_equity if None not in (final_equity, base_equity) else None,
+        'delta_vs_ab': final_equity - ab_equity if None not in (final_equity, ab_equity) else None,
+        'baseline_pf': number(summary_baseline, 'PF'),
+        'ab_pf': number(summary_ab, 'PF'),
+        'final_pf': number(summary_final, 'PF'),
+        'baseline_dd_pct': number(summary_baseline, 'Max DD %'),
+        'ab_dd_pct': number(summary_ab, 'Max DD %'),
+        'final_dd_pct': number(summary_final, 'Max DD %'),
+    })
+    return record
+
+
+def _candidate_fast_manual_c_forward_rows(version):
+    root = _candidate_fast_manual_c_root(version)
+    rows = []
+    for freeze in _candidate_fast_manual_c_frozen(version):
+        directory = root / 'evaluations' / freeze['freeze_id']
+        for path in directory.glob('*.json'):
+            try:
+                row = json.loads(path.read_text(encoding='utf-8'))
+                if row.get('freeze_id') == freeze['freeze_id']:
+                    rows.append(row)
+            except (OSError, ValueError):
+                continue
+    return pd.DataFrame(rows)
+
+
+@st.cache_resource(show_spinner=False)
+def _candidate_fast_manual_c_executor():
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix='candidate-manual-c-forward')
+
+
+@st.cache_resource(show_spinner=False)
+def _candidate_fast_manual_c_scheduled():
+    return {'lock': threading.Lock(), 'futures': {}}
+
+
+def _candidate_fast_manual_c_forward_worker(path, version, snapshot_id):
+    """Independent lightweight worker: does NOT wait for Discovery scanner."""
+    _CANDIDATE_SCAN_THREAD_CONTEXT.version = str(version)
+    status_path = _candidate_fast_manual_c_root(version) / 'jobs' / f'{snapshot_id}.json'
+    try:
+        _candidate_scan_cache_save(status_path, {
+            'status': 'running', 'snapshot_id': snapshot_id,
+            'started_at_utc': pd.Timestamp.now(tz='UTC').isoformat(),
+        })
+        execution = pd.read_parquet(path)
+        done = 0
+        for freeze in _candidate_fast_manual_c_frozen(version):
+            created_at = pd.to_datetime(freeze.get('frozen_at_utc'), utc=True, errors='coerce')
+            snap_meta = _candidate_scan_cache_load(path.with_suffix('.json')) or {}
+            snap_at = pd.to_datetime(snap_meta.get('queued_at'), utc=True, errors='coerce')
+            if pd.notna(snap_at) and pd.notna(created_at) and snap_at <= created_at:
+                continue  # Snapshot materialized before hypothesis existed.
+            target = (_candidate_fast_manual_c_root(version) / 'evaluations'
+                      / freeze['freeze_id'] / f'{snapshot_id}.json')
+            if target.exists():
+                continue
+            evaluated = _candidate_fast_manual_c_forward_one(execution, freeze, snapshot_id)
+            _candidate_fast_manual_c_json_write_once(target, evaluated)
+            done += 1
+        _candidate_scan_cache_save(status_path, {
+            'status': 'completed', 'snapshot_id': snapshot_id,
+            'evaluations_written': done,
+            'completed_at_utc': pd.Timestamp.now(tz='UTC').isoformat(),
+        })
+    except Exception as exc:
+        _candidate_scan_cache_save(status_path, {
+            'status': 'failed', 'snapshot_id': snapshot_id,
+            'error': f'{type(exc).__name__}: {exc}',
+        })
+        print(f'[CANDIDATE MANUAL C FORWARD] {version}/{snapshot_id}: {exc}', flush=True)
+    finally:
+        _CANDIDATE_SCAN_THREAD_CONTEXT.version = None
+
+
+def _candidate_fast_manual_c_forward_schedule(version):
+    """Resume unfinished/new snapshot jobs after restarts; queue is separate from Discovery."""
+    freezes = _candidate_fast_manual_c_frozen(version)
+    if not freezes:
+        return
+    earliest = pd.to_datetime(freezes[0]['frozen_at_utc'], utc=True, errors='coerce')
+    scheduler = _candidate_fast_manual_c_scheduled()
+    candidates = []
+    for meta_path in _candidate_fast_discovery_job_dir(version).glob('*.json'):
+        meta = _candidate_scan_cache_load(meta_path) or {}
+        queued_at = pd.to_datetime(meta.get('queued_at'), utc=True, errors='coerce')
+        if pd.isna(queued_at) or queued_at <= earliest:
+            continue
+        parquet = meta_path.with_suffix('.parquet')
+        if parquet.exists():
+            candidates.append((queued_at, parquet, meta_path.stem))
+    for _, parquet, snapshot_id in sorted(candidates):
+        status_path = _candidate_fast_manual_c_root(version) / 'jobs' / f'{snapshot_id}.json'
+        status = _candidate_scan_cache_load(status_path) or {}
+        if status.get('status') == 'completed':
+            # New freezes might have been added after this snapshot's evaluation.
+            present = all(
+                ( _candidate_fast_manual_c_root(version) / 'evaluations'
+                  / freeze['freeze_id'] / f'{snapshot_id}.json').exists()
+                for freeze in freezes
+                if pd.to_datetime(freeze.get('frozen_at_utc'), utc=True, errors='coerce')
+                   < pd.to_datetime((_candidate_scan_cache_load(parquet.with_suffix('.json')) or {}).get('queued_at'), utc=True, errors='coerce')
+            )
+            if present:
+                continue
+        key = (str(version), snapshot_id)
+        with scheduler['lock']:
+            future = scheduler['futures'].get(key)
+            if future is not None and not future.done():
+                continue
+            scheduler['futures'][key] = _candidate_fast_manual_c_executor().submit(
+                _candidate_fast_manual_c_forward_worker,
+                parquet, str(version), snapshot_id,
+            )
+
+
+def _candidate_fast_manual_c_render(version):
+    """Compact, per-version manual freezes; full per-snapshot Forward below."""
+    freezes = _candidate_fast_manual_c_frozen(version)
+    with st.expander(f'🧊 Manually frozen A/B + C · Forward ({len(freezes)})', expanded=False):
+        st.caption(
+            'Manual freezes are separate from automatic Top 10 and Validation. '
+            'A/B and C thresholds remain immutable. Forward uses ONLY entries '
+            'strictly after the instant you clicked Freeze; all three portfolios '
+            'start independently at $200. Evaluations appear after new snapshots.'
+        )
+        if not freezes:
+            st.info('Select an optional C qualifier above and click Freeze to begin tracking it.')
+            return
+        evaluations = _candidate_fast_manual_c_forward_rows(version)
+        latest = {}
+        if not evaluations.empty:
+            work = evaluations.sort_values('evaluated_at_utc', kind='stable')
+            latest = {str(k): group.iloc[-1].to_dict()
+                      for k, group in work.groupby('freeze_id', sort=False)}
+        summary = []
+        for freeze in freezes:
+            entry = latest.get(freeze['freeze_id'], {})
+            frozen_utc = pd.to_datetime(freeze['frozen_at_utc'], utc=True)
+            summary.append({
+                'ID': freeze['freeze_id'],
+                'Frozen (ARG)': frozen_utc.tz_convert(TZ).strftime('%Y-%m-%d %H:%M'),
+                'Strategy': freeze['strategy'],
+                'A/B AND C': f"({freeze['base_rule_text']}) AND ({freeze['qualifier_rule_text']})",
+                'Status': entry.get('status', 'awaiting_new_snapshot'),
+                'Forward N': entry.get('forward_resolved', 0),
+                'Blocked %': entry.get('final_blocked_pct'),
+                'Base $': entry.get('baseline_final'),
+                'A/B $': entry.get('ab_final'),
+                'A/B+C $': entry.get('final_equity'),
+                'Δ vs A/B $': entry.get('delta_vs_ab'),
+            })
+        visible = pd.DataFrame(summary)
+        st.dataframe(visible, hide_index=True, use_container_width=True,
+                     key=_candidate_fast_widget_key('candidate_manual_c_freezes_table'))
+        picked = st.selectbox(
+            'Inspect frozen A/B + C Forward history',
+            [freeze['freeze_id'] for freeze in freezes],
+            format_func=lambda value: next(
+                f"{value} · {freeze['strategy']} · {freeze['qualifier_rule_text']}"
+                for freeze in freezes if freeze['freeze_id'] == value
+            ),
+            key=_candidate_fast_widget_key('candidate_manual_c_freeze_selector'),
+        )
+        if not evaluations.empty:
+            detail = evaluations.loc[evaluations['freeze_id'].astype(str).eq(picked)].copy()
+            if not detail.empty:
+                st.dataframe(detail.sort_values('evaluated_at_utc'),
+                             use_container_width=True, hide_index=True,
+                             key=_candidate_fast_widget_key('candidate_manual_c_forward_detail'))
+        jobs_dir = _candidate_fast_manual_c_root(version) / 'jobs'
+        failed = []
+        for path in jobs_dir.glob('*.json'):
+            state = _candidate_scan_cache_load(path) or {}
+            if state.get('status') == 'failed':
+                failed.append(f"{path.stem}: {state.get('error', 'unknown')}")
+        if failed:
+            st.warning('Manual Forward worker errors: ' + '; '.join(failed[-3:]))
 
 
 # ============================================================
@@ -54704,6 +55086,9 @@ def render_candidate_fast_no_trade_lab(candidate_version="v1"):
         resolved,
         analysis_feature,
     )
+
+    _candidate_fast_manual_c_forward_schedule(str(candidate_version).lower())
+    _candidate_fast_manual_c_render(str(candidate_version).lower())
 
     st.markdown("##### 1. Outcome by causal regime bucket")
     if bucket_summary.empty:
