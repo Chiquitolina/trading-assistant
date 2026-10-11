@@ -94,8 +94,27 @@ def audit_events(frame: pd.DataFrame):
         if num(col).isna().any():
             raise RuntimeError(f'Missing {col}: {int(num(col).isna().sum())} of {len(selected)} selected')
 
-    if not (num('exit_timestamp') > num('entry_timestamp')).all():
-        raise RuntimeError('Non-positive historical exit delay found: refusing to simulate')
+    # The replay's exit_timestamp identifies the OPEN of the 1m candle
+    # containing the exit. A TP/SL during the entry candle is legitimate:
+    # exit_timestamp == entry_timestamp. The canonical dashboard portfolio
+    # holds that 1m candle as occupied: [entry, exit_candle_open + 60_000).
+    # Only an exit candle strictly EARLIER than the entry is malformed.
+    raw_exit = num('exit_timestamp')
+    raw_entry = num('entry_timestamp')
+    invalid_order = raw_exit.lt(raw_entry)
+    if invalid_order.any():
+        samples = selected.loc[invalid_order, [
+            'candidate_v1_event_key', 'symbol', 'Outcome',
+            'entry_timestamp', 'exit_timestamp',
+        ]].head(8)
+        raise RuntimeError(
+            f'{int(invalid_order.sum())} exit candle timestamps precede entry; '
+            'refusing to simulate. Examples:\n' + samples.to_string(index=False)
+        )
+    effective_exit = raw_exit + 60_000
+    if not effective_exit.gt(raw_entry).all():
+        raise RuntimeError('Non-positive effective hold after exit candle normalization')
+    same_candle_exit_count = int(raw_exit.eq(raw_entry).sum())
 
     cost = num('execution_cost_pct')
     if not np.allclose(cost.to_numpy(), 0.10, atol=1e-9, rtol=0):
@@ -123,7 +142,7 @@ def audit_events(frame: pd.DataFrame):
     b = num('breadth_delta_4h').ge(THRESHOLD_B)
     blocked = a | b
     selected['_entry_ts'] = num('entry_timestamp')
-    selected['_effective_exit_ts'] = num('exit_timestamp')
+    selected['_effective_exit_ts'] = effective_exit
     selected['no_trade_A'] = a
     selected['no_trade_B'] = b
     selected['no_trade_A_or_B'] = blocked
@@ -132,6 +151,7 @@ def audit_events(frame: pd.DataFrame):
 
     counts = {
         'strength_positive': int(len(selected)),
+        'same_candle_exits': same_candle_exit_count,
         'A_only': int((a & ~b).sum()),
         'B_only': int((~a & b).sum()),
         'both': int((a & b).sum()),

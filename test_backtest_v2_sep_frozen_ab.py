@@ -23,6 +23,21 @@ def synthetic():
 
 def test():
     selected,blocked,parity,counts=audit_events(synthetic())
+    # Real replay exits can occur inside the very first 1m candle.
+    # The dashboard considers [entry, exit candle + 60 seconds) occupied.
+    first_candle = synthetic()
+    first_candle.loc[0, 'exit_timestamp'] = first_candle.loc[0, 'entry_timestamp']
+    fast,_,_,first_counts=audit_events(first_candle)
+    assert first_counts['same_candle_exits'] == 1
+    assert fast.loc[0, '_effective_exit_ts'] == fast.loc[0, '_entry_ts'] + 60_000
+    assert (fast['_effective_exit_ts'] > fast['_entry_ts']).all()
+    invalid = first_candle.copy()
+    invalid.loc[0, 'exit_timestamp'] = invalid.loc[0, 'entry_timestamp'] - 60_000
+    try:
+        audit_events(invalid)
+        raise AssertionError('An exit before entry must be rejected')
+    except RuntimeError as exc:
+        assert 'precede entry' in str(exc)
     assert counts['strength_positive']==8
     assert counts['blocked_total']==4
     assert counts['A_only']==2 and counts['B_only']==2 and counts['both']==0
@@ -42,6 +57,10 @@ def test():
     assert y['summary']['Eligible trades']==4
     assert x['summary']['Accepted trades']==8
     assert y['summary']['Accepted trades']==4
+    # The first-candle case must remain eligible, not silently disappear.
+    z=runner(fast, **SETTINGS)
+    assert z['summary']['Eligible trades']==8
+    assert z['summary']['Accepted trades']==8
     import tempfile
     import shutil
     import json
