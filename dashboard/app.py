@@ -27485,6 +27485,33 @@ def _lh_symbol_month_events(
     return result
 
 
+def _lh_calendar_month_start(end_date, months):
+    """Start of N *calendar* months ending in the month of end_date (UTC).
+
+    Unlike a rolling DateOffset, 2026-09-30 with months=1 starts on
+    2026-09-01 rather than 2026-08-31. The historical engine's separate
+    warm-up remains unchanged.
+    """
+    months = int(months)
+    if months < 1:
+        raise ValueError("Calendar-month count must be positive")
+
+    return (
+        pd.Timestamp(end_date).replace(day=1)
+        - pd.DateOffset(months=months - 1)
+    ).date()
+
+
+def _lh_completed_calendar_month_end(end_date, today_utc):
+    """Reject partial/current calendar months in month-aligned replay mode."""
+    selected = pd.Timestamp(end_date)
+    today = pd.Timestamp(today_utc)
+    return bool(
+        selected == selected + pd.offsets.MonthEnd(0)
+        and selected.date() < today.date()
+    )
+
+
 def _lh_month_ranges(
     start_ms,
     end_ms,
@@ -35506,6 +35533,10 @@ def render_candidate_long_horizon_historical_replay():
             "3 months",
             "6 months",
             "12 months",
+            "1 calendar month",
+            "3 calendar months",
+            "6 calendar months",
+            "12 calendar months",
             "Custom",
         ],
         index=2,
@@ -35538,6 +35569,30 @@ def render_candidate_long_horizon_historical_replay():
             key=(
                 "candidate_long_horizon_start"
             ),
+        )
+    elif horizon_label in {
+        "1 calendar month",
+        "3 calendar months",
+        "6 calendar months",
+        "12 calendar months",
+    }:
+        # A calendar-month run must never silently process a partial month.
+        # The chosen End date is the *inclusive* last day of a completed month.
+        if not _lh_completed_calendar_month_end(end_date, today_utc):
+            h3.metric("Start date", "—")
+            st.warning(
+                "For calendar months, choose the last day of a *finished* "
+                "month (UTC), e.g. 2026/09/30 for September. "
+                "Use Custom or a rolling range for partial months."
+            )
+            return
+
+        months_back = int(horizon_label.split()[0])
+        start_date = _lh_calendar_month_start(end_date, months_back)
+        h3.metric("Start date", str(start_date))
+        st.caption(
+            f"Calendar-aligned replay (UTC): {start_date} → {end_date}. "
+            "Indicator warm-up remains separate from replay months."
         )
     else:
         months_back = {
