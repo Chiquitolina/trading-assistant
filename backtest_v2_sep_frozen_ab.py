@@ -169,11 +169,17 @@ def safe_summary(portfolio):
             for k,v in summary.items()}
 
 
-def run_backtest(root: Path, parity_only=False):
+def run_backtest(root: Path, parity_only=False, run_id=None, report_tag=""):
     app_path = root / 'dashboard/app.py'
+    if report_tag and ('/' in report_tag or '..' in report_tag or '\\' in report_tag):
+        raise RuntimeError('Invalid report tag')
+    historical_run = run_id or RUN
     report_dir = root / REL_REPORT
     source = root / REL_DATA
-    config_path = root / 'reports/candidate_long_horizon/runs' / RUN / 'config.json'
+    if report_tag:
+        report_dir = root / 'reports/candidate_long_horizon/diagnostics/v2_sep_2026' / report_tag / 'portfolio_frozen_ab'
+        source = root / 'reports/candidate_long_horizon/diagnostics/v2_sep_2026' / report_tag / 'events_strength_ab_context.csv'
+    config_path = root / 'reports/candidate_long_horizon/runs' / historical_run / 'config.json'
     if not source.exists() or not app_path.exists():
         raise RuntimeError('Missing events_strength_ab_context.csv or dashboard/app.py')
 
@@ -213,7 +219,7 @@ def run_backtest(root: Path, parity_only=False):
     payload = {
         'source_events_sha256': sha(source),
         'source_app_sha256': sha(app_path),
-        'run': RUN,
+        'run': historical_run,
         'symbol_subset_count': n_symbols,
         'settings': SETTINGS,
         'rule': {'strength': '> 0', 'A': f'btc_return_delta_4h <= {THRESHOLD_A}',
@@ -245,8 +251,10 @@ def main():
     group=parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--parity-only', action='store_true')
     group.add_argument('--run', action='store_true')
+    parser.add_argument('--run-id', default=RUN, help='Historical run ID containing the reconstructed symbols')
+    parser.add_argument('--report-tag', default='', help='Read enriched events from this output-tag subfolder')
     args=parser.parse_args()
-    run_backtest(Path(args.project).resolve(), parity_only=args.parity_only)
+    run_backtest(Path(args.project).resolve(), parity_only=args.parity_only, run_id=args.run_id, report_tag=args.report_tag)
 
 
 if __name__ == '__main__':

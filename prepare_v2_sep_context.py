@@ -148,6 +148,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--download', action='store_true', help='Repair missing/incomplete 2026-09 4h cache partitions via Binance Futures')
     parser.add_argument('--project', default='.', help='Repository project root')
+    parser.add_argument('--run-id', default='20260907_20261006_28cb79f0702a', help='Historical run folder to read')
+    parser.add_argument('--output-tag', default='', help='Subfolder to keep full-universe results separate from the original pilot')
     args = parser.parse_args()
     root = Path(args.project).resolve()
     sys.path.insert(0, str(root))
@@ -155,6 +157,10 @@ def main():
     universe = sorted({str(symbol).upper() for symbol in SYMBOLS} | {'BTCUSDT'})
     cache_root = root / 'reports/candidate_long_horizon/candle_cache/4h'
     report_dir = root / 'reports/candidate_long_horizon/diagnostics/v2_sep_2026'
+    if args.output_tag:
+        if '/' in args.output_tag or '..' in args.output_tag or '\\' in args.output_tag:
+            raise RuntimeError('Invalid output tag')
+        report_dir /= args.output_tag
     report_dir.mkdir(parents=True, exist_ok=True)
     cached = {}
     summary = []
@@ -169,7 +175,9 @@ def main():
             time.sleep(0.04 if args.download else 0)
     summary_df = pd.DataFrame(summary)
     market = _build_market(universe, cached)
-    events_path = root / 'reports/candidate_long_horizon/runs/20260907_20261006_28cb79f0702a/events.csv'
+    events_path = root / 'reports/candidate_long_horizon/runs' / args.run_id / 'events.csv'
+    if not events_path.exists():
+        raise RuntimeError(f'Run does not contain events.csv: {events_path}')
     events = pd.read_csv(events_path, low_memory=False)
     enriched = _enrich_events(events, market)
     cond_a = pd.to_numeric(enriched['btc_return_delta_4h'], errors='coerce').le(-0.4494)
