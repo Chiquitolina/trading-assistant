@@ -330,6 +330,17 @@ CANDIDATE_V1_LEGACY_PREFILTER_LATEST_FILE = (
     / "legacy_prefilter_latest.csv"
 )
 
+# Legacy V1 evidence and scan coverage; not part of the NO-TRADE filter.
+CANDIDATE_V1_LEGACY_RAW_HISTORY_FILE = CANDIDATE_V1_RAW_MONITOR_FILE
+CANDIDATE_RESEARCH_SCAN_COVERAGE_FILE = (
+    BASE_DIR / "reports" / "candidate_v1_analysis" / "candidate_scan_coverage.csv"
+)
+CANDIDATE_V1_LEGACY_RAW_BOOTSTRAP_ARCHIVE_DIR = (
+    BASE_DIR / "reports" / "candidate_v1_analysis" / "legacy_raw_bootstrap_archive"
+)
+CANDIDATE_RESEARCH_SCAN_WINDOW_MINUTES = 4320
+CANDIDATE_RESEARCH_COVERAGE_MIN_WRITE_MINUTES = 30
+
 CANDIDATE_V2_STRENGTH_THRESHOLDS = (
     0.00, 0.25, 0.50, 0.75, 1.00, 1.50,
 )
@@ -17246,6 +17257,605 @@ def _candidate_v1_persist_legacy_prefilter_ledger(
         "history": history.reset_index(drop=True),
         "latest": latest.reset_index(drop=True),
     }
+
+
+def _candidate_v1_legacy_normalize_raw_source(frame):
+    """Normalize an old/new Legacy frame to one stable REACTION Event ID schema."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    result = frame.copy()
+
+    if "signal" not in result.columns:
+        result["signal"] = result.get(
+            "side",
+            pd.Series("", index=result.index),
+        )
+    result["signal"] = (
+        result["signal"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+
+    if "side" not in result.columns:
+        result["side"] = result["signal"]
+    result["side"] = (
+        result["side"]
+        .fillna(result["signal"])
+        .astype(str)
+        .str.upper()
+    )
+
+    if "candidate_v1_event_key" not in result.columns:
+        result["candidate_v1_event_key"] = ""
+
+    existing_key = (
+        result["candidate_v1_event_key"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    retest_ts = pd.to_numeric(
+        result.get(
+            "retest_timestamp",
+            pd.Series(np.nan, index=result.index),
+        ),
+        errors="coerce",
+    )
+    generated_key = (
+        result.get(
+            "symbol",
+            pd.Series("", index=result.index),
+        )
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        + "|"
+        + result["signal"]
+        + "|"
+        + retest_ts.fillna(-1).astype("int64").astype(str)
+    )
+    valid_generated = (
+        result.get(
+            "symbol",
+            pd.Series("", index=result.index),
+        )
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+        & result["signal"].isin(["LONG", "SHORT"])
+        & retest_ts.notna()
+    )
+    result["candidate_v1_event_key"] = existing_key.where(
+        existing_key.ne(""),
+        generated_key.where(valid_generated, ""),
+    )
+    result = result.loc[
+        result["candidate_v1_event_key"].astype(str).str.len().gt(0)
+    ].copy()
+    return result.reset_index(drop=True)
+
+
+def _candidate_v1_apply_legacy_decision_columns(
+    frame,
+    short_config=None,
+    long_config=None,
+):
+    """Attach Legacy Room/RSI decision columns without filtering any REACTION."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+
+    result = frame.copy()
+    room_thresholds = []
+    rsi_thresholds = []
+    for side in result.get(
+        "signal",
+        pd.Series("", index=result.index),
+    ):
+        room_min, rsi_min = _candidate_v1_legacy_thresholds_for_side(
+            side,
+            short_config,
+            long_config,
+        )
+        room_thresholds.append(room_min)
+        rsi_thresholds.append(rsi_min)
+
+    result["legacy_v1_room_threshold_pct"] = room_thresholds
+    result["legacy_v1_rsi_min_tf"] = rsi_thresholds
+
+    room = pd.to_numeric(
+        result.get(
+            "nearest_opposing_room_pct",
+            pd.Series(np.nan, index=result.index),
+        ),
+        errors="coerce",
+    )
+    rsi_count = pd.to_numeric(
+        result.get(
+            "aligned_rsi_extreme_count",
+            pd.Series(np.nan, index=result.index),
+        ),
+        errors="coerce",
+    )
+    result["legacy_v1_room_pass"] = room.ge(
+        pd.to_numeric(
+            result["legacy_v1_room_threshold_pct"],
+            errors="coerce",
+        )
+    )
+    result["legacy_v1_rsi_pass"] = rsi_count.ge(
+        pd.to_numeric(
+            result["legacy_v1_rsi_min_tf"],
+            errors="coerce",
+        )
+    )
+    result["legacy_v1_accept"] = (
+        result["legacy_v1_room_pass"].fillna(False).astype(bool)
+        & result["legacy_v1_rsi_pass"].fillna(False).astype(bool)
+    )
+    result["legacy_v1_decision"] = np.select(
+        [
+            result["legacy_v1_accept"],
+            ~result["legacy_v1_room_pass"]
+            & ~result["legacy_v1_rsi_pass"],
+            ~result["legacy_v1_room_pass"],
+            ~result["legacy_v1_rsi_pass"],
+        ],
+        [
+            "ACCEPT",
+            "REJECT_ROOM+RSI",
+            "REJECT_ROOM",
+            "REJECT_RSI",
+        ],
+        default="UNKNOWN",
+    )
+    return result
+
+
+def _candidate_v1_ensure_legacy_raw_bootstrap_archive():
+    """Freeze the pre-migration V1 evidence once; never overwrite the archive."""
+    archive_dir = Path(CANDIDATE_V1_LEGACY_RAW_BOOTSTRAP_ARCHIVE_DIR)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    source_files = [
+        (
+            Path(CANDIDATE_V1_HISTORY_FILE),
+            "candidate_v1_frozen_monitor_before_raw_migration.csv",
+        ),
+        (
+            Path(CANDIDATE_V1_LONG_HISTORY_FILE),
+            "candidate_v1_long_frozen_monitor_before_raw_migration.csv",
+        ),
+        (
+            Path(CANDIDATE_V1_LEGACY_PREFILTER_LEDGER_FILE),
+            "legacy_prefilter_decision_ledger_before_raw_migration.csv",
+        ),
+        (
+            Path(CANDIDATE_V1_LEGACY_PREFILTER_LATEST_FILE),
+            "legacy_prefilter_latest_before_raw_migration.csv",
+        ),
+    ]
+
+    archived = []
+    for source_path, archive_name in source_files:
+        archive_path = archive_dir / archive_name
+        if not source_path.exists() or archive_path.exists():
+            continue
+        try:
+            shutil.copy2(source_path, archive_path)
+            archived.append(str(archive_path))
+        except OSError:
+            continue
+    return archived
+
+
+def _candidate_v1_persist_legacy_raw_monitor(
+    current_context,
+    short_config=None,
+    long_config=None,
+):
+    """Persist Legacy V1 RAW exactly like V2: historical + current, keep last.
+
+    The new RAW file never deletes or rewrites the original frozen V1 monitor
+    files or the pre-filter ledger. On every run they remain bootstrap/archive
+    sources, so previously collected V1 evidence cannot be lost by this change.
+    """
+    raw_path = Path(CANDIDATE_V1_LEGACY_RAW_HISTORY_FILE)
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # One-time safety net: preserve exactly what existed before RAW migration.
+    _candidate_v1_ensure_legacy_raw_bootstrap_archive()
+
+    now_utc = pd.Timestamp.now(tz="UTC")
+    now_iso = now_utc.isoformat()
+    now_ms = int(now_utc.timestamp() * 1000)
+
+    source_specs = [
+        ("FROZEN_V1_SHORT", Path(CANDIDATE_V1_HISTORY_FILE), 0),
+        ("FROZEN_V1_LONG", Path(CANDIDATE_V1_LONG_HISTORY_FILE), 0),
+        ("RAW_EXISTING", raw_path, 1),
+        (
+            "PREFILTER_LEDGER_LATEST",
+            Path(CANDIDATE_V1_LEGACY_PREFILTER_LATEST_FILE),
+            2,
+        ),
+    ]
+
+    pieces = []
+    source_counts = {}
+    for source_name, source_path, priority in source_specs:
+        source_frame = pd.DataFrame()
+        try:
+            if source_path.exists():
+                source_frame = pd.read_csv(
+                    source_path,
+                    low_memory=False,
+                )
+        except Exception:
+            source_frame = pd.DataFrame()
+
+        source_frame = _candidate_v1_legacy_normalize_raw_source(
+            source_frame
+        )
+        source_counts[source_name] = int(len(source_frame))
+        if source_frame.empty:
+            continue
+
+        source_frame["_legacy_raw_source_priority"] = int(priority)
+        if "legacy_v1_raw_source" not in source_frame.columns:
+            source_frame["legacy_v1_raw_source"] = source_name
+        else:
+            source_frame["legacy_v1_raw_source"] = (
+                source_frame["legacy_v1_raw_source"]
+                .fillna(source_name)
+                .astype(str)
+            )
+
+        # Preexisting files have no reliable first-seen timestamp.  Keep that
+        # value unknown instead of inventing a historical observation time.
+        if "legacy_v1_raw_first_persisted_at_utc" not in source_frame.columns:
+            source_frame["legacy_v1_raw_first_persisted_at_utc"] = pd.NaT
+        if "legacy_v1_raw_first_persisted_at_ms" not in source_frame.columns:
+            source_frame["legacy_v1_raw_first_persisted_at_ms"] = np.nan
+        if "legacy_v1_raw_last_refreshed_at_utc" not in source_frame.columns:
+            source_frame["legacy_v1_raw_last_refreshed_at_utc"] = (
+                source_frame.get(
+                    "legacy_v1_evaluated_at_utc",
+                    pd.Series(now_iso, index=source_frame.index),
+                )
+                .fillna(now_iso)
+            )
+        if "legacy_v1_raw_last_refreshed_at_ms" not in source_frame.columns:
+            source_frame["legacy_v1_raw_last_refreshed_at_ms"] = pd.to_numeric(
+                source_frame.get(
+                    "legacy_v1_evaluated_at_ms",
+                    pd.Series(now_ms, index=source_frame.index),
+                ),
+                errors="coerce",
+            ).fillna(now_ms)
+        pieces.append(source_frame)
+
+    current = _candidate_v1_legacy_normalize_raw_source(current_context)
+    source_counts["CURRENT_SCAN"] = int(len(current))
+    if not current.empty:
+        current = current.copy()
+        current["_legacy_raw_source_priority"] = 3
+        current["legacy_v1_raw_source"] = "CURRENT_SCAN"
+        current["legacy_v1_raw_last_refreshed_at_utc"] = now_iso
+        current["legacy_v1_raw_last_refreshed_at_ms"] = now_ms
+        current["legacy_v1_raw_first_persisted_at_utc"] = now_iso
+        current["legacy_v1_raw_first_persisted_at_ms"] = now_ms
+        pieces.append(current)
+
+    if not pieces:
+        return {
+            "history": pd.DataFrame(),
+            "current": current,
+            "source_counts": source_counts,
+            "raw_path": raw_path,
+        }
+
+    combined = pd.concat(
+        pieces,
+        ignore_index=True,
+        sort=False,
+    )
+
+    # Preserve earliest persistence timestamp per Event ID even when the newest
+    # current scan wins the row, and preserve the latest refresh timestamp too.
+    first_ms = pd.to_numeric(
+        combined.get("legacy_v1_raw_first_persisted_at_ms"),
+        errors="coerce",
+    )
+    last_ms = pd.to_numeric(
+        combined.get("legacy_v1_raw_last_refreshed_at_ms"),
+        errors="coerce",
+    )
+    combined["_legacy_raw_first_ms"] = first_ms
+    combined["_legacy_raw_last_ms"] = last_ms
+
+    first_by_key = combined.groupby(
+        "candidate_v1_event_key",
+        dropna=False,
+    )["_legacy_raw_first_ms"].min()
+    last_by_key = combined.groupby(
+        "candidate_v1_event_key",
+        dropna=False,
+    )["_legacy_raw_last_ms"].max()
+
+    history = (
+        combined.sort_values(
+            ["_legacy_raw_source_priority", "_legacy_raw_last_ms"],
+            kind="stable",
+            na_position="first",
+        )
+        .drop_duplicates(
+            subset=["candidate_v1_event_key"],
+            keep="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    history["legacy_v1_raw_first_persisted_at_ms"] = (
+        history["candidate_v1_event_key"]
+        .map(first_by_key)
+    )
+    history["legacy_v1_raw_last_refreshed_at_ms"] = (
+        history["candidate_v1_event_key"]
+        .map(last_by_key)
+    )
+    history["legacy_v1_raw_first_persisted_at_utc"] = pd.to_datetime(
+        history["legacy_v1_raw_first_persisted_at_ms"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).astype(str)
+    history["legacy_v1_raw_last_refreshed_at_utc"] = pd.to_datetime(
+        history["legacy_v1_raw_last_refreshed_at_ms"],
+        unit="ms",
+        utc=True,
+        errors="coerce",
+    ).astype(str)
+    # Distinguishes prospective observation from legacy rows whose original
+    # collection time cannot be reconstructed by the migration.
+    history["legacy_v1_raw_timing_quality"] = np.where(
+        pd.to_numeric(history["legacy_v1_raw_first_persisted_at_ms"],
+                      errors="coerce").notna(),
+        "FIRST_RECORDED_AFTER_REPAIR",
+        "UNKNOWN_LEGACY_FIRST_SEEN",
+    )
+
+    history = _candidate_v1_apply_legacy_decision_columns(
+        history,
+        short_config=short_config,
+        long_config=long_config,
+    )
+    history["legacy_v1_raw_threshold_agnostic"] = True
+    history["legacy_v1_raw_rule"] = (
+        "15m confirmed-swing REACTION persisted before Legacy Room/RSI filters"
+    )
+    history = history.drop(
+        columns=[
+            "_legacy_raw_source_priority",
+            "_legacy_raw_first_ms",
+            "_legacy_raw_last_ms",
+        ],
+        errors="ignore",
+    )
+
+    tmp = raw_path.with_suffix(".csv.tmp")
+    history.to_csv(tmp, index=False)
+    tmp.replace(raw_path)
+
+    return {
+        "history": history.reset_index(drop=True),
+        "current": current.reset_index(drop=True),
+        "source_counts": source_counts,
+        "raw_path": raw_path,
+    }
+
+
+def _candidate_research_record_scan_coverage(
+    retests_df,
+    scanner_window_minutes=CANDIDATE_RESEARCH_SCAN_WINDOW_MINUTES,
+):
+    """Record browser-driven Candidate scan coverage without spamming reruns."""
+    path = Path(CANDIDATE_RESEARCH_SCAN_COVERAGE_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    now = pd.Timestamp.now(tz="UTC")
+    now_ms = int(now.timestamp() * 1000)
+    signature = _candidate_analysis_retests_signature(retests_df)
+    signature_text = json.dumps(
+        list(signature),
+        separators=(",", ":"),
+        default=str,
+    )
+
+    existing = pd.DataFrame()
+    try:
+        if path.exists():
+            existing = pd.read_csv(path, low_memory=False)
+    except Exception:
+        existing = pd.DataFrame()
+
+    previous_ms = None
+    previous_signature = None
+    if not existing.empty:
+        scan_ms = pd.to_numeric(
+            existing.get("scan_timestamp_ms"),
+            errors="coerce",
+        ).dropna()
+        if not scan_ms.empty:
+            previous_ms = int(scan_ms.iloc[-1])
+        if "scan_signature" in existing.columns:
+            previous_signature = str(
+                existing.iloc[-1].get("scan_signature", "")
+            )
+
+    min_write_ms = int(
+        CANDIDATE_RESEARCH_COVERAGE_MIN_WRITE_MINUTES
+        * 60_000
+    )
+    if (
+        previous_ms is not None
+        and now_ms - previous_ms < min_write_ms
+        and previous_signature == signature_text
+    ):
+        latest = existing.iloc[-1].to_dict()
+        return {
+            "history": existing,
+            "latest": latest,
+            "written": False,
+        }
+
+    reaction_count = int(signature[0]) if signature else 0
+    max_retest_ts = signature[2] if len(signature) >= 3 else None
+    if previous_ms is None:
+        gap_minutes = np.nan
+        coverage_status = "FIRST_SCAN"
+    else:
+        gap_minutes = float(now_ms - previous_ms) / 60_000.0
+        coverage_status = (
+            "OK"
+            if gap_minutes <= float(scanner_window_minutes)
+            else "POSSIBLE_GAP"
+        )
+
+    row = {
+        "scan_timestamp_utc": now.isoformat(),
+        "scan_timestamp_ms": now_ms,
+        "previous_scan_timestamp_ms": previous_ms,
+        "gap_minutes": gap_minutes,
+        "gap_hours": (
+            gap_minutes / 60.0
+            if pd.notna(gap_minutes)
+            else np.nan
+        ),
+        "scanner_window_minutes": int(scanner_window_minutes),
+        "scanner_window_hours": float(scanner_window_minutes) / 60.0,
+        "coverage_status": coverage_status,
+        "reaction_count": reaction_count,
+        "max_retest_timestamp": max_retest_ts,
+        "scan_signature": signature_text,
+    }
+    updated = pd.concat(
+        [existing, pd.DataFrame([row])],
+        ignore_index=True,
+        sort=False,
+    )
+    tmp = path.with_suffix(".csv.tmp")
+    updated.to_csv(tmp, index=False)
+    tmp.replace(path)
+    return {
+        "history": updated,
+        "latest": row,
+        "written": True,
+    }
+
+
+def render_candidate_v1_legacy_raw_status(
+    raw_result,
+    ledger_result=None,
+    coverage_result=None,
+):
+    """Render the V2-style Legacy RAW universe and its preservation/coverage audit."""
+    raw_result = raw_result if isinstance(raw_result, dict) else {}
+    ledger_result = ledger_result if isinstance(ledger_result, dict) else {}
+    coverage_result = coverage_result if isinstance(coverage_result, dict) else {}
+
+    history = raw_result.get("history", pd.DataFrame())
+    current = raw_result.get("current", pd.DataFrame())
+    source_counts = raw_result.get("source_counts", {}) or {}
+    ledger_history = ledger_result.get("history", pd.DataFrame())
+    coverage_latest = coverage_result.get("latest", {}) or {}
+
+    st.markdown("#### 🧾 Legacy V1 Raw · V2-style persistence")
+    st.caption(
+        "One row per 15m REACTION Event ID, persisted BEFORE Room/RSI are used "
+        "as filters. Historical frozen V1 files and the pre-filter ledger are "
+        "imported as bootstrap sources but remain untouched on disk."
+    )
+
+    coverage_label = str(
+        coverage_latest.get("coverage_status", "—")
+    )
+    if coverage_label == "OK":
+        coverage_label = "✅ OK"
+    elif coverage_label == "POSSIBLE_GAP":
+        coverage_label = "⚠️ POSSIBLE GAP"
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Legacy RAW IDs", int(len(history)))
+    c2.metric("REACTIONs current scan", int(len(current)))
+    c3.metric(
+        "Old V1 rows available",
+        int(source_counts.get("FROZEN_V1_SHORT", 0))
+        + int(source_counts.get("FROZEN_V1_LONG", 0)),
+    )
+    c4.metric("Ledger snapshots", int(len(ledger_history)))
+    c5.metric("Scan coverage", coverage_label)
+
+    st.caption(
+        "RAW: "
+        f"`{CANDIDATE_V1_LEGACY_RAW_HISTORY_FILE}` · "
+        "audit ledger: "
+        f"`{CANDIDATE_V1_LEGACY_PREFILTER_LEDGER_FILE}` · "
+        "coverage: "
+        f"`{CANDIDATE_RESEARCH_SCAN_COVERAGE_FILE}`"
+    )
+    st.caption(
+        "RAW migration does not delete the original V1 files. A one-time frozen "
+        "copy of the pre-migration evidence is also stored in "
+        f"`{CANDIDATE_V1_LEGACY_RAW_BOOTSTRAP_ARCHIVE_DIR}`."
+    )
+
+    if not history.empty:
+        display_columns = [
+            "legacy_v1_raw_last_refreshed_at_utc",
+            "symbol",
+            "signal",
+            "retest_timestamp",
+            "nearest_opposing_room_pct",
+            "aligned_rsi_extreme_count",
+            "legacy_v1_decision",
+            "legacy_v1_raw_source",
+            "rsi14_1m",
+            "rsi14_5m",
+            "rsi14_15m",
+            "rsi14_1h",
+            "opposing_room_30m_pct",
+            "opposing_room_1h_pct",
+            "opposing_room_4h_pct",
+        ]
+        display_columns = [
+            column
+            for column in display_columns
+            if column in history.columns
+        ]
+        with st.expander(
+            "Inspect Legacy V1 Raw universe",
+            expanded=False,
+        ):
+            sort_column = (
+                "legacy_v1_raw_last_refreshed_at_ms"
+                if "legacy_v1_raw_last_refreshed_at_ms" in history.columns
+                else "retest_timestamp"
+            )
+            st.dataframe(
+                history.sort_values(
+                    sort_column,
+                    ascending=False,
+                    kind="stable",
+                    na_position="last",
+                )[display_columns].head(500),
+                use_container_width=True,
+                hide_index=True,
+                key="candidate_v1_legacy_raw_table",
+            )
+
 
 
 def render_candidate_v1_legacy_prefilter_ledger_status(ledger_result):
@@ -48255,6 +48865,24 @@ def _candidate_fast_build_v1_raw_universe(retests_df):
     raw["candidate_v1_cohort"] = existing_cohort
     raw["candidate_v2_cohort"] = existing_cohort
 
+    # This same CSV is the prospective Legacy RAW evidence.  Refreshing the
+    # fast Parquet universe must not erase first-observed timestamps.
+    if not prior_raw.empty and "candidate_v1_event_key" in prior_raw.columns:
+        previous = prior_raw.drop_duplicates(
+            "candidate_v1_event_key", keep="last"
+        ).set_index("candidate_v1_event_key")
+        for col in (
+            "legacy_v1_raw_first_persisted_at_ms",
+            "legacy_v1_raw_first_persisted_at_utc",
+            "legacy_v1_raw_timing_quality",
+        ):
+            if col in previous.columns:
+                previous_values = raw["candidate_v1_event_key"].map(previous[col])
+                if col in raw.columns:
+                    raw[col] = previous_values.where(previous_values.notna(), raw[col])
+                else:
+                    raw[col] = previous_values
+
     _candidate_fast_atomic_write_csv(
         raw,
         CANDIDATE_V1_RAW_MONITOR_FILE,
@@ -48426,6 +49054,12 @@ def _candidate_fast_build_snapshot(
     #    the Legacy Room/RSI filters. This remains the filter lab.
     # --------------------------------------------------------------
     v1_raw = _candidate_fast_build_v1_raw_universe(retests_df)
+    _candidate_v1_persist_legacy_raw_monitor(
+        ledger_result.get("current", pd.DataFrame()),
+        short_config=v1_short_config,
+        long_config=v1_long_config,
+    )
+    _candidate_research_record_scan_coverage(retests_df)
     if v1_raw.empty:
         raise RuntimeError("Legacy V1 RAW universe is empty")
 
@@ -84244,6 +84878,96 @@ if selected_section == "reaction_swing_lab":
                 and fast_store.snapshot_exists(selected_profile)
             )
 
+            # Historical research tools remain opt-in. Keep them reachable
+            # before Fast Explorer's early st.stop() while never running the
+            # long-horizon replay or rebuilding REACTION on widget-only reruns.
+            with st.expander(
+                "🔬 Historical Research · Fidelity Audit / Replay",
+                expanded=False,
+            ):
+                historical_tool = st.radio(
+                    "Historical tool",
+                    options=[
+                        "Off",
+                        "G. Historical Replay Fidelity Audit",
+                        "F. Long-Horizon Historical Replay",
+                    ],
+                    index=0,
+                    key=f"candidate_historical_tool_{selected_profile}",
+                    help=(
+                        "Both historical tools are manual. The audit checks "
+                        "reconstruction fidelity, while Long-Horizon rebuilds "
+                        "and evaluates historical V2 Base and V1 Strength."
+                    ),
+                )
+
+                if historical_tool == "F. Long-Horizon Historical Replay":
+                    st.info(
+                        "Historical replay currently evaluates V2 REACTION Base "
+                        "and V1 + Strength > 0. It does NOT apply the frozen "
+                        "NO-TRADE A/B or Optional C gate yet. Historical event "
+                        "coverage and fidelity must be verified before treating "
+                        "results as a gate backtest. Existing runs and candle "
+                        "caches are preserved unless you explicitly reset them."
+                    )
+                    render_candidate_long_horizon_historical_replay()
+
+                elif historical_tool == "G. Historical Replay Fidelity Audit":
+                    st.info(
+                        "Fidelity Audit compares the historical reconstruction "
+                        "with persisted V2 REACTION and Legacy V1 decisions, "
+                        "using exact event identities and causal context. "
+                        "V2 and V1 results are reported separately; a good V2 "
+                        "match does not certify Legacy V1 Room/RSI parity. "
+                        "Run/resume batches only when needed."
+                    )
+                    with st.spinner(
+                        "Loading reference 15m REACTION scan for fidelity audit..."
+                    ):
+                        fidelity_retests_df = _reaction_lab_shared_candidate_scan_cached(
+                            symbols=structural_symbols,
+                            swing_timeframe=str(
+                                candidate_v1_config.get("swing_timeframe", "15m")
+                            ),
+                            swing_detector=str(
+                                candidate_v1_config.get("swing_detector", "3x3")
+                            ),
+                            min_swing_prominence_pct=float(
+                                candidate_v1_config.get("min_swing_prominence_pct", 0.0)
+                            ),
+                            retest_tolerance_pct=float(
+                                candidate_v1_config.get(
+                                    "retest_tolerance_pct",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_TOLERANCE_PCT,
+                                )
+                            ),
+                            min_departure_pct=float(
+                                candidate_v1_config.get(
+                                    "min_departure_pct",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_DEPARTURE_PCT,
+                                )
+                            ),
+                            max_age_minutes=int(
+                                candidate_v1_config.get(
+                                    "max_confirmation_to_retest_min",
+                                    CONFIRMED_SWING_RETEST_DEFAULT_MAX_AGE_MINUTES,
+                                )
+                            ),
+                            max_retest_age_minutes=4320,
+                        )
+                    render_candidate_historical_replay_fidelity_audit(
+                        retests_df=fidelity_retests_df,
+                        v1_short_config=candidate_v1_config,
+                        v1_long_config=candidate_v1_long_config,
+                    )
+
+                else:
+                    st.caption(
+                        "OFF by default. Historical replay and fidelity "
+                        "reconstruction are not executed while using "
+                        "the regular Fast Explorer."
+                    )
+
             if fast_snapshot_ready:
                 render_candidate_fast_explorer(
                     candidate_version="v1" if selected_profile == "v1_raw" else "v2"
@@ -84302,16 +85026,31 @@ if selected_section == "reaction_swing_lab":
                     max_retest_age_minutes=4320,
                 )
 
+            # Collect evidence for every shared REACTION scan, regardless of
+            # whether the user is examining V1, V2, or a filtered V1 profile.
+            legacy_prefilter_ledger = (
+                _candidate_v1_persist_legacy_prefilter_ledger(
+                    candidate_shared_retests_df,
+                    short_config=candidate_v1_config,
+                    long_config=candidate_v1_long_config,
+                )
+            )
+            legacy_raw_monitor = _candidate_v1_persist_legacy_raw_monitor(
+                legacy_prefilter_ledger.get("current", pd.DataFrame()),
+                short_config=candidate_v1_config,
+                long_config=candidate_v1_long_config,
+            )
+            candidate_scan_coverage = _candidate_research_record_scan_coverage(
+                candidate_shared_retests_df,
+            )
+
             selected_candidate_label = selected_name
             if selected_profile == "v1_raw":
-                legacy_prefilter_ledger = (
-                    _candidate_v1_persist_legacy_prefilter_ledger(
-                        candidate_shared_retests_df,
-                        short_config=candidate_v1_config,
-                        long_config=candidate_v1_long_config,
-                    )
+                render_candidate_v1_legacy_raw_status(
+                    legacy_raw_monitor,
+                    ledger_result=legacy_prefilter_ledger,
+                    coverage_result=candidate_scan_coverage,
                 )
-
                 render_candidate_v1_legacy_prefilter_ledger_status(
                     legacy_prefilter_ledger
                 )
