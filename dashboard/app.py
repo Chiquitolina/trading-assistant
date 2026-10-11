@@ -49613,6 +49613,201 @@ def _candidate_fast_regime_portfolio_stability(
     return result
 
 
+def _candidate_fast_regime_optional_c_scan(
+    resolved,
+    *,
+    variant,
+    selected_component_rule,
+    c_feature_options,
+    local_reverse_labels,
+    baseline_summary,
+    base_component_summary,
+    on_progress=None,
+):
+    """Exhaustive optional C search with causal parity-checked fast replay.
+
+    Search ALL original single/range/category qualifiers. Rankings, max blocked,
+    and top-N are downstream UI filters, so the cached cohort remains complete.
+    Disk cache is isolated by version, variant, base A/B rule and event content.
+    """
+    started = time.perf_counter()
+    base_mask = _candidate_fast_regime_auto_rule_mask(
+        resolved, selected_component_rule,
+    ).reindex(resolved.index, fill_value=False).fillna(False).astype(bool)
+    base_mask_array = base_mask.to_numpy(dtype=bool)
+    base_blocked_count = int(base_mask.sum())
+    version = _candidate_fast_current_version()
+    all_features = sorted(
+        set(c_feature_options) | _candidate_fast_regime_rule_features(selected_component_rule)
+    )
+    fingerprint = scanner_fingerprint(resolved, all_features, version, variant)
+    parameters = json.dumps({
+        'engine': 'optional-c-fast-parity-v1',
+        'fingerprint': fingerprint,
+        'base_rule': selected_component_rule,
+        'features': c_feature_options,
+        'labels': local_reverse_labels,
+        'baseline': baseline_summary,
+        'base_gate': base_component_summary,
+    }, sort_keys=True, default=str, ensure_ascii=False)
+    digest = hashlib.sha256(parameters.encode('utf-8')).hexdigest()[:24]
+    cache_path = (
+        BASE_DIR / 'reports' / 'research' / 'candidate' / 'scanner_cache'
+        / version / str(variant).replace(' ', '_') / 'optional_c'
+        / f'{fingerprint}_{digest}.json'
+    )
+    cached = _candidate_scan_cache_load(cache_path)
+    if (isinstance(cached, dict)
+            and cached.get('kind') == 'optional-c-fast-parity-v1'
+            and 'rows' in cached and 'rules' in cached):
+        if on_progress:
+            on_progress(1, 1, 'persistent cache hit')
+        return (
+            pd.DataFrame(cached['rows']), cached['rules'],
+            {'cache_hit': True, 'engine': cached.get('engine', 'cached'),
+             'tested': int(cached.get('tested', 0)), 'seconds': 0.0},
+        )
+
+    c_rules = _candidate_fast_regime_auto_single_rules(resolved, c_feature_options)
+    prepared = None
+    parity_reason = 'fallback to canonical simulator'
+    try:
+        candidate = PreparedOneSlot(resolved, _candidate_v2_portfolio_priority)
+
+        def reference(allowed):
+            no_blocks = pd.Series(False, index=allowed.index, dtype=bool)
+            return _candidate_fast_regime_auto_portfolio(allowed, no_blocks)[0]
+
+        parity_ok, parity_reason = _candidate_scan_verify_parity(
+            candidate, resolved, reference,
+            _candidate_fast_portfolio_summary,
+            _candidate_fast_regime_portfolio_stability,
+        )
+        if parity_ok:
+            # Additional guards for the actual selected A/B component and C masks.
+            actual_masks = [base_mask_array]
+            for rule in c_rules:
+                qualifier = _candidate_fast_regime_auto_rule_mask(
+                    resolved, rule,
+                ).reindex(resolved.index, fill_value=False).fillna(False).to_numpy(dtype=bool)
+                joint = base_mask_array & qualifier
+                if 0 < int(joint.sum()) < len(resolved) and not np.array_equal(joint, base_mask_array):
+                    actual_masks.append(joint)
+                if len(actual_masks) >= 3:
+                    break
+            for sample_mask in actual_masks:
+                fast = candidate.simulate(sample_mask)
+                slow = reference(resolved.loc[~sample_mask])
+                for extractor, keys in (
+                    (_candidate_fast_portfolio_summary,
+                     ('Eligible', 'Accepted', 'Final equity', 'Return %', 'Max DD %', 'PF')),
+                    (_candidate_fast_regime_portfolio_stability,
+                     ('Below start time %', 'Underwater time %', 'Positive days %',
+                      'Top 1 positive day share %', 'Top 2 positive days share %',
+                      'Worst day $', 'Positive blocks / 3', 'Recovery factor')),
+                ):
+                    fast_values, slow_values = extractor(fast), extractor(slow)
+                    for key in keys:
+                        a = float(fast_values.get(key, np.nan))
+                        b = float(slow_values.get(key, np.nan))
+                        if not (np.isclose(a, b, rtol=1e-9, atol=1e-8, equal_nan=True)
+                                or (np.isinf(a) and a == b)):
+                            raise ValueError(f'C parity mismatch {key}: fast={a}, original={b}')
+            prepared = candidate
+    except Exception as exc:
+        parity_reason = str(exc)
+    if prepared is None:
+        print(f'[CANDIDATE C] canonical fallback: {parity_reason}', flush=True)
+
+    c_rows, c_rules_by_id = [], {}
+    baseline_final = float(baseline_summary.get('Final equity', np.nan))
+    base_gate_final = float(base_component_summary.get('Final equity', np.nan))
+    c_counter = 0
+    for idx, c_rule in enumerate(c_rules):
+        c_mask = _candidate_fast_regime_auto_rule_mask(
+            resolved, c_rule,
+        ).reindex(resolved.index, fill_value=False).fillna(False).astype(bool)
+        qualified_mask = (base_mask & c_mask).fillna(False).astype(bool)
+        blocked_count = int(qualified_mask.sum())
+        if (
+            blocked_count > 0
+            and blocked_count < len(resolved)
+            and blocked_count != base_blocked_count
+        ):
+            if prepared is not None:
+                qualified_portfolio = prepared.simulate(
+                    qualified_mask.to_numpy(dtype=bool)
+                )
+            else:
+                qualified_portfolio, _ = _candidate_fast_regime_auto_portfolio(
+                    resolved, qualified_mask,
+                )
+            q_summary = _candidate_fast_portfolio_summary(qualified_portfolio)
+            if q_summary:
+                q_stability = _candidate_fast_regime_portfolio_stability(
+                    qualified_portfolio
+                )
+                c_id = f'C{c_counter:04d}'
+                c_counter += 1
+                c_text = _candidate_fast_regime_auto_rule_text(
+                    c_rule, local_reverse_labels,
+                )
+                combined_text = (
+                    '(' + _candidate_fast_regime_auto_rule_text(
+                        selected_component_rule, local_reverse_labels,
+                    ) + ') AND (' + c_text + ')'
+                )
+                q_pf = q_summary.get('PF', np.nan)
+                base_pf = baseline_summary.get('PF', np.nan)
+                c_row = {
+                    'C ID': c_id,
+                    'C qualifier': c_text,
+                    'Combined gate': combined_text,
+                    'Kind': str(c_rule.get('kind', 'C')),
+                    'Blocked': blocked_count,
+                    'Blocked %': float(qualified_mask.mean() * 100.0),
+                    'Accepted': int(q_summary.get('Accepted', 0) or 0),
+                    'Final equity': float(q_summary.get('Final equity', np.nan)),
+                    'Δ equity': float(q_summary.get('Final equity', np.nan) - baseline_final),
+                    'Δ vs base gate': float(q_summary.get('Final equity', np.nan) - base_gate_final),
+                    'Return %': float(q_summary.get('Return %', np.nan)),
+                    'Δ Return pp': float(
+                        q_summary.get('Return %', np.nan) - baseline_summary.get('Return %', np.nan)
+                    ),
+                    'Max DD %': float(q_summary.get('Max DD %', np.nan)),
+                    'Δ Max DD pp': float(
+                        q_summary.get('Max DD %', np.nan) - baseline_summary.get('Max DD %', np.nan)
+                    ),
+                    'PF': float(q_pf) if pd.notna(q_pf) else np.nan,
+                    'Δ PF': (
+                        float(q_pf - base_pf)
+                        if pd.notna(q_pf) and pd.notna(base_pf)
+                        else np.nan
+                    ),
+                }
+                c_row.update(q_stability)
+                c_rows.append(c_row)
+                c_rules_by_id[c_id] = c_rule
+        if on_progress and (idx % 10 == 0 or idx + 1 == len(c_rules)):
+            on_progress(idx + 1, len(c_rules), 'fast' if prepared is not None else 'canonical')
+
+    # Save only fully completed scans, atomically, never partial C histories.
+    _candidate_scan_cache_save(cache_path, {
+        'kind': 'optional-c-fast-parity-v1',
+        'rows': c_rows,
+        'rules': c_rules_by_id,
+        'engine': 'fast' if prepared is not None else 'canonical',
+        'tested': len(c_rules),
+    })
+    return (
+        pd.DataFrame(c_rows), c_rules_by_id,
+        {'cache_hit': False,
+         'engine': 'fast' if prepared is not None else 'canonical',
+         'tested': len(c_rules),
+         'seconds': time.perf_counter() - started},
+    )
+
+
 def _candidate_fast_regime_persisted_btc_corr_features(frame):
     """Return BTC-correlation fields already present in the materialized event.
 
@@ -53576,120 +53771,39 @@ def _candidate_fast_render_auto_regime_scanner(
             with st.spinner(
                 "Testing selected component AND optional C qualifiers..."
             ):
-                c_rules = _candidate_fast_regime_auto_single_rules(
-                    resolved,
-                    c_feature_options,
-                )
-                c_rows = []
-                c_rules_by_id = {}
-                baseline_final = float(
-                    baseline_summary.get("Final equity", np.nan)
-                )
-                base_gate_final = float(
-                    base_component_summary.get("Final equity", np.nan)
-                    if base_component_summary
-                    else np.nan
-                )
-                base_gate_mask_count = int(base_component_mask.sum())
-                c_counter = 0
-                for c_rule in c_rules:
-                    c_mask = _candidate_fast_regime_auto_rule_mask(
+                progress = st.progress(0.0, text='Preparing optional C search...')
+
+                def c_scan_progress(done, total, engine):
+                    progress.progress(
+                        min(1.0, float(done) / max(1.0, float(total))),
+                        text=f'C qualifiers · {engine}: {done:,}/{total:,} rules',
+                    )
+
+                c_results, c_rules_by_id, c_meta = (
+                    _candidate_fast_regime_optional_c_scan(
                         resolved,
-                        c_rule,
-                    ).reindex(
-                        resolved.index,
-                        fill_value=False,
-                    ).fillna(False).astype(bool)
-                    qualified_mask = (
-                        base_component_mask & c_mask
-                    ).fillna(False).astype(bool)
-                    blocked_count = int(qualified_mask.sum())
-                    if (
-                        blocked_count <= 0
-                        or blocked_count >= len(resolved)
-                        or blocked_count == base_gate_mask_count
-                    ):
-                        continue
-
-                    qualified_portfolio, _ = (
-                        _candidate_fast_regime_auto_portfolio(
-                            resolved,
-                            qualified_mask,
-                        )
+                        variant=variant,
+                        selected_component_rule=selected_component_rule,
+                        c_feature_options=c_feature_options,
+                        local_reverse_labels=local_reverse_labels,
+                        baseline_summary=baseline_summary,
+                        base_component_summary=base_component_summary,
+                        on_progress=c_scan_progress,
                     )
-                    q_summary = _candidate_fast_portfolio_summary(
-                        qualified_portfolio
-                    )
-                    if not q_summary:
-                        continue
-                    q_stability = _candidate_fast_regime_portfolio_stability(
-                        qualified_portfolio
-                    )
-                    c_id = f"C{c_counter:04d}"
-                    c_counter += 1
-                    c_text = _candidate_fast_regime_auto_rule_text(
-                        c_rule,
-                        local_reverse_labels,
-                    )
-                    combined_text = (
-                        "("
-                        + _candidate_fast_regime_auto_rule_text(
-                            selected_component_rule,
-                            local_reverse_labels,
-                        )
-                        + ") AND ("
-                        + c_text
-                        + ")"
-                    )
-                    q_pf = q_summary.get("PF", np.nan)
-                    base_pf = baseline_summary.get("PF", np.nan)
-                    c_row = {
-                        "C ID": c_id,
-                        "C qualifier": c_text,
-                        "Combined gate": combined_text,
-                        "Kind": str(c_rule.get("kind", "C")),
-                        "Blocked": blocked_count,
-                        "Blocked %": float(
-                            qualified_mask.mean() * 100.0
-                        ),
-                        "Accepted": int(q_summary.get("Accepted", 0) or 0),
-                        "Final equity": float(
-                            q_summary.get("Final equity", np.nan)
-                        ),
-                        "Δ equity": float(
-                            q_summary.get("Final equity", np.nan)
-                            - baseline_final
-                        ),
-                        "Δ vs base gate": float(
-                            q_summary.get("Final equity", np.nan)
-                            - base_gate_final
-                        ),
-                        "Return %": float(q_summary.get("Return %", np.nan)),
-                        "Δ Return pp": float(
-                            q_summary.get("Return %", np.nan)
-                            - baseline_summary.get("Return %", np.nan)
-                        ),
-                        "Max DD %": float(q_summary.get("Max DD %", np.nan)),
-                        "Δ Max DD pp": float(
-                            q_summary.get("Max DD %", np.nan)
-                            - baseline_summary.get("Max DD %", np.nan)
-                        ),
-                        "PF": float(q_pf) if pd.notna(q_pf) else np.nan,
-                        "Δ PF": (
-                            float(q_pf - base_pf)
-                            if pd.notna(q_pf) and pd.notna(base_pf)
-                            else np.nan
-                        ),
-                    }
-                    c_row.update(q_stability)
-                    c_rows.append(c_row)
-                    c_rules_by_id[c_id] = c_rule
-
-                c_results = pd.DataFrame(c_rows)
+                )
+                progress.progress(1.0, text=(
+                    'Optional C cache reused' if c_meta['cache_hit']
+                    else f"Optional C complete · {c_meta['tested']:,} rules"
+                ))
+                st.caption(
+                    'C search: ' + ('persisted cache' if c_meta['cache_hit'] else c_meta['engine'])
+                    + ('' if c_meta['cache_hit'] else f" · {c_meta['seconds']:.1f}s")
+                )
                 c_cached = {
                     "signature": c_signature,
                     "results": c_results,
                     "rules": c_rules_by_id,
+                    "meta": c_meta,
                 }
                 st.session_state[c_cache_key] = c_cached
 
