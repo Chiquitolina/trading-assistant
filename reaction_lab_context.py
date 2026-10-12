@@ -184,6 +184,20 @@ def transition_label(delta):
     return 'EXPANDING' if delta>=5 else 'CONTRACTING' if delta<=-5 else 'STABLE'
 
 
+def assess_context_capture(core_missing, optional_missing, market_context_available):
+    """Classify causal core separately from explicitly unavailable optional research.
+
+    READY means causal inputs passed their checks. It DOES NOT mean all
+    research extensions have been computed or V1/V2 numerical parity proven.
+    """
+    complete = not core_missing and bool(market_context_available)
+    return {
+        'complete': bool(complete),
+        'status': 'READY' if complete else 'PARTIAL',
+        'notes': list(core_missing) + list(optional_missing),
+    }
+
+
 def context_for_event(event, service, methods, fingerprint, con, universe, sector_map=None, max_age_minutes=400):
     """Compute once, never rewrite: as-of data or explicit missing markers."""
     import pandas as pd
@@ -194,7 +208,7 @@ def context_for_event(event, service, methods, fingerprint, con, universe, secto
              'known_ts':known,'first_seen_ms':first_seen,
              'reaction_scanner_observation_type':observation,
              'candidate_v1_event_key':event_key,'candidate_v2_event_key':event_key,
-             'context_schema_version':1,'context_helper_fingerprint':fingerprint}
+             'context_schema_version':2,'context_helper_fingerprint':fingerprint}
     missing=[]; candle_archive={}
     sector_map=sector_map or {}
     context['sector']=sector_map.get(symbol)
@@ -231,6 +245,8 @@ def context_for_event(event, service, methods, fingerprint, con, universe, secto
     for tf in ('1m','5m','15m','1h'):
         val=methods['_reaction_driver_relative_volume_from_candles'](asof_input[tf],known,TIMES[tf])
         context[f'rel_volume_{tf}']=float(val) if pd.notna(val) else None
+        if context[f'rel_volume_{tf}'] is None:
+            missing.append(f'{tf}: relative volume unavailable or incomplete')
     price=raw.get('retest_close') or raw.get('retest_price')
     candidates=[];same=[];confluence=0
     for tf in ('30m','1h','4h'):
@@ -313,6 +329,10 @@ def context_for_event(event, service, methods, fingerprint, con, universe, secto
             missing.append(f'{tf} breadth: incomplete market coverage ({current.get("valid_symbols")}/{len(universe)})')
     context['Market alignment']=context.get('Market alignment 4h')
     context['flow_candle_timestamp']=context.get('flow_4h_candle_timestamp')
+    for tf in ('1h','4h'):
+        for key in (f'side_adjusted_strength_vs_btc_{tf}', f'market_breadth_{tf}'):
+            if context.get(key) is None:
+                missing.append(f'{key}: unavailable causal market context')
     context['market_context_available']=bool(context.get('side_adjusted_strength_vs_btc_4h') is not None and
                                              context.get('market_breadth_4h') is not None)
     # Independent sector normalizations need the canonical v1_market_regime module.
@@ -320,10 +340,14 @@ def context_for_event(event, service, methods, fingerprint, con, universe, secto
     for field in ('sector_strength_vs_btc_4h','relative_volume_4h',
                   'return_rank_pct_4h','volume_rank_pct_4h'):
         context[field]=None
-    missing.append('Sector ranks/relative volume 4h: require canonical market regime adapter')
-    complete=(not missing and context['market_context_available'])
-    return {'context':context,'candles':candle_archive,'notes':missing,
-            'complete':complete,'status':'READY' if complete else 'PARTIAL'}
+    optional_missing=['Sector ranks/relative volume 4h: require canonical market regime adapter']
+    context['sector_context_status']='PENDING_CANONICAL_ADAPTER'
+    context['sector_context_available']=False
+    context['optional_context_missing']=optional_missing
+    outcome=assess_context_capture(missing, optional_missing, context['market_context_available'])
+    context['core_context_available']=outcome['complete']
+    return {'context':context,'candles':candle_archive,'notes':outcome['notes'],
+            'complete':outcome['complete'],'status':outcome['status']}
 
 
 def outcomes_from_bars(bars, side):

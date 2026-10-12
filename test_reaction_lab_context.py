@@ -11,6 +11,20 @@ import reaction_lab_context as ctx
 from reaction_lab_auto_paths import encode_path
 
 class ContextTests(unittest.TestCase):
+    def test_optional_sector_context_does_not_block_causal_core(self):
+        result=ctx.assess_context_capture([], ['Sector adapter pending'], True)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['status'], 'READY')
+        self.assertEqual(result['notes'], ['Sector adapter pending'])
+
+    def test_missing_essential_data_stays_partial(self):
+        result=ctx.assess_context_capture(['1m: historical as-of candles missing'],
+                                          ['Sector adapter pending'], True)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['status'], 'PARTIAL')
+        self.assertEqual(len(result['notes']),2)
+        self.assertFalse(ctx.assess_context_capture([], [], False)['complete'])
+
     def test_closed_candles_only_asof(self):
         f=pd.DataFrame({'timestamp':[0,60000,120000,180000],'close':[1,2,3,4]})
         got=ctx.closed_at(f,'1m',180000)
