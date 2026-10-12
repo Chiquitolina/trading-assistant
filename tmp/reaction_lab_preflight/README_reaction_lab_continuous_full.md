@@ -9,6 +9,15 @@
 - `reaction_lab_scan_bridge.py`: permite leer los eventos persistidos y sumar en memoria los paths SQLite al almacén existente del dashboard. Solo fusiona al motor de Candidates eventos muy recientes (**últimos 300 minutos**) y únicamente si la selección es canónica (15m/3x3/0.10/0.20/360); el resto queda preservado en el journal. Así no se recalcula contexto histórico antiguo desde Redis actual.
 - Panel *Continuous REACTION scanner · last 100 persisted* en la vista Fast de Reaction Lab, incluso si la matriz Fast está desactualizada.
 
+## Cobertura y alcance precisos
+
+- **No elimina estrategias, monitores o pickles anteriores.** Solo `install_reaction_lab_bridge.py --apply` modifica `dashboard/app.py` y previamente hace backup.
+- El scanner continuo detecta el **universo estructural REACTION 15m / 3x3 / 0.20% / 0.10%** para los símbolos listados en `volume_exhaustion_events.csv` **al iniciar**; no equivale automáticamente a los 290 del replay ni a todos los pares de Binance. Las membresías V1 SHORT/LONG y variantes V2 siguen clasificándose por sus reglas originales.
+- Los símbolos nuevos que aparezcan después de iniciar el proceso requieren reiniciarlo en esta versión (la lista se captura una vez en startup).
+- Medir `symbols_requested`, `redis_1m_ok`, `redis_15m_ok` y latencia antes de afirmar cobertura completa. En ejecución real los historiales pueden presentar huecos y el primer lote incluye observaciones retrospectivas `RECOVERED_WINDOW`.
+- La matriz Candidate no se recalcula sola; el bridge hace los paths nuevos consultables al recalcularla y exhibe un feed persistido.
+- **Corrección del instalador:** la vista `_candidate_v1_matched_control_path_store` recibe `reaction_rows`, no `candidate_rows`. La prueba de integración comprueba ahora las tres firmas y detecta este error en futuros cambios.
+
 ## Limitaciones transparentes
 
 1. **El scanner debe estar operativo** y Redis debe tener las velas al cerrar: interrupciones largas no se reconstruyen mágicamente; la retención de 1m sigue siendo de 400 velas. Inspeccionar cobertura, retardos, gaps y estados es obligatorio.

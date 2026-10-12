@@ -49,7 +49,14 @@ def replace_function_return(source,name):
     segment=segment.replace(marker, '    from reaction_lab_scan_bridge import merge_auto_paths\n    legacy = candidate_v1_fast_refresh_path_store(',1)
     if not segment.rstrip().endswith('    )'):
         raise RuntimeError(f'Unexpected end of {name}; cannot patch safely')
-    segment=segment.rstrip()+ '\n    return merge_auto_paths(legacy, BASE_DIR, candidate_rows)\n'
+    row_parameter = {
+        '_candidate_v1_fast_path_store': 'candidate_rows',
+        '_candidate_v1_matched_control_path_store': 'reaction_rows',
+        '_candidate_v2_path_store': 'candidate_rows',
+    }.get(name)
+    if row_parameter is None or not any(arg.arg == row_parameter for arg in func.args.args):
+        raise RuntimeError(f'Unexpected Candidate rows parameter in {name}')
+    segment=segment.rstrip()+ f'\n    return merge_auto_paths(legacy, BASE_DIR, {row_parameter})\n'
     # Preserve newline formatting based on original splitlines
     return ''.join(text[:func.lineno-1])+segment+''.join(text[func.end_lineno:])
 

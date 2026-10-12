@@ -32,7 +32,7 @@
          refresh_interval_seconds=CANDIDATE_V1_PATH_REFRESH_SECONDS,
          force=bool(force),
      )
-+    return merge_auto_paths(legacy, BASE_DIR, candidate_rows)
++    return merge_auto_paths(legacy, BASE_DIR, reaction_rows)
  
  
  @st.cache_data(ttl=120, show_spinner=False)

@@ -127,6 +127,21 @@ class Tests(unittest.TestCase):
         compile(after,'app.py','exec')
         self.assertIn('merge_scanner_reactions(',after)
         self.assertEqual(after.count('return merge_auto_paths('),3)
+        # Validate each wrapper passes its actual function parameter; compile()
+        # would not detect the runtime NameError for the matched-control view.
+        tree=__import__('ast').parse(after)
+        wrappers={
+            '_candidate_v1_fast_path_store':'candidate_rows',
+            '_candidate_v1_matched_control_path_store':'reaction_rows',
+            '_candidate_v2_path_store':'candidate_rows',
+        }
+        for function, expected in wrappers.items():
+            fn=next(n for n in tree.body
+                if isinstance(n,__import__('ast').FunctionDef) and n.name==function)
+            last=fn.body[-1]
+            self.assertIsInstance(last,__import__('ast').Return)
+            self.assertEqual(last.value.func.id,'merge_auto_paths')
+            self.assertEqual(last.value.args[2].id,expected)
         self.assertEqual(before.count('merge_scanner_reactions('),0)
         with self.assertRaises(RuntimeError):installer.modify(after)
 
