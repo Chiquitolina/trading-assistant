@@ -84899,10 +84899,15 @@ def render_reaction_lab_cohort_explorer(cohort_mode, symbols):
     c3.metric("Live observed", int(dataset["continuous_live_count"]))
     c4.metric("Recovered post-corte", int(dataset["continuous_recovered_count"]))
 
+    legacy_count_label = (
+        str(dataset["legacy_monitor_count"])
+        if cohort_mode != "Continuous V1"
+        else "no cargado en esta vista"
+    )
     st.caption(
         f"Scanner recuperadas antes del corte: "
         f"{dataset['scanner_startup_recovered_count']}. "
-        f"Legacy monitor antes del corte: {dataset['legacy_monitor_count']}. "
+        f"Legacy monitor antes del corte: {legacy_count_label}. "
         "Las señales anteriores al corte nunca entran en Continuous V1. "
         "Los Event IDs repetidos entre fuentes aparecen una sola vez."
     )
@@ -85059,9 +85064,23 @@ if selected_section == "reaction_swing_lab":
             "this optimization does not change Candidate membership."
         )
     else:
+        # Global cohort choice persists while switching all six research tools.
+        cohort_mode = st.radio(
+            "Research cohort · global",
+            options=["Continuous V1", "Legacy", "Todos"],
+            index=0,
+            horizontal=True,
+            key="reaction_lab_global_cohort_v2",
+            help=(
+                "Continuous: only post-cutover scanner Event IDs. "
+                "Legacy: original independent research engines. "
+                "Todos: both presented separately, never a combined portfolio."
+            ),
+        )
         lab_mode = st.radio(
             "Research view",
             options=[
+                "📡 REACTION journal",
                 "🧬 Candidate Research",
                 "🔁 REACTION / Retests",
                 "🎯 Pivots / Confirmations",
@@ -85073,52 +85092,36 @@ if selected_section == "reaction_swing_lab":
         )
 
         st.caption(
-            "Only the selected research view is rendered. Candidate V1/V2 "
-            "share one cached all-symbol structural scan; causal market context "
-            "is cached per Candidate in-session, and completed 1m paths remain "
-            "persisted on disk. This avoids repeating the heaviest data work on "
-            "every Streamlit widget rerun."
+            "Continuous V1 usa REACTIONs y contextos persistidos; "
+            "Legacy conserva las herramientas y snapshots anteriores. "
+            "Todos los presenta por separado, sin mezclar portfolios."
         )
 
-        if lab_mode in ("🧬 Candidate Research", "🔁 REACTION / Retests"):
-            cohort_mode = st.radio(
-                "Research cohort",
-                options=["Continuous V1", "Legacy", "Todos"],
-                index=0,
-                horizontal=True,
-                key="reaction_lab_research_cohort",
-                help=(
-                    "Continuous V1 usa únicamente REACTIONs del scanner "
-                    "conocidas después del corte. Legacy mantiene los datos "
-                    "anteriores y Todos muestra ambos con procedencia."
-                ),
+        # Continuous always reads the same persisted Event IDs in EVERY view.
+        # Legacy engines are intentionally unchanged and never run in Continuous.
+        if cohort_mode in ("Continuous V1", "Todos"):
+            from reaction_lab_research_view import render_cohort_research
+            render_cohort_research(
+                BASE_DIR, "Continuous V1", lab_mode, structural_symbols
             )
-            render_reaction_lab_cohort_explorer(cohort_mode, structural_symbols)
-            if cohort_mode == "Continuous V1":
-                # Do not run old Candidate snapshots or rolling Redis scanners
-                # in the prospective cohort: that would silently mix evidence.
-                st.stop()
+            if cohort_mode == "Todos":
+                st.divider()
+                st.markdown("### 🗄️ Legacy — herramientas existentes")
 
-            # The historical engine predates this cohort selection and cannot
-            # be truthfully presented as an isolated Continuous portfolio.
-            show_compat = st.checkbox(
-                "Mostrar motor histórico existente (sin filtro de cohorte)",
-                value=False,
-                key="reaction_lab_cohort_legacy_compatibility",
-                help=(
-                    "Abre las tablas/matrices anteriores sin modificarlas. "
-                    "Este motor NO se filtra por el corte de Continuous V1."
-                ),
+        if cohort_mode == "Continuous V1":
+            pass  # no hidden legacy rebuild, refresh or monitor writes
+        elif lab_mode == "📡 REACTION journal":
+            st.caption(
+                "Journal estructural 15m/3x3 del universo observado por el scanner "
+                "(actualmente 290 símbolos), sin filtros de Candidate V1/V2. "
+                "No representa todas las variantes de swing ni confirma cobertura histórica perfecta."
             )
-            if not show_compat:
-                st.stop()
-            st.warning(
-                "Motor histórico de compatibilidad: los snapshots, matrices "
-                "y portfolios siguientes NO están filtrados por el corte. "
-                "Son independientes de la tabla de cohortes superior."
+            render_reaction_lab_cohort_explorer(
+                "Legacy" if cohort_mode == "Todos" else cohort_mode,
+                structural_symbols,
             )
 
-        if lab_mode == "🧬 Candidate Research":
+        elif lab_mode == "🧬 Candidate Research":
             candidate_version = st.radio(
                 "Candidate",
                 options=[
