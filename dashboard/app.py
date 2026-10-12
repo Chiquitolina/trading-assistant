@@ -15448,7 +15448,8 @@ def _candidate_v1_fast_path_store(candidate_rows, force=False):
     if candidate_rows is None or candidate_rows.empty:
         return pd.DataFrame()
 
-    return candidate_v1_fast_refresh_path_store(
+    from reaction_lab_scan_bridge import merge_auto_paths
+    legacy = candidate_v1_fast_refresh_path_store(
         candidate_rows=candidate_rows,
         store_path=CANDIDATE_V1_PATH_STORE_FILE,
         candle_loader=load_volume_exhaustion_research_candles,
@@ -15458,6 +15459,7 @@ def _candidate_v1_fast_path_store(candidate_rows, force=False):
         refresh_interval_seconds=CANDIDATE_V1_PATH_REFRESH_SECONDS,
         force=bool(force),
     )
+    return merge_auto_paths(legacy, BASE_DIR, candidate_rows)
 
 
 def _candidate_v1_attach_fast_path_metrics(
@@ -16872,7 +16874,8 @@ def _candidate_v1_matched_control_path_store(reaction_rows, force=False):
     if reaction_rows is None or reaction_rows.empty:
         return pd.DataFrame()
 
-    return candidate_v1_fast_refresh_path_store(
+    from reaction_lab_scan_bridge import merge_auto_paths
+    legacy = candidate_v1_fast_refresh_path_store(
         candidate_rows=reaction_rows,
         store_path=CANDIDATE_V1_MATCHED_REACTION_PATH_STORE_FILE,
         candle_loader=load_volume_exhaustion_research_candles,
@@ -16882,6 +16885,7 @@ def _candidate_v1_matched_control_path_store(reaction_rows, force=False):
         refresh_interval_seconds=CANDIDATE_V1_PATH_REFRESH_SECONDS,
         force=bool(force),
     )
+    return merge_auto_paths(legacy, BASE_DIR, reaction_rows)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -20309,7 +20313,8 @@ def _reaction_lab_shared_candidate_scan_cached(
     max_retest_age_minutes,
 ):
     """One all-symbol structural scan shared by Candidate V1 and Candidate V2."""
-    return scan_confirmed_swing_retests_all_symbols(
+    from reaction_lab_scan_bridge import merge_scanner_reactions
+    current = scan_confirmed_swing_retests_all_symbols(
         symbols=tuple(str(symbol) for symbol in symbols),
         swing_timeframes=(str(swing_timeframe),),
         swing_detector_items=((str(swing_timeframe), str(swing_detector)),),
@@ -20318,6 +20323,13 @@ def _reaction_lab_shared_candidate_scan_cached(
         min_departure_pct=float(min_departure_pct),
         max_age_minutes=int(max_age_minutes),
         max_retest_age_minutes=int(max_retest_age_minutes),
+    )
+    return merge_scanner_reactions(
+        current, BASE_DIR, symbols=symbols,
+        timeframe=swing_timeframe, detector=swing_detector,
+        min_prominence=min_swing_prominence_pct,
+        tolerance=retest_tolerance_pct, departure=min_departure_pct,
+        max_age=max_age_minutes,
     )
 
 
@@ -37090,7 +37102,8 @@ def _candidate_v2_path_store(candidate_rows, force=False):
     if rows.empty:
         return pd.DataFrame()
     active_store_path = _candidate_analysis_path_store_file(rows)
-    return candidate_v1_fast_refresh_path_store(
+    from reaction_lab_scan_bridge import merge_auto_paths
+    legacy = candidate_v1_fast_refresh_path_store(
         candidate_rows=rows,
         store_path=active_store_path,
         candle_loader=load_volume_exhaustion_research_candles,
@@ -37100,6 +37113,7 @@ def _candidate_v2_path_store(candidate_rows, force=False):
         refresh_interval_seconds=CANDIDATE_V1_PATH_REFRESH_SECONDS,
         force=bool(force),
     )
+    return merge_auto_paths(legacy, BASE_DIR, rows)
 
 
 def _candidate_v2_reaction_known_ts(frame):
@@ -85247,6 +85261,25 @@ if selected_section == "reaction_swing_lab":
                     )
 
             if fast_snapshot_ready:
+                # Fast view also shows the persistent feed even if the heavy
+                # Candidate materialization has not been refreshed.
+                from reaction_lab_scan_bridge import scan_rows
+                latest_scanner_events = scan_rows(
+                    BASE_DIR / 'reports/reaction_lab/scanner_events_v1.sqlite3',
+                    symbols=structural_symbols, limit=100,
+                )
+                if not latest_scanner_events.empty:
+                    with st.expander('📡 Continuous REACTION scanner · last 100 persisted', expanded=False):
+                        st.caption(
+                            'Live-feed journal only. Fast Candidate matrix is a separate snapshot; '
+                            'new events are not automatically scored/executed until materialized.'
+                        )
+                        scan_fields = [x for x in (
+                            'symbol','signal','retest_timestamp','status',
+                            'reaction_scanner_first_seen_ms',
+                            'reaction_scanner_observation_type'
+                        ) if x in latest_scanner_events.columns]
+                        st.dataframe(latest_scanner_events[scan_fields], use_container_width=True)
                 render_candidate_fast_explorer(
                     candidate_version="v1" if selected_profile == "v1_raw" else "v2"
                 )
