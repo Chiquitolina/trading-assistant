@@ -84870,6 +84870,171 @@ if selected_section == "micro_reaction":
                 )
 
 
+def render_reaction_lab_cohort_explorer(cohort_mode, symbols):
+    """Read-only cohort browser. Never materializes Candidate/portfolio snapshots."""
+    from reaction_lab_cohort_view import load_reaction_cohort
+
+    dataset = load_reaction_cohort(BASE_DIR, mode=cohort_mode)
+    st.markdown(f"### 📡 {cohort_mode} · REACTION journal")
+
+    if dataset["cutoff_utc"] is None:
+        st.warning(
+            "Todavía no hay un primer ciclo exitoso en scanner_events_v1.sqlite3. "
+            "Continuous V1 está vacío hasta que el scanner establezca el corte."
+        )
+    else:
+        st.caption(
+            f"Inicio del cohort: {dataset['cutoff_utc']} "
+            f"({dataset['cutoff_source']}). "
+            "Se compara la hora causal de la señal (retest + 1m), no el momento "
+            "en que Streamlit abrió la página."
+        )
+
+    for error in dataset["errors"]:
+        st.warning(f"Auditoría de cohorte: {error}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("REACTIONs de la vista", int(dataset["shown"]))
+    c2.metric("Continuous V1", int(dataset["continuous_count"]))
+    c3.metric("Live observed", int(dataset["continuous_live_count"]))
+    c4.metric("Recovered post-corte", int(dataset["continuous_recovered_count"]))
+
+    st.caption(
+        f"Scanner recuperadas antes del corte: "
+        f"{dataset['scanner_startup_recovered_count']}. "
+        f"Legacy monitor antes del corte: {dataset['legacy_monitor_count']}. "
+        "Las señales anteriores al corte nunca entran en Continuous V1. "
+        "Los Event IDs repetidos entre fuentes aparecen una sola vez."
+    )
+
+    if cohort_mode == "Continuous V1":
+        st.info(
+            "Esta es la muestra prospectiva persistida, no el snapshot Fast "
+            "de Candidate V1/V2. Las métricas de TP/SL, HTF Room, "
+            "Strength y portfolios NO se recalculan automáticamente. "
+            "Las REACTIONs recuperadas con retraso posterior al corte "
+            "se muestran identificadas, sin tratarlas como LIVE_OBSERVED."
+        )
+    elif cohort_mode == "Legacy":
+        if not dataset["legacy_frozen"]:
+            st.warning(
+                "No se encontró copia legacy_archive_*: esta vista lee "
+                "los monitores actuales filtrados por fecha causal. "
+                "Un backfill antiguo todavía podría cambiar el histórico; "
+                "para congelarlo definitivamente, archivá los CSV."
+            )
+        st.caption(
+            "Legacy incluye únicamente eventos anteriores al corte. "
+            "Si existe un archivo legacy_archive_*, se prioriza esa copia "
+            "congelada; si no, se leen los monitores originales y se filtran."
+        )
+    else:
+        st.caption(
+            "Todos combina fuentes por Event ID sin duplicarlas y conserva "
+            "las etiquetas Legacy y Continuous V1. No combina portfolios."
+        )
+
+    rows = dataset["rows"]
+    if not rows:
+        st.info(
+            "No hay REACTIONs para esta cohorte todavía. "
+            "No se importarán automáticamente eventos antiguos para rellenarla."
+        )
+        return
+
+    left, middle, right = st.columns([2, 1, 1])
+    with left:
+        available_symbols = sorted(
+            {row["symbol"] for row in rows}
+            & {str(symbol).upper() for symbol in symbols}
+        )
+        symbol = st.selectbox(
+            "Símbolo", ["ALL"] + available_symbols,
+            key="reaction_lab_cohort_symbol",
+        )
+    with middle:
+        side = st.selectbox(
+            "Side", ["ALL", "LONG", "SHORT"],
+            key="reaction_lab_cohort_side",
+        )
+    with right:
+        origin_options = ["ALL"] + sorted({r["observation_type"] for r in rows})
+        observation = st.selectbox(
+            "Origen", origin_options,
+            key="reaction_lab_cohort_observation",
+        )
+
+    p1, p2 = st.columns([2, 1])
+    with p1:
+        path_filter = st.selectbox(
+            "Path 1m", ["Todos", "Con velas", "ACTIVE", "COMPLETE", "Sin path"],
+            key="reaction_lab_cohort_path_filter",
+        )
+    with p2:
+        row_limit = st.selectbox(
+            "Filas visibles", [100, 250, 500, 1000, 5000], index=2,
+            key="reaction_lab_cohort_row_limit",
+        )
+
+    selected = []
+    for item in rows:
+        if symbol != "ALL" and item["symbol"] != symbol:
+            continue
+        if side != "ALL" and item["signal"] != side:
+            continue
+        if observation != "ALL" and item["observation_type"] != observation:
+            continue
+        if path_filter == "Con velas" and item["path_bars"] == 0:
+            continue
+        if path_filter == "Sin path" and item["path_bars"] != 0:
+            continue
+        if path_filter in ("ACTIVE", "COMPLETE") and item["path_state"] != path_filter:
+            continue
+        selected.append(item)
+
+    st.caption(f"Coincidencias: {len(selected)} · Mostrando: {min(len(selected), row_limit)}")
+    if not selected:
+        st.info("No hay eventos que coincidan con estos filtros.")
+        return
+
+    visible = pd.DataFrame(selected[:row_limit])
+    visible["retest_utc"] = pd.to_datetime(
+        visible["retest_timestamp"], unit="ms", utc=True, errors="coerce"
+    )
+    cols = [
+        "cohort", "event_key", "symbol", "signal", "retest_utc",
+        "observation_type", "sources", "path_state", "path_bars",
+        "first_seen_ms",
+    ]
+    st.dataframe(
+        visible[cols], use_container_width=True, hide_index=True,
+        key="reaction_lab_cohort_table",
+    )
+
+    chosen = st.selectbox(
+        "Inspeccionar REACTION persistida",
+        options=[r["event_key"] for r in selected[:row_limit]],
+        key="reaction_lab_cohort_inspect_event",
+    )
+    detail = next(row for row in selected if row["event_key"] == chosen)
+    with st.expander("Identidad causal y persistencia 1m", expanded=False):
+        st.json({
+            "event_id": detail["event_key"],
+            "cohort": detail["cohort"],
+            "known_ts": detail["known_ts"],
+            "first_seen_ms": detail["first_seen_ms"],
+            "observation_type": detail["observation_type"],
+            "sources": detail["sources"],
+            "path_state": detail["path_state"],
+            "saved_1m_candles": detail["path_bars"],
+            "horizon_1m": 360,
+        })
+        st.caption(
+            "Solo diagnóstico del journal y del colector. No se inventan "
+            "velas faltantes ni se generan resultados forward en esta vista."
+        )
+
+
 if selected_section == "reaction_swing_lab":
     st.markdown(
         "## 🧪 Reaction & Swing Lab"
@@ -84914,6 +85079,44 @@ if selected_section == "reaction_swing_lab":
             "persisted on disk. This avoids repeating the heaviest data work on "
             "every Streamlit widget rerun."
         )
+
+        if lab_mode in ("🧬 Candidate Research", "🔁 REACTION / Retests"):
+            cohort_mode = st.radio(
+                "Research cohort",
+                options=["Continuous V1", "Legacy", "Todos"],
+                index=0,
+                horizontal=True,
+                key="reaction_lab_research_cohort",
+                help=(
+                    "Continuous V1 usa únicamente REACTIONs del scanner "
+                    "conocidas después del corte. Legacy mantiene los datos "
+                    "anteriores y Todos muestra ambos con procedencia."
+                ),
+            )
+            render_reaction_lab_cohort_explorer(cohort_mode, structural_symbols)
+            if cohort_mode == "Continuous V1":
+                # Do not run old Candidate snapshots or rolling Redis scanners
+                # in the prospective cohort: that would silently mix evidence.
+                st.stop()
+
+            # The historical engine predates this cohort selection and cannot
+            # be truthfully presented as an isolated Continuous portfolio.
+            show_compat = st.checkbox(
+                "Mostrar motor histórico existente (sin filtro de cohorte)",
+                value=False,
+                key="reaction_lab_cohort_legacy_compatibility",
+                help=(
+                    "Abre las tablas/matrices anteriores sin modificarlas. "
+                    "Este motor NO se filtra por el corte de Continuous V1."
+                ),
+            )
+            if not show_compat:
+                st.stop()
+            st.warning(
+                "Motor histórico de compatibilidad: los snapshots, matrices "
+                "y portfolios siguientes NO están filtrados por el corte. "
+                "Son independientes de la tabla de cohortes superior."
+            )
 
         if lab_mode == "🧬 Candidate Research":
             candidate_version = st.radio(
