@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 FIFTEEN_MS = 900_000
@@ -122,6 +123,112 @@ def combined_archived_15m(archived, path, known_ts, limit=400):
     else:combined=pd.concat([asof,future],ignore_index=True)
     if combined.empty:return combined
     return combined.sort_values('timestamp').drop_duplicates('timestamp',keep='first').tail(int(limit)).reset_index(drop=True)
+
+
+def observed_reaction_run(bars, *, retest_timestamp, retest_close, signal):
+    """Legacy reaction_mfe_pct semantics on the archived post-retest 1m prefix.
+
+    The baseline is the REACTION candle close (NOT next-bar entry open).
+    The REACTION candle is excluded; the first usable bar is retest+60s.
+    Missing first minute, gaps, or invalid OHLC stop the observation.  A
+    missing observation is None, never zero.  This is descriptive hindsight,
+    never a causal feature for candidate eligibility.
+    """
+    baseline = _num(retest_close)
+    stamp = _num(retest_timestamp)
+    side = str(signal).upper()
+    if baseline is None or baseline <= 0 or stamp is None or side not in ('LONG', 'SHORT'):
+        return None
+    if not bars:
+        return None
+    next_ts = int(stamp) + ONE_MS
+    expected = next_ts
+    favorable = 0.0
+    observed = 0
+    # The collector contract is at most 360 consecutive, fully closed bars.
+    for item in bars[:360]:
+        try:
+            ts, _open, high, low, _close = item[:5]
+            ts = int(ts)
+            high = _num(high)
+            low = _num(low)
+        except (TypeError, ValueError, IndexError):
+            break
+        if ts != expected or high is None or low is None or low > high or low <= 0:
+            break
+        move = ((high / baseline - 1.0) * 100.0 if side == 'LONG'
+                else (1.0 - low / baseline) * 100.0)
+        favorable = max(favorable, move)
+        observed += 1
+        expected += ONE_MS
+    if observed == 0:
+        return None
+    return {'reaction_mfe_pct': float(max(0.0, favorable)),
+            'reaction_observed_min': float(observed)}
+
+
+def attach_observed_reaction_runs(project, frame):
+    """Enrich Continuous rows from persisted paths; never scan live Redis.
+
+    This deliberately does NOT use followups.mfe_180m_pct: that field has a
+    different price baseline (the next-bar OPEN) from Legacy reaction run.
+    """
+    import pandas as pd
+    import zlib
+    from reaction_lab_auto_paths import decode_path
+
+    if frame is None or frame.empty:
+        return pd.DataFrame() if frame is None else frame.copy()
+    out = frame.copy()
+    out['reaction_mfe_pct'] = float('nan')
+    out['reaction_observed_min'] = float('nan')
+    db = Path(project) / 'reports/reaction_lab/auto_paths_v1.sqlite3'
+    if not db.is_file():
+        return out
+    index_by_key = {str(k): idx for idx, k in out['event_key'].items()}
+    keys = list(index_by_key)
+    # In-memory keyed lookups, no writes or global paths loading.
+    with closing(sqlite3.connect(f'file:{db.resolve()}?mode=ro', uri=True, timeout=10)) as con:
+        for offset in range(0, len(keys), 400):
+            batch = keys[offset:offset+400]
+            if not batch:
+                continue
+            placeholders = ','.join('?' for _ in batch)
+            query = ('SELECT event_key, path_blob FROM events WHERE count>0 '
+                     f'AND event_key IN ({placeholders})')
+            for key, blob in con.execute(query, batch):
+                if not blob:
+                    continue
+                idx = index_by_key.get(str(key))
+                if idx is None:
+                    continue
+                try:
+                    bars = decode_path(blob)
+                except (TypeError, ValueError, zlib.error):
+                    # Treat corrupted/missing paths as unavailable; do not invent a run.
+                    # The inspector continues to show the Event ID and status.
+                    continue
+                row = out.loc[idx]
+                measure = observed_reaction_run(
+                    bars,
+                    retest_timestamp=row.get('retest_timestamp'),
+                    retest_close=row.get('retest_close'),
+                    signal=row.get('signal'),
+                )
+                if measure is not None:
+                    for field, value in measure.items():
+                        out.at[idx, field] = value
+    return out
+
+
+def sort_retests_by_run(frame):
+    """Highest observed post-REACTION MFE first; no-path events last."""
+    if frame is None or frame.empty:
+        return frame
+    return frame.sort_values(
+        ['reaction_mfe_pct', 'retest_timestamp', 'event_key'],
+        ascending=[False, False, True], na_position='last', kind='stable',
+    ).copy()
 
 
 def archived_event_candles(project, key):

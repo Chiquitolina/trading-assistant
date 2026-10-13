@@ -171,6 +171,15 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
     if df.empty:
         st.info('Sin coincidencias.');return
 
+    if 'REACTION / Retests' in view_name:
+        # Exactly Legacy's observable post-REACTION MFE semantics, but using
+        # the Continuous 1m archive (up to 360 closed bars), not live Redis.
+        # These values describe FUTURE development, not causal entry features.
+        from reaction_lab_unified_adapter import (
+            attach_observed_reaction_runs, sort_retests_by_run,
+        )
+        df = sort_retests_by_run(attach_observed_reaction_runs(project, df))
+
     if 'Candidate Research' in view_name:
         st.markdown('#### Candidate V1/V2 — contexto y variantes')
         st.caption('Elegibilidad de investigación basada en campos disponibles; NO constituye ejecución ni portfolio congelado.')
@@ -192,6 +201,10 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
     elif 'REACTION / Retests' in view_name:
         st.markdown('#### Retests persistidos')
         st.caption('Scanner continuo fijo: 15m 3x3, retest 0.10%, departure 0.20%. Otros detectores siguen siendo estudios independientes.')
+        st.caption('Orden: mayor recorrido favorable observado desde el cierre de la REACTION (run/MFE post-retest). '
+                   'No confundir con departure previo al retest ni con rendimiento de una operación. '
+                   'Mide hasta 360 minutos de path 1m archivado; los eventos recientes pueden crecer y '
+                   'los que no tienen velas consecutivas válidas aparecen al final sin un porcentaje inventado.')
     elif 'Pivots / Confirmations' in view_name:
         st.markdown('#### Swing → confirmación → retest')
         st.caption('Timestamps causales congelados por Event ID. No incluye todos los pivots sin retest.')
@@ -212,7 +225,7 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
         elif 'Pivots' in view_name: extra=['pivot_timestamp','actionable_timestamp','pivot_price','departure_timestamp','retest_price']
         elif 'Event swing' in view_name: extra=['nearest_opposing_room_pct','opposing_room_30m_pct','opposing_room_1h_pct','opposing_room_4h_pct','htf_confluence_count_0_50']
         elif 'Volume' in view_name: extra=['rel_volume_1m','rel_volume_5m','rel_volume_15m','rsi14_1m','rsi14_15m','aligned_rsi_extreme_count']
-        else:extra=['pivot_timestamp','swing_price','max_departure_pct','retest_distance_pct','mfe_180m_pct']
+        else:extra=['reaction_mfe_pct','reaction_observed_min','pivot_timestamp','swing_price','max_departure_pct','retest_distance_pct','mfe_180m_pct']
         return [c for c in base+extra if c in df.columns]
     st.dataframe(df[columns_for_mode()].head(2500),hide_index=True,use_container_width=True)
     keys=df['event_key'].astype(str).tolist()
