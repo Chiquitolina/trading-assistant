@@ -66,6 +66,180 @@ def selected_event_path(project,key):
     return read_auto_paths_dataframe(path,event_keys={key})
 
 
+
+# Continuous inspector uses the original, immutable event and OHLC snapshots.
+# It does not run Redis backtests or change the Legacy inspector.
+def _valid_number(value):
+    import math
+    try:
+        result = float(value)
+        return result if math.isfinite(result) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def persisted_room_fields(row):
+    """Use frozen causally available HTF fields; never recompute from live Redis."""
+    price = _valid_number(row.get('retest_close'))
+    if price is None:
+        price = _valid_number(row.get('retest_price'))
+    swing_tf = row.get('nearest_opposing_swing_tf')
+    if not isinstance(swing_tf, str) or not swing_tf.strip():
+        swing_tf = None
+    rsi_ready = all(_valid_number(row.get('rsi14_' + tf)) is not None
+                    for tf in ('1m', '5m', '15m', '1h'))
+    return {
+        'reaction_price': price,
+        'room_pct': _valid_number(row.get('nearest_opposing_room_pct')),
+        'swing_tf': swing_tf,
+        'swing_price': _valid_number(row.get('nearest_opposing_swing_price')),
+        'swing_confirmed': _valid_number(row.get('nearest_opposing_swing_confirmed_timestamp')),
+        'swing_actionable': _valid_number(row.get('nearest_opposing_swing_actionable_timestamp')),
+        'aligned_rsi_count': (_valid_number(row.get('aligned_rsi_extreme_count')) if rsi_ready else None),
+    }
+
+
+def frozen_closed_15m(candles, known_ts, limit):
+    """Only snapshot 15m candles that were FULLY closed at event-known time."""
+    import pandas as pd
+    if not candles:
+        return pd.DataFrame()
+    df = pd.DataFrame(candles)
+    required = {'timestamp', 'open', 'high', 'low', 'close'}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+    for col in required:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    known = _valid_number(known_ts)
+    if known is None:
+        return pd.DataFrame()
+    return (
+        df.dropna(subset=list(required))
+        .loc[lambda x: x['timestamp'] + 900_000 <= known]
+        .sort_values('timestamp')
+        .drop_duplicates(subset=['timestamp'], keep='last')
+        .tail(max(1, int(limit)))
+        .reset_index(drop=True)
+    )
+
+
+def persisted_retest_markers(row):
+    """Markers saved by the canonical structural scanner (no synthetic pivots)."""
+    result = []
+    for label, timestamp_field, price_fields in (
+        ('Pivot', 'pivot_timestamp', ('swing_price', 'pivot_price')),
+        ('Confirmed', 'actionable_timestamp', ('entry_price', 'swing_price')),
+        ('Departure', 'departure_timestamp', ('departure_price',)),
+        ('REACTION', 'retest_timestamp', ('retest_price', 'retest_close')),
+    ):
+        stamp = _valid_number(row.get(timestamp_field))
+        price = next((_valid_number(row.get(k)) for k in price_fields
+                      if _valid_number(row.get(k)) is not None), None)
+        if stamp is not None and price is not None:
+            result.append((label, int(stamp), price))
+    return result
+
+
+def render_persisted_retest_inspector(row, recorded, view_name):
+    """Show the Legacy-style inspection controls on persisted Continuous events.
+
+    Unlike the live Legacy inspector, the 15m plot contains ONLY the as-of
+    snapshot. The post-event 1m path is rendered separately below.
+    """
+    import pandas as pd
+    import plotly.graph_objects as go
+    import streamlit as st
+
+    room = persisted_room_fields(row)
+    show_room = st.checkbox(
+        'Show causal HTF room on chart', value=True,
+        key='continuous_retest_show_htf_room',
+        help='HTF room frozen at known_ts, not recalculated with future swings.',
+    )
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric('Detected HTF room', f"{room['room_pct']:.2f}%" if room['room_pct'] is not None else '—')
+    m2.metric('Opposing swing TF', str(room['swing_tf']) if room['swing_tf'] else '—')
+    m3.metric('Opposing swing price', f"{room['swing_price']:.8g}" if room['swing_price'] is not None else '—')
+    m4.metric('Aligned RSI TFs', str(int(room['aligned_rsi_count'])) if room['aligned_rsi_count'] is not None else '—')
+    known = _valid_number(row.get('known_ts'))
+    # Existing raw fields are historically persisted and can be absent on older events.
+    if room['room_pct'] is not None and room['reaction_price'] is not None and room['swing_price'] is not None:
+        st.caption(
+            f"Causal room snapshot: REACTION {room['reaction_price']:.8g} → "
+            f"{room['swing_tf'] or 'HTF'} opposing swing {room['swing_price']:.8g} "
+            f"({room['room_pct']:.2f}%). Frozen from already-confirmed HTF structures."
+        )
+    else:
+        st.caption('No opposing HTF swing was available in this frozen context; room is not inferred.')
+
+    count = st.slider(
+        '15m candles in inspector', min_value=40, max_value=200, value=80,
+        step=10, key='continuous_retest_15m_candle_limit',
+        help='Number of PRE-event fully closed 15m candles from the saved snapshot; not a live Redis fetch.',
+    )
+    history = frozen_closed_15m(recorded.get('15m', []), known, count)
+    if history.empty:
+        st.warning('No fully closed 15m candles were archived for this Event ID.')
+        return
+    times = pd.to_datetime(history['timestamp'], unit='ms', utc=True)
+    fig = go.Figure(data=[go.Candlestick(
+        x=times, open=history['open'], high=history['high'],
+        low=history['low'], close=history['close'], name='15m (as-of)',
+    )])
+    pivot_price = _valid_number(row.get('swing_price'))
+    if pivot_price is not None:
+        fig.add_hline(y=pivot_price, line_dash='dash', annotation_text='15m swing')
+
+    markers = persisted_retest_markers(row)
+    left_ms = int(history['timestamp'].min())
+    last_closed_ms = int(history['timestamp'].max()) + 900_000
+    retest_ms = int(_valid_number(row.get('retest_timestamp')) or last_closed_ms)
+    # The retest may fall in a 15m candle not yet fully closed at known_ts.
+    # Keep its marker visible to the right without fabricating that candle.
+    right_ms = max(last_closed_ms, retest_ms + 900_000)
+    marker_shapes = {'Pivot':'triangle-up' if row.get('signal')=='LONG' else 'triangle-down',
+                     'Confirmed':'circle-open','Departure':'circle','REACTION':'diamond'}
+    for label, ts, price in markers:
+        if left_ms <= ts <= right_ms:
+            fig.add_trace(go.Scatter(
+                x=[pd.to_datetime(ts, unit='ms', utc=True)], y=[price],
+                mode='markers+text', text=[label], textposition='top center',
+                marker={'symbol':marker_shapes[label], 'size':11}, name=label,
+            ))
+
+    if show_room and room['room_pct'] is not None and room['reaction_price'] is not None and room['swing_price'] is not None:
+        side = str(row.get('signal', '')).upper()
+        verified = room['swing_actionable']
+        if side in {'LONG','SHORT'} and (known is None or verified is None or verified <= known):
+            end_ms = retest_ms + 3_600_000  # Visual projection, NOT future candles
+            fig.add_shape(
+                type='rect', x0=pd.to_datetime(retest_ms, unit='ms', utc=True),
+                x1=pd.to_datetime(end_ms, unit='ms', utc=True),
+                y0=min(room['reaction_price'], room['swing_price']),
+                y1=max(room['reaction_price'], room['swing_price']),
+                fillcolor='rgba(34,197,94,0.15)' if side=='LONG' else 'rgba(239,68,68,0.15)',
+                line={'width':0}, layer='below',
+            )
+            fig.add_hline(y=room['swing_price'], line_dash='dot',
+                          annotation_text=f"HTF target {room['swing_tf'] or ''} · {room['room_pct']:.2f}%")
+            right_ms=max(right_ms,end_ms)
+        elif verified is not None and known is not None and verified > known:
+            st.warning('Stored HTF swing confirmation is later than known_ts: band hidden for causal safety.')
+    fig.update_layout(
+        height=600, xaxis_rangeslider_visible=False, hovermode='x unified',
+        title=f"{row.get('symbol','')} · 15m confirmed swing retest · {row.get('signal','')} · {len(history)} × 15m",
+    )
+    fig.update_xaxes(range=[pd.to_datetime(left_ms,unit='ms',utc=True),
+                            pd.to_datetime(right_ms,unit='ms',utc=True)])
+    st.caption(
+        f"Historical inspector: {len(history)} fully closed 15m candles archived as-of the signal "
+        '(requested %d). Markers retain pivot, confirmation, departure and retest times. '
+        'Blank space to the right represents no archived 15m candle; see the separate 1m path for outcomes.' % count
+    )
+    st.plotly_chart(fig, use_container_width=True, key='continuous_retest_detail_chart',
+                    config={'displaylogo':False,'scrollZoom':True})
+
+
 def render_cohort_research(project,cohort_mode,view_name,symbols):
     import pandas as pd
     import streamlit as st
@@ -141,22 +315,48 @@ def render_cohort_research(project,cohort_mode,view_name,symbols):
         return [c for c in base+extra if c in df.columns]
     st.dataframe(df[columns_for_mode()].head(2500),hide_index=True,use_container_width=True)
     keys=df['event_key'].astype(str).tolist()
-    selected=st.selectbox('Inspeccionar Event ID',keys,key='cohort_global_event_inspector')
+    is_retest_view = 'REACTION / Retests' in view_name
+    if is_retest_view:
+        # Same inspector controls as Legacy, but based on the persisted cohort.
+        options_by_key = df.set_index('event_key', drop=False)
+        def _label(key):
+            event = options_by_key.loc[key]
+            run = _valid_number(event.get('mfe_180m_pct'))
+            run_text = f" · MFE +{run:.2f}%" if run is not None else ''
+            swing = _valid_number(event.get('swing_price'))
+            swing_text = f" · swing {swing:.8g}" if swing is not None else ''
+            timestamp = _valid_number(event.get('retest_timestamp'))
+            date_text = (pd.to_datetime(int(timestamp), unit='ms', utc=True)
+                         .strftime('%Y-%m-%d %H:%M UTC') if timestamp is not None else key)
+            return (f"{event.get('symbol', '?')} · 15m 3x3 · "
+                    f"{event.get('signal', '?')} · REACTION{run_text}"
+                    f"{swing_text} · {date_text}")
+        selected = st.selectbox('Inspect confirmed swing retest', keys,
+                                format_func=_label, key='cohort_global_event_inspector')
+    else:
+        selected = st.selectbox('Inspeccionar Event ID', keys,
+                                key='cohort_global_event_inspector')
     row=df.loc[df['event_key'].eq(selected)].iloc[0]
-    with st.expander('Contexto completo, calidad y outcomes',expanded=True):
-        value=row.to_dict()
-        st.json({str(k):None if not isinstance(v,(list,dict)) and pd.isna(v) else v
-                 for k,v in value.items() if not isinstance(v,(list,dict))})
-        if row.get('context_state')!='READY':
-            st.warning('Contexto no completamente validado. Las métricas ausentes no deben tratarse como ceros.')
-    # Exact as-of candle evidence saved at first enrichment, independent of Redis.
     context_db=Path(project)/'reports/reaction_lab/causal_context_v1.sqlite3'
+    recorded={}
     if context_db.is_file():
         with closing(_readonly(context_db)) as con:
             candle_row=con.execute('SELECT candles_json FROM contexts WHERE event_key=?',(selected,)).fetchone()
         if candle_row:
             recorded=json.loads(candle_row[0])
-            available=[tf for tf in ('15m','30m','1h','4h','5m','1m') if recorded.get(tf)]
+    if is_retest_view:
+        render_persisted_retest_inspector(row.to_dict(), recorded, view_name)
+    with st.expander('Contexto completo, calidad y outcomes',expanded=not is_retest_view):
+        value=row.to_dict()
+        st.json({str(k):None if not isinstance(v,(list,dict)) and pd.isna(v) else v
+                 for k,v in value.items() if not isinstance(v,(list,dict))})
+        if row.get('context_state')!='READY':
+            st.warning('Contexto no completamente validado. Las métricas ausentes no deben tratarse como ceros.')
+    # Exact as-of HTF evidence, independent of Redis. 15m uses the
+    # dedicated inspector above in REACTION / Retests; other modes unchanged.
+    if recorded:
+            available=[tf for tf in ('15m','30m','1h','4h','5m','1m')
+                       if recorded.get(tf) and not (is_retest_view and tf=='15m')]
             if available:
                 active_tf=st.selectbox('Velas históricas congeladas · contexto as-of',available,key='cohort_global_htf_chart')
                 historic=pd.DataFrame(recorded[active_tf])
