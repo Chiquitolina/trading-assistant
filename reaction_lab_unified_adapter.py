@@ -252,3 +252,22 @@ def load_selected_path(project, key):
         row=con.execute('SELECT path_blob FROM events WHERE event_key=?',(str(key),)).fetchone()
     if not row or row[0] is None:return pd.DataFrame(columns=columns)
     return pd.DataFrame(decode_path(row[0]),columns=columns)
+
+
+def read_persisted_runners(project):
+    """Read ALL qualifying Continuous V1 runner identities, not the UI scan batch.
+
+    The independent archive is append-only by Event ID. Threshold crossing is
+    retrospective; it is not a trading entry-time eligibility criterion.
+    """
+    import pandas as pd
+    db=Path(project)/'reports/reaction_lab/runners_v1.sqlite3'
+    columns=['event_key','peak_run_pct','runner_observed_min','threshold_cross_ts',
+             'runner_peak_ts','runner_path_state','runner_max_adverse_pct']
+    if not db.is_file():
+        return pd.DataFrame(columns=columns)
+    with closing(sqlite3.connect(f'file:{db.resolve()}?mode=ro',uri=True,timeout=10)) as con:
+        data=con.execute('''SELECT event_key,peak_run_pct,observed_min,threshold_cross_ts,
+             peak_ts,path_state,max_adverse_pct FROM runners
+             WHERE peak_run_pct>1.0 ORDER BY peak_run_pct DESC,event_key''').fetchall()
+    return pd.DataFrame(data,columns=columns)

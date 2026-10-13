@@ -20,7 +20,7 @@ def continuous_research_frame(project, mode='Continuous V1', max_events=15000):
     from reaction_lab_cohort_view import load_reaction_cohort
     root=Path(project)
     cohort=load_reaction_cohort(root,mode=mode)
-    rows=cohort['rows'][:max_events]
+    rows=cohort['rows'] if max_events is None else cohort['rows'][:max_events]
     if not rows:return pd.DataFrame(),cohort
     ctx_db=root/'reports/reaction_lab/causal_context_v1.sqlite3'
     contexts={};followups={};v1_regimes={}
@@ -145,7 +145,10 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
     import pandas as pd
     import streamlit as st
     import plotly.graph_objects as go
-    df,cohort=continuous_research_frame(project,cohort_mode)
+    df,cohort=continuous_research_frame(
+        project,cohort_mode,
+        max_events=None if 'REACTION / Retests' in view_name else 15000,
+    )
     st.subheader(f'{view_name} · {cohort_mode}')
     st.caption('Un mismo conjunto de Event IDs; sin mezclar el contexto causal con los resultados posteriores.')
     for error in cohort['errors']:
@@ -178,7 +181,34 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
         from reaction_lab_unified_adapter import (
             attach_observed_reaction_runs, sort_retests_by_run,
         )
-        df = sort_retests_by_run(attach_observed_reaction_runs(project, df))
+        from reaction_lab_unified_adapter import read_persisted_runners
+        only_runners=st.checkbox(
+            'Solo runners históricos persistidos (run > 1%)',
+            value=True,key='cohort_continuous_runners_only',
+            help='No depende de la ventana ni del lote visible. MFE posterior al retest, no señal causal.'
+        )
+        if only_runners:
+            archive=read_persisted_runners(project)
+            if archive.empty:
+                st.info('Todavía no hay runners archivados. Ejecutá primero reaction_lab_runners.py --once y validá su SQLite.')
+                return
+            min_run=st.number_input('Recorrido mínimo observado (%)',
+                                    min_value=1.0,max_value=100.0,value=1.0,step=0.5,
+                                    key='cohort_runner_min_run')
+            df=df.merge(archive,on='event_key',how='inner',validate='one_to_one')
+            df=df.loc[df['peak_run_pct']>float(min_run)].copy()
+            if df.empty:
+                st.info('La selección actual no contiene runners >1% en el archivo permanente.')
+                return
+            df['reaction_mfe_pct']=df['peak_run_pct']
+            df['reaction_observed_min']=df['runner_observed_min']
+            df=sort_retests_by_run(df)
+            st.caption(f'Archivo permanente: {len(df)} runners en los filtros actuales. '
+                       f'Con run >=2%: {int(df["peak_run_pct"].ge(2).sum())}. '
+                       'El máximo observado se actualiza hasta completar el path 1m; '
+                       'el registro no desaparece tras 360 minutos.')
+        else:
+            df = sort_retests_by_run(attach_observed_reaction_runs(project, df))
 
     if 'Candidate Research' in view_name:
         st.markdown('#### Candidate V1/V2 — contexto y variantes')
@@ -227,7 +257,15 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
         elif 'Volume' in view_name: extra=['rel_volume_1m','rel_volume_5m','rel_volume_15m','rsi14_1m','rsi14_15m','aligned_rsi_extreme_count']
         else:extra=['reaction_mfe_pct','reaction_observed_min','pivot_timestamp','swing_price','max_departure_pct','retest_distance_pct','mfe_180m_pct']
         return [c for c in base+extra if c in df.columns]
-    st.dataframe(df[columns_for_mode()].head(2500),hide_index=True,use_container_width=True)
+    display_cols=columns_for_mode()
+    if 'REACTION / Retests' in view_name:
+        display_cols += [col for col in (
+            'peak_run_pct','threshold_cross_ts','runner_peak_ts',
+            'runner_max_adverse_pct','runner_path_state'
+        ) if col in df.columns and col not in display_cols]
+    # Streamlit virtualizes rows; never truncate the runner archive to the latest batch.
+    st.dataframe(df[display_cols] if 'REACTION / Retests' in view_name else df[display_cols].head(2500),
+                 hide_index=True,use_container_width=True)
     keys=df['event_key'].astype(str).tolist()
     is_retest_view = 'REACTION / Retests' in view_name
     if is_retest_view:
