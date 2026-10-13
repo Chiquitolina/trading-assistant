@@ -60,6 +60,111 @@ def continuous_research_frame(project, mode='Continuous V1', max_events=15000):
     return frame,cohort
 
 
+# Research runner exports read the causal context already persisted in
+# causal_context_v1.sqlite3 and canonical V1 regime sidecars. They NEVER
+# recalculate these fields from current Redis or label outcomes as entry inputs.
+RUNNER_ID_FIELDS = (
+    'event_key', 'cohort', 'symbol', 'signal', 'observation_type',
+    'retest_timestamp', 'known_ts', 'pivot_timestamp', 'actionable_timestamp',
+    'departure_timestamp', 'swing_price', 'retest_close', 'retest_price',
+    'max_departure_pct', 'retest_distance_pct', 'context_state',
+    'v1_regime_status', 'sector_context_status', 'context_notes',
+    'path_state', 'path_bars', 'runner_path_state',
+)
+RUNNER_CAUSAL_FIELDS = (
+    'nearest_opposing_room_pct', 'nearest_opposing_swing_tf',
+    'nearest_opposing_swing_price', 'nearest_opposing_swing_actionable_timestamp',
+    'opposing_room_30m_pct', 'opposing_room_1h_pct', 'opposing_room_4h_pct',
+    'same_swing_dist_30m_pct', 'same_swing_dist_1h_pct', 'same_swing_dist_4h_pct',
+    'nearest_htf_same_swing_pct', 'htf_confluence_count_0_50',
+    'rsi14_1m', 'rsi14_5m', 'rsi14_15m', 'rsi14_1h',
+    'aligned_rsi_extreme_count',
+    'rel_volume_1m', 'rel_volume_5m', 'rel_volume_15m',
+    'relative_volume_4h', 'quote_volume_4h', 'median_quote_volume_4h',
+    'return_pct_1h', 'return_pct_4h',
+    'btc_return_pct_1h', 'btc_return_pct_4h',
+    'btc_return_delta_1h', 'btc_return_delta_4h',
+    'symbol_strength_vs_btc_1h', 'symbol_strength_vs_btc_4h',
+    'side_adjusted_strength_vs_btc_1h', 'side_adjusted_strength_vs_btc_4h',
+    'market_breadth_1h', 'market_breadth_4h',
+    'breadth_delta_1h', 'breadth_delta_4h',
+    'breadth_direction_1h', 'breadth_direction_4h',
+    'positive_symbols_1h', 'positive_symbols_4h',
+    'market_coverage_1h', 'market_coverage_4h',
+    'market_median_return_pct_1h', 'market_median_return_pct_4h',
+    'Market alignment', 'Market alignment 1h', 'Market alignment 4h',
+    'flow_1h_candle_timestamp', 'flow_4h_candle_timestamp',
+    'primary_sector', 'sector', 'return_rank_pct_4h', 'volume_rank_pct_4h',
+    'sector_return_pct_4h', 'sector_breadth_4h',
+    'sector_relative_volume_4h', 'sector_return_rank_pct_4h',
+    'sector_strength_vs_btc_4h', 'symbol_strength_vs_sector_4h',
+    'sector_coverage_pct', 'sector_valid_symbols', 'sector_configured_symbols',
+    'market_context_available', 'core_context_available',
+    'sector_context_available', 'flow_candle_timestamp',
+    'context_schema_version', 'context_helper_fingerprint',
+)
+RUNNER_OUTCOME_FIELDS = (
+    'peak_run_pct', 'reaction_mfe_pct', 'runner_observed_min',
+    'reaction_observed_min', 'runner_max_adverse_pct',
+    'threshold_cross_ts', 'runner_peak_ts',
+    'mfe_1m_pct', 'mfe_3m_pct', 'mfe_5m_pct', 'mfe_15m_pct',
+    'mfe_30m_pct', 'mfe_60m_pct', 'mfe_120m_pct',
+    'mfe_180m_pct', 'mfe_360m_pct',
+    'mae_1m_pct', 'mae_3m_pct', 'mae_5m_pct', 'mae_15m_pct',
+    'mae_30m_pct', 'mae_60m_pct', 'mae_120m_pct',
+    'mae_180m_pct', 'mae_360m_pct',
+    'tp_0_5_sl_3_h180_outcome', 'tp_0_5_sl_3_h180_exit_ts',
+    'tp_sl_same_bar_ambiguous',
+)
+
+
+def runner_research_export_frame(frame):
+    """One row per Event ID, fully flattened, no arbitrary UI batch limit.
+
+    Causal measurements and future outcomes are preserved in distinctly ordered
+    groups. Missing values stay missing. Unknown/nested fields are serialized
+    as JSON rather than silently discarded. Caller has already applied the
+    requested cohort/side/runner filters and loaded the frozen V1 sidecar.
+    """
+    import pandas as pd
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    if 'event_key' not in frame.columns:
+        raise ValueError('Runner research export needs Event IDs')
+    if frame['event_key'].duplicated().any():
+        raise ValueError('Runner research export contains duplicated Event IDs')
+    preferred = RUNNER_ID_FIELDS + RUNNER_CAUSAL_FIELDS + RUNNER_OUTCOME_FIELDS
+    columns = [key for key in dict.fromkeys(preferred) if key in frame.columns]
+    columns += [key for key in frame.columns if key not in columns]
+    out = frame.loc[:, columns].copy()
+    for key in out.columns:
+        if out[key].map(lambda value: isinstance(value, (list, tuple, dict))).any():
+            out[key] = out[key].map(
+                lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True)
+                if isinstance(value, (list, tuple, dict)) else value
+            )
+    return out.reset_index(drop=True)
+
+
+def runner_context_table_columns(frame):
+    """Compact in-app context comparison; full export retains all fields."""
+    fields = (
+        'symbol', 'signal', 'peak_run_pct', 'runner_observed_min',
+        'context_state', 'v1_regime_status',
+        'nearest_opposing_room_pct',
+        'opposing_room_30m_pct', 'opposing_room_1h_pct', 'opposing_room_4h_pct',
+        'side_adjusted_strength_vs_btc_1h', 'side_adjusted_strength_vs_btc_4h',
+        'btc_return_pct_1h', 'btc_return_pct_4h',
+        'market_breadth_1h', 'market_breadth_4h',
+        'breadth_delta_1h', 'breadth_delta_4h',
+        'Market alignment 1h', 'Market alignment 4h',
+        'relative_volume_4h', 'return_rank_pct_4h', 'volume_rank_pct_4h',
+        'primary_sector', 'sector_strength_vs_btc_4h',
+        'threshold_cross_ts', 'runner_peak_ts', 'event_key',
+    )
+    return [field for field in fields if field in frame.columns]
+
+
 def selected_event_path(project,key):
     from reaction_lab_auto_paths import read_auto_paths_dataframe
     path=Path(project)/'reports/reaction_lab/auto_paths_v1.sqlite3'
@@ -174,6 +279,12 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
     if df.empty:
         st.info('Sin coincidencias.');return
 
+    if 'REACTION / Retests' in view_name and cohort_mode != 'Legacy':
+        # The analyzer receives the UNFILTERED Base cohort BEFORE the archived
+        # runners-only selector; otherwise losers vanish from denominators.
+        from reaction_lab_runner_analyzer import render_runner_analyzer
+        render_runner_analyzer(project, df.copy())
+
     if 'REACTION / Retests' in view_name:
         # Exactly Legacy's observable post-REACTION MFE semantics, but using
         # the Continuous 1m archive (up to 360 closed bars), not live Redis.
@@ -263,6 +374,32 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
             'peak_run_pct','threshold_cross_ts','runner_peak_ts',
             'runner_max_adverse_pct','runner_path_state'
         ) if col in df.columns and col not in display_cols]
+    if 'REACTION / Retests' in view_name and only_runners:
+        # Both the in-app table and the full CSV use the already frozen context
+        # and V1 sector sidecar joined by Event ID in continuous_research_frame.
+        # The path archive is NOT reread or truncated for this export.
+        display_cols += [col for col in runner_context_table_columns(df)
+                         if col not in display_cols]
+        with st.expander('Investigación de runners · Room / BTC / Breadth / Flow / Sectores', expanded=False):
+            st.caption('Variables causales congeladas a known_ts. Run, MFE/MAE y TP/SL son '
+                       'observaciones posteriores, nunca filtros conocidos al entrar. '
+                       'PARTIAL y SECTOR_UNAVAILABLE permanecen en el estudio como valores faltantes.')
+            st.dataframe(df[runner_context_table_columns(df)],
+                         hide_index=True, use_container_width=True)
+            complete = int(df['context_state'].eq('READY').sum())
+            regime_ready = int(df['v1_regime_status'].eq('READY').sum())
+            st.caption(f'Contexto causal READY: {complete}/{len(df)} · '
+                       f'Régimen sectorial READY: {regime_ready}/{len(df)}')
+        export = runner_research_export_frame(df)
+        st.download_button(
+            'Exportar runners con TODO el contexto y outcomes (CSV)',
+            data=export.to_csv(index=False).encode('utf-8-sig'),
+            file_name='continuous_v1_runners_full_context.csv',
+            mime='text/csv',
+            key='cohort_runners_full_context_export',
+            help='Todas las filas filtradas; no se recortan por los lotes del scanner. '
+                 'Los valores sin evidencia siguen vacíos. Incluye Event ID para auditorías.'
+        )
     # Streamlit virtualizes rows; never truncate the runner archive to the latest batch.
     st.dataframe(df[display_cols] if 'REACTION / Retests' in view_name else df[display_cols].head(2500),
                  hide_index=True,use_container_width=True)
