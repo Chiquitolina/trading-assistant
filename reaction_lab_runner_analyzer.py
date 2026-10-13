@@ -60,7 +60,13 @@ NUMERIC_FACTORS = {
     'BTC Beta 1h': ('btc_beta_1h', (-math.inf, -.5, 0., .5, 1., 1.5, math.inf)),
     'BTC R² 1h': ('btc_r2_1h', (-math.inf, .2, .5, .8, math.inf)),
     'BTC residual 1h': ('btc_residual_move_1h_pct', (-math.inf, -2., -.5, 0., .5, 2., math.inf)),
+    'BTC velocidad 15m (%)': ('btc_velocity_15m', (-math.inf, .2, .5, .8, 1.2, 2., math.inf)),
+    'BTC velocidad 1h (%)': ('btc_velocity_1h', (-math.inf, .5, 1., 1.5, 2.5, math.inf)),
+    'BTC movimiento con signo 15m': ('btc_signed_move_15m_pct', (-math.inf, -1., -.5, 0., .5, 1., math.inf)),
+    'BTC movimiento con signo 1h': ('btc_signed_move_1h_pct', (-math.inf, -2., -1., 0., 1., 2., math.inf)),
+    'BTC residual 15m': ('btc_residual_move_15m_pct', (-math.inf, -2., -.5, 0., .5, 2., math.inf)),
 }
+
 CATEGORICAL_FACTORS = {
     'Market Flow': 'Market alignment',
     'Flow 1h': 'Market alignment 1h',
@@ -75,7 +81,11 @@ CATEGORICAL_FACTORS = {
     'BTC relationship': 'btc_relationship_label',
     'BTC trade risk': 'btc_trade_risk_state',
     'BTC direction alignment': 'btc_direction_alignment',
+    'BTC velocity state': 'btc_velocity_state',
+    'BTC trade alignment': 'btc_trade_alignment',
+    'BTC context status': 'btc_context_status',
 }
+
 FACTORS = {name: column for name, (column, _) in NUMERIC_FACTORS.items()}
 FACTORS.update(CATEGORICAL_FACTORS)
 
@@ -316,7 +326,11 @@ def spearman_feature_table(frame, min_n=25):
         x=pd.to_numeric(frame[col],errors='coerce')
         mask=x.notna()&y.notna()
         if mask.sum()<min_n or x[mask].nunique()<2 or y[mask].nunique()<2:continue
-        corr=x[mask].corr(y[mask],method='spearman')
+        # Spearman is Pearson correlation of average ranks.  Computing the
+        # ranks directly avoids pandas' optional SciPy dependency while
+        # preserving tie handling and the original pairwise non-null mask.
+        corr=x[mask].rank(method='average').corr(
+            y[mask].rank(method='average'),method='pearson')
         records.append({'Factor':factor,'N':int(mask.sum()),'Spearman con Run':round(float(corr),4)})
     if not records:return pd.DataFrame()
     return pd.DataFrame(records).sort_values('Spearman con Run',key=lambda s:s.abs(),ascending=False)

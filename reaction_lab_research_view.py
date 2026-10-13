@@ -23,7 +23,7 @@ def continuous_research_frame(project, mode='Continuous V1', max_events=15000):
     rows=cohort['rows'] if max_events is None else cohort['rows'][:max_events]
     if not rows:return pd.DataFrame(),cohort
     ctx_db=root/'reports/reaction_lab/causal_context_v1.sqlite3'
-    contexts={};followups={};v1_regimes={}
+    contexts={};followups={};v1_regimes={};btc_contexts={}
     if ctx_db.is_file():
         with closing(_readonly(ctx_db)) as con:
             contexts={k:(state,notes,json.loads(payload)) for k,state,notes,payload in
@@ -35,6 +35,13 @@ def continuous_research_frame(project, mode='Continuous V1', max_events=15000):
             if 'v1_regime_events' in tables:
                 v1_regimes={k:(state,json.loads(payload)) for k,state,payload in
                     con.execute('SELECT event_key,status,metrics_json FROM v1_regime_events')}
+    # Independent prospective BTC sidecar. It does not rewrite the core
+    # causal-context JSON or retroactively label old REACTIONs.
+    btc_db=root/'reports/reaction_lab/btc_context_v1.sqlite3'
+    if btc_db.is_file():
+        with closing(_readonly(btc_db)) as con:
+            btc_contexts={key:(state,json.loads(payload)) for key,state,payload in
+                          con.execute('SELECT event_key,status,features_json FROM btc_events')}
     all_rows=[]
     protected={'event_key','symbol','signal','known_ts','retest_timestamp','observation_type','cohort'}
     for row in rows:
@@ -53,6 +60,13 @@ def continuous_research_frame(project, mode='Continuous V1', max_events=15000):
         if regime_status in ('READY','SECTOR_UNAVAILABLE'):
             record['sector_context_available']=regime_status=='READY'
             record['sector_context_status']='READY' if regime_status=='READY' else 'SECTOR_UNAVAILABLE'
+        btc_state,btc_metrics=btc_contexts.get(key,('NOT_CAPTURED',{}))
+        record['btc_context_status']=btc_state
+        # BTC feature names are namespaced and frozen at known_ts. No outcomes
+        # from the runner path are used here, and existing core context wins.
+        for field,value in btc_metrics.items():
+            if field not in protected and (field not in record or record[field] is None):
+                record[field]=value
         _state,followup=followups.get(key,(None,{}))
         record.update(followup)
         all_rows.append(record)
@@ -68,7 +82,7 @@ RUNNER_ID_FIELDS = (
     'retest_timestamp', 'known_ts', 'pivot_timestamp', 'actionable_timestamp',
     'departure_timestamp', 'swing_price', 'retest_close', 'retest_price',
     'max_departure_pct', 'retest_distance_pct', 'context_state',
-    'v1_regime_status', 'sector_context_status', 'context_notes',
+    'v1_regime_status', 'sector_context_status', 'btc_context_status', 'context_notes',
     'path_state', 'path_bars', 'runner_path_state',
 )
 RUNNER_CAUSAL_FIELDS = (
@@ -102,6 +116,16 @@ RUNNER_CAUSAL_FIELDS = (
     'market_context_available', 'core_context_available',
     'sector_context_available', 'flow_candle_timestamp',
     'context_schema_version', 'context_helper_fingerprint',
+    'btc_corr_5m_1h', 'btc_corr_5m_4h', 'btc_corr_5m_24h',
+    'btc_corr_5m', 'btc_corr_15m', 'btc_corr_30m', 'btc_corr_1h', 'btc_corr_4h',
+    'btc_beta_5m_4h', 'btc_beta_15m', 'btc_beta_1h', 'btc_beta_4h',
+    'btc_r2_5m_4h', 'btc_r2_15m', 'btc_r2_1h', 'btc_r2_4h',
+    'btc_residual_move_15m_pct', 'btc_residual_move_1h_pct', 'btc_residual_move_4h_pct',
+    'btc_velocity_15m', 'btc_velocity_1h',
+    'btc_signed_move_15m_pct', 'btc_signed_move_1h_pct',
+    'btc_direction_alignment', 'btc_velocity_state',
+    'btc_trade_alignment', 'btc_trade_risk_state', 'btc_relationship_label',
+    'btc_context_known_ts', 'btc_context_source_hash',
 )
 RUNNER_OUTCOME_FIELDS = (
     'peak_run_pct', 'reaction_mfe_pct', 'runner_observed_min',
@@ -150,7 +174,10 @@ def runner_context_table_columns(frame):
     """Compact in-app context comparison; full export retains all fields."""
     fields = (
         'symbol', 'signal', 'peak_run_pct', 'runner_observed_min',
-        'context_state', 'v1_regime_status',
+        'context_state', 'v1_regime_status', 'btc_context_status',
+        'btc_corr_5m_4h', 'btc_beta_5m_4h', 'btc_r2_5m_4h',
+        'btc_velocity_15m', 'btc_velocity_1h', 'btc_velocity_state',
+        'btc_trade_risk_state', 'btc_relationship_label',
         'nearest_opposing_room_pct',
         'opposing_room_30m_pct', 'opposing_room_1h_pct', 'opposing_room_4h_pct',
         'side_adjusted_strength_vs_btc_1h', 'side_adjusted_strength_vs_btc_4h',
@@ -280,8 +307,7 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
         st.info('Sin coincidencias.');return
 
     if 'REACTION / Retests' in view_name and cohort_mode != 'Legacy':
-        # The analyzer receives the UNFILTERED Base cohort BEFORE the archived
-        # runners-only selector; otherwise losers vanish from denominators.
+        # Preserve the full Base cohort BEFORE applying the runner-only filter.
         from reaction_lab_runner_analyzer import render_runner_analyzer
         render_runner_analyzer(project, df.copy())
 
