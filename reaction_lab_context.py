@@ -472,8 +472,11 @@ def process_once(project,db,scanner_db,limit=100,force=False,min_free_mb=1024):
             con.execute('INSERT INTO runs(at_ms,checked,inserted,ready,partial,error) VALUES(?,?,?,?,?,NULL)',
                         (now_ms(),checked,inserted,ready,partial))
         outcomes=followup_once(con,project/'reports/reaction_lab/auto_paths_v1.sqlite3')
+        # Independently versioned canonical V1 4h snapshot. Never rewrite contexts.
+        from reaction_lab_v1_regime_adapter import enrich_once
+        v1_regime=enrich_once(con,client,project,symbols,sector_map,limit=limit)
         statuses=dict(con.execute('SELECT status,COUNT(*) FROM contexts GROUP BY status'))
-        return {'followups':outcomes,'checked':checked,'inserted':inserted,'ready_now':ready,'partial_now':partial,
+        return {'followups':outcomes,'v1_regime':v1_regime,'checked':checked,'inserted':inserted,'ready_now':ready,'partial_now':partial,
                 'total_contexts':sum(statuses.values()),'states':statuses,'source_hash':digest}
     finally:con.close()
 
@@ -483,7 +486,11 @@ def status(db):
     with closing(get_database(db)) as con:
         states=dict(con.execute('SELECT status,COUNT(*) FROM contexts GROUP BY status'))
         latest=con.execute('SELECT at_ms,checked,inserted,ready,partial FROM runs ORDER BY id DESC LIMIT 1').fetchone()
-    return {'database_exists':True,'states':states,'last_run':latest}
+        tables={row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        v1=dict(con.execute('SELECT status,COUNT(*) FROM v1_regime_events GROUP BY status')) if 'v1_regime_events' in tables else {}
+        boundaries=con.execute('SELECT COUNT(*) FROM v1_regime_snapshots').fetchone()[0] if 'v1_regime_snapshots' in tables else 0
+    return {'database_exists':True,'states':states,'v1_regime_states':v1,
+            'v1_regime_snapshots':boundaries,'last_run':latest}
 
 
 def main(argv=None):
@@ -509,7 +516,9 @@ def main(argv=None):
     scope,digest=load_canonical(project/'dashboard/app.py')
     print('REACTION CONTEXT:',digest,'SCANNER:',scanner,'DB:',db,flush=True)
     if args.check:
-        print('CHECK PASS: canonical helpers available; no DB mutations');return 0
+        from reaction_lab_v1_regime_adapter import canonical_module
+        canonical_module(project)
+        print('CHECK PASS: dashboard helpers and canonical V1 market regime available; no DB mutations');return 0
     db.parent.mkdir(parents=True,exist_ok=True)
     with db.with_suffix(db.suffix+'.lock').open('a+') as fh:
         fcntl.flock(fh,fcntl.LOCK_EX|fcntl.LOCK_NB)
