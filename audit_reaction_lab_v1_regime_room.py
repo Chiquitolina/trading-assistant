@@ -114,7 +114,7 @@ def main(argv=None):
     from dotenv import load_dotenv
     load_dotenv(project/'.env')
     client = redis.Redis(host=os.getenv('REDIS_HOST','127.0.0.1'), port=int(os.getenv('REDIS_PORT','6379')),
-                         db=int(os.getenv('REDIS_DB','0')),socket_timeout=15)
+                         db=int(os.getenv('REDIS_DB','0')),socket_timeout=15,decode_responses=True)
     client.ping()
     pipe = client.pipeline(transaction=False)
     size = max(48,min(500,int(args.max_history)))
