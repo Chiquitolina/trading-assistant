@@ -140,107 +140,8 @@ def persisted_retest_markers(row):
     return result
 
 
-def render_persisted_retest_inspector(row, recorded, view_name):
-    """Show the Legacy-style inspection controls on persisted Continuous events.
 
-    Unlike the live Legacy inspector, the 15m plot contains ONLY the as-of
-    snapshot. The post-event 1m path is rendered separately below.
-    """
-    import pandas as pd
-    import plotly.graph_objects as go
-    import streamlit as st
-
-    room = persisted_room_fields(row)
-    show_room = st.checkbox(
-        'Show causal HTF room on chart', value=True,
-        key='continuous_retest_show_htf_room',
-        help='HTF room frozen at known_ts, not recalculated with future swings.',
-    )
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric('Detected HTF room', f"{room['room_pct']:.2f}%" if room['room_pct'] is not None else '—')
-    m2.metric('Opposing swing TF', str(room['swing_tf']) if room['swing_tf'] else '—')
-    m3.metric('Opposing swing price', f"{room['swing_price']:.8g}" if room['swing_price'] is not None else '—')
-    m4.metric('Aligned RSI TFs', str(int(room['aligned_rsi_count'])) if room['aligned_rsi_count'] is not None else '—')
-    known = _valid_number(row.get('known_ts'))
-    # Existing raw fields are historically persisted and can be absent on older events.
-    if room['room_pct'] is not None and room['reaction_price'] is not None and room['swing_price'] is not None:
-        st.caption(
-            f"Causal room snapshot: REACTION {room['reaction_price']:.8g} → "
-            f"{room['swing_tf'] or 'HTF'} opposing swing {room['swing_price']:.8g} "
-            f"({room['room_pct']:.2f}%). Frozen from already-confirmed HTF structures."
-        )
-    else:
-        st.caption('No opposing HTF swing was available in this frozen context; room is not inferred.')
-
-    count = st.slider(
-        '15m candles in inspector', min_value=40, max_value=200, value=80,
-        step=10, key='continuous_retest_15m_candle_limit',
-        help='Number of PRE-event fully closed 15m candles from the saved snapshot; not a live Redis fetch.',
-    )
-    history = frozen_closed_15m(recorded.get('15m', []), known, count)
-    if history.empty:
-        st.warning('No fully closed 15m candles were archived for this Event ID.')
-        return
-    times = pd.to_datetime(history['timestamp'], unit='ms', utc=True)
-    fig = go.Figure(data=[go.Candlestick(
-        x=times, open=history['open'], high=history['high'],
-        low=history['low'], close=history['close'], name='15m (as-of)',
-    )])
-    pivot_price = _valid_number(row.get('swing_price'))
-    if pivot_price is not None:
-        fig.add_hline(y=pivot_price, line_dash='dash', annotation_text='15m swing')
-
-    markers = persisted_retest_markers(row)
-    left_ms = int(history['timestamp'].min())
-    last_closed_ms = int(history['timestamp'].max()) + 900_000
-    retest_ms = int(_valid_number(row.get('retest_timestamp')) or last_closed_ms)
-    # The retest may fall in a 15m candle not yet fully closed at known_ts.
-    # Keep its marker visible to the right without fabricating that candle.
-    right_ms = max(last_closed_ms, retest_ms + 900_000)
-    marker_shapes = {'Pivot':'triangle-up' if row.get('signal')=='LONG' else 'triangle-down',
-                     'Confirmed':'circle-open','Departure':'circle','REACTION':'diamond'}
-    for label, ts, price in markers:
-        if left_ms <= ts <= right_ms:
-            fig.add_trace(go.Scatter(
-                x=[pd.to_datetime(ts, unit='ms', utc=True)], y=[price],
-                mode='markers+text', text=[label], textposition='top center',
-                marker={'symbol':marker_shapes[label], 'size':11}, name=label,
-            ))
-
-    if show_room and room['room_pct'] is not None and room['reaction_price'] is not None and room['swing_price'] is not None:
-        side = str(row.get('signal', '')).upper()
-        verified = room['swing_actionable']
-        if side in {'LONG','SHORT'} and (known is None or verified is None or verified <= known):
-            end_ms = retest_ms + 3_600_000  # Visual projection, NOT future candles
-            fig.add_shape(
-                type='rect', x0=pd.to_datetime(retest_ms, unit='ms', utc=True),
-                x1=pd.to_datetime(end_ms, unit='ms', utc=True),
-                y0=min(room['reaction_price'], room['swing_price']),
-                y1=max(room['reaction_price'], room['swing_price']),
-                fillcolor='rgba(34,197,94,0.15)' if side=='LONG' else 'rgba(239,68,68,0.15)',
-                line={'width':0}, layer='below',
-            )
-            fig.add_hline(y=room['swing_price'], line_dash='dot',
-                          annotation_text=f"HTF target {room['swing_tf'] or ''} · {room['room_pct']:.2f}%")
-            right_ms=max(right_ms,end_ms)
-        elif verified is not None and known is not None and verified > known:
-            st.warning('Stored HTF swing confirmation is later than known_ts: band hidden for causal safety.')
-    fig.update_layout(
-        height=600, xaxis_rangeslider_visible=False, hovermode='x unified',
-        title=f"{row.get('symbol','')} · 15m confirmed swing retest · {row.get('signal','')} · {len(history)} × 15m",
-    )
-    fig.update_xaxes(range=[pd.to_datetime(left_ms,unit='ms',utc=True),
-                            pd.to_datetime(right_ms,unit='ms',utc=True)])
-    st.caption(
-        f"Historical inspector: {len(history)} fully closed 15m candles archived as-of the signal "
-        '(requested %d). Markers retain pivot, confirmation, departure and retest times. '
-        'Blank space to the right represents no archived 15m candle; see the separate 1m path for outcomes.' % count
-    )
-    st.plotly_chart(fig, use_container_width=True, key='continuous_retest_detail_chart',
-                    config={'displaylogo':False,'scrollZoom':True})
-
-
-def render_cohort_research(project,cohort_mode,view_name,symbols):
+def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest_inspector=None,cohort_timezone='UTC'):
     import pandas as pd
     import streamlit as st
     import plotly.graph_objects as go
@@ -317,26 +218,47 @@ def render_cohort_research(project,cohort_mode,view_name,symbols):
     keys=df['event_key'].astype(str).tolist()
     is_retest_view = 'REACTION / Retests' in view_name
     if is_retest_view:
-        # Same inspector controls as Legacy, but based on the persisted cohort.
-        options_by_key = df.set_index('event_key', drop=False)
-        def _label(key):
-            event = options_by_key.loc[key]
-            run = _valid_number(event.get('mfe_180m_pct'))
-            run_text = f" · MFE +{run:.2f}%" if run is not None else ''
-            swing = _valid_number(event.get('swing_price'))
-            swing_text = f" · swing {swing:.8g}" if swing is not None else ''
-            timestamp = _valid_number(event.get('retest_timestamp'))
-            date_text = (pd.to_datetime(int(timestamp), unit='ms', utc=True)
-                         .strftime('%Y-%m-%d %H:%M UTC') if timestamp is not None else key)
-            return (f"{event.get('symbol', '?')} · 15m 3x3 · "
-                    f"{event.get('signal', '?')} · REACTION{run_text}"
-                    f"{swing_text} · {date_text}")
-        selected = st.selectbox('Inspect confirmed swing retest', keys,
-                                format_func=_label, key='cohort_global_event_inspector')
+        # Reuse the EXACT same Legacy component, never a look-alike inspector.
+        from reaction_lab_unified_adapter import (
+            inspector_rows, frozen_room, combined_archived_15m,
+            archived_event_candles, load_selected_path,
+        )
+        if shared_retest_inspector is None:
+            st.error('Falta el inspector canónico compartido de app.py; no se dibuja un sustituto.')
+            return
+        original=inspector_rows(df, tz=cohort_timezone)
+        chartable=original.dropna(subset=[
+            'pivot_timestamp','actionable_timestamp','departure_timestamp',
+            'swing_price','departure_price','retest_price','retest_timestamp',
+        ]).copy()
+        if chartable.empty:
+            st.warning('Eventos presentes, pero sin timestamps/precios suficientes para el inspector.')
+            return
+        st.caption(
+            'Inspector original compartido con Legacy. La tabla muestra toda la '
+            'cohorte; el gráfico requiere identidad estructural completa. '
+            'Los análisis Legacy sin métricas comparables todavía no se ejecutan '
+            'sobre resultados parciales.'
+        )
+        def _candles(event, limit):
+            eid=str(event['event_key'])
+            stored=archived_event_candles(project,eid)
+            path=load_selected_path(project,eid)
+            return combined_archived_15m(
+                stored.get('15m',[]),path,event.get('known_ts'),limit
+            )
+        selected_event=shared_retest_inspector(
+            chartable, candles_provider=_candles,
+            room_provider=frozen_room,ui_key_prefix='continuous_',
+        )
+        if selected_event is None:return
+        selected=str(selected_event['event_key'])
+        row=df.loc[df['event_key'].eq(selected)].iloc[0]
+        st.caption('REACTION Event ID: '+selected)
     else:
         selected = st.selectbox('Inspeccionar Event ID', keys,
                                 key='cohort_global_event_inspector')
-    row=df.loc[df['event_key'].eq(selected)].iloc[0]
+        row=df.loc[df['event_key'].eq(selected)].iloc[0]
     context_db=Path(project)/'reports/reaction_lab/causal_context_v1.sqlite3'
     recorded={}
     if context_db.is_file():
@@ -344,8 +266,6 @@ def render_cohort_research(project,cohort_mode,view_name,symbols):
             candle_row=con.execute('SELECT candles_json FROM contexts WHERE event_key=?',(selected,)).fetchone()
         if candle_row:
             recorded=json.loads(candle_row[0])
-    if is_retest_view:
-        render_persisted_retest_inspector(row.to_dict(), recorded, view_name)
     with st.expander('Contexto completo, calidad y outcomes',expanded=not is_retest_view):
         value=row.to_dict()
         st.json({str(k):None if not isinstance(v,(list,dict)) and pd.isna(v) else v

@@ -11477,6 +11477,7 @@ def build_confirmed_swing_retest_detail_chart(
     retest_row,
     chart_candle_limit=CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES,
     room_context=None,
+    show_event_marker_without_closed_15m=False,
 ):
     """Render the selected confirmed-swing retest in structural 15m candles.
 
@@ -11621,6 +11622,10 @@ def build_confirmed_swing_retest_detail_chart(
     # A 15m candle represents the interval beginning at its timestamp. Keep
     # markers from the final visible candle visible throughout that interval.
     visible_end_ts = int(visible["timestamp"].max()) + 15 * 60_000
+    if show_event_marker_without_closed_15m:
+        # Continuous can know a 1m retest before its enclosing 15m candle
+        # closes. Make room for the marker, NOT a synthetic 15m candle.
+        visible_end_ts = max(visible_end_ts, int(retest_ts) + 60_000)
 
     for label, timestamp, price, marker_symbol in marker_rows:
         if not (visible_start_ts <= int(timestamp) <= visible_end_ts):
@@ -66559,6 +66564,292 @@ def render_confirmed_swing_reaction_run_driver_lab(view):
         )
 
 
+def render_confirmed_swing_retest_inspector(
+    view,
+    *,
+    candles_provider=None,
+    room_provider=None,
+    ui_key_prefix="",
+):
+    """Single canonical Legacy inspector, shared by Legacy and persisted cohorts.
+
+    candles_provider(selected_retest, limit) supplies archived candles +
+    contiguous post-event candles when possible; room_provider supplies frozen
+    causal HTF Room. None retains the original Legacy live behavior.
+    """
+    if view is None or view.empty:
+        st.info("No confirmed-swing retests match these filters.")
+        return
+
+    labels = []
+    lookup = {}
+    for index, row in view.iterrows():
+        retest_time = row.get("retest_time")
+        if pd.notna(retest_time):
+            time_text = retest_time.strftime("%Y-%m-%d %H:%M")
+        else:
+            time_text = str(row.get("retest_timestamp", index))
+        reaction_mfe = pd.to_numeric(
+            row.get("reaction_mfe_pct"),
+            errors="coerce",
+        )
+        reaction_run_text = (
+            f" · run +{float(reaction_mfe):.2f}%"
+            if pd.notna(reaction_mfe)
+            else ""
+        )
+        label = (
+            f"{row.get('symbol', '—')} · {row.get('timeframe', '—')} "
+            f"{row.get('detector', '—')} · {row.get('signal', '—')} · "
+            f"{row.get('status', '—')}{reaction_run_text} · "
+            f"swing {float(row.get('swing_price', 0.0)):.8g} · {time_text}"
+        )
+        labels.append(label)
+        lookup[label] = index
+
+    selected_label = st.selectbox(
+        "Inspect confirmed swing retest",
+        labels,
+        key=ui_key_prefix + "confirmed_swing_retest_event_select",
+    )
+    selected_retest = view.loc[lookup[selected_label]]
+
+    # Same causal context used by the research tables, computed only for the
+    # selected inspector event. This does not alter setup detection.
+    selected_room_context = (
+        room_provider(selected_retest) if room_provider is not None else None
+    )
+    if room_provider is None and str(selected_retest.get("status", "")).upper() == "REACTION":
+        selected_context_frame = _build_reaction_run_driver_context(
+            pd.DataFrame([selected_retest.to_dict()])
+        )
+        if selected_context_frame is not None and not selected_context_frame.empty:
+            selected_context_row = selected_context_frame.iloc[0]
+            selected_room_context = {
+                "reaction_price": pd.to_numeric(
+                    selected_retest.get(
+                        "retest_close", selected_retest.get("retest_price")
+                    ),
+                    errors="coerce",
+                ),
+                "nearest_opposing_room_pct": selected_context_row.get(
+                    "nearest_opposing_room_pct"
+                ),
+                "nearest_opposing_swing_tf": selected_context_row.get(
+                    "nearest_opposing_swing_tf"
+                ),
+                "nearest_opposing_swing_price": selected_context_row.get(
+                    "nearest_opposing_swing_price"
+                ),
+                "nearest_opposing_swing_pivot_timestamp": selected_context_row.get(
+                    "nearest_opposing_swing_pivot_timestamp"
+                ),
+                "nearest_opposing_swing_confirmed_timestamp": selected_context_row.get(
+                    "nearest_opposing_swing_confirmed_timestamp"
+                ),
+                "nearest_opposing_swing_actionable_timestamp": selected_context_row.get(
+                    "nearest_opposing_swing_actionable_timestamp"
+                ),
+                "aligned_rsi_extreme_count": selected_context_row.get(
+                    "aligned_rsi_extreme_count"
+                ),
+            }
+
+    show_detected_htf_room = st.checkbox(
+        "Show causal HTF room on chart",
+        value=True,
+        key=ui_key_prefix + "confirmed_swing_retest_show_detected_htf_room",
+        help=(
+            "Shows the room known at REACTION close: from the reaction price "
+            "to the nearest already-confirmed opposing 30m/1h/4h 5x5 swing. "
+            "Future swings never move this band."
+        ),
+    )
+
+    if selected_room_context is not None:
+        room_pct = pd.to_numeric(
+            selected_room_context.get("nearest_opposing_room_pct"),
+            errors="coerce",
+        )
+        room_price = pd.to_numeric(
+            selected_room_context.get("nearest_opposing_swing_price"),
+            errors="coerce",
+        )
+        reaction_price = pd.to_numeric(
+            selected_room_context.get("reaction_price"),
+            errors="coerce",
+        )
+        room_tf = selected_room_context.get("nearest_opposing_swing_tf")
+        aligned_rsi_count = pd.to_numeric(
+            selected_room_context.get("aligned_rsi_extreme_count"),
+            errors="coerce",
+        )
+
+        room_m1, room_m2, room_m3, room_m4 = st.columns(4)
+        room_m1.metric(
+            "Detected HTF room",
+            f"{float(room_pct):.2f}%" if pd.notna(room_pct) else "—",
+        )
+        room_m2.metric("Opposing swing TF", str(room_tf) if room_tf else "—")
+        room_m3.metric(
+            "Opposing swing price",
+            f"{float(room_price):.8g}" if pd.notna(room_price) else "—",
+        )
+        room_m4.metric(
+            "Aligned RSI TFs",
+            str(int(aligned_rsi_count)) if pd.notna(aligned_rsi_count) else "—",
+        )
+
+        if pd.notna(reaction_price) and pd.notna(room_price) and pd.notna(room_pct):
+            direction_text = (
+                "above"
+                if str(selected_retest.get("signal", "")).upper() == "LONG"
+                else "below"
+            )
+            st.caption(
+                "Causal room snapshot: REACTION "
+                f"{float(reaction_price):.8g} → {room_tf or 'HTF'} opposing "
+                f"swing {float(room_price):.8g} "
+                f"({float(room_pct):.2f}% {direction_text}). "
+                "The target is frozen from structures already confirmed when "
+                "the REACTION became known."
+            )
+    elif str(selected_retest.get("status", "")).upper() == "REACTION":
+        st.caption(
+            "No already-confirmed opposing 30m/1h/4h swing was available for "
+            "this REACTION, so no causal HTF room band is drawn."
+        )
+
+    detail_chart_candle_limit = st.slider(
+        "15m candles in inspector",
+        min_value=CONFIRMED_SWING_RETEST_DETAIL_MIN_CANDLES,
+        max_value=CONFIRMED_SWING_RETEST_DETAIL_MAX_CANDLES,
+        value=CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES,
+        step=10,
+        key=ui_key_prefix + "confirmed_swing_retest_detail_candle_limit",
+        help=(
+            "Only the inspector changes. Retest detection remains causal on "
+            "the original 1m path. 80 candles = about 20 hours of 15m context."
+        ),
+    )
+
+    # Fetch only enough 15m history to cover the selected historical retest,
+    # its pivot, and the requested chart context. The all-symbol scanner stays
+    # cached and is not rebuilt when this visual control changes.
+    retest_age_min = pd.to_numeric(
+        selected_retest.get("retest_age_min"),
+        errors="coerce",
+    )
+    pivot_to_retest_min = pd.to_numeric(
+        selected_retest.get("pivot_to_retest_min"),
+        errors="coerce",
+    )
+
+    historical_span_min = 0.0
+    if pd.notna(retest_age_min):
+        historical_span_min += max(0.0, float(retest_age_min))
+    if pd.notna(pivot_to_retest_min):
+        historical_span_min += max(0.0, float(pivot_to_retest_min))
+
+    required_history_bars = int(
+        np.ceil(historical_span_min / 15.0)
+    )
+    detail_fetch_limit = min(
+        CONFIRMED_SWING_RETEST_DETAIL_FETCH_MAX,
+        max(
+            int(detail_chart_candle_limit) + 20,
+            required_history_bars + 20,
+        ),
+    )
+
+    if candles_provider is None:
+        detail_candles = load_volume_exhaustion_research_candles(
+            symbol=str(selected_retest["symbol"]),
+            timeframe=CONFIRMED_SWING_RETEST_DETAIL_TIMEFRAME,
+            limit=detail_fetch_limit,
+        )
+    else:
+        detail_candles = candles_provider(selected_retest, detail_fetch_limit)
+
+    if detail_candles is None or detail_candles.empty:
+        st.warning(
+            "No 15m candles are available for this confirmed swing retest."
+        )
+    else:
+        detail_fig = build_confirmed_swing_retest_detail_chart(
+            candles=detail_candles,
+            retest_row=selected_retest,
+            chart_candle_limit=detail_chart_candle_limit,
+            room_context=(
+                selected_room_context if show_detected_htf_room else None
+            ),
+            show_event_marker_without_closed_15m=(candles_provider is not None),
+        )
+        if candles_provider is not None:
+            st.caption(
+                "Continuous V1: velas 15m as-of congeladas y velas posteriores "
+                "reconstruidas solo de bloques completos, contiguos, de 15 × 1m. "
+                "Sin rellenar huecos; el contexto de Room y RSI sigue congelado."
+            )
+        st.caption(
+            f"Historical inspector: {detail_chart_candle_limit} × 15m "
+            f"≈ {detail_chart_candle_limit * 15 / 60:.1f} hours. "
+            "Pivot, confirmation, departure and retest markers keep their "
+            "original timestamps."
+        )
+        st.plotly_chart(
+            detail_fig,
+            use_container_width=True,
+            key=ui_key_prefix + "confirmed_swing_retest_detail_chart",
+            config={"displaylogo": False, "scrollZoom": True},
+        )
+
+    details = {
+        "symbol": selected_retest.get("symbol"),
+        "signal": selected_retest.get("signal"),
+        "timeframe": selected_retest.get("timeframe"),
+        "detector": selected_retest.get("detector"),
+        "status": selected_retest.get("status"),
+        "swing_price": selected_retest.get("swing_price"),
+        "retest_price": selected_retest.get("retest_price"),
+        "retest_distance_pct": selected_retest.get("retest_distance_pct"),
+        "reaction_mfe_pct": selected_retest.get("reaction_mfe_pct"),
+        "reaction_mae_pct": selected_retest.get("reaction_mae_pct"),
+        "reaction_current_pct": selected_retest.get("reaction_current_pct"),
+        "reaction_observed_min": selected_retest.get("reaction_observed_min"),
+        "max_departure_pct": selected_retest.get("max_departure_pct"),
+        "confirmed_to_retest_min": selected_retest.get("confirmed_to_retest_min"),
+        "pivot_to_confirmation_pct": selected_retest.get("pivot_to_confirmation_pct"),
+        "retest_close_location": selected_retest.get("retest_close_location"),
+        "causal_htf_room_pct": (
+            selected_room_context.get("nearest_opposing_room_pct")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_tf": (
+            selected_room_context.get("nearest_opposing_swing_tf")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_price": (
+            selected_room_context.get("nearest_opposing_swing_price")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_pivot_timestamp": (
+            selected_room_context.get("nearest_opposing_swing_pivot_timestamp")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_confirmed_timestamp": (
+            selected_room_context.get("nearest_opposing_swing_confirmed_timestamp")
+            if selected_room_context else None
+        ),
+        "causal_opposing_swing_actionable_timestamp": (
+            selected_room_context.get("nearest_opposing_swing_actionable_timestamp")
+            if selected_room_context else None
+        ),
+    }
+    st.json(details)
+    return selected_retest
+
+
 def render_confirmed_swing_retest_scanner(
     retests_df,
     reaction_filter,
@@ -66724,260 +67015,7 @@ def render_confirmed_swing_retest_scanner(
         hide_index=True,
     )
 
-    labels = []
-    lookup = {}
-    for index, row in view.iterrows():
-        retest_time = row.get("retest_time")
-        if pd.notna(retest_time):
-            time_text = retest_time.strftime("%Y-%m-%d %H:%M")
-        else:
-            time_text = str(row.get("retest_timestamp", index))
-        reaction_mfe = pd.to_numeric(
-            row.get("reaction_mfe_pct"),
-            errors="coerce",
-        )
-        reaction_run_text = (
-            f" · run +{float(reaction_mfe):.2f}%"
-            if pd.notna(reaction_mfe)
-            else ""
-        )
-        label = (
-            f"{row.get('symbol', '—')} · {row.get('timeframe', '—')} "
-            f"{row.get('detector', '—')} · {row.get('signal', '—')} · "
-            f"{row.get('status', '—')}{reaction_run_text} · "
-            f"swing {float(row.get('swing_price', 0.0)):.8g} · {time_text}"
-        )
-        labels.append(label)
-        lookup[label] = index
-
-    selected_label = st.selectbox(
-        "Inspect confirmed swing retest",
-        labels,
-        key="confirmed_swing_retest_event_select",
-    )
-    selected_retest = view.loc[lookup[selected_label]]
-
-    # Same causal context used by the research tables, computed only for the
-    # selected inspector event. This does not alter setup detection.
-    selected_room_context = None
-    if str(selected_retest.get("status", "")).upper() == "REACTION":
-        selected_context_frame = _build_reaction_run_driver_context(
-            pd.DataFrame([selected_retest.to_dict()])
-        )
-        if selected_context_frame is not None and not selected_context_frame.empty:
-            selected_context_row = selected_context_frame.iloc[0]
-            selected_room_context = {
-                "reaction_price": pd.to_numeric(
-                    selected_retest.get(
-                        "retest_close", selected_retest.get("retest_price")
-                    ),
-                    errors="coerce",
-                ),
-                "nearest_opposing_room_pct": selected_context_row.get(
-                    "nearest_opposing_room_pct"
-                ),
-                "nearest_opposing_swing_tf": selected_context_row.get(
-                    "nearest_opposing_swing_tf"
-                ),
-                "nearest_opposing_swing_price": selected_context_row.get(
-                    "nearest_opposing_swing_price"
-                ),
-                "nearest_opposing_swing_pivot_timestamp": selected_context_row.get(
-                    "nearest_opposing_swing_pivot_timestamp"
-                ),
-                "nearest_opposing_swing_confirmed_timestamp": selected_context_row.get(
-                    "nearest_opposing_swing_confirmed_timestamp"
-                ),
-                "nearest_opposing_swing_actionable_timestamp": selected_context_row.get(
-                    "nearest_opposing_swing_actionable_timestamp"
-                ),
-                "aligned_rsi_extreme_count": selected_context_row.get(
-                    "aligned_rsi_extreme_count"
-                ),
-            }
-
-    show_detected_htf_room = st.checkbox(
-        "Show causal HTF room on chart",
-        value=True,
-        key="confirmed_swing_retest_show_detected_htf_room",
-        help=(
-            "Shows the room known at REACTION close: from the reaction price "
-            "to the nearest already-confirmed opposing 30m/1h/4h 5x5 swing. "
-            "Future swings never move this band."
-        ),
-    )
-
-    if selected_room_context is not None:
-        room_pct = pd.to_numeric(
-            selected_room_context.get("nearest_opposing_room_pct"),
-            errors="coerce",
-        )
-        room_price = pd.to_numeric(
-            selected_room_context.get("nearest_opposing_swing_price"),
-            errors="coerce",
-        )
-        reaction_price = pd.to_numeric(
-            selected_room_context.get("reaction_price"),
-            errors="coerce",
-        )
-        room_tf = selected_room_context.get("nearest_opposing_swing_tf")
-        aligned_rsi_count = pd.to_numeric(
-            selected_room_context.get("aligned_rsi_extreme_count"),
-            errors="coerce",
-        )
-
-        room_m1, room_m2, room_m3, room_m4 = st.columns(4)
-        room_m1.metric(
-            "Detected HTF room",
-            f"{float(room_pct):.2f}%" if pd.notna(room_pct) else "—",
-        )
-        room_m2.metric("Opposing swing TF", str(room_tf) if room_tf else "—")
-        room_m3.metric(
-            "Opposing swing price",
-            f"{float(room_price):.8g}" if pd.notna(room_price) else "—",
-        )
-        room_m4.metric(
-            "Aligned RSI TFs",
-            str(int(aligned_rsi_count)) if pd.notna(aligned_rsi_count) else "—",
-        )
-
-        if pd.notna(reaction_price) and pd.notna(room_price) and pd.notna(room_pct):
-            direction_text = (
-                "above"
-                if str(selected_retest.get("signal", "")).upper() == "LONG"
-                else "below"
-            )
-            st.caption(
-                "Causal room snapshot: REACTION "
-                f"{float(reaction_price):.8g} → {room_tf or 'HTF'} opposing "
-                f"swing {float(room_price):.8g} "
-                f"({float(room_pct):.2f}% {direction_text}). "
-                "The target is frozen from structures already confirmed when "
-                "the REACTION became known."
-            )
-    elif str(selected_retest.get("status", "")).upper() == "REACTION":
-        st.caption(
-            "No already-confirmed opposing 30m/1h/4h swing was available for "
-            "this REACTION, so no causal HTF room band is drawn."
-        )
-
-    detail_chart_candle_limit = st.slider(
-        "15m candles in inspector",
-        min_value=CONFIRMED_SWING_RETEST_DETAIL_MIN_CANDLES,
-        max_value=CONFIRMED_SWING_RETEST_DETAIL_MAX_CANDLES,
-        value=CONFIRMED_SWING_RETEST_DETAIL_DEFAULT_CANDLES,
-        step=10,
-        key="confirmed_swing_retest_detail_candle_limit",
-        help=(
-            "Only the inspector changes. Retest detection remains causal on "
-            "the original 1m path. 80 candles = about 20 hours of 15m context."
-        ),
-    )
-
-    # Fetch only enough 15m history to cover the selected historical retest,
-    # its pivot, and the requested chart context. The all-symbol scanner stays
-    # cached and is not rebuilt when this visual control changes.
-    retest_age_min = pd.to_numeric(
-        selected_retest.get("retest_age_min"),
-        errors="coerce",
-    )
-    pivot_to_retest_min = pd.to_numeric(
-        selected_retest.get("pivot_to_retest_min"),
-        errors="coerce",
-    )
-
-    historical_span_min = 0.0
-    if pd.notna(retest_age_min):
-        historical_span_min += max(0.0, float(retest_age_min))
-    if pd.notna(pivot_to_retest_min):
-        historical_span_min += max(0.0, float(pivot_to_retest_min))
-
-    required_history_bars = int(
-        np.ceil(historical_span_min / 15.0)
-    )
-    detail_fetch_limit = min(
-        CONFIRMED_SWING_RETEST_DETAIL_FETCH_MAX,
-        max(
-            int(detail_chart_candle_limit) + 20,
-            required_history_bars + 20,
-        ),
-    )
-
-    detail_candles = load_volume_exhaustion_research_candles(
-        symbol=str(selected_retest["symbol"]),
-        timeframe=CONFIRMED_SWING_RETEST_DETAIL_TIMEFRAME,
-        limit=detail_fetch_limit,
-    )
-
-    if detail_candles is None or detail_candles.empty:
-        st.warning(
-            "No 15m candles are available for this confirmed swing retest."
-        )
-    else:
-        detail_fig = build_confirmed_swing_retest_detail_chart(
-            candles=detail_candles,
-            retest_row=selected_retest,
-            chart_candle_limit=detail_chart_candle_limit,
-            room_context=(
-                selected_room_context if show_detected_htf_room else None
-            ),
-        )
-        st.caption(
-            f"Historical inspector: {detail_chart_candle_limit} × 15m "
-            f"≈ {detail_chart_candle_limit * 15 / 60:.1f} hours. "
-            "Pivot, confirmation, departure and retest markers keep their "
-            "original timestamps."
-        )
-        st.plotly_chart(
-            detail_fig,
-            use_container_width=True,
-            key="confirmed_swing_retest_detail_chart",
-            config={"displaylogo": False, "scrollZoom": True},
-        )
-
-    details = {
-        "symbol": selected_retest.get("symbol"),
-        "signal": selected_retest.get("signal"),
-        "timeframe": selected_retest.get("timeframe"),
-        "detector": selected_retest.get("detector"),
-        "status": selected_retest.get("status"),
-        "swing_price": selected_retest.get("swing_price"),
-        "retest_price": selected_retest.get("retest_price"),
-        "retest_distance_pct": selected_retest.get("retest_distance_pct"),
-        "reaction_mfe_pct": selected_retest.get("reaction_mfe_pct"),
-        "reaction_mae_pct": selected_retest.get("reaction_mae_pct"),
-        "reaction_current_pct": selected_retest.get("reaction_current_pct"),
-        "reaction_observed_min": selected_retest.get("reaction_observed_min"),
-        "max_departure_pct": selected_retest.get("max_departure_pct"),
-        "confirmed_to_retest_min": selected_retest.get("confirmed_to_retest_min"),
-        "pivot_to_confirmation_pct": selected_retest.get("pivot_to_confirmation_pct"),
-        "retest_close_location": selected_retest.get("retest_close_location"),
-        "causal_htf_room_pct": (
-            selected_room_context.get("nearest_opposing_room_pct")
-            if selected_room_context else None
-        ),
-        "causal_opposing_swing_tf": (
-            selected_room_context.get("nearest_opposing_swing_tf")
-            if selected_room_context else None
-        ),
-        "causal_opposing_swing_price": (
-            selected_room_context.get("nearest_opposing_swing_price")
-            if selected_room_context else None
-        ),
-        "causal_opposing_swing_pivot_timestamp": (
-            selected_room_context.get("nearest_opposing_swing_pivot_timestamp")
-            if selected_room_context else None
-        ),
-        "causal_opposing_swing_confirmed_timestamp": (
-            selected_room_context.get("nearest_opposing_swing_confirmed_timestamp")
-            if selected_room_context else None
-        ),
-        "causal_opposing_swing_actionable_timestamp": (
-            selected_room_context.get("nearest_opposing_swing_actionable_timestamp")
-            if selected_room_context else None
-        ),
-    }
-    st.json(details)
+    render_confirmed_swing_retest_inspector(view)
 
 
 def build_volume_exhaustion_confirmation_bucket_summary(
@@ -85102,7 +85140,9 @@ if selected_section == "reaction_swing_lab":
         if cohort_mode in ("Continuous V1", "Todos"):
             from reaction_lab_research_view import render_cohort_research
             render_cohort_research(
-                BASE_DIR, "Continuous V1", lab_mode, structural_symbols
+                BASE_DIR, "Continuous V1", lab_mode, structural_symbols,
+                shared_retest_inspector=render_confirmed_swing_retest_inspector,
+                cohort_timezone=TZ,
             )
             if cohort_mode == "Todos":
                 st.divider()

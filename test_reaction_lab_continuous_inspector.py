@@ -59,68 +59,23 @@ class FrozenInspectorTests(unittest.TestCase):
                          ['Pivot','Confirmed','Departure','REACTION'])
         self.assertEqual(view.persisted_retest_markers({}), [])
 
-    def test_render_controls_use_frozen_values_and_15m_snapshot(self):
-        class Col:
-            def metric(self, *args, **kwargs):
-                pass
-        plotted=[]
-        controls=[]
-        fake = types.ModuleType('streamlit')
-        fake.checkbox = lambda *args, **kwargs: (controls.append(args[0]) or True)
-        fake.slider = lambda *args, **kwargs: (controls.append(args[0]) or 80)
-        fake.columns = lambda n: [Col() for _ in range(n)]
-        fake.caption = lambda *args, **kwargs: None
-        fake.warning = lambda *args, **kwargs: None
-        fake.plotly_chart = lambda fig, **kwargs: plotted.append(fig)
-        row = {
-            'symbol':'TESTUSDT', 'signal':'LONG', 'known_ts':self.known,
-            'retest_timestamp':self.retest,'retest_price':10.1,
-            'retest_close':10.1,'swing_price':10,
-            'pivot_timestamp':self.t + 42*900_000,
-            'actionable_timestamp':self.t + 48*900_000,
-            'entry_price':10,'departure_timestamp':self.t+75*900_000,
-            'departure_price':10.5,
-            'nearest_opposing_room_pct':5,
-            'nearest_opposing_swing_tf':'1h',
-            'nearest_opposing_swing_price':10.6,
-            'nearest_opposing_swing_actionable_timestamp':self.t,
-            'aligned_rsi_extreme_count':2,
-            'rsi14_1m':33,'rsi14_5m':38,'rsi14_15m':41,'rsi14_1h':45,
-        }
-        with patch.dict(sys.modules, {'streamlit': fake}):
-            view.render_persisted_retest_inspector(row, {'15m':self.candles}, 'REACTION / Retests')
-        self.assertIn('Show causal HTF room on chart',controls)
-        self.assertIn('15m candles in inspector',controls)
-        self.assertEqual(len(plotted), 1)
-        fig=plotted[0]
-        self.assertEqual(len(fig.data[0].x),80)
-        names=[x.name for x in fig.data[1:]]
-        self.assertIn('Pivot',names)
-        self.assertIn('Confirmed',names)
-        self.assertIn('REACTION',names)
-        self.assertTrue(any(shape.type=='rect' for shape in fig.layout.shapes))
+    def test_continuous_delegates_to_single_shared_legacy_inspector(self):
+        import inspect
+        text=inspect.getsource(view.render_cohort_research)
+        self.assertIn('shared_retest_inspector(', text)
+        self.assertNotIn('render_persisted_retest_inspector(', text)
+        self.assertIn('ui_key_prefix=\'continuous_\'', text)
 
-    def test_future_confirmed_htf_target_is_blocked(self):
-        # A corrupted HTF timestamp must not produce a causal band.
-        class Col:
-            def metric(self, *args, **kwargs): pass
-        plotted=[];warnings=[]
-        fake = types.ModuleType('streamlit')
-        fake.checkbox=lambda *args, **kwargs:True
-        fake.slider=lambda *args, **kwargs:80
-        fake.columns=lambda n:[Col() for _ in range(n)]
-        fake.caption=lambda *args, **kwargs:None
-        fake.warning=lambda msg: warnings.append(msg)
-        fake.plotly_chart=lambda fig, **kwargs:plotted.append(fig)
-        row={'symbol':'TESTUSDT','signal':'LONG','known_ts':self.known,
-             'retest_timestamp':self.retest,'retest_price':10,
-             'nearest_opposing_room_pct':4,
+    def test_visual_adapter_preserves_causal_room_and_complete_15m_blocks(self):
+        from reaction_lab_unified_adapter import frozen_room, post_15m_from_1m
+        import pandas as pd
+        row={'known_ts':self.known,'nearest_opposing_room_pct':4,
              'nearest_opposing_swing_price':10.4,
              'nearest_opposing_swing_actionable_timestamp':self.known + 3600000}
-        with patch.dict(sys.modules, {'streamlit': fake}):
-            view.render_persisted_retest_inspector(row,{'15m':self.candles},'REACTION / Retests')
-        self.assertTrue(warnings)
-        self.assertEqual(len([shape for shape in plotted[0].layout.shapes if shape.type=='rect']),0)
+        self.assertIsNone(frozen_room(row)['nearest_opposing_room_pct'])
+        path=pd.DataFrame([{'timestamp':self.t+i*60_000,'open':10,'high':11,'low':9,'close':10.5}
+            for i in range(14)])
+        self.assertTrue(post_15m_from_1m(path, self.t).empty)
 
 
 if __name__=='__main__':
