@@ -459,12 +459,118 @@ def render_runner_analyzer(project, source_events):
         st.markdown('#### ¿Qué datos causales tenemos?')
         coverage=factor_coverage(full)
         st.dataframe(coverage,hide_index=True,use_container_width=True,height=260)
-        btc_cov=coverage.loc[coverage['Factor'].str.startswith('BTC Corr')]
-        if not btc_cov.empty and int(btc_cov['Con dato'].sum())==0:
-            st.warning('BTC Correlation histórico (Pearson/Beta/R²) NO está congelado por Event ID '
-                       'en esta cohorte. Sí están BTC retorno 1h/4h, Strength vs BTC y Market Flow. '
-                       'No calculamos correlaciones con velas posteriores o Redis actual.')
+        # The independent BTC collector started prospectively, after many of
+        # the earlier 180m+ paths. Report coverage for ALL events and for the
+        # EVALUABLE horizon separately, rather than a misleading global warning.
+        btc_field='btc_corr_5m_4h'
+        btc_sidecar=(Path(project)/'reports/reaction_lab/btc_context_v1.sqlite3').is_file()
+        all_btc=int(pd.to_numeric(events[btc_field],errors='coerce').notna().sum()) if btc_field in events else 0
+        eligible_btc=int(pd.to_numeric(full[btc_field],errors='coerce').notna().sum()) if btc_field in full else 0
+        if btc_sidecar:
+            st.info(f'BTC Correlation + Velocity: base prospectiva disponible. '
+                    f'Con BTC Corr 5m/4h: {all_btc}/{len(events)} REACTIONs en el universo seleccionado; '
+                    f'{eligible_btc}/{len(full)} con horizonte {horizon}m completo. '
+                    'Las anteriores a la activación conservan el dato ausente, sin backfill ni lookahead.')
+            if eligible_btc==0:
+                st.caption('Los factores de correlación BTC aparecerán en buckets y minería automática '
+                           'cuando estas REACTIONs completen su path de observación.')
+        else:
+            st.warning('No está disponible la SQLite prospectiva de BTC Correlation/Velocity en este proyecto. '
+                       'No se reconstruye desde Redis actual.')
         available=coverage.loc[coverage['Con dato']>=int(min_n),'Factor'].tolist()
+        # Auto-discovery is opt-in and shares exactly the same eligible universe
+        # as the existing manual buckets; no runner archive as control set.
+        st.markdown('#### 🔎 Explorador automático de patrones (2–3 factores)')
+        st.caption('Busca configuraciones con mayor o menor frecuencia de runners que las REACTIONs '
+                   'comparables sin esa configuración. Solo usa factores congelados al retest. '
+                   'Resultados exploratorios sujetos a selección múltiple.')
+        search_enabled=st.checkbox('Buscar automáticamente combinaciones de factores',
+                                    value=False,key='runner_patterns_enable')
+        if search_enabled:
+            from reaction_lab_runner_patterns import (
+                discover_runner_patterns, DEFAULT_PATTERN_FACTORS,
+                EXCLUDED_SEARCH_FACTORS, MAX_FACTORS,
+            )
+            choices=[f for f in available if f not in EXCLUDED_SEARCH_FACTORS]
+            defaults=[f for f in DEFAULT_PATTERN_FACTORS if f in choices]
+            picked=st.multiselect('Factores a explorar (máximo 24)',choices,
+                                  default=defaults,key='runner_patterns_factors',
+                                  help='Incluí BTC, Room, Flow y volumen cuando tengan datos. '
+                                       'Cada bucket usa umbrales fijos; no aprende cortes del resultado.')
+            p1,p2=st.columns(2)
+            depth=p1.selectbox('Máximo de factores por combinación',[1,2,3],index=2,
+                               key='runner_patterns_depth')
+            top=p2.selectbox('Reglas a mostrar por grupo',[10,20,30],index=1,
+                             key='runner_patterns_top')
+            if len(picked)>MAX_FACTORS:
+                st.warning(f'Seleccioná como máximo {MAX_FACTORS} factores para limitar el costo del cálculo.')
+            elif not picked:
+                st.info('Seleccioná al menos un factor con cobertura suficiente.')
+            else:
+                # Only pass the needed immutable subset through Streamlit cache;
+                # repeated UI interactions do not rescan paths or mine rules.
+                feature_columns=[FACTORS[f] for f in picked]
+                narrow_columns=list(dict.fromkeys(['event_key','known_ts',label]+feature_columns))
+                reduced=full.loc[:,narrow_columns].copy()
+                @st.cache_data(ttl=180,max_entries=6,show_spinner=False)
+                def _cached_patterns(reduced_frame, objective, window, minimum, fields, maxdepth, limit):
+                    return discover_runner_patterns(reduced_frame,target=objective,
+                        horizon=window,min_n=minimum,factors=fields,depth=maxdepth,top_each=limit)
+                with st.spinner('Explorando combinaciones 1D/2D/3D y controles comparables…'):
+                    up,down,info=_cached_patterns(reduced,float(target),int(horizon),
+                        int(min_n),tuple(picked),int(depth),int(top))
+                st.caption(f"Modo: {info['mode']} · {info['days']} días · "
+                           f"{info['factors_with_buckets']} factores con buckets · "
+                           f"{info['candidate_evaluations']} combinaciones examinadas · "
+                           f"{info['valid_rules']} reglas con muestra válida.")
+                if info['mode']=='TEMPORAL':
+                    st.info(f"Validación cronológica separada desde {info['cutoff_utc']} "
+                            f"(entrenamiento {info['train_events']} eventos; "
+                            f"validación {info['validation_events']}; "
+                            f"purga {info['embargo']} eventos). "
+                            'Las reglas se eligen exclusivamente en los días anteriores.')
+                else:
+                    st.warning('Sin validación fuera de muestra suficiente: los hallazgos son exploratorios, '
+                               'no se pueden interpretar como ventajas predictivas.')
+                tab_up,tab_down=st.tabs(['Mayor tasa de runners','Menor tasa de runners'])
+                with tab_up:
+                    if up.empty:st.info('Sin reglas con suficientes casos.')
+                    else:st.dataframe(up,hide_index=True,use_container_width=True,height=360)
+                with tab_down:
+                    if down.empty:st.info('Sin reglas con suficientes casos.')
+                    else:st.dataframe(down,hide_index=True,use_container_width=True,height=360)
+                if not up.empty or not down.empty:
+                    from reaction_lab_runner_patterns import match_rule
+                    explorer_rules=(['MÁS | '+x for x in up['Regla'].tolist()]
+                                    +['MENOS | '+x for x in down['Regla'].tolist()])
+                    choice=st.selectbox('Inspeccionar REACTIONs que cumplen una regla',
+                                        explorer_rules,key='runner_patterns_inspect')
+                    selected_rule=choice.split(' | ',1)[1]
+                    matching=full.loc[match_rule(full, selected_rule)].copy()
+                    st.caption(f'{len(matching)} REACTIONs cumplen la regla en el horizonte actual '
+                               '(incluye exploración y fechas de validación). Todas tienen path completo.')
+                    fields=['event_key','symbol','signal','known_ts',
+                            'run_horizon_pct','mae_horizon_pct',label,
+                            'nearest_opposing_room_pct','side_adjusted_strength_vs_btc_4h',
+                            'btc_corr_5m_4h','btc_velocity_state','Market alignment']
+                    visible=[x for x in fields if x in matching.columns]
+                    st.dataframe(matching.loc[:,visible].head(250),hide_index=True,
+                                 use_container_width=True,height=260)
+                st.caption('El explorador usa una búsqueda guiada de triples; no garantiza el óptimo global. '
+                           'La columna N es la muestra de la regla; «resto comparable» contiene '
+                           'otros eventos con todos los factores de esa regla disponibles. '
+                           'Una tasa alta no es rentabilidad. Muchas combinaciones pueden generar '
+                           'hallazgos por azar y los eventos simultáneos comparten BTC.')
+                if not up.empty or not down.empty:
+                    import io
+                    buf=io.StringIO()
+                    for direction,result in [('MAS_RUNNERS',up),('MENOS_RUNNERS',down)]:
+                        portion=result.copy();portion.insert(0,'Búsqueda',direction)
+                        portion.to_csv(buf,index=False,header=buf.tell()==0)
+                    st.download_button('Exportar reglas descubiertas (CSV)',
+                        buf.getvalue().encode('utf-8-sig'),
+                        file_name=f'continuous_runner_patterns_{horizon}m_{target:g}pct.csv',
+                        mime='text/csv',key='runner_patterns_export')
         if not available:
             st.info('No hay factores con muestras suficientes para agrupar.');return
         st.markdown('#### Buckets contra todas las REACTIONs evaluables')
