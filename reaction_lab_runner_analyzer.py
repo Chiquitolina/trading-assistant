@@ -65,7 +65,42 @@ NUMERIC_FACTORS = {
     'BTC movimiento con signo 15m': ('btc_signed_move_15m_pct', (-math.inf, -1., -.5, 0., .5, 1., math.inf)),
     'BTC movimiento con signo 1h': ('btc_signed_move_1h_pct', (-math.inf, -2., -1., 0., 1., 2., math.inf)),
     'BTC residual 15m': ('btc_residual_move_15m_pct', (-math.inf, -2., -.5, 0., .5, 2., math.inf)),
+    # Deep Research V1, frozen at the known timestamp; never from forward paths.
+    'Departure duración (min)': ('departure_duration_min', (-math.inf, 3., 10., 20., 40., 80., math.inf)),
+    'Departure velocidad (%/min)': ('departure_speed_pct_per_min', (-math.inf, .025, .05, .1, .2, .4, math.inf)),
+    'Departure eficiencia': ('departure_efficiency', (-math.inf, .2, .4, .6, .8, math.inf)),
+    'Departure velas favorables': ('departure_directional_bar_share', (-math.inf, .25, .5, .75, math.inf)),
+    'Departure volumen relativo': ('departure_relative_volume', (-math.inf, .5, 1., 2., 4., math.inf)),
+    'Departure en ATR': ('departure_atr_multiple', (-math.inf, 1., 2., 3., 5., 8., math.inf)),
+    'Retest mecha rechazo': ('retest_rejection_wick_share', (-math.inf, .1, .25, .5, .75, math.inf)),
+    'Retest fuerza del cierre': ('retest_close_strength', (-math.inf, .2, .4, .6, .8, math.inf)),
+    'Retest volumen vs 30m': ('retest_volume_relative_30m', (-math.inf, .5, 1., 2., 4., math.inf)),
+    'Retest aproximación 5m': ('retest_approach_5m_speed_pct_min', (-math.inf, -.2, -.05, 0., .05, .2, math.inf)),
+    'Retest eficiencia aproximación': ('retest_approach_15m_efficiency', (-math.inf, .2, .4, .6, .8, math.inf)),
+    'Retest distancia en ATR': ('retest_level_distance_atr', (-math.inf, .25, .5, 1., 2., math.inf)),
+    'ATR 1m (%)': ('atr_1m_pct', (-math.inf, .1, .2, .4, .8, 1.5, math.inf)),
+    'Percentil ATR 1m': ('atr_1m_percentile_200', (-math.inf, 20., 40., 60., 80., math.inf)),
+    'Volatilidad realizada 15m': ('realized_vol_15m_pct', (-math.inf, .5, 1., 2., 4., math.inf)),
+    'Volatilidad realizada 60m': ('realized_vol_60m_pct', (-math.inf, 1., 2., 4., 8., math.inf)),
+    'Shock volatilidad 1m': ('retest_volatility_shock', (-math.inf, 1., 2., 4., 8., math.inf)),
+    'Densidad REACTIONs 15m': ('reaction_density_market_15m', (-math.inf, 5., 15., 30., 60., math.inf)),
+    'Aceleración Breadth 1h': ('breadth_acceleration_1h', (-math.inf, -15., -5., 0., 5., 15., math.inf)),
+    'Pendiente Breadth 1h': ('breadth_slope_2bars_1h', (-math.inf, -10., -2., 0., 2., 10., math.inf)),
+    'Aceleración Breadth 4h': ('breadth_acceleration_4h', (-math.inf, -15., -5., 0., 5., 15., math.inf)),
+    'Densidad REACTIONs mismo lado': ('reaction_density_same_side_15m', (-math.inf, 5., 15., 30., 60., math.inf)),
+    'OI cambio 5m (%)': ('oi_change_5m_pct', (-math.inf, -2., -.5, 0., .5, 2., math.inf)),
+    'OI cambio 15m (%)': ('oi_change_15m_pct', (-math.inf, -2., -.5, 0., .5, 2., math.inf)),
+    'Funding': ('funding_rate', (-math.inf, -.001, 0., .0001, .001, math.inf)),
+    'Antigüedad microestructura (seg)': ('telemetry_age_sec', (-math.inf, 30., 60., 120., 300., 600., math.inf)),
+    'Agresor compra 5m': ('taker_buy_ratio_5m', (-math.inf, .35, .45, .55, .65, math.inf)),
+    'Delta agresores 5m': ('taker_delta_5m', (-math.inf, -100000., 0., 100000., math.inf)),
+    'CVD aproximado 15m': ('cvd_15m', (-math.inf, -100000., 0., 100000., math.inf)),
+    'Imbalance libro top5': ('orderbook_imbalance_5', (-math.inf, -.5, -.2, 0., .2, .5, math.inf)),
+    'Spread libro bps': ('orderbook_spread_bps', (-math.inf, 1., 3., 6., 12., math.inf)),
+    'Liquidaciones 15m USD': ('liquidations_15m_usdt', (-math.inf, 1e3, 1e4, 1e5, 1e6, math.inf)),
+    'Densidad REACTIONs sector': ('sector_reaction_density_15m', (-math.inf, 2., 5., 10., 20., math.inf)),
 }
+
 
 CATEGORICAL_FACTORS = {
     'Market Flow': 'Market alignment',
@@ -84,6 +119,8 @@ CATEGORICAL_FACTORS = {
     'BTC velocity state': 'btc_velocity_state',
     'BTC trade alignment': 'btc_trade_alignment',
     'BTC context status': 'btc_context_status',
+    'Divergencia Flow 1h/4h': 'deep_market_flow_divergence',
+    'Calidad microestructura': 'microstructure_status',
 }
 
 FACTORS = {name: column for name, (column, _) in NUMERIC_FACTORS.items()}
@@ -440,6 +477,21 @@ def render_runner_analyzer(project, source_events):
                        'No clasificamos paths incompletos como perdedores.')
             return
         full=runner_analysis_frame(events,outcome)
+        # Deep Research is read-only and purely optional; old events retain
+        # missing values, never get imputed from the current market.
+        try:
+            from reaction_lab_deep_collector import load_deep_frame, load_deep_outcomes
+            keys=tuple(full['event_key'].astype(str))
+            deep=load_deep_frame(project,keys)
+            deep_outcomes=load_deep_outcomes(project,keys,int(horizon))
+            if not deep.empty:
+                keep=['event_key']+[c for c in deep.columns if c!='event_key' and c not in full.columns]
+                full=full.merge(deep[keep],on='event_key',how='left',validate='one_to_one')
+            if not deep_outcomes.empty:
+                keep=['event_key']+[c for c in deep_outcomes.columns if c!='event_key' and c not in full.columns]
+                full=full.merge(deep_outcomes[keep],on='event_key',how='left',validate='one_to_one')
+        except ImportError:
+            pass  # Historical analyzer works without the optional deep extension.
         label=f'hit_{str(target).replace(".","_")}pct'
         hits=int(full[label].sum())
         st.metric(f'Runners > {target:g}% / {horizon}m',f'{hits} / {len(full)}',
@@ -456,6 +508,23 @@ def render_runner_analyzer(project, source_events):
             st.caption('Separación por fechas UTC, sin mezclar días. Todavía no es validación fuera de muestra de una estrategia.')
         else:
             st.caption('Sin suficientes días y eventos para un corte temporal útil (mínimo 4 días).')
+        st.markdown('#### 🧬 Deep Research · cobertura y resultados operables')
+        if 'deep_status' in full:
+            deep_ready=int(full['deep_status'].notna().sum())
+            micro=int(full['microstructure_status'].eq('OBSERVED').sum()) if 'microstructure_status' in full else 0
+            st.caption(f'Enriquecimiento causal: {deep_ready}/{len(full)} eventos elegibles; '
+                       f'microestructura observada: {micro}/{len(full)}. '
+                       'Los históricos anteriores a la activación quedan sin estas métricas.')
+            operable=[x for x in full.columns if x.startswith('tp_sl_') and x.endswith(f'_{horizon}m') and not x.startswith('tp_sl_minutes')]
+            if operable:
+                field=st.selectbox('Secuencia TP/SL desde OPEN siguiente (conservadora)',operable,
+                                   key='deep_research_tp_sl_choice')
+                st.dataframe(full[field].fillna('NO DISPONIBLE').value_counts(dropna=False)
+                             .rename_axis('Resultado').reset_index(name='REACTIONs'),hide_index=True)
+                st.caption('AMBIGUOUS_SL_FIRST: la misma vela 1m tocó ambas barreras; '
+                           'contado conservadoramente como SL. No incluye slippage, spread ni comisiones.')
+        else:
+            st.caption('Deep Research todavía no está activo. Las métricas existentes siguen disponibles.')
         st.markdown('#### ¿Qué datos causales tenemos?')
         coverage=factor_coverage(full)
         st.dataframe(coverage,hide_index=True,use_container_width=True,height=260)

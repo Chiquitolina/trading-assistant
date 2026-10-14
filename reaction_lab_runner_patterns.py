@@ -18,7 +18,7 @@ from reaction_lab_runner_analyzer import FACTORS, NUMERIC_FACTORS, TARGETS, _gro
 
 # Data-quality labels / capture modalities are not market features: exclude from
 # automated mining even though they remain available in manual diagnostics.
-EXCLUDED_SEARCH_FACTORS = frozenset({'BTC context status', 'Tipo de observación'})
+EXCLUDED_SEARCH_FACTORS = frozenset({'BTC context status', 'Tipo de observación', 'Calidad microestructura'})
 DEFAULT_PATTERN_FACTORS = (
     'Lado', 'HTF Room mínimo', 'HTF Room 1h',
     'Strength BTC 4h (direccional)', 'Breadth 1h', 'Delta breadth 1h',
@@ -26,6 +26,9 @@ DEFAULT_PATTERN_FACTORS = (
     'RSI 15m', 'Departure pre-retest', 'Fuerza sector vs BTC 4h',
     'BTC Corr 5m / 4h', 'BTC Beta 5m / 4h', 'BTC residual 1h',
     'BTC velocidad 15m (%)', 'BTC trade alignment',
+    'Departure velocidad (%/min)', 'Departure eficiencia',
+    'Retest mecha rechazo', 'Retest volumen vs 30m',
+    'ATR 1m (%)', 'Densidad REACTIONs 15m',
 )
 MAX_FACTORS = 24
 
@@ -208,7 +211,17 @@ def discover_runner_patterns(frame, *, target=2., horizon=180, min_n=20,
     min_val = max(5, min_n//2)
     def table(records, sign):
         rows=[]
-        for rule in sorted((r for r in records if r['diff']*sign>0),key=_rule_order)[:top_each]:
+        # Different bucket names can select exactly the same Event IDs.
+        # Collapse such redundant discoveries; validation is never used here.
+        seen_signatures=set()
+        for rule in sorted((r for r in records if r['diff']*sign>0),key=_rule_order):
+            scope=train.copy()
+            for condition in rule['conditions']:
+                scope &= valid_masks[condition.factor]
+            signature=np.packbits(scope & rule['mask']).tobytes()
+            if signature in seen_signatures:continue
+            seen_signatures.add(signature)
+            if len(rows)>=top_each:break
             row = {
                 'Regla':' ∧ '.join(f'{c.factor} = {c.bucket}' for c in rule['conditions']),
                 'N factores':len(rule['conditions']),

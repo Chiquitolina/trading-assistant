@@ -486,6 +486,47 @@ def render_cohort_research(project,cohort_mode,view_name,symbols,*,shared_retest
                  for k,v in value.items() if not isinstance(v,(list,dict))})
         if row.get('context_state')!='READY':
             st.warning('Contexto no completamente validado. Las métricas ausentes no deben tratarse como ceros.')
+    # Event-level deep research: available for EVERY Continuous Base REACTION,
+    # independently of runner outcome. No mutation of existing research data.
+    if 'REACTION / Retests' in view_name and cohort_mode != 'Legacy':
+        try:
+            from reaction_lab_deep_collector import load_deep_frame, load_deep_outcomes
+            deep_event=load_deep_frame(project,[selected])
+            with st.expander('🧬 Deep Research · departure, retest, volatilidad, flujo y ejecución',expanded=False):
+                if deep_event.empty:
+                    st.info('Este Event ID es anterior a la captura Deep Research, o está pendiente. '
+                            'No completamos variables históricas usando el mercado actual.')
+                else:
+                    deep_values=deep_event.iloc[0].to_dict()
+                    st.caption('Contexto causal congelado al known_ts. '
+                               'Las fuentes externas faltantes se muestran como nulas, no como cero.')
+                    groups={
+                        'Departure y retest': ('departure_','retest_'),
+                        'ATR y volatilidad': ('atr_','realized_vol_','retest_volatility_shock'),
+                        'Breadth, Flow y densidad': ('breadth_','deep_market_','reaction_density_','sector_reaction_'),
+                        'Open Interest, agresores y liquidez': ('oi_','funding_','taker_','cvd_','orderbook_','liquidations_','telemetry_'),
+                    }
+                    for label,prefixes in groups.items():
+                        values={k:v for k,v in deep_values.items() if k.startswith(prefixes)}
+                        if values:
+                            st.markdown('**'+label+'**')
+                            st.json({k:(None if pd.isna(v) else v) for k,v in values.items()})
+                    if deep_values.get('microstructure_status') != 'OBSERVED':
+                        st.warning('Microestructura incompleta: OI/CVD/funding/libro/liquidaciones '
+                                   'pueden carecer de una fuente observada antes de la señal.')
+                    horizons=st.selectbox('Outcome operativo posterior (minutos)',
+                        [30,60,120,180,360],index=3,key='cohort_deep_outcome_horizon')
+                    result=load_deep_outcomes(project,[selected],int(horizons))
+                    if result.empty:
+                        st.info('El horizonte todavía no tiene path 1m completo, '
+                                'o el recolector Deep Research aún no actualizó este outcome.')
+                    else:
+                        val=result.iloc[0].to_dict()
+                        st.json({k:v for k,v in val.items() if k!='event_key'})
+                        st.caption('La simulación usa OPEN siguiente y orden SL primero si TP/SL '
+                                   'se tocan en la misma vela. No supone ejecución real ni incluye fees.')
+        except ImportError:
+            pass
     # Exact as-of HTF evidence, independent of Redis. 15m uses the
     # dedicated inspector above in REACTION / Retests; other modes unchanged.
     if recorded:
