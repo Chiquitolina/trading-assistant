@@ -18,7 +18,8 @@ from reaction_lab_runner_analyzer import FACTORS, NUMERIC_FACTORS, TARGETS, _gro
 
 # Data-quality labels / capture modalities are not market features: exclude from
 # automated mining even though they remain available in manual diagnostics.
-EXCLUDED_SEARCH_FACTORS = frozenset({'BTC context status', 'Tipo de observación', 'Calidad microestructura'})
+EXCLUDED_SEARCH_FACTORS = frozenset({'BTC context status', 'Tipo de observación', 'Calidad microestructura',
+    'Antigüedad microestructura (seg)'})
 DEFAULT_PATTERN_FACTORS = (
     'Lado', 'HTF Room mínimo', 'HTF Room 1h',
     'Strength BTC 4h (direccional)', 'Breadth 1h', 'Delta breadth 1h',
@@ -29,6 +30,7 @@ DEFAULT_PATTERN_FACTORS = (
     'Departure velocidad (%/min)', 'Departure eficiencia',
     'Retest mecha rechazo', 'Retest volumen vs 30m',
     'ATR 1m (%)', 'Densidad REACTIONs 15m',
+    'Presión taker según lado 5m',
 )
 MAX_FACTORS = 24
 

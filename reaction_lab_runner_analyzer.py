@@ -93,11 +93,16 @@ NUMERIC_FACTORS = {
     'Funding': ('funding_rate', (-math.inf, -.001, 0., .0001, .001, math.inf)),
     'Antigüedad microestructura (seg)': ('telemetry_age_sec', (-math.inf, 30., 60., 120., 300., 600., math.inf)),
     'Agresor compra 5m': ('taker_buy_ratio_5m', (-math.inf, .35, .45, .55, .65, math.inf)),
+    'Agresor compra 15m': ('taker_buy_ratio_15m', (-math.inf, .35, .45, .55, .65, math.inf)),
+    'Presión taker según lado 5m': ('taker_pressure_side_5m', (-math.inf, -.6, -.2, 0., .2, .6, math.inf)),
+    'Delta taker normalizado 5m': ('taker_imbalance_ratio_5m', (-math.inf, -.6, -.2, 0., .2, .6, math.inf)),
     'Delta agresores 5m': ('taker_delta_5m', (-math.inf, -100000., 0., 100000., math.inf)),
     'CVD aproximado 15m': ('cvd_15m', (-math.inf, -100000., 0., 100000., math.inf)),
     'Imbalance libro top5': ('orderbook_imbalance_5', (-math.inf, -.5, -.2, 0., .2, .5, math.inf)),
+    'Imbalance libro según lado': ('orderbook_imbalance_side_5', (-math.inf, -.5, -.2, 0., .2, .5, math.inf)),
     'Spread libro bps': ('orderbook_spread_bps', (-math.inf, 1., 3., 6., 12., math.inf)),
     'Liquidaciones 15m USD': ('liquidations_15m_usdt', (-math.inf, 1e3, 1e4, 1e5, 1e6, math.inf)),
+    'Snapshots liquidaciones 15m': ('liquidations_snapshot_count_15m', (-math.inf, 1., 2., 5., 10., math.inf)),
     'Densidad REACTIONs sector': ('sector_reaction_density_15m', (-math.inf, 2., 5., 10., 20., math.inf)),
 }
 
@@ -492,6 +497,11 @@ def render_runner_analyzer(project, source_events):
                 full=full.merge(deep_outcomes[keep],on='event_key',how='left',validate='one_to_one')
         except ImportError:
             pass  # Historical analyzer works without the optional deep extension.
+        # Independent telemetry-link is the single authority for source-fresh
+        # microstructure. Even if Deep had an older snapshot, missing sources in
+        # the link are NOT filled from it. All eligible Event IDs remain.
+        from reaction_lab_microstructure_analysis import enrich_runner_microstructure
+        full=enrich_runner_microstructure(full,project)
         label=f'hit_{str(target).replace(".","_")}pct'
         hits=int(full[label].sum())
         st.metric(f'Runners > {target:g}% / {horizon}m',f'{hits} / {len(full)}',
@@ -525,6 +535,51 @@ def render_runner_analyzer(project, source_events):
                            'contado conservadoramente como SL. No incluye slippage, spread ni comisiones.')
         else:
             st.caption('Deep Research todavía no está activo. Las métricas existentes siguen disponibles.')
+        st.markdown('#### 📡 Microestructura causal · REACTIONs vs controles')
+        from reaction_lab_microstructure_analysis import (
+            SOURCE_NAMES, source_coverage_table, winner_control_microstructure,
+        )
+        linked_ok=full['telemetry_link_integrity'].eq('PASS')
+        linked_rejected=full['telemetry_link_integrity'].isin(
+            ['KNOWN_TS_MISMATCH','INVALID_DIGEST_OR_PAYLOAD'])
+        st.caption(
+            f'Enlaces íntegros: {int(linked_ok.sum())}/{len(full)} con horizonte completo · '
+            f'enlaces rechazados: {int(linked_rejected.sum())} · '
+            f'contextos completos: {int(full.get("microstructure_status", pd.Series(index=full.index,dtype=object)).eq("OBSERVED").sum())}. '
+            'Las REACTIONs sin enlace o con fuente no fresca siguen en la población de comparación; '
+            'nunca se completan desde Redis actual ni se interpretan los faltantes como cero.')
+        if linked_rejected.any():
+            st.error('Hay enlaces con Event ID/timestamp o digest inconsistente: '
+                     'no participan como datos de microestructura. Revisá la auditoría del linker.')
+        coverage_micro=source_coverage_table(full,target)
+        st.dataframe(coverage_micro,hide_index=True,use_container_width=True)
+        st.caption('Tasa runner con/sin dato permite detectar sesgo de cobertura; NO es una señal de trading. '
+                   'El cero de liquidaciones solo es válido cuando el WebSocket cubrió los 15 minutos. '
+                   'Los contratos de OI, deltas de volumen y CVD bruto no son comparables entre símbolos.')
+        micro_min_each=max(5,int(min_n)//2)
+        micro_comparison=winner_control_microstructure(full,target,min_each=micro_min_each)
+        if micro_comparison.empty:
+            st.info(f'Aún no hay suficientes runners y controles CON DATO para comparar '
+                    f'las medianas (mínimo {micro_min_each} por grupo y factor). '
+                    'Conservá los nueve recolectores activos; no completar datos antiguos.')
+        else:
+            st.markdown('##### Distribuciones comparables (solo con fuente disponible)')
+            st.dataframe(micro_comparison,hide_index=True,use_container_width=True)
+            st.caption('Presión taker y libro se alinean al lado de la señal (LONG positivo, SHORT invierte signo). '
+                       'OI es porcentaje, no número de contratos. Asociaciones exploratorias, sin causalidad demostrada.')
+        with st.expander('Inspeccionar microestructura por Event ID · paths maduros',expanded=False):
+            micro_cols=['event_key','symbol','signal','known_ts',label,'run_horizon_pct',
+                        'telemetry_link_integrity','microstructure_status',
+                        'oi_change_5m_pct','oi_change_15m_pct','funding_rate',
+                        'taker_pressure_side_5m','orderbook_imbalance_side_5',
+                        'orderbook_spread_bps','liquidations_snapshot_count_15m',
+                        'liquidations_15m_usdt']
+            micro_cols += [f'telemetry_{source}_age_sec' for source in ('oi','funding','depth','taker')]
+            micro_cols=[field for field in micro_cols if field in full]
+            st.dataframe(full[micro_cols].sort_values('known_ts',ascending=False).head(300),
+                         hide_index=True,use_container_width=True,height=340)
+            st.caption('La tabla muestra hasta 300 Event IDs elegibles; el export CSV final conserva todos. '
+                       'Los resultados futuros se muestran por separado de los factores previos.')
         st.markdown('#### ¿Qué datos causales tenemos?')
         coverage=factor_coverage(full)
         st.dataframe(coverage,hide_index=True,use_container_width=True,height=260)
