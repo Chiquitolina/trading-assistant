@@ -252,18 +252,39 @@ def status(project,db=None):
 
 
 def load_deep_frame(project,keys):
-    """Analysis-side merge: immutable features only, never future outcomes as predictors."""
+    """Immutable Deep fields plus separately frozen microstructure sidecar.
+
+    A later observation never rewrites either SQLite. Read-time merge only;
+    per-source timestamps are verified by reaction_lab_telemetry_link.
+    """
     import pandas as pd
     path=output_db(project)
-    if not path.is_file():return pd.DataFrame(columns=['event_key'])
     rows=[]
-    with closing(db_ro(path)) as c:
-        for i in range(0,len(keys),350):
-            part=list(keys[i:i+350]);q=','.join('?'*len(part))
-            if not q:continue
-            for key,raw,status in c.execute(f'SELECT event_key,features_json,status FROM event_features WHERE event_key IN ({q})',part):
-                rows.append({'event_key':key,**json.loads(raw),'deep_status':status})
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['event_key'])
+    if path.is_file():
+        with closing(db_ro(path)) as c:
+            for i in range(0,len(keys),350):
+                part=list(keys[i:i+350]);q=','.join('?'*len(part))
+                if not q:continue
+                for key,raw,status in c.execute(f'SELECT event_key,features_json,status FROM event_features WHERE event_key IN ({q})',part):
+                    rows.append({'event_key':key,**json.loads(raw),'deep_status':status})
+    frame=pd.DataFrame(rows) if rows else pd.DataFrame(columns=['event_key'])
+    try:
+        from reaction_lab_telemetry_link import load_telemetry_frame
+        linked=load_telemetry_frame(project,keys)
+    except ImportError:
+        return frame  # older installations work unchanged
+    if linked.empty:return frame
+    if frame.empty:return linked
+    merged=frame.merge(linked,on='event_key',how='outer',suffixes=('','__link'))
+    for col in list(merged.columns):
+        if col.endswith('__link'):
+            original=col[:-6]
+            if original in merged:
+                # Prefer strictly per-source as-of sidecar values when present.
+                merged[original]=merged[col].where(merged[col].notna(),merged[original])
+            else:merged[original]=merged[col]
+            merged=merged.drop(columns=[col])
+    return merged
 
 
 def main():

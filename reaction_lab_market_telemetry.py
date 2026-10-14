@@ -18,6 +18,7 @@ import sqlite3
 import time
 from urllib.parse import urlencode
 from urllib.request import Request,urlopen
+from urllib.error import HTTPError
 
 API='https://fapi.binance.com'
 SCHEMA='''CREATE TABLE IF NOT EXISTS snapshots(
@@ -26,16 +27,32 @@ SCHEMA='''CREATE TABLE IF NOT EXISTS snapshots(
  PRIMARY KEY(symbol,observed_ms));
 CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON snapshots(symbol,received_ms);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS priority_watches(symbol TEXT PRIMARY KEY,score REAL NOT NULL,
+ detail_json TEXT NOT NULL,last_seen_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_watches_seen ON priority_watches(last_seen_ms);
 '''
 
 
 def now():return int(time.time()*1000)
 
 
+class BinanceRateLimited(RuntimeError):
+    def __init__(self, code, retry_seconds=600):
+        super().__init__(f'Binance HTTP {code} rate-limited; cooldown requested')
+        self.retry_seconds=retry_seconds
+
+
 def client_get(path,params):
     url=API+path+'?'+urlencode(params)
-    with urlopen(Request(url,headers={'User-Agent':'reaction-lab-research/1.0'}),timeout=8) as response:
-        return json.load(response)
+    try:
+        with urlopen(Request(url,headers={'User-Agent':'reaction-lab-research/1.0'}),timeout=8) as response:
+            return json.load(response)
+    except HTTPError as exc:
+        if exc.code in (418,429):
+            try:delay=int(exc.headers.get('Retry-After','600'))
+            except (ValueError,TypeError):delay=600
+            raise BinanceRateLimited(exc.code,max(600,delay)) from exc
+        raise
 
 
 def valid_float(v):
@@ -99,7 +116,14 @@ def poll_symbol(symbol,get=client_get):
             elif name=='funding':data['funding_rate']=valid_float(response.get('lastFundingRate'))
             elif name=='depth':data.update(derive_book(response))
             elif name=='taker':data.update(derive_taker(response,moment))
-            quality[name]={'observed_ms':moment,'available':True}
+            metric_keys={'oi':('oi_contracts',),'funding':('funding_rate',),
+                         'depth':('orderbook_spread_bps','orderbook_imbalance_5'),
+                         'taker':('taker_buy_ratio_5m','taker_buy_ratio_15m')}
+            available=all(data.get(k) is not None for k in metric_keys[name])
+            quality[name]={'observed_ms':moment,'available':available}
+            if not available:quality[name]['reason']='missing_or_invalid_fields'
+        except BinanceRateLimited:
+            raise
         except Exception as e:
             quality[name]={'available':False,'error':repr(e)[:160]}
     return data,quality
@@ -113,49 +137,126 @@ def open_store(path):
     return db
 
 
-def poll_once(project,db_path=None,max_symbols=25,get=client_get):
+def _meta(db,key,default='0'):
+    row=db.execute('SELECT value FROM meta WHERE key=?',(key,)).fetchone()
+    return row[0] if row else default
+
+
+def _put_meta(db,key,value):
+    db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)',(key,str(value)))
+
+
+def select_symbols(db, symbols, max_symbols, now_ms, *, max_priority=10,
+                   watch_valid_ms=5*60_000, revisit_ms=90_000):
+    """Fair rotation reserves >=50% of budget for whole universe."""
+    if not symbols:return [],0,0
+    reserve=min(max_priority,max_symbols//2)
+    seen=dict(db.execute('SELECT symbol,MAX(received_ms) FROM snapshots GROUP BY symbol'))
+    candidates=[]
+    for symbol,score,when in db.execute(
+        'SELECT symbol,score,last_seen_ms FROM priority_watches WHERE last_seen_ms>=? ORDER BY score DESC',
+        (now_ms-watch_valid_ms,)):
+        if symbol not in symbols:continue
+        if now_ms-seen.get(symbol,0)<revisit_ms:continue
+        candidates.append((symbol,score,seen.get(symbol,0)))
+    selected=[s for s,score,previous in sorted(candidates,key=lambda r:(-r[1],r[2],r[0]))[:reserve]]
+    priority_n=len(selected)
+    index=int(_meta(db,'next_cursor'))%len(symbols)
+    walked=0
+    while len(selected)<max_symbols and walked<len(symbols):
+        sym=symbols[(index+walked)%len(symbols)]
+        walked+=1
+        if sym not in selected:selected.append(sym)
+    next_cursor=(index+walked)%len(symbols)
+    return selected,next_cursor,priority_n
+
+
+def refresh_watches(db,project,symbols, *, budget=60,probe=None,now_ms=None):
+    moment=now() if now_ms is None else int(now_ms)
+    if not symbols:return {'scanned':0,'watches':0,'error':None}
+    offset=int(_meta(db,'priority_cursor'))%len(symbols)
+    chosen=[symbols[(offset+i)%len(symbols)] for i in range(min(budget,len(symbols)))]
+    try:
+        if probe is None:
+            from reaction_lab_structural_priority import refresh_priority
+            watches=refresh_priority(project,chosen,moment,budget=len(chosen))
+        else:watches=probe(project,chosen,moment)
+        with db:
+            db.executemany('DELETE FROM priority_watches WHERE symbol=?',[(s,) for s in chosen])
+            for symbol,detail in watches.items():
+                if symbol in chosen:
+                    db.execute('INSERT OR REPLACE INTO priority_watches VALUES (?,?,?,?)',
+                        (symbol,float(detail['score']),json.dumps(detail,allow_nan=False),moment))
+            _put_meta(db,'priority_cursor',(offset+len(chosen))%len(symbols))
+            db.execute('DELETE FROM priority_watches WHERE last_seen_ms<?',(moment-5*60_000,))
+        return {'scanned':len(chosen),'watches':len(watches),'error':None}
+    except Exception as exc:
+        return {'scanned':0,'watches':0,'error':repr(exc)[:180]}
+
+
+def poll_once(project,db_path=None,max_symbols=20,get=client_get,*,priority_enabled=False,
+              priority_scan_symbols=60,max_priority=10,priority_probe=None):
     from reaction_lab_continuous_scanner import get_symbols
-    root=Path(project)
-    symbols=get_symbols(root)
+    root=Path(project);symbols=get_symbols(root)
     dest=Path(db_path) if db_path else root/'reports/reaction_lab/telemetry_v1.sqlite3'
-    completed=0;failed=0
+    attempted=completed=failed=0;limited=False
     with open_store(dest) as db:
-        cursor=db.execute("SELECT value FROM meta WHERE key='next_cursor'").fetchone()
-        index=int(cursor[0]) if cursor else 0
-        chosen=[symbols[(index+i)%len(symbols)] for i in range(min(max_symbols,len(symbols)))]
+        cooldown=int(_meta(db,'cooldown_until_ms'))
+        if cooldown>now():
+            return {'cooldown_remaining_s':int((cooldown-now())/1000),
+                    'symbols_attempted':0,'snapshots':0,'missing':0,'universe':len(symbols)}
+        probe_report={'scanned':0,'watches':0,'error':None}
+        if priority_enabled:
+            probe_report=refresh_watches(db,root,symbols,budget=priority_scan_symbols,probe=priority_probe)
+        chosen,next_cursor,priority_n=select_symbols(db,symbols,min(max_symbols,len(symbols)),now(),
+                                                     max_priority=max_priority if priority_enabled else 0)
         for sym in chosen:
-            data,quality=poll_symbol(sym,get)
-            timestamp=now()  # never pretend fields existed earlier than response
-            if data:
+            try:data,quality=poll_symbol(sym,get)
+            except BinanceRateLimited as exc:
+                with db:_put_meta(db,'cooldown_until_ms',now()+exc.retry_seconds*1000)
+                limited=True;break
+            attempted+=1
+            timestamp=now()
+            if data and any(q.get('available') is True for q in quality.values()):
                 with db:
-                    db.execute('''INSERT OR IGNORE INTO snapshots VALUES (?,?,?,?,?)''',
+                    db.execute('INSERT OR IGNORE INTO snapshots VALUES (?,?,?,?,?)',
                         (sym,timestamp,timestamp,json.dumps(data,allow_nan=False),json.dumps(quality)))
                 completed+=1
             else:failed+=1
-        with db:db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('next_cursor',str((index+len(chosen))%len(symbols))))
-    return {'symbols_attempted':len(chosen),'snapshots':completed,'missing':failed,
-            'next_cursor':(index+len(chosen))%len(symbols),'universe':len(symbols)}
+        if not limited:
+            with db:_put_meta(db,'next_cursor',next_cursor)
+    return {'symbols_attempted':attempted,'snapshots':completed,'missing':failed,
+            'next_cursor':next_cursor if not limited else None,'universe':len(symbols),
+            'priority_selected':priority_n,'priority_scan':probe_report,'rate_limited':limited}
 
 
 def main():
-    p=argparse.ArgumentParser()
+    p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--project',default='.')
     p.add_argument('--db')
     p.add_argument('--check',action='store_true')
     p.add_argument('--once',action='store_true')
     p.add_argument('--loop',action='store_true')
-    p.add_argument('--max-symbols',type=int,default=25)
-    p.add_argument('--poll-seconds',type=int,default=120)
+    p.add_argument('--max-symbols',type=int,default=20)
+    p.add_argument('--poll-seconds',type=int,default=45)
+    p.add_argument('--priority-enabled',action='store_true')
+    p.add_argument('--priority-scan-symbols',type=int,default=60)
+    p.add_argument('--max-priority',type=int,default=10)
     a=p.parse_args()
     if a.check:
         from reaction_lab_continuous_scanner import get_symbols
-        print(json.dumps({'universe':len(get_symbols(Path(a.project))),
-            'calls_per_full_universe':len(get_symbols(Path(a.project)))*4,
-            'network':'OFF (check only)','storage':'opt-in separate SQLite'}));return
+        n=len(get_symbols(Path(a.project)))
+        print(json.dumps({'universe':n,'calls_per_full_universe':n*4,
+            'max_requests_per_cycle':a.max_symbols*4,'priority_enabled':a.priority_enabled,
+            'network':'OFF (check only)','storage':'separate existing telemetry SQLite'}));return
     if not (a.once or a.loop):p.error('Use --check, --once or --loop')
-    if a.max_symbols<1 or a.poll_seconds<30:p.error('Invalid polling options')
+    if not(1<=a.max_symbols<=25 and a.poll_seconds>=30 and
+           1<=a.priority_scan_symbols<=100 and 0<=a.max_priority<=a.max_symbols//2):
+        p.error('Out-of-range safe API / priority budget (max 25 symbols, >=30s interval)')
     while True:
-        print(json.dumps(poll_once(a.project,a.db,a.max_symbols)),flush=True)
+        result=poll_once(a.project,a.db,a.max_symbols,priority_enabled=a.priority_enabled,
+                         priority_scan_symbols=a.priority_scan_symbols,max_priority=a.max_priority)
+        print(json.dumps(result,ensure_ascii=False),flush=True)
         if not a.loop:break
         time.sleep(a.poll_seconds)
 
