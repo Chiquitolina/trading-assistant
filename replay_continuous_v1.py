@@ -59,10 +59,13 @@ def checkpoints(start_ms, end_ms, step_min):
 
 def csv_write(path, fields, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('w', encoding='utf-8', newline='') as f:
+    # Atomic snapshot: a crash must not leave a truncated CSV for --resume.
+    tmp = path.with_name(path.name + '.tmp')
+    with tmp.open('w', encoding='utf-8', newline='') as f:
         writer = csv.DictWriter(f, fields, extrasaction='ignore')
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp, path)
 
 
 def cache_name(symbol, timeframe, start_ms, end_ms):
@@ -148,6 +151,83 @@ def fetch_klines(symbol, timeframe, start_ms, end_ms, cache_dir, delay=0.09):
     return candles, False
 
 
+
+def progress_signature(*, mode, start_ms, end_ms, step_minutes, project, journal, cache_dir, symbols, fingerprint):
+    """Freeze replay identity so --resume cannot silently mix incompatible runs."""
+    payload = {
+        'replay_progress_version': 2,
+        'mode': mode,
+        'start_ms': start_ms, 'end_ms': end_ms,
+        'step_minutes': step_minutes,
+        'project': str(project), 'journal': str(journal),
+        'cache_dir': str(cache_dir),
+        'symbols': list(symbols),
+        'canonical_hash': fingerprint,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def resume_or_initialize(output, *, resume, signature, symbols, start_ms, end_ms):
+    """Load only completed symbols and their saved rows; never infer success from caches.
+
+    Writes to output happen in the order: event CSV, diagnostic CSVs, progress.
+    If interrupted between these writes, any extra event rows not marked complete
+    are intentionally discarded and that symbol is scanned again.
+    """
+    manifest = output / 'progress.json'
+    events_file = output / 'replay_events.csv'
+    gaps_file = output / 'history_gaps.csv'
+    if not resume:
+        if manifest.exists() or events_file.exists():
+            raise RuntimeError(
+                f'Output directory already contains a replay: {output}. '
+                'Use --resume for the SAME inputs, or choose a NEW --output directory.'
+            )
+        return set(), {}, []
+    if not manifest.is_file() or not events_file.is_file() or not gaps_file.is_file():
+        raise RuntimeError('Cannot --resume: progress.json, replay_events.csv and history_gaps.csv are required')
+    progress = json.loads(manifest.read_text(encoding='utf-8'))
+    if progress.get('signature') != signature or progress.get('version') != 2:
+        raise RuntimeError('Cannot --resume: inputs, symbol universe, or canonical hash changed; choose a new output')
+    completed_list = progress.get('completed')
+    if not isinstance(completed_list, list) or len(completed_list) != len(set(completed_list)):
+        raise RuntimeError('Cannot --resume: invalid completed list')
+    completed = set(completed_list)
+    if not completed.issubset(set(symbols)):
+        raise RuntimeError('Cannot --resume: completed symbol not in current universe')
+    collected = {}
+    with events_file.open(encoding='utf-8', newline='') as f:
+        for r in csv.DictReader(f):
+            # These could be from the last symbol persisted before a crash
+            # but before its progress.json was updated. Rescan them.
+            if r['symbol'] not in completed:
+                continue
+            key = r['event_key']
+            ts = int(r['retest_ts'])
+            if not start_ms <= ts < end_ms or key != f"{r['symbol']}|{r['side']}|{ts}":
+                raise RuntimeError('Cannot --resume: corrupt saved Event ID')
+            if key in collected:
+                raise RuntimeError('Cannot --resume: duplicate saved Event ID')
+            collected[key] = {
+                'event_key': key, 'symbol': r['symbol'], 'side': r['side'],
+                'retest_ts': ts, 'known_ts': int(r['known_ts']),
+                'first_replay_observed_ms': int(r['first_replay_observed_ms']),
+                'payload': json.loads(r['causal_json']),
+            }
+    with gaps_file.open(encoding='utf-8', newline='') as f:
+        saved_gaps = [r for r in csv.DictReader(f) if r['symbol'] in completed]
+    print(f'RESUME: {len(completed)} completed symbols, {len(collected)} saved events', flush=True)
+    return completed, collected, saved_gaps
+
+
+def write_progress(path, signature, completed):
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_text(json.dumps({
+        'version': 2, 'signature': signature, 'completed': sorted(completed),
+    }, indent=2), encoding='utf-8')
+    os.replace(tmp, path)
+
+
 def contiguous_diagnostics(candles, tf_ms, start_ms, end_ms):
     times = [c['timestamp'] for c in candles if start_ms <= c['timestamp'] < end_ms]
     gaps = [(a, b, round((b-a)/tf_ms)-1)
@@ -200,7 +280,7 @@ def compare_events(replayed, existing, fingerprint):
                     tol = 1e-8 * max(1,abs(left),abs(right))
                     if not __import__('math').isclose(left,right, rel_tol=1e-8, abs_tol=tol):
                         diff.append(field)
-                except (ValueError,TypeError):
+                except (ValueError,TypeError,OverflowError):
                     if v1 != v2:
                         diff.append(field)
             if diff:
@@ -332,8 +412,17 @@ def main(argv=None):
     print(f'MODE={args.mode} symbols={len(symbols)} checkpoints/symbol={len(ticks)}')
     print(f'WINDOW={format_arg(start_ms)} to {format_arg(end_ms)} fingerprint={fingerprint}')
     print(f'PRODUCTION JOURNAL: read-only {journal}',flush=True)
-    collected = {}
-    errors, gaps_report = [], []
+    signature = progress_signature(
+        mode=args.mode, start_ms=start_ms, end_ms=end_ms,
+        step_minutes=args.step_minutes, project=project, journal=journal,
+        cache_dir=cache_dir, symbols=symbols, fingerprint=fingerprint,
+    )
+    checkpoint_file = output / 'progress.json'
+    completed, collected, gaps_report = resume_or_initialize(
+        output, resume=args.resume, signature=signature, symbols=symbols,
+        start_ms=start_ms, end_ms=end_ms,
+    )
+    errors = []
     # Save results incrementally so a long batch is not lost upon interruption.
     for idx, sym in enumerate(symbols, 1):
         if sym in completed:
@@ -375,7 +464,7 @@ def main(argv=None):
                       replay_rows)
             csv_write(output/'download_errors.csv',('symbol','error'),errors)
             csv_write(output/'history_gaps.csv',('symbol','one_min_gap_count','fifteen_min_gap_count','one_min_first_gap','fifteen_min_first_gap'),gaps_report)
-            checkpoint_file.write_text(json.dumps({'signature':signature,'completed':sorted(completed)},indent=2))
+            write_progress(checkpoint_file, signature, completed)
     comparisons, metrics = compare_events(collected, existing, fingerprint)
     csv_write(output/'comparison.csv',('event_key','comparison','retest_ts','symbol','side','source_hash_equal','numeric_differences'),comparisons)
     missing=[x for x in comparisons if x['comparison']=='REPLAY_ONLY']

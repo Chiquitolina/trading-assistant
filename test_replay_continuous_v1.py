@@ -39,6 +39,16 @@ class ReplayTests(unittest.TestCase):
         self.assertFalse(metrics['FULL_ID_PARITY'])
         self.assertEqual(rows[0]['source_hash_equal'],True)
 
+    def test_numeric_comparison_handles_missing_optional_field(self):
+        replayed={'A|LONG|10':{'event_key':'A|LONG|10','symbol':'A','side':'LONG',
+                  'retest_ts':10,'payload':{'pivot_timestamp':None}}}
+        existing={'A|LONG|10':{'event_key':'A|LONG|10','symbol':'A','side':'LONG',
+                  'retest_ts':10,'source_hash':'hash',
+                  'causal_json':json.dumps({'pivot_timestamp':1})}}
+        rows,counts=mod.compare_events(replayed, existing, 'hash')
+        self.assertEqual(counts['NUMERIC_DIFFERENCES'],1)
+        self.assertEqual(rows[0]['numeric_differences'],'pivot_timestamp')
+
     def test_no_future_candles_in_virtual_loader(self):
         # Fake scanner checks two bar sets; closing-time guard must reject
         # 1m t+60 and 15m t+900 while virtual now is t.
@@ -92,6 +102,69 @@ class ReplayTests(unittest.TestCase):
                               confirmation,confirmation+12*mod.ONE_MIN,1)
         self.assertTrue(any(v['side']=='LONG' and v['retest_ts']==confirmation+5*mod.ONE_MIN
                             for v in result.values()),str(result))
+
+    def test_replay_main_and_resume_without_repeating_symbols(self):
+        import tempfile
+        import types
+        import sys
+        from unittest.mock import patch
+        import csv
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            project = root/'project'
+            project.mkdir()
+            output = root/'output'
+            cache = root/'cache'
+            journal = root/'journal.sqlite3'
+            journal.touch()
+            symbol = 'MOCKUSDT'
+            ts = mod.iso_to_ms('2026-10-13T04:00:00Z')
+            key = f'{symbol}|LONG|{ts}'
+            payload = {'symbol':symbol,'signal':'LONG','status':'REACTION',
+                       'retest_timestamp':ts,'pivot_timestamp':ts - 20 * 60_000,
+                       'entry_price':100.0,'retest_close':100.0}
+            event = {'event_key':key,'symbol':symbol,'side':'LONG','retest_ts':ts,
+                     'known_ts':ts+mod.ONE_MIN, 'first_replay_observed_ms':ts+mod.ONE_MIN,
+                     'payload':payload}
+            journal_rows = {key:{'event_key':key,'symbol':symbol,'side':'LONG',
+                                 'retest_ts':ts,'source_hash':'fakefingerprint',
+                                 'causal_json':json.dumps(payload)}}
+            fake_live = types.ModuleType('reaction_lab_continuous_scanner')
+            fake_live.get_symbols = lambda project: (symbol,)
+            fake_live.compile_canonical_scanner = lambda app,loader: (None,'fakefingerprint')
+            fake_live.normalize_reactions = lambda frame,tick: {}
+            argv = ['--project',str(project),'--mode','parity',
+                    '--start','2026-10-13T00:00:00Z',
+                    '--end','2026-10-14T00:00:00Z',
+                    '--step-minutes','15','--output',str(output),
+                    '--cache-dir',str(cache),'--journal',str(journal)]
+            single_bar = [{'timestamp':ts,'open':100.,'high':100.,'low':100.,'close':100.,'volume':1.}]
+            with patch.dict(sys.modules, {'reaction_lab_continuous_scanner':fake_live}), \
+                 patch.object(mod,'load_journal',return_value=journal_rows), \
+                 patch.object(mod,'fetch_klines',return_value=(single_bar,False)) as fetch, \
+                 patch.object(mod,'run_symbol',return_value={key:event}) as run:
+                self.assertEqual(mod.main(argv),0)
+                self.assertEqual(run.call_count,1)
+                self.assertEqual(fetch.call_count,2)
+                self.assertTrue((output/'progress.json').is_file())
+                self.assertEqual(mod.main(argv+['--resume']),0)
+                self.assertEqual(run.call_count,1)
+                self.assertEqual(fetch.call_count,2)
+                with (output/'replay_events.csv').open() as f:
+                    self.assertEqual(len(list(csv.DictReader(f))),1)
+                with self.assertRaisesRegex(RuntimeError,'already contains'):
+                    mod.main(argv)
+
+    def test_resume_rejects_mismatched_signature(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            output=Path(d)
+            mod.csv_write(output/'replay_events.csv',('event_key',),[])
+            mod.csv_write(output/'history_gaps.csv',('symbol',),[])
+            mod.write_progress(output/'progress.json','old',set())
+            with self.assertRaisesRegex(RuntimeError,'changed'):
+                mod.resume_or_initialize(output,resume=True,signature='new',symbols=['A'],start_ms=1,end_ms=2)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
