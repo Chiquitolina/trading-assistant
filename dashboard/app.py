@@ -20,6 +20,7 @@ import numpy as np
 
 import math
 import shutil
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 # =========================
@@ -7702,6 +7703,70 @@ if save_description:
         )
 
 
+# PM2 connectivity for Reaction Lab processes. Read-only, no PM2 mutations.
+# A process marked ONLINE may still publish stale or incomplete data.
+REACTION_LAB_PM2_PROCESSES = (
+    ('Scanner', 'reaction-lab-scanner'),
+    ('Auto paths', 'reaction-lab-auto-paths'),
+    ('Context', 'reaction-lab-context'),
+    ('Runners', 'reaction-lab-runners'),
+    ('BTC context', 'reaction-lab-btc-context'),
+    ('Deep research', 'reaction-lab-deep-research'),
+    ('Liquidations', 'reaction-lab-liquidations'),
+    ('Market telemetry', 'reaction-lab-market-telemetry'),
+    ('Telemetry link', 'reaction-lab-telemetry-link'),
+)
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_reaction_lab_pm2_status():
+    """Return PM2 process status for Reaction Lab; not data freshness."""
+    process_names = [name for _, name in REACTION_LAB_PM2_PROCESSES]
+    try:
+        result = subprocess.run(
+            ["pm2", "jlist"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("PM2 query failed")
+
+        records = json.loads(result.stdout)
+        if not isinstance(records, list) or not records:
+            raise ValueError("PM2 process list unavailable or empty")
+
+        by_name = {
+            str(item.get("name", "")): str(
+                (item.get("pm2_env") or {}).get("status", "unknown")
+            ).lower()
+            for item in records
+            if isinstance(item, dict)
+        }
+
+        def normalize(name):
+            if name not in by_name:
+                return "OFFLINE"
+            current = by_name[name]
+            if current == "online":
+                return "ONLINE"
+            if current in ("stopped", "errored", "stopping"):
+                return "OFFLINE"
+            if current == "launching":
+                return "RECOVERING"
+            return "UNKNOWN"
+
+        return {name: normalize(name) for name in process_names}, None
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+        # The dashboard may run under a different PM2_HOME/user.
+        # Do not report OFFLINE if PM2 itself cannot be queried.
+        return (
+            {name: "UNKNOWN" for name in process_names},
+            "No fue posible consultar PM2 desde el dashboard.",
+        )
+
+
 @st.fragment(run_every="5s")
 def render_live_system_status():
     status = load_status()
@@ -7749,75 +7814,24 @@ def render_live_system_status():
         last_signal = get_last_signal(df_raw)
 
     with st.container(border=True):
+        # Todos los indicadores de conectividad se muestran juntos; no
+        # cambian las fuentes de health ni se agregan consultas externas.
+        st.markdown("#### 🔌 Conectividad")
+        primary_health = st.columns(4)
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-
-        with c1:
+        with primary_health[0]:
             render_status_dot(
                 "ENGINE",
                 engine_online,
             )
 
-        with c2:
+        with primary_health[1]:
             render_pipeline_state(
                 "MARKET DATA",
                 market_health.get("state", "OFFLINE"),
             )
 
-        c3.metric(
-            "POSITION",
-            position_side,
-        )
-
-        c4.metric(
-            "uPnL",
-            round(unpnl, 2),
-        )
-
-        c5.metric(
-            "BALANCE",
-            f"{balance} USDT",
-        )
-        
-        #c6.metric("PNL TODAY %", pnl_today)
-        #c6.metric("PNL TODAY USD", f"{pnl_today_usd} USDT")
-
-        c8, c9, c10, c11= st.columns(4)
-    
-        with c8:
-            st.metric(
-                "STRATEGY / TF",
-                f"{strategy_mode} / {trigger_tf}"
-            )
-
-        with c9:
-            render_signal_text(
-                signal=last_signal,
-                trend=signal_trend,
-                direction=signal_direction,
-                momentum=signal_momentum,
-                reason=last_router_reason
-            )
-
-        with c10:
-            render_plan_text(
-                status=last_plan_status,
-                reason=last_plan_reason,
-                side=last_plan_side,
-                entry=last_plan_entry,
-                tp=last_plan_tp,
-                sl=last_plan_sl,
-            )
-            
-        with c11:
-            st.metric("SYMBOL", symbol_from_status)
-
-        # =========================
-        # MARKET DATA PIPELINE HEALTH
-        # =========================
-        health_cols = st.columns(5)
-
-        with health_cols[0]:
+        with primary_health[2]:
             render_pipeline_state(
                 "Core Kline WS",
                 "ONLINE"
@@ -7829,7 +7843,7 @@ def render_live_system_status():
                 ),
             )
 
-        with health_cols[1]:
+        with primary_health[3]:
             render_pipeline_state(
                 "Redis heartbeat",
                 "ONLINE"
@@ -7837,7 +7851,9 @@ def render_live_system_status():
                 else "OFFLINE",
             )
 
-        with health_cols[2]:
+        secondary_health = st.columns(3)
+
+        with secondary_health[0]:
             render_pipeline_state(
                 "Strategy feed",
                 "ONLINE" if ws_online else (
@@ -7847,7 +7863,7 @@ def render_live_system_status():
                 ),
             )
 
-        with health_cols[3]:
+        with secondary_health[1]:
             if market_health.get("micro_flow_mode") == "sharded_external":
                 expected = int(
                     market_health.get("micro_flow_shards_expected", 0) or 0
@@ -7889,7 +7905,7 @@ def render_live_system_status():
                 micro_ws_state,
             )
 
-        with health_cols[4]:
+        with secondary_health[2]:
             collector_state = (
                 "DEGRADED"
                 if market_health.get("micro_flow_collector_gap_open")
@@ -7939,6 +7955,68 @@ def render_live_system_status():
             st.warning(
                 "Market Data health unavailable: "
                 f"{market_health['error']}"
+            )
+
+        # All Reaction Lab PM2 processes appear next to the other
+        # connectivity indicators, not next to position / last plan.
+        st.markdown("##### Reaction Lab · procesos PM2")
+        reaction_states, reaction_error = load_reaction_lab_pm2_status()
+        for group_start in range(0, len(REACTION_LAB_PM2_PROCESSES), 3):
+            reaction_cols = st.columns(3)
+            group = REACTION_LAB_PM2_PROCESSES[group_start:group_start + 3]
+            for col, (label, process_name) in zip(reaction_cols, group):
+                with col:
+                    render_pipeline_state(
+                        label,
+                        reaction_states.get(process_name, "UNKNOWN"),
+                    )
+
+        reaction_online = sum(
+            reaction_states.get(name) == "ONLINE"
+            for _, name in REACTION_LAB_PM2_PROCESSES
+        )
+        st.caption(
+            f"Reaction Lab PM2: {reaction_online}/"
+            f"{len(REACTION_LAB_PM2_PROCESSES)} online. "
+            "Este estado refleja PM2, no la frescura de los datos."
+        )
+        if reaction_error:
+            st.caption(reaction_error)
+
+        st.divider()
+        st.markdown("#### 📊 Estrategia y cuenta")
+
+        account_cols = st.columns(4)
+        account_cols[0].metric("POSITION", position_side)
+        account_cols[1].metric("uPnL", round(unpnl, 2))
+        account_cols[2].metric("BALANCE", f"{balance} USDT")
+        account_cols[3].metric("SYMBOL", symbol_from_status)
+
+        strategy_cols = st.columns([1.1, 1.2, 1.7])
+
+        with strategy_cols[0]:
+            st.metric(
+                "STRATEGY / TF",
+                f"{strategy_mode} / {trigger_tf}",
+            )
+
+        with strategy_cols[1]:
+            render_signal_text(
+                signal=last_signal,
+                trend=signal_trend,
+                direction=signal_direction,
+                momentum=signal_momentum,
+                reason=last_router_reason,
+            )
+
+        with strategy_cols[2]:
+            render_plan_text(
+                status=last_plan_status,
+                reason=last_plan_reason,
+                side=last_plan_side,
+                entry=last_plan_entry,
+                tp=last_plan_tp,
+                sl=last_plan_sl,
             )
 
         # =========================
