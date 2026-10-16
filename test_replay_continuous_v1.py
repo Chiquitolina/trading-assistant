@@ -72,6 +72,46 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(self_seen,[(180*mod.ONE_MIN,179*mod.ONE_MIN,165*mod.ONE_MIN),
                                     (181*mod.ONE_MIN,180*mod.ONE_MIN,165*mod.ONE_MIN)])
 
+    def test_latest_pivot_resolves_same_event_key_without_changing_event_id(self):
+        from pandas import DataFrame
+        ticks = [180 * mod.ONE_MIN]
+        bars1 = [dict(timestamp=t, open=1., high=1., low=1., close=1., volume=2.)
+                 for t in range(0, 190 * mod.ONE_MIN, mod.ONE_MIN)]
+        bars15 = [dict(timestamp=t, open=1., high=1., low=1., close=1., volume=2.)
+                  for t in range(0, 200 * mod.ONE_MIN, 15 * mod.ONE_MIN)]
+        retest = 178 * mod.ONE_MIN
+        class Scanner:
+            __globals__ = {}
+            def __call__(self, **kwargs):
+                return DataFrame([
+                    dict(symbol='TEST', signal='LONG', status='REACTION',
+                         retest_timestamp=retest, pivot_timestamp=10 * mod.ONE_MIN,
+                         swing_price=10., max_departure_pct=3.),
+                    dict(symbol='TEST', signal='LONG', status='REACTION',
+                         retest_timestamp=retest, pivot_timestamp=30 * mod.ONE_MIN,
+                         swing_price=20., max_departure_pct=2.),
+                ])
+        def normalize(df, now):
+            result = {}
+            for rec in df.to_dict('records'):
+                key = f"{rec['symbol']}|{rec['signal']}|{rec['retest_timestamp']}"
+                result.setdefault(key, rec)
+            return result
+        def run(policy):
+            return mod.run_symbol('TEST', Scanner(), normalize, ticks, bars1, bars15,
+                                  0, 181 * mod.ONE_MIN, 1, policy)
+        key = f'TEST|LONG|{retest}'
+        self.assertEqual(run('native')[key]['payload']['swing_price'], 10.)
+        self.assertEqual(run('latest-pivot')[key]['payload']['swing_price'], 20.)
+        self.assertEqual(set(run('native')), set(run('latest-pivot')))
+
+    def test_collision_policy_separates_resume_signatures(self):
+        kw = dict(mode='parity', start_ms=1, end_ms=2, step_minutes=15,
+                  project=Path('/tmp/p'), journal=Path('/tmp/j'),
+                  cache_dir=Path('/tmp/c'), symbols=['TEST'], fingerprint='hash')
+        self.assertNotEqual(mod.progress_signature(**kw, collision_policy='native'),
+                            mod.progress_signature(**kw, collision_policy='latest-pivot'))
+
     def test_actual_ast_fingerprint_and_retest(self):
         import sys
         # Source package from the provided audit ZIP, not the user's live VPS.

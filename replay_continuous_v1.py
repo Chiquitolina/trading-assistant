@@ -152,13 +152,14 @@ def fetch_klines(symbol, timeframe, start_ms, end_ms, cache_dir, delay=0.09):
 
 
 
-def progress_signature(*, mode, start_ms, end_ms, step_minutes, project, journal, cache_dir, symbols, fingerprint):
+def progress_signature(*, mode, start_ms, end_ms, step_minutes, project, journal, cache_dir, symbols, fingerprint, collision_policy="native"):
     """Freeze replay identity so --resume cannot silently mix incompatible runs."""
     payload = {
         'replay_progress_version': 2,
         'mode': mode,
         'start_ms': start_ms, 'end_ms': end_ms,
         'step_minutes': step_minutes,
+        'collision_policy': collision_policy,
         'project': str(project), 'journal': str(journal),
         'cache_dir': str(cache_dir),
         'symbols': list(symbols),
@@ -297,7 +298,7 @@ def compare_events(replayed, existing, fingerprint):
 
 
 def run_symbol(sym, scan, normalize_reactions, ticks, candles_1m, candles_15m,
-               start_ms, end_ms, step_min):
+               start_ms, end_ms, step_min, collision_policy="native"):
     """Feed only CLOSED candles as of each virtual clock tick, capped at live 400."""
     import numpy as np
     import pandas as pd
@@ -332,6 +333,19 @@ def run_symbol(sym, scan, normalize_reactions, ticks, candles_1m, candles_15m,
                      min_swing_prominence_pct=0.0, retest_tolerance_pct=0.10,
                      min_departure_pct=0.20, max_age_minutes=360,
                      max_retest_age_minutes=4320)
+        if collision_policy == 'latest-pivot' and frame is not None and not frame.empty:
+            # EXPERIMENT: only change which candidate wins when multiple
+            # confirmed swings share the same symbol|side|retest_ts.
+            # Do not modify detection rules, candle selection, or production.
+            required = {'retest_timestamp', 'pivot_timestamp'}
+            if not required.issubset(frame.columns):
+                raise RuntimeError('Canonical scanner omitted retest/pivot timestamps')
+            frame = frame.sort_values(
+                ['retest_timestamp', 'pivot_timestamp'],
+                ascending=[False, False], kind='mergesort', na_position='last'
+            )
+        elif collision_policy != 'native':
+            raise ValueError(f'Unknown collision policy: {collision_policy}')
         for key, payload in normalize_reactions(frame, tick).items():
             ts = int(payload['retest_timestamp'])
             if not start_ms <= ts < end_ms:
@@ -353,6 +367,9 @@ def main(argv=None):
     ap.add_argument('--mode', choices=('parity','gap'), required=True)
     ap.add_argument('--step-minutes', type=int, default=15,
                     help='15 default; optional 1 for highest temporal fidelity')
+    ap.add_argument('--collision-policy', choices=('native', 'latest-pivot'),
+                    default='native',
+                    help='Experimental retest collision tie-break (replay ONLY)')
     ap.add_argument('--symbols-file', type=Path,
                     help='Optional subset of symbols; otherwise scanner canonical universe')
     ap.add_argument('--max-symbols', type=int, default=0,
@@ -394,6 +411,7 @@ def main(argv=None):
         trusted = (gate.get('mode') == 'parity' and
                    gate.get('canonical_hash') == fingerprint and
                    gate.get('step_minutes') == args.step_minutes and
+                   gate.get('collision_policy') == args.collision_policy and
                    gate.get('symbols_failed') == 0 and
                    gate.get('data_gaps') == 0 and
                    gate.get('symbols_total') == len(symbols) and
@@ -409,13 +427,14 @@ def main(argv=None):
     one_start = ((start_ms - 430*ONE_MIN)//ONE_MIN)*ONE_MIN
     fifteen_start = ((start_ms - 410*FIFTEEN_MIN)//FIFTEEN_MIN)*FIFTEEN_MIN
     fetch_end = ticks[-1] + FIFTEEN_MIN
-    print(f'MODE={args.mode} symbols={len(symbols)} checkpoints/symbol={len(ticks)}')
+    print(f'MODE={args.mode} collision_policy={args.collision_policy} symbols={len(symbols)} checkpoints/symbol={len(ticks)}')
     print(f'WINDOW={format_arg(start_ms)} to {format_arg(end_ms)} fingerprint={fingerprint}')
     print(f'PRODUCTION JOURNAL: read-only {journal}',flush=True)
     signature = progress_signature(
         mode=args.mode, start_ms=start_ms, end_ms=end_ms,
         step_minutes=args.step_minutes, project=project, journal=journal,
         cache_dir=cache_dir, symbols=symbols, fingerprint=fingerprint,
+        collision_policy=args.collision_policy,
     )
     checkpoint_file = output / 'progress.json'
     completed, collected, gaps_report = resume_or_initialize(
@@ -443,7 +462,7 @@ def main(argv=None):
                 if not args.allow_incomplete:
                     raise RuntimeError(f'Historical gaps: 1m={len(gaps1)} 15m={len(gaps15)}')
             found = run_symbol(sym,scan,live.normalize_reactions,ticks,b1,b15,
-                               start_ms,end_ms,args.step_minutes)
+                               start_ms,end_ms,args.step_minutes,args.collision_policy)
             collected.update(found)
             completed.add(sym)
             print(f'[{idx}/{len(symbols)}] {sym}: events={len(found)} 1m={len(b1)} 15m={len(b15)} cache={cached1}/{cached15}',flush=True)
@@ -470,7 +489,8 @@ def main(argv=None):
     missing=[x for x in comparisons if x['comparison']=='REPLAY_ONLY']
     csv_write(output/'not_in_journal.csv',('event_key','comparison','retest_ts','symbol','side','source_hash_equal','numeric_differences'),missing)
     source_hashes = sorted({str(x['source_hash']) for x in existing.values()})
-    summary={'mode':args.mode,'start_arg':args.start,'end_arg':args.end,
+    summary={'mode':args.mode,'collision_policy':args.collision_policy,
+             'start_arg':args.start,'end_arg':args.end,
              'start_ms':start_ms,'end_ms':end_ms,'canonical_hash':fingerprint,
              'journal_hashes':source_hashes,'journal_hash_equal':all(x==fingerprint for x in source_hashes),
              'symbols_total':len(symbols),'symbols_ok':len(symbols)-len(errors),
