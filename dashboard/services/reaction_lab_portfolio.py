@@ -390,7 +390,8 @@ def _flat_csv(path, records):
                           else v for k, v in row.items()})
 
 
-def export_comparison(comparison, records, destination, *, provenance=None):
+def export_comparison(comparison, records, destination, *, provenance=None,
+                      cohort="LIVE_OBSERVED_RETROSPECTIVE_RESEARCH"):
     """Create NEW isolated run folder; never overwrite, never touch inputs."""
     dest = Path(destination)
     dest.mkdir(parents=True, exist_ok=False)
@@ -399,7 +400,7 @@ def export_comparison(comparison, records, destination, *, provenance=None):
     manifest = {"engine_version": ENGINE_VERSION,
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "source_digest_sha256": digest,
-                "cohort": "LIVE_OBSERVED_RETROSPECTIVE_RESEARCH",
+                "cohort": str(cohort),
                 "source_records": len(records), "profiles": {k: v["parameters"] for k, v in comparison.items()},
                 "portfolio_settings": next(iter(comparison.values()))["settings"],
                 "cost_assumptions": next(iter(comparison.values()))["costs"],
