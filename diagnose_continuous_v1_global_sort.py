@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Compare full-universe vs single-symbol tie ordering for two Continuous V1 collisions.
 
