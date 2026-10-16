@@ -85158,191 +85158,247 @@ def render_reaction_lab_cohort_explorer(cohort_mode, symbols):
 
 @st.cache_data(ttl=90, show_spinner=False)
 def _runner_opt_load_snapshot(project_root):
-    """Read-only, time-limited snapshot; search runs never refresh collectors."""
+    """Read-only LIVE SQLite snapshot; never refreshes engine/collector."""
     from dashboard.services.reaction_lab_runner_optimizer import load_live
     return load_live(project_root)
 
 
 def render_reaction_lab_runner_optimizer(project_root):
-    """Automatic grid search over causal LIVE REACTIONs with common mature paths."""
+    """Reproducible frozen-cohort search; no production SQLite writes."""
     from dashboard.services.reaction_lab_runner_optimizer import (
-        BASELINE, KEYS, SETTINGS, parameter_grid, grid_size,
-        evaluate, evaluate_holdout, inspect_trades, run_search,
+        BASELINE, DEFAULT_COSTS, KEYS, SETTINGS, MANIFEST_FILENAME,
+        parameter_grid, grid_size, load_or_freeze_cohort, evaluate_holdout,
+        inspect_trades, run_search,
     )
 
     st.markdown("### ⚙️ Runner Optimization · búsqueda automática")
     st.caption(
-        "Investigación read-only: exclusivamente LIVE_OBSERVED desde 15/10/2026 "
-        "12:25 ARG; no incluye RECOVERED_WINDOW, el replay histórico ni "
-        "subconjuntos seleccionados por el collector Runners. "
-        "No emite señales, no ejecuta órdenes y no modifica las SQLite."
+        "Research only · REACTIONs LIVE_OBSERVED desde 15/10/2026 12:25 ARG · "
+        "Scanner, Context, V1 Regime y Auto Paths en modo lectura. "
+        "No ejecuta órdenes ni altera colectores, journals o Runner V1 Frozen."
     )
     with st.expander("🔒 Runner V1 Frozen · referencia inmutable", expanded=False):
         st.dataframe(pd.DataFrame([{"Variable": k, "Baseline": v}
-                                   for k,v in BASELINE.items()]),
+                                   for k, v in BASELINE.items()]),
                      hide_index=True, use_container_width=True)
-        st.caption("TP 3% es una alternativa de comparación; baseline principal TP 2%. "
-                   "Los parámetros congelados no cambian al editar la búsqueda.")
+        st.caption("TP 2% congelado; TP 3% es variante exploratoria. "
+                   "Cambiar tarifas afecta estimaciones, NO los parámetros baseline.")
 
     try:
         records, quality = _runner_opt_load_snapshot(str(project_root))
     except Exception as exc:
-        st.error(f"No se pudo leer el dataset de Reaction Lab: {exc}")
+        st.error(f"No se pudo leer el dataset LIVE: {exc}")
         return
-    a,b,c,d = st.columns(4)
-    a.metric("REACTIONs LIVE", int(quality.get("live",0)))
-    b.metric("4 factores numéricos", int(quality.get("complete_factors",0)))
-    c.metric("Paths completos", int(quality.get("complete_paths",0)))
-    d.metric("Cohorte madura evaluable", len(records))
-    with st.expander("Cobertura y control de datos", expanded=False):
+    a, b, c, d = st.columns(4)
+    a.metric("REACTIONs LIVE", int(quality.get("live", 0)))
+    b.metric("4 factores numéricos", int(quality.get("complete_factors", 0)))
+    c.metric("Paths completos", int(quality.get("complete_paths", 0)))
+    d.metric("Maduras disponibles", len(records))
+    with st.expander("Control de datos y metodología", expanded=False):
         st.json(quality)
-        st.caption("Solo paths COMPLETE contiguos de al menos 210 minutos. "
-                   "Una REACTION con contexto posterior o recorrido faltante NO se interpreta como pérdida. "
-                   "Las métricas 4h fueron reconstruidas ASOF y siguen siendo evidencia de investigación.")
+        st.caption("Se exige path 1m COMPLETE y contiguo, mínimo 210 barras; "
+                   "factor disponible antes de la orden. El contexto 4h "
+                   "RECOMPUTED_ASOF no es observación original en vivo. "
+                   "Los fills intravela se aproximan por OHLC y NO son fills reales.")
     if not records:
-        st.info("No hay señales LIVE con factores y recorridos maduros para buscar combinaciones.")
+        st.info("Todavía no hay eventos LIVE maduros para optimizar.")
         return
 
+    manifest_path = (Path(project_root) / "reports" / "reaction_lab" /
+                     "runner_optimizer" / MANIFEST_FILENAME)
+    if manifest_path.exists():
+        st.info(f"🔒 Split temporal ya congelado: `{manifest_path}`. "
+                "Las REACTIONs posteriores no ingresan en este experimento.")
+    else:
+        st.warning("Al iniciar la primera búsqueda se guardará un manifiesto "
+                   "nuevo con los Event IDs exactos del 70% TRAIN y 30% HOLDOUT. "
+                   "No se sobrescribe en búsquedas posteriores.")
+
     st.markdown("#### Variables a optimizar")
-    st.caption("Marcá cuáles querés cruzar. Los valores se separan con punto y coma "
-               "(usar punto decimal). Todas las combinaciones se generan automáticamente; "
-               "si superan el presupuesto, se selecciona una muestra aleatoria reproducible.")
     values = pd.DataFrame([
         {"Clave": key, "Variable": label, "Baseline": BASELINE[key],
          "Optimizar": enabled, "Valores a probar": trials}
-        for key,label,trials,enabled in SETTINGS
+        for key, label, trials, enabled in SETTINGS
     ])
-    with st.form("runner_optimization_controls_v1"):
+    with st.form("runner_optimization_controls_v2"):
         edited = st.data_editor(
             values, hide_index=True, use_container_width=True,
-            num_rows="fixed", disabled=["Clave","Variable","Baseline"],
-            key="runner_optimization_grid_editor_v1",
+            num_rows="fixed", disabled=["Clave", "Variable", "Baseline"],
+            key="runner_optimization_grid_editor_v2",
             column_config={
                 "Clave": st.column_config.TextColumn("ID"),
                 "Variable": st.column_config.TextColumn("Factor"),
                 "Baseline": st.column_config.NumberColumn("Congelado"),
                 "Optimizar": st.column_config.CheckboxColumn("Optimizar"),
-                "Valores a probar": st.column_config.TextColumn("Valores a probar"),
+                "Valores a probar": st.column_config.TextColumn("Valores (%) o minutos; separados por ;"),
             },
         )
-        b1,b2,b3 = st.columns(3)
-        with b1:
-            budget = st.number_input("Máximo de combinaciones muestreadas", min_value=50,
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            budget = st.number_input("Combinaciones aleatorias", min_value=50,
                                      max_value=3000, step=50, value=500)
-        with b2:
-            min_fills = st.number_input("Mínimo de fills resueltos para ranking",
-                                        min_value=1, max_value=100, value=5, step=1)
-        with b3:
-            seed = st.number_input("Semilla reproducible", min_value=1,
+        with a2:
+            min_fills = st.number_input("Mínimo fills resueltos", min_value=1,
+                                        max_value=200, value=20, step=1)
+        with a3:
+            min_signals = st.number_input("Mínimo señales elegibles", min_value=1,
+                                          max_value=1000, value=30, step=1)
+        with a4:
+            seed = st.number_input("Semilla fija", min_value=1,
                                    max_value=99999999, value=20261016, step=1)
-        clicked = st.form_submit_button("▶ Buscar combinaciones automáticamente",
+        st.markdown("##### Costos hipotéticos (editable; % por lado)")
+        fee1, fee2, fee3 = st.columns(3)
+        with fee1:
+            maker_fee = st.number_input("Maker fee (%)", min_value=0.0,
+                                        max_value=1.0, value=DEFAULT_COSTS["maker_fee_pct"],
+                                        step=0.01, format="%.3f")
+        with fee2:
+            taker_fee = st.number_input("Taker fee (%)", min_value=0.0,
+                                        max_value=1.0, value=DEFAULT_COSTS["taker_fee_pct"],
+                                        step=0.01, format="%.3f")
+        with fee3:
+            taker_slip = st.number_input("Slippage taker (bps por lado)", min_value=0.0,
+                                         max_value=100.0,
+                                         value=DEFAULT_COSTS["taker_slippage_bps"],
+                                         step=1.0, format="%.1f")
+        clicked = st.form_submit_button("▶ Congelar muestra / Buscar combinaciones",
                                         use_container_width=True, type="primary")
 
     if clicked:
         try:
             grid = parameter_grid(edited.to_dict("records"))
-            count = grid_size(grid)
-            if count > int(budget):
-                st.info(f"Espacio total: {count:,} combinaciones. "
-                        f"Se muestrearán {int(budget):,} + baseline con semilla fija.")
-            with st.spinner("Simulando configuraciones en el período de exploración…"):
-                outcome = run_search(records, grid, budget=int(budget),
-                                     seed=int(seed), min_fills=int(min_fills))
-            st.session_state.pop("_runner_opt_holdout_v1", None)
-            st.session_state["_runner_opt_latest_v1"] = {
-                "result": outcome, "records": records,
-                "min_fills": int(min_fills), "grid": grid,
+            costs = {"maker_fee_pct": float(maker_fee),
+                     "taker_fee_pct": float(taker_fee),
+                     "taker_slippage_bps": float(taker_slip)}
+            frozen = load_or_freeze_cohort(records, manifest_path)
+            combos = grid_size(grid)
+            if combos > int(budget):
+                st.info(f"Grilla de {combos:,} combinaciones; "
+                        f"se muestrean {int(budget):,} + baseline con semilla fija.")
+            with st.spinner("Evaluando exclusivamente los Event IDs de entrenamiento…"):
+                result = run_search(records, grid, budget=int(budget), seed=int(seed),
+                                    min_fills=int(min_fills), min_signals=int(min_signals),
+                                    costs=costs, frozen=frozen)
+            st.session_state.pop("_runner_opt_holdout_v2", None)
+            st.session_state["_runner_opt_latest_v2"] = {
+                "result": result, "frozen": frozen,
+                "costs": costs, "min_fills": int(min_fills),
+                "min_signals": int(min_signals),
             }
         except Exception as exc:
-            st.error(f"No se pudo ejecutar la búsqueda: {exc}")
+            st.error(f"No pudo ejecutarse la búsqueda: {exc}")
             return
 
-    saved = st.session_state.get("_runner_opt_latest_v1")
+    saved = st.session_state.get("_runner_opt_latest_v2")
     if not saved:
-        st.info("Configurá la grilla y ejecutá la búsqueda. Ninguna prueba modifica "
-                "el baseline ni el journal.")
+        st.info("Configurá la grilla y pulsá Buscar. La primera ejecución congela "
+                "las membresías en un JSON independiente.")
         return
-    result = saved["result"]
-    sample = saved["records"]
-    needed = saved["min_fills"]
-    st.markdown("#### Ranking automático · exploración temporal (70% inicial)")
+    result, frozen, costs = saved["result"], saved["frozen"], saved["costs"]
+    train, holdout_records, manifest = frozen
+    st.markdown("#### Ranking automático · solo entrenamiento congelado")
     st.caption(
-        f"Espacio posible: {result['total_combinations']:,} · probadas: "
-        f"{result['tested']:,} · señales maduras de entrenamiento: {result['train_n']} "
-        f"· holdout posterior reservado: {result['holdout_n']}. "
-        "El ranking NO usa resultados del holdout. Mismo universo maduro para "
-        "todas las combinaciones; sin fill equivale a 0, ambigüedad/censura "
-        "se reporta separadamente."
+        f"Combinaciones totales: {result['total_combinations']:,} · "
+        f"probadas: {result['tested']:,} · TRAIN: {len(train)} · "
+        f"HOLDOUT reservado: {len(holdout_records)}. "
+        "Las señales nuevas no entran al split de este experimento. "
+        "NO_FILL = 0; ambiguas y censuradas quedan fuera de la expectativa."
     )
+    with st.expander("Identidad y descarga del split congelado", expanded=False):
+        st.write("Manifest:", str(manifest_path))
+        st.write("Fecha de congelamiento:", manifest["created_utc"])
+        st.write("SHA256 TRAIN:", manifest["train_sha256"])
+        st.write("SHA256 HOLDOUT:", manifest["holdout_sha256"])
+        st.download_button("⬇ Descargar manifiesto JSON",
+                           data=json.dumps(manifest, ensure_ascii=False, indent=2),
+                           file_name=MANIFEST_FILENAME, mime="application/json",
+                           key="runner_opt_manifest_dl_v2")
     ranking = pd.DataFrame(result["ranking"])
     valid_count = int(ranking["train_muestra_suficiente"].sum())
-    if valid_count == 0:
-        st.warning(f"Ninguna configuración alcanzó {needed} fills resueltos y "
-                   "cobertura suficiente en entrenamiento. Los resultados son "
-                   "exploratorios; no hay ganadora validada.")
+    if not valid_count:
+        st.warning("Ninguna combinación pasó los mínimos de señales y fills "
+                   "resueltos en TRAIN. El ranking es exploratorio; "
+                   "NO hay estrategia aprobada.")
     else:
-        st.caption(f"Configuraciones que cumplen la regla mínima de muestra: {valid_count} "
-                   "(no equivale a significancia estadística).")
+        st.caption(f"{valid_count} combinaciones alcanzaron los mínimos "
+                   "del ranking (sin significancia estadística garantizada).")
     display_cols = [
-        "config_id","baseline",*KEYS,"train_señales","train_evaluables",
-        "train_fills","train_tp","train_sl","train_timeout","train_sin_fill",
-        "train_ambiguas","train_censuradas","train_wr_pct","train_pf",
-        "train_pnl_medio_fill_pct","train_expectativa_por_señal_pct",
+        "config_id", "baseline", *KEYS,
+        "train_señales", "train_evaluables", "train_fills",
+        "train_tp_count", "train_sl_count", "train_timeout",
+        "train_sin_fill", "train_ambiguas", "train_censuradas",
+        "train_wr_pct", "train_pf", "train_pnl_medio_fill_pct",
+        "train_expectativa_por_señal_pct", "train_expectativa_por_universo_pct",
         "train_muestra_suficiente",
     ]
     st.dataframe(ranking[display_cols], use_container_width=True,
-                 hide_index=True, height=500, key="runner_optimizer_ranking_table")
-    st.download_button("⬇ Descargar ranking CSV", data=ranking.to_csv(index=False).encode("utf-8"),
-                       file_name="reaction_lab_runner_optimization.csv", mime="text/csv",
-                       key="runner_opt_download_v1")
-    st.caption("PF vacío cuando no hubo pérdidas: NO significa rentabilidad demostrada. "
-               "PNL expresado en % sobre nocional, tarifa supuesta 0,07%; "
-               "sin slippage, funding ni cartera/solapamiento. "
-               "Si TP y SL coinciden en una vela posterior, penaliza como SL y lo informa.")
+                 hide_index=True, height=500, key="runner_optimizer_ranking_table_v2")
+    st.download_button("⬇ Ranking CSV (TRAIN)",
+                       data=ranking.to_csv(index=False).encode("utf-8"),
+                       file_name="runner_optimization_train_v2.csv", mime="text/csv",
+                       key="runner_opt_download_v2")
+    st.caption("Parámetros `tp` y `sl` = porcentajes elegidos; "
+               "`train_tp_count` / `train_sl_count` = cantidad de salidas. "
+               "Taker en entrada marketable, SL y timeout; maker en LIMIT pasiva "
+               "y TP límite. Slippage taker estimado. No incluye funding, "
+               "latencia, cartera compartida ni liquidez real.")
 
-    st.markdown("#### Comparar e inspeccionar")
-    top = result["ranking"][:20]
-    baseline = next((r for r in result["ranking"] if r["baseline"]), None)
-    shortlist = list(top)
-    if baseline and baseline["config_id"] not in {r["config_id"] for r in shortlist}:
-        shortlist.append(baseline)
-    options = {int(r["config_id"]): r for r in shortlist}
+    st.markdown("#### Inspección y holdout")
+    options = {int(r["config_id"]): r for r in result["ranking"]}
     chosen = st.selectbox(
-        "Configuración (top 20 por entrenamiento + baseline)",
+        "Seleccionar configuración (todas, no solo top 20)",
         options=list(options),
         format_func=lambda i: (
-            f"#{i} {'🔒 baseline' if options[i]['baseline'] else 'exploratoria'} "
-            f"LIMIT {options[i]['limit']}% · TTL {options[i]['ttl']}m · "
+            f"#{i} {'🔒 baseline' if options[i]['baseline'] else 'exploratoria'} · "
+            f"LIMIT {options[i]['limit']}% / TTL {options[i]['ttl']}m / "
             f"TP {options[i]['tp']}% / SL {options[i]['sl']}%"
-        ), key="runner_optimization_selected_config_v1",
+        ), key="runner_optimizer_selected_config_v2",
     )
     selected = options[chosen]
-    with st.expander("Operaciones de la configuración seleccionada", expanded=False):
-        detail = pd.DataFrame(inspect_trades(sample, {k: selected[k] for k in KEYS}))
+    params = {k: selected[k] for k in KEYS}
+    with st.expander("Operaciones TRAIN de la configuración", expanded=False):
+        detail = pd.DataFrame(inspect_trades(train, params, costs=costs))
         if detail.empty:
-            st.info("Esta combinación no tiene señales elegibles en la cohorte madura.")
+            st.info("No hay señales elegibles en TRAIN.")
         else:
             st.dataframe(detail, use_container_width=True, hide_index=True)
-            st.download_button("⬇ Descargar operaciones CSV",
-                               detail.to_csv(index=False).encode("utf-8"),
-                               file_name=f"runner_config_{chosen}_events.csv", mime="text/csv",
-                               key="runner_opt_trades_download")
-    if st.button("🧪 Evaluar HOLDOUT de esta configuración y del baseline",
-                 key="runner_opt_holdout_button_v1"):
+            st.download_button("⬇ Operaciones TRAIN CSV",
+                               data=detail.to_csv(index=False).encode("utf-8"),
+                               file_name=f"runner_train_config_{chosen}.csv", mime="text/csv",
+                               key="runner_opt_trades_train_dl_v2")
+    if st.button("🧪 Revelar HOLDOUT: seleccionada vs baseline",
+                 key="runner_opt_holdout_button_v2"):
+        baseline_row = next(r for r in result["ranking"] if r["baseline"])
         selected_rows = [selected]
-        if baseline and baseline["config_id"] != chosen:
-            selected_rows.append(baseline)
-        holdout = evaluate_holdout(sample, selected_rows, min_fills=needed)
-        st.session_state["_runner_opt_holdout_v1"] = (chosen, holdout)
-    holdout = st.session_state.get("_runner_opt_holdout_v1")
-    if holdout and holdout[0] == chosen:
-        st.markdown("##### Holdout temporal (30% posterior)")
-        st.dataframe(pd.DataFrame(holdout[1]), hide_index=True,
-                     use_container_width=True)
-        st.warning("El holdout es exploratorio y compartido con la investigación; "
-                   "mirarlo y volver a optimizar invalida una evaluación independiente. "
-                   "Para aprobar una estrategia, congelar parámetros y esperar NUEVAS "
-                   "REACTIONs observadas después de la selección.")
+        if baseline_row["config_id"] != chosen:
+            selected_rows.append(baseline_row)
+        holdout = evaluate_holdout(train + holdout_records, selected_rows,
+                                   min_fills=saved["min_fills"],
+                                   min_signals=saved["min_signals"],
+                                   costs=costs, frozen=frozen)
+        st.session_state["_runner_opt_holdout_v2"] = (chosen, holdout)
+    held = st.session_state.get("_runner_opt_holdout_v2")
+    if held and held[0] == chosen:
+        st.markdown("##### Holdout fijo · comparación explícita")
+        hdf = pd.DataFrame(held[1])
+        st.dataframe(hdf, use_container_width=True, hide_index=True)
+        st.download_button("⬇ Comparación HOLDOUT CSV", hdf.to_csv(index=False).encode("utf-8"),
+                           file_name=f"runner_holdout_config_{chosen}.csv", mime="text/csv",
+                           key="runner_opt_holdout_dl_v2")
+        if not bool(hdf["muestra_suficiente"].all()):
+            st.warning("Muestra insuficiente en HOLDOUT según los mínimos configurados; "
+                       "no declarar ganadora esta variante.")
+        with st.expander("Operaciones HOLDOUT reveladas", expanded=False):
+            hdetail = pd.DataFrame(inspect_trades(holdout_records, params, costs=costs))
+            st.dataframe(hdetail, hide_index=True, use_container_width=True)
+            if not hdetail.empty:
+                st.download_button("⬇ Operaciones HOLDOUT CSV",
+                                   hdetail.to_csv(index=False).encode("utf-8"),
+                                   file_name=f"runner_holdout_trades_{chosen}.csv", mime="text/csv",
+                                   key="runner_opt_trades_holdout_dl_v2")
+        st.warning("Holdout consultado = evidencia exploratoria ya vista, NO validación "
+                   "out-of-sample prospectiva. Para aprobar, congelar configuración "
+                   "y esperar Event IDs futuros independientes.")
 
 
 if selected_section == "reaction_swing_lab":
