@@ -333,6 +333,10 @@ def run_symbol(sym, scan, normalize_reactions, ticks, candles_1m, candles_15m,
                      min_swing_prominence_pct=0.0, retest_tolerance_pct=0.10,
                      min_departure_pct=0.20, max_age_minutes=360,
                      max_retest_age_minutes=4320)
+        if collision_policy not in ('native', 'latest-pivot'):
+            raise ValueError(f'Unknown collision policy: {collision_policy}')
+        # Empty frames are perfectly normal when a checkpoint has no reactions.
+        # Keep the policy valid, and only sort when candidate rows exist.
         if collision_policy == 'latest-pivot' and frame is not None and not frame.empty:
             # EXPERIMENT: only change which candidate wins when multiple
             # confirmed swings share the same symbol|side|retest_ts.
@@ -344,8 +348,6 @@ def run_symbol(sym, scan, normalize_reactions, ticks, candles_1m, candles_15m,
                 ['retest_timestamp', 'pivot_timestamp'],
                 ascending=[False, False], kind='mergesort', na_position='last'
             )
-        elif collision_policy != 'native':
-            raise ValueError(f'Unknown collision policy: {collision_policy}')
         for key, payload in normalize_reactions(frame, tick).items():
             ts = int(payload['retest_timestamp'])
             if not start_ms <= ts < end_ms:

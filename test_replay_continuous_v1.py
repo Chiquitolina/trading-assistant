@@ -72,6 +72,23 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(self_seen,[(180*mod.ONE_MIN,179*mod.ONE_MIN,165*mod.ONE_MIN),
                                     (181*mod.ONE_MIN,180*mod.ONE_MIN,165*mod.ONE_MIN)])
 
+    def test_latest_pivot_allows_empty_reaction_frame(self):
+        from pandas import DataFrame
+        tick = 180 * mod.ONE_MIN
+        bars1 = [dict(timestamp=t, open=1., high=1., low=1., close=1., volume=2.)
+                 for t in range(0, 190 * mod.ONE_MIN, mod.ONE_MIN)]
+        bars15 = [dict(timestamp=t, open=1., high=1., low=1., close=1., volume=2.)
+                  for t in range(0, 200 * mod.ONE_MIN, 15 * mod.ONE_MIN)]
+        class Scanner:
+            __globals__ = {}
+            def __call__(self, **kwargs):
+                return DataFrame()
+        # Previously this raised 'Unknown collision policy: latest-pivot'
+        events = mod.run_symbol('TEST', Scanner(), lambda frame, now: {}, [tick],
+                                bars1, bars15, 0, 181 * mod.ONE_MIN, 1,
+                                collision_policy='latest-pivot')
+        self.assertEqual(events, {})
+
     def test_latest_pivot_resolves_same_event_key_without_changing_event_id(self):
         from pandas import DataFrame
         ticks = [180 * mod.ONE_MIN]
