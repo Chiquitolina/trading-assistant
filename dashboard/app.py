@@ -85448,6 +85448,7 @@ if selected_section == "reaction_swing_lab":
                 "📍 Event swing structure",
                 "🧬 Volume → future swings",
                 "⚙️ Runner Optimization",
+                "📈 Runner Portfolio",
             ],
             horizontal=True,
             key="reaction_swing_lab_mode",
@@ -85463,10 +85464,15 @@ if selected_section == "reaction_swing_lab":
         # materialization, returns results only in Streamlit session memory.
         if lab_mode == "⚙️ Runner Optimization":
             render_reaction_lab_runner_optimizer(BASE_DIR)
+        elif lab_mode == "📈 Runner Portfolio":
+            from dashboard.views.reaction_lab_portfolio_view import (
+                render_runner_portfolio_dashboard,
+            )
+            render_runner_portfolio_dashboard(BASE_DIR)
 
         # Continuous always reads the same persisted Event IDs in EVERY view.
         # Legacy engines are intentionally unchanged and never run in Continuous.
-        if lab_mode != "⚙️ Runner Optimization" and cohort_mode in ("Continuous V1", "Todos"):
+        if lab_mode not in ("⚙️ Runner Optimization", "📈 Runner Portfolio") and cohort_mode in ("Continuous V1", "Todos"):
             from reaction_lab_research_view import render_cohort_research
             render_cohort_research(
                 BASE_DIR, "Continuous V1", lab_mode, structural_symbols,
@@ -85477,8 +85483,8 @@ if selected_section == "reaction_swing_lab":
                 st.divider()
                 st.markdown("### 🗄️ Legacy — herramientas existentes")
 
-        if cohort_mode == "Continuous V1":
-            pass  # no hidden legacy rebuild, refresh or monitor writes
+        if cohort_mode == "Continuous V1" or lab_mode in ("⚙️ Runner Optimization", "📈 Runner Portfolio"):
+            pass  # No hidden legacy rebuild; portfolio and optimizer are isolated read-only views.
         elif lab_mode == "📡 REACTION journal":
             st.caption(
                 "Journal estructural 15m/3x3 del universo observado por el scanner "
