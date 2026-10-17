@@ -356,3 +356,13 @@ Interpretación: cohort research / incertidumbres / hipótesis congeladas:
 **Módulo adicional, sin alterar fases 1–2 ni el Portfolio Simulator.** Una vez que existen los Shadow Outcomes completos, ejecutar la agregación offline descrita en [`docs/CANDIDATE_SELECTION_LAB.md`](CANDIDATE_SELECTION_LAB.md). Entrada: `shadow_manifest.json` + `competition_decisions.csv` + `ready_groups.csv` + `shadow_outcomes.csv`, `historical_factors.csv` hash-verificado, y opcionalmente uno o más `market_snapshots_4h.csv` para un Strength direccional **proxy** de retorno relativo a BTC. Salida nueva: `candidate_factor_snapshots.csv`, `selection_candidates.csv`, `selection_groups.csv`, `selection_policy_choices.csv`, `selection_manifest.json`.
 
 Se exige paridad 1:1 de **cada desempate por Room con slot libre** contra la decisión congelada. No se admiten factores con `available_ms > ready_ms`, resultados futuros como input del selector, imputaciones silenciosas, reemplazos retrospectivos de posiciones ni suma de resultados shadow como equity. Otros rankers son comparaciones **descriptivas**, no nueva cartera. Para 290×14d volver a ejecutar este módulo después del Context/Portfolio/Competition/Shadow completos, usando el mismo `market_snapshots_4h.csv` del contexto 290 correspondiente. La ampliación a nuevas reglas operables requiere Portfolio Policy Replay con slot único y paridad exacta del baseline.
+
+---
+
+## Fase 7 — Portfolio Policy Replay (nuevo, experimental)
+
+Después de completar **Replay → Contexto → Portfolio original → Competition Ledger → Shadow → Selection**, consultar `docs/PORTFOLIO_POLICY_REPLAY.md` antes de evaluar prioridades alternativas de un slot.
+
+`candidate_portfolio_policy_replay.py` comprueba contra el run congelado guardado la fuente, decisiones, trades y equity, y ejecuta variantes causales cambiando **solo el orden de señales simultáneas admisibles**. Publica reportes separados por `policy` y no suma Shadow Outcomes ni los utiliza como señales de decisión.
+
+Validar primero los 20 símbolos y 14 días contra `HIST_20261017T200411382804Z_5e7eba8e4d`; después aplicar la misma secuencia con el nuevo run de 290 símbolos. Strength sigue siendo un proxy de retornos de vela 4h cerrada, no paridad canónica con Candidate V2 ni LIVE.
