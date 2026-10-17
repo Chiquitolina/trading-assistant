@@ -10,6 +10,8 @@ import sqlite3
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from dashboard.views.reaction_lab_candidate_selection_view import render_selection_research
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -348,7 +350,7 @@ def render_competition_lab(output_dir):
     else:
         st.info("Generá Fase 2 para visualizar resultados individuales (TP/SL/TIMEOUT/NO_FILL, MFE y MAE).")
 
-    tab_time, tab_cand, tab_groups = st.tabs(["⏱️ Timeline del slot", "🧪 Todas las candidatas", "⚔️ Simultáneas"])
+    tab_time, tab_cand, tab_groups, tab_select = st.tabs(["⏱️ Timeline del slot", "🧪 Todas las candidatas", "⚔️ Simultáneas", "🔬 Selection Research"])
     with tab_time:
         st.subheader("Timeline horizontal de ocupación del slot")
         if e.empty:
@@ -472,6 +474,9 @@ def render_competition_lab(output_dir):
                 linked = s[s["event_key"].isin(mem["event_key"])].copy()
                 st.dataframe(_outcome_table(linked), use_container_width=True, hide_index=True)
                 _trajectory(root, linked["event_key"].tolist(), s)
+
+    with tab_select:
+        render_selection_research(root, strategy)
 
     with st.expander("Proveniencia, supuestos y seguridad"):
         st.json({"competition_engine": manifest["engine"], "source_hashes": manifest["source_hashes"],

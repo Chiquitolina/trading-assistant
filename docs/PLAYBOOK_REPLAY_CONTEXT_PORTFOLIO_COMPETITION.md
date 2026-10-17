@@ -350,3 +350,9 @@ Interpretación: cohort research / incertidumbres / hipótesis congeladas:
 **Recomendación de versionado:** almacenar este manual en `docs/PLAYBOOK_REPLAY_CONTEXT_PORTFOLIO_COMPETITION.md`; cada cambio de contrato CLI, caché, orden temporal o esquema de eventos debe actualizar el playbook y los tests de paridad.
 
 **Commit sugerido para el manual y mejoras visuales:** `docs(reaction-lab): document replay-to-competition pipeline and improve shadow inspection`
+
+## 8. Candidate Selection Research — métricas as-of, desempates y documentación
+
+**Módulo adicional, sin alterar fases 1–2 ni el Portfolio Simulator.** Una vez que existen los Shadow Outcomes completos, ejecutar la agregación offline descrita en [`docs/CANDIDATE_SELECTION_LAB.md`](CANDIDATE_SELECTION_LAB.md). Entrada: `shadow_manifest.json` + `competition_decisions.csv` + `ready_groups.csv` + `shadow_outcomes.csv`, `historical_factors.csv` hash-verificado, y opcionalmente uno o más `market_snapshots_4h.csv` para un Strength direccional **proxy** de retorno relativo a BTC. Salida nueva: `candidate_factor_snapshots.csv`, `selection_candidates.csv`, `selection_groups.csv`, `selection_policy_choices.csv`, `selection_manifest.json`.
+
+Se exige paridad 1:1 de **cada desempate por Room con slot libre** contra la decisión congelada. No se admiten factores con `available_ms > ready_ms`, resultados futuros como input del selector, imputaciones silenciosas, reemplazos retrospectivos de posiciones ni suma de resultados shadow como equity. Otros rankers son comparaciones **descriptivas**, no nueva cartera. Para 290×14d volver a ejecutar este módulo después del Context/Portfolio/Competition/Shadow completos, usando el mismo `market_snapshots_4h.csv` del contexto 290 correspondiente. La ampliación a nuevas reglas operables requiere Portfolio Policy Replay con slot único y paridad exacta del baseline.
