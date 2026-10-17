@@ -135,6 +135,84 @@ def _outcome_table(shadow):
     })
 
 
+def _trajectory_segments(bars, *, anchor, side, fill_ms=None, exit_ms=None, exit_price=None):
+    """Separate observed 1m CLOSEs from the exact modeled fill/exit prices.
+
+    A candle's close at exit time might happen AFTER the SL/TP hit. Therefore,
+    never use that close as an executable exit or continue the solid trade line
+    after `exit_ms`. `market_after` is observational, not a held position.
+    """
+    series = bars.sort_values("timestamp_ms").copy()
+    direction = 1 if side == "LONG" else -1
+    series["directional_pct"] = direction * (series["close"] / float(anchor) - 1) * 100
+    if fill_ms is None:  # NO_FILL: this is a market-only reference path
+        return {"pre_fill": series.iloc[:0], "active": series.iloc[:0],
+                "market_after": series, "exit_point": None}
+    pre = series[series["timestamp_ms"] < fill_ms]
+    held = series[series["timestamp_ms"] >= fill_ms]
+    exit_point = None
+    if exit_ms is not None:
+        held = held[held["timestamp_ms"] < exit_ms]
+        after = series[series["timestamp_ms"] > exit_ms]
+        if exit_price is not None and pd.notna(exit_price):
+            exit_point = (int(exit_ms), direction * (float(exit_price) / float(anchor) - 1) * 100)
+    else:
+        after = series.iloc[:0]
+    return {"pre_fill": pre, "active": held, "market_after": after,
+            "exit_point": exit_point}
+
+
+def _blocked_summary(shadow, decisions):
+    """Descriptive individual outcomes for *eligible slot-blocked* candidates.
+
+    Never aggregate hypothetical isolated returns as portfolio PnL.
+    """
+    blocked = shadow.loc[shadow["shadow_class"] == "ELIGIBLE_BLOCKED_SLOT"].copy()
+    blocked["shadow_net_pct"] = pd.to_numeric(blocked["shadow_net_pct"], errors="coerce")
+    blocked["shadow_fill_ts"] = pd.to_numeric(blocked["shadow_fill_ts"], errors="coerce")
+    owner_fields = decisions[["event_key", "owner_stage", "owner_at_decision"]].drop_duplicates("event_key")
+    blocked = blocked.merge(owner_fields, on="event_key", how="left", validate="one_to_one")
+    summary = {
+        "blocked": len(blocked),
+        "filled": int(blocked["shadow_fill_ts"].notna().sum()),
+        "tp": int(blocked["shadow_status"].eq("TP").sum()),
+        "sl": int(blocked["shadow_status"].isin(["SL", "AMBIGUOUS_BOTH_AS_SL"]).sum()),
+        "timeout": int(blocked["shadow_status"].eq("TIMEOUT").sum()),
+        "no_fill": int(blocked["shadow_status"].eq("NO_FILL").sum()),
+        "unresolved": int((~blocked["shadow_status"].isin(
+            ["TP", "SL", "AMBIGUOUS_BOTH_AS_SL", "TIMEOUT", "NO_FILL"])).sum()),
+    }
+    filled = blocked.loc[blocked["shadow_fill_ts"].notna(), "shadow_net_pct"].dropna()
+    summary["mean_net_pct_filled"] = float(filled.mean()) if not filled.empty else None
+    return summary, blocked
+
+
+def _blocked_panel(shadow, decisions):
+    stats, blocked = _blocked_summary(shadow, decisions)
+    st.markdown("#### Resumen de candidatas elegibles bloqueadas por el slot")
+    c = st.columns(4)
+    c[0].metric("Bloqueadas", stats["blocked"])
+    c[1].metric("Fill hipotético", f'{stats["filled"]}/{stats["blocked"]}')
+    c[2].metric("TP aislados", stats["tp"])
+    c[3].metric("SL aislados", stats["sl"])
+    st.caption(f'TIMEOUT: {stats["timeout"]} · NO_FILL: {stats["no_fill"]} · '
+               f'No resueltos/ambiguos: {stats["unresolved"]}. '
+               "Los outcomes pertenecen a órdenes aisladas, NO a una cartera alternativa.")
+    if blocked.empty:
+        return
+    if stats["mean_net_pct_filled"] is not None:
+        st.caption(f'Retorno neto medio individual entre fills: '
+                   f'{stats["mean_net_pct_filled"]:+.3f}%. '
+                   'No es un rendimiento alcanzable de cartera ni puede sumarse.')
+    stage = blocked.groupby(["owner_stage", "shadow_status"], dropna=False).size().unstack(fill_value=0)
+    st.markdown("**Motivo de ocupación × resultado aislado**")
+    st.dataframe(stage, use_container_width=True)
+    owners = (blocked.groupby("owner_at_decision", dropna=False).size()
+              .sort_values(ascending=False).head(10).rename("bloqueadas"))
+    with st.expander("Operaciones que más candidatas bloquearon", expanded=False):
+        st.dataframe(owners, use_container_width=True)
+
+
 def _trajectory(root, keys, shadow):
     f = root / "shadow_paths_1m.sqlite3"
     if not f.is_file():
@@ -153,46 +231,74 @@ def _trajectory(root, keys, shadow):
         bars = data[data["event_key"] == key].sort_values("timestamp_ms").copy()
         if bars.empty:
             continue
-        entry = pd.to_numeric(pd.Series([row["shadow_fill_price"]]), errors="coerce").iloc[0]
-        anchor = float(entry) if pd.notna(entry) and float(entry) > 0 else float(bars.iloc[0]["open"])
-        side = 1 if row["side"] == "LONG" else -1
-        bars["directional_pct"] = side * (bars["close"] / anchor - 1) * 100
-        bars["dt"] = bars["timestamp_ms"].map(_time)
-        st_name = str(row["shadow_status"])
-        tag = "SELECCIONADO" if row["actual_decision"] == "ORDER_SUBMITTED" else "SHADOW"
-        color = PALETTE.get(st_name, "#38bdf8")
-        fig.add_trace(go.Scatter(
-            x=bars["dt"], y=bars["directional_pct"], mode="lines",
-            line=dict(color=color, width=2.2 if tag == "SELECCIONADO" else 1.6,
-                      dash="solid" if tag == "SELECCIONADO" else "dash"),
-            name=f"{row['symbol']} {row['side']} · {tag} · {st_name}",
-            hovertemplate="%{x}<br>Retorno direccional al cierre: %{y:.3f}%<extra></extra>",
-        ))
+        fill_price = pd.to_numeric(pd.Series([row["shadow_fill_price"]]), errors="coerce").iloc[0]
         fill = pd.to_numeric(pd.Series([row["shadow_fill_ts"]]), errors="coerce").iloc[0]
         exit_ = pd.to_numeric(pd.Series([row["shadow_exit_ts"]]), errors="coerce").iloc[0]
-        if pd.notna(fill):
-            fig.add_trace(go.Scatter(
-                x=[_time(fill)], y=[0], mode="markers", showlegend=False,
-                marker=dict(color=color, size=9, symbol="triangle-up"),
-                hovertemplate=f"FILL {_label(key)}<extra></extra>",
-            ))
-        if pd.notna(exit_):
-            exit_bar = bars[bars["timestamp_ms"] == int(exit_)]
-            if not exit_bar.empty:
-                y = float(exit_bar.iloc[0]["directional_pct"])
+        exit_price = pd.to_numeric(pd.Series([row["shadow_exit_price"]]), errors="coerce").iloc[0]
+        anchor = float(fill_price) if pd.notna(fill_price) and float(fill_price) > 0 else float(bars.iloc[0]["open"])
+        fill_ms = int(fill) if pd.notna(fill) else None
+        exit_ms = int(exit_) if pd.notna(exit_) else None
+        parts = _trajectory_segments(bars, anchor=anchor, side=row["side"],
+                                     fill_ms=fill_ms, exit_ms=exit_ms,
+                                     exit_price=float(exit_price) if pd.notna(exit_price) else None)
+        status = str(row["shadow_status"])
+        tag = "SELECCIONADO" if row["actual_decision"] == "ORDER_SUBMITTED" else "SHADOW"
+        color = PALETTE.get(status, "#38bdf8")
+        name = f"{row['symbol']} {row['side']} · {tag} · {status}"
+        if fill_ms is None:
+            market = parts["market_after"]
+            if not market.empty:
                 fig.add_trace(go.Scatter(
-                    x=[_time(exit_)], y=[y], mode="markers", showlegend=False,
-                    marker=dict(color=color, size=10, symbol="x"),
-                    hovertemplate=f"EXIT {_label(key)} · {st_name}<extra></extra>",
-                ))
+                    x=market["timestamp_ms"].map(_time), y=market["directional_pct"],
+                    mode="lines", name=f"{name} · SIN FILL (mercado)",
+                    line=dict(color=color, width=1.4, dash="dot"), opacity=0.52,
+                    hovertemplate="Precio observado, sin posición<br>%{x}<br>%{y:.3f}%<extra></extra>"))
+            continue
+        before = parts["pre_fill"]
+        if not before.empty:
+            fig.add_trace(go.Scatter(
+                x=before["timestamp_ms"].map(_time), y=before["directional_pct"],
+                mode="lines", showlegend=False,
+                line=dict(color=color, width=1, dash="dot"), opacity=0.22,
+                hovertemplate="Antes del fill · sin posición<br>%{x}<br>%{y:.3f}%<extra></extra>"))
+        active = parts["active"]
+        x_active = [_time(fill_ms)] + list(active["timestamp_ms"].map(_time))
+        y_active = [0.0] + list(active["directional_pct"])
+        exit_point = parts["exit_point"]
+        if exit_point is not None:
+            x_active.append(_time(exit_point[0]))
+            y_active.append(exit_point[1])
+        fig.add_trace(go.Scatter(
+            x=x_active, y=y_active, mode="lines", name=name,
+            line=dict(color=color, width=2.5 if tag == "SELECCIONADO" else 1.8),
+            hovertemplate="Posición hipotética abierta<br>%{x}<br>Movimiento bruto: %{y:.3f}%<extra></extra>"))
+        fig.add_trace(go.Scatter(
+            x=[_time(fill_ms)], y=[0], mode="markers", showlegend=False,
+            marker=dict(color=color, size=9, symbol="triangle-up"),
+            hovertemplate=f"FILL {_label(key)} (estimado)<extra></extra>"))
+        if exit_point is not None:
+            fig.add_trace(go.Scatter(
+                x=[_time(exit_point[0])], y=[exit_point[1]], mode="markers", showlegend=False,
+                marker=dict(color=color, size=12, symbol="x", line=dict(width=2, color="#f8fafc")),
+                hovertemplate=f"SALIDA ESTIMADA {_label(key)} · {status}<br>Movimiento bruto: %{{y:.3f}}%"
+                              "<extra></extra>"))
+            after = parts["market_after"]
+            if not after.empty:
+                fig.add_trace(go.Scatter(
+                    x=[_time(exit_point[0])] + list(after["timestamp_ms"].map(_time)),
+                    y=[exit_point[1]] + list(after["directional_pct"]), mode="lines",
+                    showlegend=False,
+                    line=dict(color=color, width=1.4, dash="dash"), opacity=0.42,
+                    hovertemplate="Mercado después de cerrar; sin posición<br>%{x}<br>%{y:.3f}%<extra></extra>"))
     fig.add_hline(y=0, line_dash="dot", line_color="#64748b")
-    fig.update_layout(xaxis_title="Tiempo Argentina", yaxis_title="Movimiento direccional del cierre vs fill/base (%)",
+    fig.update_layout(xaxis_title="Tiempo Argentina", yaxis_title="Movimiento direccional vs fill/base (%)",
                       height=480, margin=dict(l=10, r=10, t=18, b=10),
                       legend=dict(orientation="h", y=-.22))
     st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
-    st.caption("Cada línea usa su propio precio de fill (o el primer OPEN si NO_FILL). LONG y SHORT se normalizan "
-               "a favor de la dirección; NO son curvas de equity. FILL/EXIT son estimaciones OHLC 1m. "
-               "En las velas de salida el cierre puede ser posterior al TP/SL; compará Net % aislado para el resultado.")
+    st.caption("Línea continua: desde FILL hasta SALIDA del escenario. X: salida a su precio estimado TP/SL/TIMEOUT "
+               "(no al cierre de la vela). Línea tenue discontinua: trayectoria de mercado DESPUÉS de la salida, "
+               "sin posición. Antes del fill no hay exposición; NO_FILL = mercado de referencia, nunca operación. "
+               "Retorno bruto direccional ≠ PnL neto después de comisiones. OHLC 1m no resuelve orden intravela.")
 
 
 def render_competition_lab(output_dir):
@@ -311,6 +417,8 @@ def render_competition_lab(output_dir):
         if not has_shadow:
             st.info("Se requiere generación offline de Shadow Outcomes")
         else:
+            _blocked_panel(s, d)
+            st.divider()
             choice_types = sorted(s["shadow_class"].unique().tolist())
             selected_types = st.multiselect("Tipo de candidata", choice_types,
                                             default=choice_types, key="competition_shadow_classes_v2")
