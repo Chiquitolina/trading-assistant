@@ -73,6 +73,6 @@ def render_competition_dashboard(base_dir: Path) -> None:
     st.caption(
         "Vista independiente del cohort selector de Reaction Lab. "
         "No recalcula señales, no ejecuta órdenes y no cambia ninguna estrategia. "
-        "Phase 1: aún no existen Shadow Outcomes de candidatas descartadas."
+        "Los Shadow Outcomes aparecen solo cuando se generó un dataset Phase 2 verificado; no ejecuta órdenes."
     )
     render_competition_lab(roots[choice])
