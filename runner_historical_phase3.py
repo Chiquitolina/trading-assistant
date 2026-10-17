@@ -44,7 +44,8 @@ def preflight(args):
     if not events:
         raise ValueError('Replay vacío: no hay REACTIONs estructurales reconstruidas')
     factors=hist.load_factors(args.factors) if args.factors else {}
-    candidates, factor_issues=hist.prepare_candidates(events,factors)
+    candidates, factor_issues=hist.prepare_candidates(
+        events,factors,assumed_execution_delay_ms=args.assumed_execution_delay_ms)
     parity_summary=json.loads(args.parity_summary.read_text()) if args.parity_summary else None
     structure_verified=parity_evidence(summary,parity_summary)
     result={'replay_events':len(events),'valid_factor_rows':len(candidates),
@@ -58,6 +59,9 @@ def preflight(args):
             'run_ready':bool(candidates) and not factor_issues and structure_verified
                          and summary.get('symbols_failed')==0 and summary.get('data_gaps')==0,
             'historical_validation_ready':False,  # independent numerical factor parity pending
+            'timing_policy':'HISTORICAL_POST_CANDLE_BOUNDARY_1MS_PLUS_SCENARIO',
+            'post_boundary_guard_ms':hist.POST_BOUNDARY_GUARD_MS,
+            'assumed_execution_delay_ms':args.assumed_execution_delay_ms,
             'note':'4h/1h historical numeric parity requires separate verification. ' +
                    'Replay first_replay_observed_ms is a virtual observation, not LIVE first_seen_ms.'}
     return events,summary,candidates,factor_issues,result
@@ -126,9 +130,13 @@ def execute(args):
               'historical_replay_summary_sha256':hist.source_sha256(args.summary) if args.summary else None,
               'replay_step_minutes':summary.get('step_minutes'),
               'causal_first_observation':'VIRTUAL_HISTORICAL_REPLAY_CLOCK',
+              'timing_policy':'HISTORICAL_POST_CANDLE_BOUNDARY_1MS_PLUS_SCENARIO',
+              'post_boundary_guard_ms':hist.POST_BOUNDARY_GUARD_MS,
+              'assumed_execution_delay_ms':args.assumed_execution_delay_ms,
               'context':'HISTORICAL_ASOF_DERIVED_NOT_NUMERICALLY_PROVEN_LIVE',
               'quality':{k:v for k,v in quality.items() if k!='strategies'},
               'warnings':['Research only; virtual first observed time, no real latency evidence',
+                          'Candle-boundary guard and hypothetical execution delay are scenario assumptions; no live latency replication',
                           'Factor numeric parity not established',
                           'Portfolio engine estimates fills with native 1m OHLC; no funding/liquidation']}
     dest=export_comparison(comparison,records,out_root/label,provenance=metadata,cohort=cohort)
@@ -156,6 +164,8 @@ def parser():
     p.add_argument('--research-unverified',action='store_true',help='Clearly label unverified structural replay')
     p.add_argument('--allow-partial',action='store_true',help='Clearly label incomplete-universe research')
     p.add_argument('--max-events',type=int,default=0,help='SMOKE TEST ONLY; not full sample')
+    p.add_argument('--assumed-execution-delay-ms',type=int,default=0,
+                   help='Historical-only scenario delay after known causal inputs (ms). Always adds 1ms boundary guard; NOT learned from LIVE.')
     p.add_argument('--initial-equity',type=float,default=200)
     p.add_argument('--margin-fraction',type=float,default=.8)
     p.add_argument('--leverage',type=float,default=3.)
@@ -169,6 +179,7 @@ def parser():
 if __name__=='__main__':
     args=parser().parse_args()
     if args.max_events<0:raise SystemExit('--max-events must be >=0')
+    if args.assumed_execution_delay_ms<0:raise SystemExit('--assumed-execution-delay-ms must be >=0')
     if args.mode=='run' and args.cache_dir is None:raise SystemExit('--cache-dir required for --mode run')
     try:execute(args)
     except (FileNotFoundError,ValueError,FileExistsError) as exc:

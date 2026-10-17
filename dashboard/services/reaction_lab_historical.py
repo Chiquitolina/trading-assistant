@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 MINUTE = 60_000
+# A candle closes at its boundary; no OHLC fill can occur at the SAME exact
+# millisecond that the required candle-close information becomes known.
+POST_BOUNDARY_GUARD_MS = 1
 REQUIRED_FACTOR_FIELDS = (
     'event_key', 'room_1h_pct', 'volume_rank_pct_4h', 'return_rank_pct_4h',
     'room_available_ms', 'ranks_available_ms', 'room_asof_ms', 'ranks_asof_ms',
@@ -125,8 +128,17 @@ def load_factors(path):
     return output
 
 
-def prepare_candidates(events, factors):
-    """Validate temporal provenance BEFORE reading any forward candles."""
+def prepare_candidates(events, factors, *, assumed_execution_delay_ms=0):
+    """Validate causal provenance and apply a historical-only execution clock.
+
+    A 1m close known at HH:MM:00 cannot generate a fill at that exact OPEN;
+    at least one millisecond must elapse. The optional extra delay is a
+    scenario assumption, not a reconstruction of observed live processing.
+    """
+    if (isinstance(assumed_execution_delay_ms, bool)
+            or not isinstance(assumed_execution_delay_ms, int)
+            or assumed_execution_delay_ms < 0):
+        raise ValueError('assumed_execution_delay_ms must be a nonnegative integer')
     candidates=[]; problems=[]
     for key,e in sorted(events.items(), key=lambda pair:(int(pair[1]['retest_ts']),pair[0])):
         f=factors.get(key)
@@ -153,15 +165,19 @@ def prepare_candidates(events, factors):
         if not (0 < rs <= ra and 0 < vs <= va):
             problems.append({'event_key':key,'reason':'INVALID_FACTOR_ASOF_OR_AVAILABILITY'})
             continue
-        ready=max(observed,ra,va)
+        theoretical_ready=max(known,observed,ra,va)
         # A stale factor from a far-away future boundary must not be substituted.
-        if ready > known + 5*60*MINUTE:
+        if theoretical_ready > known + 5*60*MINUTE:
             problems.append({'event_key':key,'reason':'CONTEXT_TOO_LATE_FOR_REACTION'})
             continue
+        ready=theoretical_ready + POST_BOUNDARY_GUARD_MS + assumed_execution_delay_ms
         candidates.append({'key':key,'symbol':e['symbol'],'side':e['side'],
                            'retest_ts':as_int(e['retest_ts']),
                            'first_seen_ms':observed, # intentionally virtual, NOT live
                            'ready_ms':ready,
+                           'theoretical_ready_ms':theoretical_ready,
+                           'post_boundary_guard_ms':POST_BOUNDARY_GUARD_MS,
+                           'assumed_execution_delay_ms':assumed_execution_delay_ms,
                            'values':(as_float(json.loads(e['causal_json'])['max_departure_pct']),room,vol,ret),
                            'context_status':'HISTORICAL_ASOF_DERIVED',
                            'regime_status':'HISTORICAL_ASOF_DERIVED',
