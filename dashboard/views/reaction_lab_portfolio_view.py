@@ -381,6 +381,79 @@ def _integrity(project, run_id, summary, manifest, tables):
                       f'runner_portfolio_raw_{table}_v2')
 
 
+def _experimental_guard_dashboard(summary, manifest, tables):
+    """Inspect only persisted outcomes of the separately simulated guard variant."""
+    name = 'Runner Challenger 220 · Extreme Strength Guard'
+    parent = 'Runner Challenger 220'
+    if name not in summary:
+        st.info('Este run no incluye Extreme Strength Guard. Generá un nuevo run con '
+                '`--extreme-strength-guard-experiment`. Los runs anteriores no se modifican.')
+        return
+    st.markdown('#### 🧪 Challenger #220 · Extreme Strength Guard')
+    st.warning('Variante experimental IN-SAMPLE: el umbral 95/90 se formuló al observar '
+               'resultados de septiembre. No es una validación independiente ni una regla LIVE.')
+    guard = (manifest.get('experimental_variants') or {}).get(name, {})
+    st.caption('Solo SHORT: rechazar si Return Rank 4h ≥ 95 Y Volume Rank 4h ≥ 90. '
+               'TP/SL, LIMIT, TTL, costos, capital y slot iguales a Challenger #220. '
+               'Ambas carteras se simulan completas desde cero.')
+    if guard:
+        with st.expander('Definición congelada del experimento', expanded=False):
+            st.json(guard)
+    table = []
+    for strategy in (parent, name):
+        if strategy not in summary:
+            continue
+        m = summary[strategy]
+        table.append({
+            'Estrategia': strategy,
+            'Equity final USDT': m.get('equity_final_realized_usdt'),
+            'Retorno %': m.get('return_realized_pct'),
+            'Max DD MTM %': m.get('max_marked_drawdown_pct'),
+            'Trades': m.get('resolved_trades'),
+            'Profit Factor': m.get('profit_factor'),
+            'Órdenes': m.get('orders_placed'),
+            'Slot ocupado': m.get('skipped_slot_busy'),
+            'Guard rechazadas': m.get('experimental_guard_rejected', 0),
+        })
+    st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+    dec = tables.get('decisions', [])
+    blocked = [r for r in dec if r.get('strategy') == name
+               and r.get('decision') == 'FILTER_REJECTED_EXTREME_STRENGTH']
+    st.metric('SHORTs vetados por fuerza extrema (antes del slot)', len(blocked))
+    if blocked:
+        blocked_df = _annotate_timestamps(_df(blocked), ['ready_ms'])
+        cols = ['ready_ms_ARG', 'symbol', 'side', 'return_rank', 'volume_rank',
+                'room_1h', 'departure', 'guard_id', 'event_key']
+        st.dataframe(blocked_df[[c for c in cols if c in blocked_df]],
+                     use_container_width=True, hide_index=True)
+        _download(blocked_df, '⬇ Vetos experimentales CSV',
+                  'runner_extreme_strength_guard_vetos.csv',
+                  'runner_extreme_strength_guard_rejects_dl')
+    all_trades = tables.get('trades', [])
+    parent_by_key = {r['event_key']: r for r in all_trades
+                     if r.get('strategy') == parent}
+    variant_by_key = {r['event_key']: r for r in all_trades
+                      if r.get('strategy') == name}
+    # This is not a trade-to-trade PnL subtraction: slots, wallet and notional
+    # are recalculated separately and different events may get executed.
+    new_keys = sorted(variant_by_key.keys() - parent_by_key.keys())
+    old_keys = sorted(parent_by_key.keys() - variant_by_key.keys())
+    c1, c2 = st.columns(2)
+    c1.metric('Trades nuevos por reasignación de slot', len(new_keys))
+    c2.metric('Trades ausentes vs. Challenger', len(old_keys))
+    changed = ([{'tipo': 'NUEVO_EN_GUARD', **variant_by_key[k]} for k in new_keys]
+               + [{'tipo': 'SOLO_EN_CHALLENGER', **parent_by_key[k]} for k in old_keys])
+    if changed:
+        st.dataframe(_annotate_timestamps(_df(changed), ['fill_ts', 'exit_ts']),
+                     use_container_width=True, hide_index=True)
+        _download(_df(changed), '⬇ Diferencias de operaciones CSV',
+                  'runner_extreme_strength_guard_trade_deltas.csv',
+                  'runner_extreme_strength_guard_trade_deltas_dl')
+    st.caption('Las diferencias de PnL requieren comparar las carteras simuladas completas, '
+               'no sumar las pérdidas históricas evitadas. El gráfico Equity & Drawdown '
+               'incluye ambas curvas independientes.')
+
+
 def render_runner_portfolio_dashboard(project):
     """Entry point called only when the Portfolio Lab research tab is selected."""
     project=str(project)
@@ -407,8 +480,12 @@ def render_runner_portfolio_dashboard(project):
                f"Creado UTC: {manifest.get('created_at_utc')} · "
                f"Fuente: {manifest.get('cohort')}")
     _metrics(summary)
-    tabs=st.tabs(['📉 Equity & Drawdown','📋 Trades','🔎 Trade Inspector',
-                  '🚦 Skipped Signals','🛡️ Data Integrity'])
+    has_guard = 'Runner Challenger 220 · Extreme Strength Guard' in summary
+    tab_names = ['📉 Equity & Drawdown','📋 Trades','🔎 Trade Inspector',
+                 '🚦 Skipped Signals','🛡️ Data Integrity']
+    if has_guard:
+        tab_names.append('🧪 Extreme Strength Guard')
+    tabs=st.tabs(tab_names)
     with tabs[0]:
         _equity_charts(tables['equity'],summary)
     with tabs[1]:
@@ -421,5 +498,8 @@ def render_runner_portfolio_dashboard(project):
                  tables['path_traces'],summary)
     with tabs[4]:
         _integrity(project,selected,summary,manifest,tables)
+    if has_guard:
+        with tabs[5]:
+            _experimental_guard_dashboard(summary, manifest, tables)
     st.warning('Investigación retrospectiva. Datos de régimen 4h pueden ser RECOMPUTED_ASOF_CLOSED_4H_REDIS; '
                'equity estimada OHLC 1m, sin funding ni liquidaciones. No constituye validación forward independiente.')

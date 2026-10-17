@@ -115,7 +115,10 @@ def execute(args):
     settings=PortfolioSettings(args.initial_equity,args.margin_fraction,args.leverage).validate()
     costs={'maker_fee_pct':args.maker_fee_pct, 'taker_fee_pct':args.taker_fee_pct,
            'taker_slippage_bps':args.taker_slippage_bps}
-    comparison=run_comparison(records,settings=settings,costs=costs)
+    comparison=run_comparison(
+        records, settings=settings, costs=costs,
+        include_extreme_strength_guard=args.extreme_strength_guard_experiment)
+    quality['experimental_extreme_strength_guard_enabled']=bool(args.extreme_strength_guard_experiment)
     quality['source_digest_sha256']=source_digest(records)
     quality['cohort']=cohort
     quality['strategies']={k:v['summary'] for k,v in comparison.items()}
@@ -134,6 +137,7 @@ def execute(args):
               'post_boundary_guard_ms':hist.POST_BOUNDARY_GUARD_MS,
               'assumed_execution_delay_ms':args.assumed_execution_delay_ms,
               'context':'HISTORICAL_ASOF_DERIVED_NOT_NUMERICALLY_PROVEN_LIVE',
+              'experimental_extreme_strength_guard_enabled':bool(args.extreme_strength_guard_experiment),
               'quality':{k:v for k,v in quality.items() if k!='strategies'},
               'warnings':['Research only; virtual first observed time, no real latency evidence',
                           'Candle-boundary guard and hypothetical execution delay are scenario assumptions; no live latency replication',
@@ -172,6 +176,8 @@ def parser():
     p.add_argument('--maker-fee-pct',type=float,default=DEFAULT_COSTS['maker_fee_pct'])
     p.add_argument('--taker-fee-pct',type=float,default=DEFAULT_COSTS['taker_fee_pct'])
     p.add_argument('--taker-slippage-bps',type=float,default=DEFAULT_COSTS['taker_slippage_bps'])
+    p.add_argument('--extreme-strength-guard-experiment',action='store_true',
+                   help='OPT-IN third isolated #220 portfolio. Block SHORT only when return_rank_4h>=95 AND volume_rank_4h>=90. In-sample exploratory, never LIVE.')
     p.add_argument('--dry-run',action='store_true')
     return p
 

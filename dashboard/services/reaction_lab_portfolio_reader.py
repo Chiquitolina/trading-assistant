@@ -14,7 +14,8 @@ from pathlib import Path
 RUN_ROOT = Path('reports/reaction_lab/runner_portfolio_v1')
 TABLES = frozenset(('decisions', 'events', 'trades', 'equity', 'path_traces'))
 LABELS = {'Runner V1 Frozen': 'Runner V1 Frozen',
-          'Runner Challenger 220': 'Runner Challenger 220'}
+          'Runner Challenger 220': 'Runner Challenger 220',
+          'Runner Challenger 220 · Extreme Strength Guard': 'Runner Challenger 220 · Extreme Strength Guard'}
 
 
 def portfolio_root(project):

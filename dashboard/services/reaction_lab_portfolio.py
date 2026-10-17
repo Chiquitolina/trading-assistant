@@ -34,6 +34,31 @@ PROFILES = {
     },
 }
 
+# An opt-in third research portfolio. The profile is identical to frozen #220;
+# ONLY the causal admission rule differs. Original PROFILES remain untouched.
+EXPERIMENTAL_NAME = "Runner Challenger 220 · Extreme Strength Guard"
+EXPERIMENTAL_GUARD_ID = "SHORT_RETURN_4H_GTE_95_AND_VOLUME_4H_GTE_90_V1"
+EXPERIMENTAL_RETURN_RANK_MIN = 95.0
+EXPERIMENTAL_VOLUME_RANK_MIN = 90.0
+EXPERIMENTAL_REJECT_DECISION = "FILTER_REJECTED_EXTREME_STRENGTH"
+
+
+def extreme_strength_short_guard(record):
+    """Reject only SHORTs with BOTH causal 4h ranks in the extreme band."""
+    if record["side"] != "SHORT":
+        return False
+    # Factors were validated upstream. Fail closed on missing/invalid values,
+    # rather than silently accepting an otherwise eligible SHORT.
+    try:
+        ret = float(record["values"][3])
+        vol = float(record["values"][2])
+    except (TypeError, ValueError, IndexError, KeyError) as exc:
+        raise ValueError("Experimental guard requires complete causal ranks") from exc
+    if not math.isfinite(ret) or not math.isfinite(vol):
+        raise ValueError("Experimental guard received non-finite causal ranks")
+    return ret >= EXPERIMENTAL_RETURN_RANK_MIN and vol >= EXPERIMENTAL_VOLUME_RANK_MIN
+
+
 TERMINAL = {"TP", "SL", "AMBIGUOUS_BOTH_AS_SL", "TIMEOUT"}
 UNRESOLVED = {"AMBIGUOUS_FILL_BAR", "CENSORED_AFTER_FILL", "UNOBSERVABLE_WINDOW"}
 
@@ -141,7 +166,7 @@ def _compute_mark_curve(accepted_trades, initial_equity, strategy, start_ms=None
     return points, worst
 
 
-def simulate_strategy(records, name, params, settings=None, costs=None):
+def simulate_strategy(records, name, params, settings=None, costs=None, *, experimental_guard=False):
     """Run one deterministic one-slot portfolio, preserving every decision.
 
     Order priorities: ready_ms ascending; if equal, larger *known* Room 1h
@@ -180,6 +205,15 @@ def simulate_strategy(records, name, params, settings=None, costs=None):
         if not v2._eligible(r, params):
             decisions.append({**row, "decision": "FILTER_REJECTED", "reason": "thresholds"})
             counts["FILTER_REJECTED"] += 1
+            continue
+        # Experimental veto comes AFTER frozen #220 eligibility and BEFORE
+        # slot reservation. Rejecting an event may free the slot for later ones.
+        # Never apply this branch to the original frozen portfolios.
+        if experimental_guard and extreme_strength_short_guard(r):
+            decisions.append({**row, "decision": EXPERIMENTAL_REJECT_DECISION,
+                              "reason": EXPERIMENTAL_GUARD_ID,
+                              "guard_id": EXPERIMENTAL_GUARD_ID})
+            counts[EXPERIMENTAL_REJECT_DECISION] += 1
             continue
         if ready < busy_until:
             decisions.append({**row, "decision": "SKIPPED_SLOT_BUSY",
@@ -362,6 +396,14 @@ def simulate_strategy(records, name, params, settings=None, costs=None):
                                 (underdetermined or insolvency_risk) else
                                 "COMPLETE_1M_ESTIMATED"),
                "caveat": "Historical simulated equity, NOT exchange-executed; 1m OHLC fill assumption; no funding or exchange liquidation."}
+    if experimental_guard:
+        summary.update({
+            "experimental_guard_id": EXPERIMENTAL_GUARD_ID,
+            "experimental_guard_rejected": counts[EXPERIMENTAL_REJECT_DECISION],
+            "pre_guard_eligible": summary["filter_eligible"],
+            "filter_eligible": summary["filter_eligible"] - counts[EXPERIMENTAL_REJECT_DECISION],
+            "experimental_status": "IN_SAMPLE_POST_HOC_NOT_VALIDATED",
+        })
     # Remove volatile candle arrays from exported trades; retain them only while
     # building 1m equity curves. The original read-only Auto Paths own the bars.
     public_trades = [{k: v for k, v in t.items() if k != "bars"} for t in trades]
@@ -370,11 +412,22 @@ def simulate_strategy(records, name, params, settings=None, costs=None):
             "settings": asdict(settings), "parameters": dict(params), "costs": costs}
 
 
-def run_comparison(records, *, settings=None, costs=None, profiles=None):
+def run_comparison(records, *, settings=None, costs=None, profiles=None,
+                   include_extreme_strength_guard=False):
+    """Default remains exactly two frozen portfolios; third requires explicit opt-in."""
     settings = (settings or PortfolioSettings()).validate()
     profiles = validate_profiles(profiles or PROFILES)
-    return {name: simulate_strategy(records, name, params, settings, costs)
-            for name, params in profiles.items()}
+    if not isinstance(include_extreme_strength_guard, bool):
+        raise ValueError("Experimental guard flag must be boolean")
+    if include_extreme_strength_guard and EXPERIMENTAL_NAME in profiles:
+        raise ValueError("Experimental strategy name collides with supplied profiles")
+    comparison = {name: simulate_strategy(records, name, params, settings, costs)
+                  for name, params in profiles.items()}
+    if include_extreme_strength_guard:
+        comparison[EXPERIMENTAL_NAME] = simulate_strategy(
+            records, EXPERIMENTAL_NAME, dict(PROFILES["Runner Challenger 220"]),
+            settings, costs, experimental_guard=True)
+    return comparison
 
 
 def _flat_csv(path, records):
@@ -406,6 +459,20 @@ def export_comparison(comparison, records, destination, *, provenance=None,
                 "cost_assumptions": next(iter(comparison.values()))["costs"],
                 "provenance": provenance,
                 "immutability_note": "Run folder create-only; source SQLite untouched"}
+    if EXPERIMENTAL_NAME in comparison:
+        manifest["experimental_variants"] = {
+            EXPERIMENTAL_NAME: {
+                "status": "IN_SAMPLE_POST_HOC_NOT_VALIDATED",
+                "parent": "Runner Challenger 220",
+                "guard_id": EXPERIMENTAL_GUARD_ID,
+                "side": "SHORT",
+                "return_rank_4h_gte": EXPERIMENTAL_RETURN_RANK_MIN,
+                "volume_rank_4h_gte": EXPERIMENTAL_VOLUME_RANK_MIN,
+                "causal_factors_required": True,
+                "same_portfolio_engine_and_parameters_as_parent": True,
+                "slot_reallocated_by_full_chronological_resimulation": True,
+            }
+        }
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (dest / "summary.json").write_text(json.dumps({k: v["summary"] for k, v in comparison.items()},
                                                   indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

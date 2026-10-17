@@ -20,6 +20,8 @@ def main(argv=None):
     p.add_argument("--taker-fee-pct", type=float, default=DEFAULT_COSTS["taker_fee_pct"])
     p.add_argument("--taker-slippage-bps", type=float, default=DEFAULT_COSTS["taker_slippage_bps"])
     p.add_argument("--cutoff-ms", type=int, default=LIVE_START_MS)
+    p.add_argument("--extreme-strength-guard-experiment", action="store_true",
+                   help="OPT-IN third exploratory #220 portfolio with extreme-strength SHORT veto")
     p.add_argument("--dry-run", action="store_true", help="Display results, do not write reports")
     args = p.parse_args(argv)
     project = Path(args.project).resolve()
@@ -30,7 +32,8 @@ def main(argv=None):
     records, quality = load_live(project, cutoff_ms=args.cutoff_ms)
     if not records:
         raise SystemExit("No hay eventos LIVE maduros con contexto y paths completos. No se escribe un ledger vacío.")
-    outcome = run_comparison(records, settings=settings, costs=costs)
+    outcome = run_comparison(records, settings=settings, costs=costs,
+                             include_extreme_strength_guard=args.extreme_strength_guard_experiment)
     result = {"quality": quality, "source_digest_sha256": source_digest(records),
               "strategies": {k: v["summary"] for k, v in outcome.items()}}
     print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -39,7 +42,9 @@ def main(argv=None):
         name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "_" + result["source_digest_sha256"][:10]
         dest = export_comparison(outcome, records, root / name,
                                  provenance={"project": str(project), "data_quality": quality,
-                                             "cutoff_ms": args.cutoff_ms})
+                                             "cutoff_ms": args.cutoff_ms,
+                                             "experimental_extreme_strength_guard_enabled":
+                                                 bool(args.extreme_strength_guard_experiment)})
         print("\nSaved NEW research run:", dest)
     return result
 
