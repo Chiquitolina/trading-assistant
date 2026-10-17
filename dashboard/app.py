@@ -85449,6 +85449,7 @@ if selected_section == "reaction_swing_lab":
                 "🧬 Volume → future swings",
                 "⚙️ Runner Optimization",
                 "📈 Runner Portfolio",
+                "🎯 Candidate Competition",
             ],
             horizontal=True,
             key="reaction_swing_lab_mode",
@@ -85469,10 +85470,15 @@ if selected_section == "reaction_swing_lab":
                 render_runner_portfolio_dashboard,
             )
             render_runner_portfolio_dashboard(BASE_DIR)
+        elif lab_mode == "🎯 Candidate Competition":
+            from dashboard.views.reaction_lab_competition_entry import (
+                render_competition_dashboard,
+            )
+            render_competition_dashboard(BASE_DIR)
 
         # Continuous always reads the same persisted Event IDs in EVERY view.
         # Legacy engines are intentionally unchanged and never run in Continuous.
-        if lab_mode not in ("⚙️ Runner Optimization", "📈 Runner Portfolio") and cohort_mode in ("Continuous V1", "Todos"):
+        if lab_mode not in ("⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition") and cohort_mode in ("Continuous V1", "Todos"):
             from reaction_lab_research_view import render_cohort_research
             render_cohort_research(
                 BASE_DIR, "Continuous V1", lab_mode, structural_symbols,
@@ -85483,7 +85489,7 @@ if selected_section == "reaction_swing_lab":
                 st.divider()
                 st.markdown("### 🗄️ Legacy — herramientas existentes")
 
-        if cohort_mode == "Continuous V1" or lab_mode in ("⚙️ Runner Optimization", "📈 Runner Portfolio"):
+        if cohort_mode == "Continuous V1" or lab_mode in ("⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition"):
             pass  # No hidden legacy rebuild; portfolio and optimizer are isolated read-only views.
         elif lab_mode == "📡 REACTION journal":
             st.caption(
