@@ -191,6 +191,25 @@ MICRO_FLOW_FIRST_TOUCH_FILE = (
     BASE_DIR / "micro_flow_first_touch.csv"
 )
 MICRO_FLOW_FIRST_TOUCH_THRESHOLDS_PCT = (0.10, 0.15, 0.20, 0.30)
+# Micro Flow V2 is a parallel research process. It consumes the same sharded
+# 1-second stream but does not modify V1 or open any Binance connections.
+MICRO_FLOW_V2_EPISODES_FILE = (
+    BASE_DIR / "micro_flow_v2_episodes.csv"
+)
+MICRO_FLOW_V2_TRANSITIONS_FILE = (
+    BASE_DIR / "micro_flow_v2_transitions.csv"
+)
+MICRO_FLOW_V2_CANDIDATE_SNAPSHOTS_FILE = (
+    BASE_DIR / "micro_flow_v2_candidate_snapshots.csv"
+)
+MICRO_FLOW_V2_CANDIDATES_FILE = (
+    BASE_DIR / "micro_flow_v2_candidates.csv"
+)
+MICRO_FLOW_V2_FIRST_TOUCH_FILE = (
+    BASE_DIR / "micro_flow_v2_first_touch.csv"
+)
+MICRO_FLOW_V2_STATUS_KEY = f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:v2:status"
+MICRO_FLOW_V2_HEARTBEAT_KEY = f"{_MICRO_FLOW_KEY_PREFIX}:micro-flow:v2:heartbeat"
 MICRO_FLOW_AGGTRADES_URL = (
     "https://fapi.binance.com/fapi/v1/aggTrades"
 )
@@ -78238,6 +78257,163 @@ def load_micro_flow_collector_status():
             "error": f"{type(exc).__name__}: {exc}",
         }
 
+def _load_micro_flow_v2_csv(path):
+    modified_ns = get_file_modified_ns(path)
+    if modified_ns is None:
+        return pd.DataFrame()
+    return load_csv_cached(path, modified_ns).copy()
+
+
+def load_micro_flow_v2_episodes():
+    return _load_micro_flow_v2_csv(MICRO_FLOW_V2_EPISODES_FILE)
+
+
+def load_micro_flow_v2_transitions():
+    return _load_micro_flow_v2_csv(MICRO_FLOW_V2_TRANSITIONS_FILE)
+
+
+def load_micro_flow_v2_candidate_snapshots():
+    return _load_micro_flow_v2_csv(MICRO_FLOW_V2_CANDIDATE_SNAPSHOTS_FILE)
+
+
+def load_micro_flow_v2_candidates():
+    return _load_micro_flow_v2_csv(MICRO_FLOW_V2_CANDIDATES_FILE)
+
+
+def load_micro_flow_v2_first_touch():
+    return _load_micro_flow_v2_csv(MICRO_FLOW_V2_FIRST_TOUCH_FILE)
+
+
+@st.cache_data(ttl=2, show_spinner=False)
+def load_micro_flow_v2_status():
+    try:
+        client = redis.Redis(
+            host=DASHBOARD_REDIS_HOST,
+            port=DASHBOARD_REDIS_PORT,
+            db=DASHBOARD_REDIS_DB,
+            decode_responses=True,
+        )
+        heartbeat = bool(client.exists(MICRO_FLOW_V2_HEARTBEAT_KEY))
+        raw_status = client.get(MICRO_FLOW_V2_STATUS_KEY)
+        status = json.loads(raw_status) if raw_status else {}
+        if not isinstance(status, dict):
+            status = {}
+        status["heartbeat_alive"] = heartbeat
+        status["error"] = None
+        return status
+    except Exception as exc:
+        return {
+            "heartbeat_alive": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+_MICRO_FLOW_V2_DRIVER_SPECS = {
+    "Burst age at confirmation": {
+        "column": "burst_age_seconds",
+        "bins": [-np.inf, 3, 5, 10, 20, 40, np.inf],
+        "labels": ["<3s", "3–5s", "5–10s", "10–20s", "20–40s", "≥40s"],
+    },
+    "Peak burst move %": {
+        "column": "burst_peak_move_pct",
+        "bins": [-np.inf, 0.05, 0.10, 0.20, 0.40, 0.80, np.inf],
+        "labels": ["<0.05", "0.05–0.10", "0.10–0.20", "0.20–0.40", "0.40–0.80", "≥0.80"],
+    },
+    "Peak directional flow 5s": {
+        "column": "peak_directional_flow_5s",
+        "bins": [-np.inf, 0.55, 0.70, 0.80, 0.90, np.inf],
+        "labels": ["<0.55", "0.55–0.70", "0.70–0.80", "0.80–0.90", "≥0.90"],
+    },
+    "Flow retention vs peak": {
+        "column": "flow_retention_ratio",
+        "bins": [-np.inf, 0.25, 0.50, 0.70, 0.90, 1.10, np.inf],
+        "labels": ["<0.25", "0.25–0.50", "0.50–0.70", "0.70–0.90", "0.90–1.10", ">1.10"],
+    },
+    "Efficiency retention vs peak": {
+        "column": "efficiency_retention_ratio",
+        "bins": [-np.inf, 0.25, 0.50, 0.65, 0.80, 1.00, np.inf],
+        "labels": ["<0.25", "0.25–0.50", "0.50–0.65", "0.65–0.80", "0.80–1.00", ">1.00"],
+    },
+    "Aggression without progress x baseline": {
+        "column": "post_peak_aggression_x_baseline",
+        "bins": [-np.inf, 0.25, 0.50, 1.00, 2.00, 4.00, np.inf],
+        "labels": ["<0.25x", "0.25–0.50x", "0.50–1x", "1–2x", "2–4x", "≥4x"],
+    },
+    "Retrace from peak %": {
+        "column": "retrace_from_peak_pct",
+        "bins": [-np.inf, 0.02, 0.03, 0.05, 0.10, 0.20, np.inf],
+        "labels": ["<0.02", "0.02–0.03", "0.03–0.05", "0.05–0.10", "0.10–0.20", "≥0.20"],
+    },
+    "Seconds since price extreme": {
+        "column": "seconds_since_price_extreme",
+        "bins": [-np.inf, 1, 2, 3, 5, 10, np.inf],
+        "labels": ["<1s", "1–2s", "2–3s", "3–5s", "5–10s", "≥10s"],
+    },
+    "Arm score": {
+        "column": "arm_score",
+        "bins": [-np.inf, 1.5, 2.5, 3.5, np.inf],
+        "labels": ["≤1", "2", "3", "4"],
+    },
+    "Confirm score": {
+        "column": "confirm_score",
+        "bins": [-np.inf, 1.5, 2.5, 3.5, np.inf],
+        "labels": ["≤1", "2", "3", "4"],
+    },
+}
+
+
+def build_micro_flow_v2_driver_table(
+    events,
+    horizon,
+    driver_name,
+    fee_per_side_pct=0.05,
+    min_n=20,
+):
+    frame = _micro_flow_complete_events(events, horizon)
+    spec = _MICRO_FLOW_V2_DRIVER_SPECS.get(driver_name)
+    if frame.empty or spec is None or spec["column"] not in frame.columns:
+        return pd.DataFrame()
+    values = pd.to_numeric(frame[spec["column"]], errors="coerce")
+    frame = frame.assign(
+        _driver_bucket=pd.cut(
+            values,
+            bins=spec["bins"],
+            labels=spec["labels"],
+            include_lowest=True,
+            right=False,
+        )
+    )
+    roundtrip_cost = 2.0 * float(fee_per_side_pct)
+    rows = []
+    for bucket, group in frame.groupby("_driver_bucket", observed=True):
+        gross = pd.to_numeric(
+            group.get(f"return_{int(horizon)}m_pct"),
+            errors="coerce",
+        ).dropna()
+        if len(gross) < int(min_n):
+            continue
+        net = gross - roundtrip_cost
+        mfe = pd.to_numeric(
+            group.get(f"mfe_{int(horizon)}m_pct"),
+            errors="coerce",
+        )
+        mae = pd.to_numeric(
+            group.get(f"mae_{int(horizon)}m_pct"),
+            errors="coerce",
+        )
+        rows.append({
+            "Bucket": str(bucket),
+            "N": int(len(gross)),
+            "Gross avg %": float(gross.mean()),
+            "Net avg %": float(net.mean()),
+            "Net median %": float(net.median()),
+            "Net win %": float((net > 0).mean() * 100.0),
+            "PF net": _micro_flow_profit_factor(net),
+            "MFE avg %": float(mfe.mean()) if mfe.notna().any() else np.nan,
+            "MAE avg %": float(mae.mean()) if mae.notna().any() else np.nan,
+        })
+    return pd.DataFrame(rows)
+
 # ==========================================
 # MICRO REACTION RESEARCH HELPERS
 # ==========================================
@@ -81759,9 +81935,10 @@ if selected_section == "micro_flow":
         "WebSocket collector feeding the same schema."
     )
 
-    bootstrap_tab, collector_tab = st.tabs([
+    bootstrap_tab, collector_tab, v2_tab = st.tabs([
         "Bootstrap · recent aggTrades",
-        "Persistent collector dataset",
+        "Persistent collector dataset · V1",
+        "V2 · Flow Episodes",
     ])
 
     with bootstrap_tab:
@@ -82648,6 +82825,302 @@ if selected_section == "micro_flow":
                 key="micro_flow_persisted_download",
             )
 
+
+
+    with v2_tab:
+        st.markdown("### Micro Flow V2 · Episode / Exhaustion Research")
+        st.caption(
+            "V2 is intentionally parallel to V1. It consumes the same sharded "
+            "1-second Redis stream, opens no Binance sockets and places no orders. "
+            "The unit of analysis is one burst episode, not repeated 10-second "
+            "events. The defaults are research thresholds, not a trading rule."
+        )
+
+        v2_status = load_micro_flow_v2_status()
+        v2_status_cols = st.columns(7)
+        heartbeat_alive = bool(v2_status.get("heartbeat_alive"))
+        v2_status_cols[0].metric(
+            "V2 collector",
+            "ONLINE" if heartbeat_alive else "OFFLINE",
+        )
+        v2_status_cols[1].metric(
+            "Symbols warm",
+            f"{int(v2_status.get('symbols_warm') or 0):,}",
+        )
+        v2_status_cols[2].metric(
+            "Active episodes",
+            f"{int(v2_status.get('active_episodes') or 0):,}",
+        )
+        v2_status_cols[3].metric(
+            "Episodes",
+            f"{int(v2_status.get('episodes_completed') or 0):,}",
+        )
+        v2_status_cols[4].metric(
+            "Candidates",
+            f"{int(v2_status.get('candidates_completed') or 0):,}",
+        )
+        v2_status_cols[5].metric(
+            "Pending",
+            f"{int(v2_status.get('pending_candidates') or 0):,}",
+        )
+        v2_status_cols[6].metric(
+            "CSV errors",
+            f"{int(v2_status.get('csv_errors') or 0):,}",
+        )
+
+        if v2_status.get("error"):
+            st.warning(f"V2 status error: {v2_status['error']}")
+
+        open_shards = v2_status.get("transport_open_shards") or []
+        if v2_status.get("transport_global_gap_open") or open_shards:
+            st.warning(
+                "V2 transport protection is active. "
+                f"Open shards: {open_shards or 'GLOBAL'}. "
+                "Affected episode/candidate state is invalidated instead of "
+                "bridging a websocket gap."
+            )
+
+        with st.expander("V2 causal state machine / current thresholds", expanded=False):
+            st.code(
+                "IDLE -> BURST_STARTED -> EXPANDING -> MATURE "
+                "-> EXHAUSTION_ARMED -> REVERSAL_CONFIRMED -> ENDED"
+            )
+            thresholds = v2_status.get("thresholds") or {}
+            if thresholds:
+                st.json(thresholds)
+            st.caption(
+                "ARM is a score built from flow decay, efficiency decay, "
+                "aggression without price progress and peak retrace. CONFIRM "
+                "requires later causal evidence such as a 1s flow flip, flow "
+                "delta reversal, 1s price reversal or deeper peak retrace. "
+                "MATURE→ARMED→CONFIRMED cannot all occur on the same second."
+            )
+
+        episodes_v2 = load_micro_flow_v2_episodes()
+        candidates_v2 = load_micro_flow_v2_candidates()
+        transitions_v2 = load_micro_flow_v2_transitions()
+        candidate_snapshots_v2 = load_micro_flow_v2_candidate_snapshots()
+
+        if episodes_v2.empty and candidates_v2.empty:
+            st.info(
+                "No V2 dataset yet. Start the `micro-flow-v2` PM2 process and "
+                "let it observe the shared second stream. V1 can continue running."
+            )
+        else:
+            st.markdown("#### Episode dataset")
+            if not episodes_v2.empty:
+                valid_mask = (
+                    episodes_v2.get("valid", pd.Series(index=episodes_v2.index, dtype=object))
+                    .astype(str).str.lower().isin({"true", "1", "yes"})
+                )
+                valid_episodes = episodes_v2[valid_mask].copy()
+                ecols = st.columns(6)
+                ecols[0].metric("Rows", f"{len(episodes_v2):,}")
+                ecols[1].metric("Valid", f"{len(valid_episodes):,}")
+                confirmed = pd.to_numeric(
+                    valid_episodes.get("confirmed_timestamp"),
+                    errors="coerce",
+                ).notna() if not valid_episodes.empty else pd.Series(dtype=bool)
+                ecols[2].metric(
+                    "Confirmed reversal %",
+                    f"{(confirmed.mean() * 100.0):.1f}%" if len(confirmed) else "—",
+                )
+                duration = pd.to_numeric(valid_episodes.get("duration_seconds"), errors="coerce")
+                ecols[3].metric(
+                    "Duration med",
+                    f"{duration.median():.1f}s" if duration.notna().any() else "—",
+                )
+                peak_move = pd.to_numeric(valid_episodes.get("peak_move_pct"), errors="coerce")
+                ecols[4].metric(
+                    "Peak move med",
+                    f"{peak_move.median():.3f}%" if peak_move.notna().any() else "—",
+                )
+                max_arm = pd.to_numeric(valid_episodes.get("max_arm_score"), errors="coerce")
+                ecols[5].metric(
+                    "Max arm score med",
+                    f"{max_arm.median():.1f}" if max_arm.notna().any() else "—",
+                )
+                st.dataframe(
+                    episodes_v2.tail(500),
+                    use_container_width=True,
+                    hide_index=True,
+                    key="micro_flow_v2_episodes_table",
+                )
+                st.download_button(
+                    "⬇️ Download V2 episodes",
+                    data=episodes_v2.to_csv(index=False).encode("utf-8"),
+                    file_name="micro_flow_v2_episodes.csv",
+                    mime="text/csv",
+                    key="micro_flow_v2_episodes_download",
+                )
+
+            st.markdown("#### Reversal candidates")
+            if candidates_v2.empty:
+                st.info(
+                    "Episodes are being collected, but no V2 reversal candidate "
+                    "has completed its 5-minute causal outcome yet."
+                )
+                if not candidate_snapshots_v2.empty:
+                    st.caption(
+                        f"Created candidate snapshots: {len(candidate_snapshots_v2):,}"
+                    )
+            else:
+                controls = st.columns(4)
+                event_options_v2 = ["ALL"] + sorted(
+                    candidates_v2.get("event_type", pd.Series(dtype=str))
+                    .dropna().astype(str).unique().tolist()
+                )
+                symbol_options_v2 = ["ALL"] + sorted(
+                    candidates_v2.get("symbol", pd.Series(dtype=str))
+                    .dropna().astype(str).unique().tolist()
+                )
+                with controls[0]:
+                    event_filter_v2 = st.selectbox(
+                        "V2 event", event_options_v2, key="micro_flow_v2_event_filter"
+                    )
+                with controls[1]:
+                    horizon_v2 = st.selectbox(
+                        "V2 horizon", [1, 3, 5], index=1,
+                        format_func=lambda value: f"{value}m",
+                        key="micro_flow_v2_horizon",
+                    )
+                with controls[2]:
+                    symbol_filter_v2 = st.selectbox(
+                        "V2 symbol", symbol_options_v2, key="micro_flow_v2_symbol_filter"
+                    )
+                with controls[3]:
+                    fee_v2 = st.number_input(
+                        "V2 fee / side %", min_value=0.0, max_value=0.5,
+                        value=0.05, step=0.01, format="%.3f",
+                        key="micro_flow_v2_fee",
+                    )
+
+                filtered_v2 = candidates_v2.copy()
+                if event_filter_v2 != "ALL":
+                    filtered_v2 = filtered_v2[
+                        filtered_v2["event_type"].astype(str) == event_filter_v2
+                    ]
+                if symbol_filter_v2 != "ALL":
+                    filtered_v2 = filtered_v2[
+                        filtered_v2["symbol"].astype(str) == symbol_filter_v2
+                    ]
+
+                metrics_v2 = build_micro_flow_horizon_metrics(
+                    filtered_v2,
+                    int(horizon_v2),
+                    fee_per_side_pct=float(fee_v2),
+                )
+                if metrics_v2:
+                    mcols = st.columns(6)
+                    mcols[0].metric("N", f"{int(metrics_v2['n']):,}")
+                    mcols[1].metric("Gross avg", f"{metrics_v2['gross_avg']:+.3f}%")
+                    mcols[2].metric("Net avg", f"{metrics_v2['net_avg']:+.3f}%")
+                    mcols[3].metric("Net median", f"{metrics_v2['net_median']:+.3f}%")
+                    mcols[4].metric("Net win", f"{metrics_v2['net_win_rate']:.1f}%")
+                    pf = metrics_v2.get("pf_net")
+                    mcols[5].metric(
+                        "PF net",
+                        "∞" if pf is not None and np.isinf(pf)
+                        else f"{pf:.2f}" if pf is not None and pd.notna(pf)
+                        else "—",
+                    )
+
+                    mcols2 = st.columns(2)
+                    mcols2[0].metric(
+                        "MFE avg / med",
+                        f"{metrics_v2['mfe_avg']:.3f}% / {metrics_v2['mfe_median']:.3f}%",
+                    )
+                    mcols2[1].metric(
+                        "MAE avg / med",
+                        f"{metrics_v2['mae_avg']:.3f}% / {metrics_v2['mae_median']:.3f}%",
+                    )
+
+                st.markdown("##### V2 Driver Analyzer")
+                dcols = st.columns([1.6, 1.0])
+                with dcols[0]:
+                    driver_v2 = st.selectbox(
+                        "V2 driver",
+                        list(_MICRO_FLOW_V2_DRIVER_SPECS),
+                        key="micro_flow_v2_driver",
+                    )
+                with dcols[1]:
+                    min_n_v2 = st.number_input(
+                        "V2 min N / bucket",
+                        min_value=2, max_value=1000, value=30, step=1,
+                        key="micro_flow_v2_driver_min_n",
+                    )
+                driver_table_v2 = build_micro_flow_v2_driver_table(
+                    filtered_v2,
+                    int(horizon_v2),
+                    driver_v2,
+                    fee_per_side_pct=float(fee_v2),
+                    min_n=int(min_n_v2),
+                )
+                if driver_table_v2.empty:
+                    st.info("Not enough completed V2 candidates for these buckets yet.")
+                else:
+                    st.dataframe(
+                        driver_table_v2,
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_flow_v2_driver_table",
+                    )
+
+                st.markdown("##### V2 chronological TP / SL first-touch")
+                first_touch_v2 = load_micro_flow_v2_first_touch()
+                matrix_v2, first_touch_n_v2 = build_micro_flow_first_touch_matrix(
+                    filtered_v2,
+                    first_touch_v2,
+                    int(horizon_v2),
+                    fee_per_side_pct=float(fee_v2),
+                )
+                if matrix_v2.empty:
+                    st.info("No completed V2 first-touch sample yet.")
+                else:
+                    st.caption(
+                        f"Exact V2 first-touch sample: {first_touch_n_v2:,}. "
+                        "Same-second TP+SL is conservatively counted as SL."
+                    )
+                    st.dataframe(
+                        matrix_v2.sort_values(
+                            ["PF net", "Net avg %"],
+                            ascending=[False, False],
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        key="micro_flow_v2_first_touch_matrix",
+                    )
+
+                st.markdown("##### Completed V2 candidate rows")
+                st.dataframe(
+                    filtered_v2.tail(1000),
+                    use_container_width=True,
+                    hide_index=True,
+                    key="micro_flow_v2_candidates_table",
+                )
+                st.download_button(
+                    "⬇️ Download V2 candidates",
+                    data=filtered_v2.to_csv(index=False).encode("utf-8"),
+                    file_name="micro_flow_v2_candidates.csv",
+                    mime="text/csv",
+                    key="micro_flow_v2_candidates_download",
+                )
+
+        if not transitions_v2.empty:
+            with st.expander("Episode state transitions", expanded=False):
+                st.dataframe(
+                    transitions_v2.tail(1000),
+                    use_container_width=True,
+                    hide_index=True,
+                    key="micro_flow_v2_transitions_table",
+                )
+                st.download_button(
+                    "⬇️ Download V2 transitions",
+                    data=transitions_v2.to_csv(index=False).encode("utf-8"),
+                    file_name="micro_flow_v2_transitions.csv",
+                    mime="text/csv",
+                    key="micro_flow_v2_transitions_download",
+                )
 
 
 if selected_section == "micro_reaction":
