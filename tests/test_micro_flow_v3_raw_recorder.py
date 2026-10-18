@@ -85,7 +85,10 @@ class RawRecorderTests(unittest.TestCase):
         self.assertEqual(self.rows("SELECT raw_json FROM tape WHERE kind='TRADE' ORDER BY seq")[0][0], text)
         self.assertEqual([r[0] for r in self.rows("SELECT quality FROM tape WHERE kind='TRADE'")], ['OK', 'OK'])
         self.assertEqual(replay_digest(self.path), replay_digest(self.path))
-        self.assertTrue(factory.calls[0][0].endswith('/ethusdt@aggTrade'))
+        self.assertEqual(
+            factory.calls[0][0],
+            'wss://fstream.binance.com/market/ws/ethusdt@aggTrade'
+        )
         self.assertEqual(factory.calls[0][1]['compression'], None)
 
     def test_error_reconnect_preserves_gap_and_generation(self):
@@ -132,6 +135,28 @@ class RawRecorderTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.run_pilot(FakeConnector([trade(901)]))
         self.assertEqual(replay_digest(self.path), before)
+
+    def test_silent_open_socket_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, 'No aggTrade received'):
+            run_live_raw('ETHUSDT', self.path, max_hours=0.0003,
+                         min_free_gb=0, reconnect_min=0,
+                         reconnect_max=0, first_trade_timeout=0.03,
+                         connect_factory=FakeConnector([]))
+        reasons = [r[0] for r in self.rows(
+            "SELECT reason FROM tape WHERE kind='MARKER' ORDER BY seq"
+        )]
+        self.assertIn('NO_FIRST_AGGTRADE_TIMEOUT_FAIL_CLOSED', reasons)
+        self.assertTrue(any(r.startswith('PROCESS_FAILED:RuntimeError') for r in reasons))
+
+    def test_short_empty_capture_never_claims_success(self):
+        with self.assertRaisesRegex(RuntimeError, 'zero-data tape'):
+            run_live_raw('ETHUSDT', self.path, max_hours=0.000015,
+                         min_free_gb=0, first_trade_timeout=2.0,
+                         connect_factory=FakeConnector([]))
+        reasons = [r[0] for r in self.rows(
+            "SELECT reason FROM tape WHERE kind='MARKER' ORDER BY seq"
+        )]
+        self.assertIn('ZERO_TRADES_CAPTURE_FAIL_CLOSED', reasons)
 
     def test_invalid_data_stops_and_preserves_failure_marker(self):
         with self.assertRaisesRegex(RuntimeError, 'Invalid AggTrade'):

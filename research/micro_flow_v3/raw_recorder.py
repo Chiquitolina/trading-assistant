@@ -23,7 +23,8 @@ from pathlib import Path
 from .tape import TapeStore, replay_digest
 
 SYMBOL_RE = re.compile(r'^[A-Z0-9]{2,30}USDT$')
-BASE_WS_URL = 'wss://fstream.binance.com/ws'
+# Binance migrated USD-M market-data streams to /market in 2026.
+BASE_WS_URL = 'wss://fstream.binance.com/market/ws'
 
 
 def _disk_free(path):
@@ -53,7 +54,7 @@ async def _sleep_until(stop_flag, *, seconds, deadline):
 async def _capture(symbol, writer, *, stop_flag, deadline, min_free_gb,
                    connect_factory=None, reconnect_min=0.5,
                    reconnect_max=3.0, status_interval=15.0,
-                   read_timeout=30.0):
+                   read_timeout=30.0, first_trade_timeout=20.0):
     """Record WebSocket TEXT frames in observed receive order.
 
     `connect_factory` allows fully offline tests. Only the real default imports
@@ -95,11 +96,20 @@ async def _capture(symbol, writer, *, stop_flag, deadline, min_free_gb,
                 compression=None,
             ) as ws:
                 connection_opened = True
+                ws_opened_at = time.monotonic()
+                trade_seen_on_connection = False
                 writer.marker('WS_OPENED', connection=gen)
                 writer.maybe_flush(force=True)
                 print(f'[V3 RAW] WS opened generation={gen} symbol={symbol}', flush=True)
 
                 while not stop_flag.is_set() and time.monotonic() < deadline:
+                    if (not trade_seen_on_connection
+                            and time.monotonic() - ws_opened_at >= first_trade_timeout):
+                        writer.marker('NO_FIRST_AGGTRADE_TIMEOUT_FAIL_CLOSED', connection=gen)
+                        raise RuntimeError(
+                            f'No aggTrade received within {first_trade_timeout:g}s '
+                            'of WebSocket open; check endpoint and subscription'
+                        )
                     if _disk_free(writer.path.parent) < int(min_free_gb * 1024 ** 3):
                         writer.marker('LOW_DISK_FAIL_CLOSED', connection=gen)
                         raise RuntimeError('V3 free disk below configured floor')
@@ -127,6 +137,8 @@ async def _capture(symbol, writer, *, stop_flag, deadline, min_free_gb,
                     previous_id = writer.last_agg_id
                     result = writer.ingest(msg, connection=gen,
                                            wall_ns=wall_ns, mono_ns=mono_ns)
+                    if result == 'TRADE':
+                        trade_seen_on_connection = True
                     if result == 'INVALID':
                         writer.marker('INVALID_AGGTRADE_FAIL_CLOSED',
                                       wall_ns=wall_ns, mono_ns=mono_ns,
@@ -166,6 +178,7 @@ async def _capture(symbol, writer, *, stop_flag, deadline, min_free_gb,
                   f'{type(exc).__name__}: {str(exc)[:180]}', flush=True)
             if isinstance(exc, RuntimeError) and str(exc).startswith((
                 'V3 free disk', 'Unexpected binary', 'Invalid AggTrade',
+                'No aggTrade',
             )):
                 raise
         finally:
@@ -193,14 +206,15 @@ async def _capture(symbol, writer, *, stop_flag, deadline, min_free_gb,
 
 def run_live_raw(symbol, path, *, min_free_gb=2, max_hours=None,
                  reconnect_min=0.5, reconnect_max=3.0,
-                 connect_factory=None):
+                 connect_factory=None, first_trade_timeout=20.0):
     """Run one capture into a NEW tape; never append a second recording session."""
     symbol = symbol.upper()
     if not SYMBOL_RE.fullmatch(symbol):
         raise ValueError('Invalid Binance USD-M symbol')
     if max_hours is not None and max_hours <= 0:
         raise ValueError('max-hours must be positive')
-    if min_free_gb < 0 or reconnect_min < 0 or reconnect_max < reconnect_min:
+    if (min_free_gb < 0 or reconnect_min < 0 or reconnect_max < reconnect_min
+            or first_trade_timeout <= 0):
         raise ValueError('Invalid disk or reconnect parameters')
 
     path = Path(path)
@@ -243,7 +257,11 @@ def run_live_raw(symbol, path, *, min_free_gb=2, max_hours=None,
                 symbol, writer, stop_flag=stop_flag, deadline=deadline,
                 min_free_gb=min_free_gb, connect_factory=connect_factory,
                 reconnect_min=reconnect_min, reconnect_max=reconnect_max,
+                first_trade_timeout=first_trade_timeout,
             ))
+            if result['trades'] == 0:
+                writer.marker('ZERO_TRADES_CAPTURE_FAIL_CLOSED')
+                raise RuntimeError('No aggTrades captured; zero-data tape is not a valid pilot')
             if stop_flag.is_set():
                 writer.marker('PROCESS_STOP_SIGNAL')
             elif max_hours is not None and time.monotonic() >= deadline:
@@ -277,6 +295,8 @@ def main():
     p.add_argument('--min-free-gb', type=float, default=2.0)
     p.add_argument('--reconnect-min', type=float, default=0.5)
     p.add_argument('--reconnect-max', type=float, default=3.0)
+    p.add_argument('--first-trade-timeout', type=float, default=20.0,
+                   help='Fail closed if an open WS delivers no aggTrades within N seconds')
     p.add_argument('--verify', help='Offline check: stable SQLite read digest')
     args = p.parse_args()
     if args.verify:
@@ -295,7 +315,8 @@ def main():
     result = run_live_raw(symbol, path, min_free_gb=args.min_free_gb,
                           max_hours=args.max_hours,
                           reconnect_min=args.reconnect_min,
-                          reconnect_max=args.reconnect_max)
+                          reconnect_max=args.reconnect_max,
+                          first_trade_timeout=args.first_trade_timeout)
     print(f'[V3 RAW] summary={result}', flush=True)
     return 0
 
