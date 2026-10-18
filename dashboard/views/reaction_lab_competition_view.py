@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dashboard.views.reaction_lab_candidate_selection_view import render_selection_research
+from dashboard.views.reaction_lab_policy_research_view import render_policy_research
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -350,7 +351,10 @@ def render_competition_lab(output_dir):
     else:
         st.info("Generá Fase 2 para visualizar resultados individuales (TP/SL/TIMEOUT/NO_FILL, MFE y MAE).")
 
-    tab_time, tab_cand, tab_groups, tab_select = st.tabs(["⏱️ Timeline del slot", "🧪 Todas las candidatas", "⚔️ Simultáneas", "🔬 Selection Research"])
+    tab_time, tab_cand, tab_groups, tab_select, tab_policy = st.tabs([
+        "⏱️ Timeline del slot", "🧪 Todas las candidatas", "⚔️ Simultáneas",
+        "🔬 Selection Research", "📊 Portfolio Policy Research"
+    ])
     with tab_time:
         st.subheader("Timeline horizontal de ocupación del slot")
         if e.empty:
@@ -477,6 +481,9 @@ def render_competition_lab(output_dir):
 
     with tab_select:
         render_selection_research(root, strategy)
+
+    with tab_policy:
+        render_policy_research(root, strategy)
 
     with st.expander("Proveniencia, supuestos y seguridad"):
         st.json({"competition_engine": manifest["engine"], "source_hashes": manifest["source_hashes"],

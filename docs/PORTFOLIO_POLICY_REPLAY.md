@@ -138,3 +138,11 @@ Cuando termine el replay 290x14d: verificar 290/290, cero gaps, `summary.json`; 
 En la cohorte 20 símbolos hubo **tres instantes temporales distintos** de desempate de Challenger; resultados experimentales de una población pequeña. Las carteras en 290 pueden comportarse radicalmente distinto. No se considera el dataset de 290 temporalmente out-of-sample porque contiene los 20 símbolos y fechas ya analizados. Una validación independiente requerirá ventana y/o universo predefinidos antes de mirar los resultados.
 
 **Commit sugerido:** `feat(reaction-lab): add isolated causal one-slot policy portfolio replay`.
+
+---
+
+## Extensión Fase 4.1: Portfolio Policy Research en Streamlit
+
+Se añadió una vista de **solo lectura** al dashboard principal. El run histórico de Fase 4 **no cambia**. Instalación manual, controles de SHA, tres modos (`Equity Comparison`, `Policy Divergences`, `Slot Consequences`) y ruta de 290 símbolos: consultar `docs/PORTFOLIO_POLICY_DASHBOARD.md`.
+
+Archivos: `dashboard/views/reaction_lab_competition_view.py` (reemplazar), `dashboard/views/reaction_lab_policy_research_view.py` (nuevo), `dashboard/services/reaction_lab_policy_dashboard.py` (nuevo), `tests/test_reaction_lab_policy_dashboard.py` (nuevo). No modificar `dashboard/app.py` ni el simulador congelado. La pestaña se alimenta de los CSV guardados; no ejecuta recomputaciones.

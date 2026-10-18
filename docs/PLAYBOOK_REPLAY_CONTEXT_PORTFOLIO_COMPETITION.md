@@ -366,3 +366,23 @@ Después de completar **Replay → Contexto → Portfolio original → Competiti
 `candidate_portfolio_policy_replay.py` comprueba contra el run congelado guardado la fuente, decisiones, trades y equity, y ejecuta variantes causales cambiando **solo el orden de señales simultáneas admisibles**. Publica reportes separados por `policy` y no suma Shadow Outcomes ni los utiliza como señales de decisión.
 
 Validar primero los 20 símbolos y 14 días contra `HIST_20261017T200411382804Z_5e7eba8e4d`; después aplicar la misma secuencia con el nuevo run de 290 símbolos. Strength sigue siendo un proxy de retornos de vela 4h cerrada, no paridad canónica con Candidate V2 ni LIVE.
+
+---
+
+## Fase 4.1 — Inspección visual Portfolio Policy Research (después de Policy Replay)
+
+**Requisito:** corrida `candidate_portfolio_policy_replay.py` ya finalizada, con `manifest.json`, `summary.json`, `strategy_policy_summary.csv`, `policy_competitions.csv`, `policy_divergences.csv`, `policy_decisions.csv`, `policy_trades.csv` y `policy_equity.csv`. No hay recálculo de cartera desde el dashboard.
+
+El dashboard original `Reaction & Swing Lab → Candidate Competition` ahora incorpora `📊 Portfolio Policy Research`, con `Equity Comparison`, `Policy Divergences` y `Slot Consequences` (selector interno).
+
+Pasos verificables para 20 símbolos:
+
+```bash
+cd /home/multiservices-1m
+python3 -m unittest discover -s tests -p 'test_reaction_lab_policy_dashboard.py' -v
+ls -lh /root/runner_policy_14d20_20sym_v1/manifest.json
+```
+
+Después abrir el ledger `runner_competition_14d20_shadow_v2` y seleccionar la cartera (Challenger o Extreme Guard). El visor ubica su Selection Research enlazado, y busca únicamente Policy Replays con SHA de Selection correspondientes. La guía detallada, limitaciones de proveniencia, preparación para 290 y semántica de `Slot Consequences` están en `docs/PORTFOLIO_POLICY_DASHBOARD.md`.
+
+**Nunca** seleccionar otra política por ver un outcome futuro; las variantes de prioridad son las ya ejecutadas en el motor causal de Fase 4. Para 290 repetir Replay → Context → Portfolio → Competition → Shadow → Selection → Policy Replay y abrir su run correspondiente.
