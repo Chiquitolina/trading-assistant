@@ -7,6 +7,8 @@ Important: python-binance delivers a *decoded dict*, not original wire bytes.
 The tape stores a canonical JSON representation plus callback-observed receive
 times. Reconnection markers record observed transport state; their timestamps
 must not be misinterpreted as exact boundaries of missing market trades.
+Transport errors are recorded when WSClient forwards error dictionaries;
+messages only printed internally by python-binance cannot be captured here.
 """
 import argparse
 import fcntl
@@ -36,7 +38,9 @@ def _canonical_message(message):
     return json.dumps(message, separators=(',', ':'), ensure_ascii=False)
 
 
-def run_live(symbol, path, *, min_free_gb=2, max_hours=None):
+def run_live(symbol, path, *, min_free_gb=2, max_hours=None,
+             min_reconnect_interval=15, reconnect_delay_floor=5,
+             reconnect_delay_cap=60):
     # Deferred import keeps offline replay/tests independent of Binance.
     from engine.live.ws.ws_client import WSClient
 
@@ -61,8 +65,10 @@ def run_live(symbol, path, *, min_free_gb=2, max_hours=None):
     overflow = threading.Event()
     started = time.monotonic()
     old_handlers = {}
-    connection_seen = None
     state_seen = None
+    callback_generation = threading.local()
+    error_signatures_seen = set()
+    error_signatures_lock = threading.Lock()
     callback_errors = 0
     try:
         writer = TapeStore(path, symbol=symbol)
@@ -78,11 +84,61 @@ def run_live(symbol, path, *, min_free_gb=2, max_hours=None):
                 raw = _canonical_message(message)
                 # Read-only generation from the project's WSClient; increments
                 # when it creates a replacement python-binance WS manager.
-                gen = int(getattr(ws, '_connection_generation', 0))
-                q.put_nowait((raw, gen, wall_ns, mono_ns))
+                gen = int(getattr(
+                    callback_generation, 'value',
+                    getattr(ws, '_connection_generation', 0),
+                ))
+                q.put_nowait(('TRADE', raw, gen, wall_ns, mono_ns))
             except (queue.Full, TypeError, ValueError, OverflowError):
                 callback_errors += 1
                 overflow.set()  # fail closed; never report a partial tape as clean
+
+        def record_transport_error(msg, gen):
+            """Observe first error of each signature/generation; never swallow it.
+
+            Only error dictionaries passed through WSClient are visible here.
+            The library may also print lower-level errors without callbacks.
+            """
+            nonlocal callback_errors
+            wall_ns, mono_ns = time.time_ns(), time.monotonic_ns()
+            signature = (
+                str(msg.get('type', 'error'))[:80],
+                str(msg.get('m', ''))[:180],
+            )
+            key = (gen, signature)
+            with error_signatures_lock:
+                if key in error_signatures_seen:
+                    return
+                error_signatures_seen.add(key)
+            reason = (
+                'WS_TRANSPORT_ERROR_OBSERVED:'
+                + signature[0] + ':' + signature[1]
+            )
+            try:
+                q.put_nowait(('MARKER', reason, gen, wall_ns, mono_ns))
+            except queue.Full:
+                callback_errors += 1
+                overflow.set()
+
+        # Research-only subclass. Do not change or monkeypatch WSClient
+        # shared by LIVE/shards. Forward error handling to the original.
+        class RecorderWSClient(WSClient):
+            def _handle_message(self, msg, group_id=None, generation=None):
+                active = getattr(self, '_connection_generation', None)
+                if generation is None or generation == active:
+                    callback_generation.value = generation if generation is not None else active
+                    try:
+                        if isinstance(msg, dict) and msg.get('e') == 'error':
+                            record_transport_error(msg, active)
+                        return super()._handle_message(
+                            msg, group_id=group_id, generation=generation,
+                        )
+                    finally:
+                        if hasattr(callback_generation, 'value'):
+                            del callback_generation.value
+                return super()._handle_message(
+                    msg, group_id=group_id, generation=generation,
+                )
 
         def request_stop(_signum, _frame):
             stop_event.set()
@@ -91,7 +147,7 @@ def run_live(symbol, path, *, min_free_gb=2, max_hours=None):
             old_handlers[sig] = signal.getsignal(sig)
             signal.signal(sig, request_stop)
 
-        ws = WSClient(
+        ws = RecorderWSClient(
             on_message=on_message,
             timeframes=(),
             symbols=[symbol],
@@ -99,9 +155,9 @@ def run_live(symbol, path, *, min_free_gb=2, max_hours=None):
             stale_after=45,
             include_agg_trades=True,
             client_name=f'micro-flow-v3-{symbol.lower()}',
-            min_reconnect_interval=15,
-            reconnect_delay_floor=5,
-            reconnect_delay_cap=60,
+            min_reconnect_interval=min_reconnect_interval,
+            reconnect_delay_floor=reconnect_delay_floor,
+            reconnect_delay_cap=reconnect_delay_cap,
             enable_coverage_audit=False,
         )
         writer.marker('CONNECT_ATTEMPT')
@@ -137,11 +193,16 @@ def run_live(symbol, path, *, min_free_gb=2, max_hours=None):
                 state_seen = current_state
 
             try:
-                raw, gen, wall_ns, mono_ns = q.get(timeout=0.1)
+                kind, data, gen, wall_ns, mono_ns = q.get(timeout=0.1)
             except queue.Empty:
                 writer.maybe_flush(force=True)
                 continue
-            writer.ingest(raw, connection=gen, wall_ns=wall_ns, mono_ns=mono_ns)
+            if kind == 'MARKER':
+                writer.marker(data, connection=gen,
+                              wall_ns=wall_ns, mono_ns=mono_ns)
+            else:
+                writer.ingest(data, connection=gen,
+                              wall_ns=wall_ns, mono_ns=mono_ns)
             writer.maybe_flush()
             if time.monotonic() - last_status_at > 15:
                 print(f'[V3] symbol={symbol} trades={writer.count} anomalies={writer.anomalies} queue={q.qsize()}',flush=True)
@@ -155,9 +216,17 @@ def run_live(symbol, path, *, min_free_gb=2, max_hours=None):
             ws_thread.join(timeout=20)
         if writer is not None:
             # Drain callbacks already observed before shutdown.
-            while not q.empty():
-                raw, gen, wall_ns, mono_ns = q.get_nowait()
-                writer.ingest(raw, connection=gen, wall_ns=wall_ns, mono_ns=mono_ns)
+            while True:
+                try:
+                    kind, data, gen, wall_ns, mono_ns = q.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == 'MARKER':
+                    writer.marker(data, connection=gen,
+                                  wall_ns=wall_ns, mono_ns=mono_ns)
+                else:
+                    writer.ingest(data, connection=gen,
+                                  wall_ns=wall_ns, mono_ns=mono_ns)
             if overflow.is_set():
                 writer.marker(f'CALLBACK_QUEUE_OR_ENCODING_LOSS_FAIL_CLOSED:{callback_errors}')
             writer.marker('PROCESS_STOP')
@@ -175,6 +244,11 @@ def main():
     p.add_argument('--db', default=None)
     p.add_argument('--min-free-gb', type=float, default=2.0)
     p.add_argument('--max-hours', type=float, default=None)
+    p.add_argument('--min-reconnect-interval', type=int, default=15,
+                   help='Experimental V3-only WSClient reconnect throttle (seconds)')
+    p.add_argument('--reconnect-delay-floor', type=int, default=5,
+                   help='Experimental V3-only minimum reconnect wait (seconds)')
+    p.add_argument('--reconnect-delay-cap', type=int, default=60)
     p.add_argument('--verify', help='Offline readability and replay digest of SQLite tape')
     args = p.parse_args()
     if args.verify:
@@ -184,7 +258,11 @@ def main():
         return 0 if a == b else 2
     symbol = args.symbol.upper()
     path = args.db or f'reports/micro_flow_v3/tapes/{symbol}/aggtrades_observed.sqlite3'
-    run_live(symbol, path, min_free_gb=args.min_free_gb, max_hours=args.max_hours)
+    run_live(symbol, path, min_free_gb=args.min_free_gb,
+             max_hours=args.max_hours,
+             min_reconnect_interval=args.min_reconnect_interval,
+             reconnect_delay_floor=args.reconnect_delay_floor,
+             reconnect_delay_cap=args.reconnect_delay_cap)
     return 0
 
 
