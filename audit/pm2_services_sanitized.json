@@ -1,0 +1,484 @@
+{
+  "processes": [
+    {
+      "args_sanitized": [
+        "-m",
+        "streamlit",
+        "run",
+        "dashboard/app.py",
+        "--server.port",
+        "8501"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "dash-micro1m",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 8,
+      "restart_time": 24,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-m",
+        "streamlit",
+        "run",
+        "dashboard/app.py",
+        "--server.port",
+        "8503"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "dash-multiservices",
+      "pm_cwd": "/home/multiservices",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 6,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [],
+      "exec_interpreter": "node",
+      "exec_mode": "fork_mode",
+      "name": "devtacora",
+      "pm_cwd": "/var/www/devtacora-back/dist",
+      "pm_exec_path": "/var/www/devtacora-back/dist/index.js",
+      "pm_id": 0,
+      "restart_time": 0,
+      "status": "stopped"
+    },
+    {
+      "args_sanitized": [],
+      "exec_interpreter": "node",
+      "exec_mode": "fork_mode",
+      "name": "devtacora-dev",
+      "pm_cwd": "/var/www/devtacora-dev/dist",
+      "pm_exec_path": "/var/www/devtacora-dev/dist/index.js",
+      "pm_id": 1,
+      "restart_time": 0,
+      "status": "stopped"
+    },
+    {
+      "args_sanitized": [
+        "-m",
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.port",
+        "8507"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "hela",
+      "pm_cwd": "/home/hela",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 2,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.data.market_data_service"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "market-data-test",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 11,
+      "restart_time": 16,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.research.micro_flow_collector"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "micro-flow",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 10,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.data.micro_flow_shard_service",
+        "--shard-id",
+        "0",
+        "--shard-count",
+        "6",
+        "--chunk-size",
+        "60",
+        "--stale-after",
+        "45"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "micro-flow-ws-0",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 12,
+      "restart_time": 5,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.data.micro_flow_shard_service",
+        "--shard-id",
+        "1",
+        "--shard-count",
+        "6",
+        "--chunk-size",
+        "60",
+        "--stale-after",
+        "45"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "micro-flow-ws-1",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 13,
+      "restart_time": 3,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.data.micro_flow_shard_service",
+        "--shard-id",
+        "2",
+        "--shard-count",
+        "6",
+        "--chunk-size",
+        "60",
+        "--stale-after",
+        "45"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "micro-flow-ws-2",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 14,
+      "restart_time": 3,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.data.micro_flow_shard_service",
+        "--shard-id",
+        "3",
+        "--shard-count",
+        "6",
+        "--chunk-size",
+        "60",
+        "--stale-after",
+        "45"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "micro-flow-ws-3",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 15,
+      "restart_time": 2,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.data.micro_flow_shard_service",
+        "--shard-id",
+        "4",
+        "--shard-count",
+        "6",
+        "--chunk-size",
+        "60",
+        "--stale-after",
+        "45"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "micro-flow-ws-4",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 16,
+      "restart_time": 3,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.data.micro_flow_shard_service",
+        "--shard-id",
+        "5",
+        "--shard-count",
+        "6",
+        "--chunk-size",
+        "60",
+        "--stale-after",
+        "45"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "micro-flow-ws-5",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 17,
+      "restart_time": 2,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.main",
+        "--strategy",
+        "compression"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "multiservices",
+      "pm_cwd": "/home/multiservices",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 7,
+      "restart_time": 0,
+      "status": "stopped"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.main",
+        "--strategy",
+        "compression"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "multiservices-1m",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 9,
+      "restart_time": 1,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "-m",
+        "engine.live.main",
+        "--strategy",
+        "compression"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "og-window",
+      "pm_cwd": "/home/original-window",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 5,
+      "restart_time": 31,
+      "status": "stopped"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_auto_paths.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop",
+        "--poll-seconds",
+        "60"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-auto-paths",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 19,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_btc_context.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop",
+        "--poll-seconds",
+        "60",
+        "--limit",
+        "50"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-btc-context",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 22,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_context.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop",
+        "--poll-seconds",
+        "60",
+        "--limit",
+        "50"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-context",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 20,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_deep_collector.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop",
+        "--poll-seconds",
+        "60",
+        "--limit",
+        "100"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-deep-research",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 23,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_liquidations.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-liquidations",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 24,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_market_telemetry.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop",
+        "--poll-seconds",
+        "45",
+        "--max-symbols",
+        "20",
+        "--priority-enabled",
+        "--priority-scan-symbols",
+        "60",
+        "--max-priority",
+        "10"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-market-telemetry",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 25,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_runners.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop",
+        "--poll-seconds",
+        "60"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-runners",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 21,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_continuous_scanner.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop",
+        "--poll-seconds",
+        "60"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-scanner",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 18,
+      "restart_time": 0,
+      "status": "online"
+    },
+    {
+      "args_sanitized": [
+        "-u",
+        "/home/multiservices-1m/reaction_lab_telemetry_link.py",
+        "--project",
+        "/home/multiservices-1m",
+        "--loop",
+        "--poll-seconds",
+        "60",
+        "--limit",
+        "100"
+      ],
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "name": "reaction-lab-telemetry-link",
+      "pm_cwd": "/home/multiservices-1m",
+      "pm_exec_path": "/usr/bin/python3",
+      "pm_id": 26,
+      "restart_time": 0,
+      "status": "online"
+    }
+  ],
+  "status": "ok"
+}
