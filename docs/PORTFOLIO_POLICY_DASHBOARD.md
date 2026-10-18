@@ -127,3 +127,63 @@ El run de 290 necesitará su **propio** Selection Lab y referencia `HIST_*` crea
 - La cohorte de 290 comparte fechas y los primeros símbolos; no constituye automáticamente un test temporal fuera de muestra.
 
 **Commit sugerido:** `feat(reaction-lab): visualize one-slot policy equity divergences and slot consequences`.
+
+---
+
+# Fase 4.2 — Slot Consequences: ventana verificable (2026-10-17)
+
+## Motivo de la corrección
+
+En Fase 4.1 el resumen superior computaba **todas las divergencias posteriores** a la competencia elegida, mientras que el control `Horas posteriores` solo filtraba el cuadro inferior. Por ejemplo, seleccionar **Challenger #220, Room vs Strength, 20/09 18:04 (ARG)** mostraba ocho divergencias: seis del 20/09 y dos de un **nuevo desempate del 24/09**. Ese número era engañoso si se interpretaba como efecto local de la elección XPLUS vs TURBO.
+
+## Nuevo contrato del panel
+
+1. Primero se seleccionan política, competencia y número de horas (1–24). Todos los contadores y tablas principales usan **el mismo intervalo semiabierto** `[ready_ms, min(ready_ms+hours, siguiente_competencia_nueva))`.
+2. `siguiente_competencia_nueva` significa el siguiente `ready_ms` en que **ambos portfolios tenían el slot libre Y enviaron distintas candidatas**. No es un «reinicio causal»: la equity acumulada puede diferir desde antes. Los grupos en que ambos slots ya estaban ocupados no activan ese corte.
+3. Las diferencias posteriores quedan en un desplegable explícitamente rotulado **fuera de ventana / no atribuidas**. Nunca se suman a las métricas locales.
+4. El visor enlaza decisiones por `(ready_ms, event_key)`, exige igualdad de claves entre portfolios y cruza el conjunto de diferencias contra `policy_divergences.csv`. Si los CSV discrepan, **no presenta un resumen supuestamente verificado**.
+5. El timeline de ocupación se deriva **solo** de `policy_events.csv`: `ORDER_PLACED → ORDER_FILLED → POSITION_EXIT`, `ORDER_PLACED → ORDER_EXPIRED`, con reservas pendientes separadas de posiciones. El visor trae cierres fuera del rango visible y recorta únicamente la presentación. Si falta la cadena completa o existe `UNRESOLVED_POSITION`, no inventa un cierre y avisa.
+6. Las señales marcadas como bloqueadas son `SKIPPED_SLOT_BUSY` de decisiones históricas simuladas; no se consideran trades rentables. La tabla **Órdenes realmente enviadas que cambiaron** enlaza `policy_trades.csv`: TP/SL/TIMEOUT son trades simulados, `NO_FILL` significa orden sin ejecución, y `No enviada` significa que el slot impidió enviarla. No suma retornos aislados como si fuesen equity adicional.
+7. Si existieron divergencias ANTES del grupo elegido, se presenta una advertencia: ningún resultado posterior se atribuye causalmente solo al grupo actual.
+
+### Regresión XPLUS/TURBO · 20 septiembre
+
+En la ventana de **6 horas** desde 20/09 18:04 se esperan estos valores en Challenger #220, Room vs Strength:
+
+| Indicador | Valor esperado |
+|---|---:|
+| Divergencias locales | **6** |
+| Decisión distinta | **3** |
+| Igual decisión, distinto motivo/reserva | **3** |
+| Divergencias posteriores (24/09) | **2**, separadas y no atribuidas |
+| Room eligió | XPLUSDT LONG, TP +1.96% |
+| Strength eligió | TURBOUSDT LONG, TIMEOUT +0.6002% |
+| Oportunidad adicional bajo Room | VELVET SHORT: NO_FILL, sin trade |
+| Diferencia visible de liberación de slot | **~117 minutos** (basada en timestamps de eventos) |
+
+El valor de 117 minutos se comprobará con los archivos `policy_events.csv` reales en VPS; la prueba automatizada reproduce los tiempos registrados en la captura, no acredita una auditoría independiente de esos CSV reales.
+
+### Instalación manual sobre Fase 4.1
+
+**Reemplazar solo dos archivos:**
+
+- `dashboard/views/reaction_lab_policy_research_view.py`
+- `dashboard/services/reaction_lab_policy_dashboard.py`
+
+**Agregar prueba:** `tests/test_reaction_lab_policy_dashboard_phase4_2.py`.
+
+Actualizar esta documentación y el playbook. **No reemplazar** `dashboard/views/reaction_lab_competition_view.py` ni `dashboard/app.py`: la pestaña ya existe. No ejecutar Portfolio Policy Replay de nuevo.
+
+```bash
+cd /home/multiservices-1m
+python3 -m py_compile dashboard/views/reaction_lab_policy_research_view.py \
+  dashboard/services/reaction_lab_policy_dashboard.py
+python3 -m unittest discover -s tests -p 'test_reaction_lab_policy_dashboard*.py' -v
+ls -lh /root/runner_policy_14d20_20sym_v1/policy_events.csv
+```
+
+**Esperado en la prueba local:** 18 tests (`7` anteriores y `11` nuevos), salvo que la suite se amplíe posteriormente. Abrir el dashboard, elegir Challenger 220 → Slot Consequences → Strength vs BTC 4h (proxy) → 20/09 18:04 → 6 horas. En la VPS real revisar contadores, barras y tabla VELVET.
+
+El visor sigue siendo **SOLO LECTURA**, usa los mismos inputs de 20 símbolos y está preparado para el volumen de 290 con lectura de eventos por chunks y caché de datos condicionada por `mtime_ns`. Cualquier diferencia visible en el dashboard de 290 debe ser validada sobre su corrida particular.
+
+**Commit sugerido:** `fix(reaction-lab): scope slot consequences and plot observed slot occupancy`

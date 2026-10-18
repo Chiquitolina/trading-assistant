@@ -56,6 +56,11 @@ def _decisions_cached(folder, file_mtime_ns, strategy, policies, start_ms, end_m
     return service.load_decisions_window(folder, strategy, policies, start_ms, end_ms)
 
 
+@st.cache_data(show_spinner=False, max_entries=20)
+def _policy_events_cached(folder, file_mtime_ns, strategy, policies, start_ms, end_ms):
+    return service.load_policy_event_window(folder, strategy, policies, start_ms, end_ms)
+
+
 @st.cache_data(show_spinner=False)
 def _factors_cached(selection_folder, file_mtime_ns):
     filename = Path(selection_folder) / "candidate_factor_snapshots.csv"
@@ -214,73 +219,166 @@ def _competition_detail(root, selection_root, strategy, policy, pairs, all_compe
     return int(selected_ms)
 
 
+
+def _slot_timeline_chart(segments, paired, policy, start_ms, end_ms):
+    """Observed order/position occupancy. Source: policy_events.csv only."""
+    fig = go.Figure()
+    colors = {service.POLICY_BASE: "#38bdf8", policy: "#fb923c"}
+    pretty = {service.POLICY_BASE: "Room original", policy: _label(policy)}
+    seen = set()
+    for _, r in segments.sort_values(["start_ms", "policy"]).iterrows():
+        kind = str(r["stage"])
+        title = f"{pretty[r['policy']]} · {kind}"
+        show = title not in seen
+        seen.add(title)
+        fig.add_trace(go.Scatter(
+            x=[_time(r["start_ms"]), _time(r["end_ms"])],
+            y=[pretty[r["policy"]], pretty[r["policy"]]],
+            mode="lines", name=title, showlegend=show,
+            line={"color":colors[r["policy"]], "width":16 if kind == "Posición abierta" else 10,
+                  "dash":"solid" if kind == "Posición abierta" else "dot"},
+            customdata=[str(r["event_key"])]*2,
+            hovertemplate="%{customdata}<br>%{x}<extra>"+title+"</extra>",
+        ))
+    # Mark skipped signals, not filtered/rejected events. These markers do not
+    # imply missed executions or profitable trades.
+    for label, col in (("Room original", "decision_baseline"), (_label(policy), "decision_policy")):
+        skips = paired.loc[paired[col] == "SKIPPED_SLOT_BUSY"].copy()
+        if len(skips) > 300:
+            skips = skips.iloc[:300].copy()
+        if not skips.empty:
+            fig.add_trace(go.Scatter(
+                x=skips["ready_ms"].map(_time), y=[label]*len(skips),
+                mode="markers", name="Señal omitida por slot · "+label,
+                marker={"color":"#f43f5e", "symbol":"x", "size":9,
+                        "line":{"width":1}},
+                customdata=skips["event_key"],
+                hovertemplate="Omitida por slot<br>%{customdata}<br>%{x}<extra></extra>",
+            ))
+    fig.add_vline(x=_time(start_ms).to_pydatetime(), line_dash="dash", line_color="gray")
+    fig.update_layout(height=310, margin=dict(l=8,r=10,t=30,b=22),
+                      xaxis_title="Hora Argentina · tramo seleccionado",
+                      yaxis_title="Cartera / slot", hovermode="closest",
+                      legend=dict(orientation="h",y=-.3),
+                      xaxis_range=[_time(start_ms),_time(end_ms)])
+    return fig
+
+
 def _consequences_panel(root, divergences, competitions, strategy, policy, start_ms):
-    st.subheader("Slot Consequences · efecto posterior en decisiones")
-    st.caption("Se comparan decisiones de las carteras completas. Un cambio de `slot_busy_through` "
-               "puede modificar futuras oportunidades incluso cuando la decisión sigue siendo SKIPPED_SLOT_BUSY. "
-               "No atribuir automáticamente cada diferencia posterior a una sola competencia.")
+    st.subheader("Slot Consequences · ventana de impacto observable")
+    st.caption("Solo lectura. Separamos el cambio de selección, las reservas posteriores y una nueva "
+               "competencia donde ambos slots vuelven a estar libres. Las diferencias no prueban "
+               "causalidad aislada ni equivalen a operaciones perdidas.")
     if policy == service.POLICY_BASE:
         st.info("Elegí una política alternativa para comparar con Room original")
         return
-    earlier = divergences[(divergences["strategy"] == strategy) &
-                          (divergences["policy"] == policy)]
-    current, had_prior = service.divergence_after(divergences, strategy, policy, start_ms)
-    if had_prior:
-        first = int(earlier["ready_ms"].min())
-        st.warning(f"Ya había divergencias desde {_clock(first)}, antes de esta competencia. "
-                   "Los cambios posteriores NO se pueden atribuir únicamente al grupo seleccionado.")
-    if current.empty:
-        st.info("No se registraron diferencias de decisión ni motivo desde ese instante.")
-        return
-    st.metric("Eventos con divergencia desde la competencia", len(current))
-    counts = current["change_type"].value_counts()
-    a, b = st.columns(2)
-    a.metric("Decisión distinta", int(counts.get("Decisión distinta", 0)))
-    b.metric("Misma decisión, distinto resultado/reserva", int(counts.get("Misma decisión / reserva o resultado distinto", 0)))
-    table = current.copy()
-    table["Hora ARG"] = table["ready_ms"].map(_clock)
-    st.dataframe(table[["Hora ARG", "event_key", "baseline_decision", "baseline_reason",
-                        "policy_decision", "policy_reason", "change_type"]],
-                 use_container_width=True, hide_index=True, height=330)
-    st.markdown("**Ventana local de decisiones desde el desempate**")
+    # One window, one metric scope. The previous version erroneously counted
+    # every later divergence while the decisions table used a local slider.
     hours = st.slider("Horas posteriores", min_value=1, max_value=24, value=6,
                       key="policy_research_hours_v1")
-    end_ms = int(start_ms + hours * 3600 * 1000)
-    decisions_file = root / "policy_decisions.csv"
+    local, later, had_prior, end_ms, boundary = service.scoped_consequences(
+        divergences, competitions, strategy, policy, int(start_ms), hours)
+    if had_prior:
+        original, _ = service.divergence_after(divergences, strategy, policy, 0)
+        earlier = original[original["ready_ms"] < start_ms]
+        if not earlier.empty:
+            st.warning(f"Esta política ya había divergido el {_clock(int(earlier['ready_ms'].min()))}. "
+                       "Sus posiciones y capital pueden arrastrar diferencias previas: "
+                       "esta ventana es descriptiva, no atribución causal.")
+    if boundary is not None and boundary < start_ms + hours*3_600_000:
+        st.info(f"Ventana cortada el {_clock(boundary)}: comienza otro desempate con ambos slots "
+                "libres y distinta candidata enviada. Esa nueva competencia se analiza por separado; "
+                "no constituye un reinicio del capital ni demuestra independencia estadística.")
+    st.caption(f"Intervalo de las métricas: {_clock(start_ms)} → {_clock(end_ms)} "
+               "(extremo final excluido).")
+    counts = local["change_type"].value_counts() if not local.empty else pd.Series(dtype="int64")
+    x, y, z = st.columns(3)
+    x.metric("Divergencias en esta ventana", len(local))
+    y.metric("Decisión distinta", int(counts.get("Decisión distinta",0)))
+    z.metric("Misma decisión, otro motivo/reserva", int(counts.get("Misma decisión / reserva o resultado distinto",0)))
+    if not later.empty:
+        with st.expander(f"Divergencias posteriores fuera de esta ventana ({len(later)}) · NO atribuidas"):
+            future = later.copy()
+            future["Hora ARG"] = future["ready_ms"].map(_clock)
+            st.dataframe(future[["Hora ARG","event_key","baseline_decision","policy_decision", "change_type"]],
+                         use_container_width=True, hide_index=True, height=240)
+    file_dec = root / "policy_decisions.csv"
     try:
-        events = _decisions_cached(str(root), decisions_file.stat().st_mtime_ns, strategy,
-                                   (service.POLICY_BASE, policy),
-                                   int(start_ms), end_ms)
+        events = _decisions_cached(str(root), file_dec.stat().st_mtime_ns, strategy,
+                                   (service.POLICY_BASE, policy), int(start_ms),int(end_ms))
     except (OSError, KeyError, ValueError) as exc:
-        st.error(f"No se pueden consultar las decisiones: {exc}")
+        st.error(f"No se pudieron recuperar decisiones: {exc}")
         return
     if events.empty:
-        st.info("Sin decisiones en esta ventana")
+        st.info("No hay decisiones en esta ventana")
         return
-    events["ready_ms"] = pd.to_numeric(events["ready_ms"], errors="raise").astype("int64")
-    baseline = events[events["policy"] == service.POLICY_BASE].set_index("event_key")
-    variant = events[events["policy"] == policy].set_index("event_key")
-    common_keys = baseline.index.intersection(variant.index)
-    if not len(common_keys):
-        st.warning("La ventana no contiene claves comunes; revisá el export")
+    try:
+        paired = service.paired_window_decisions(events, alternative=policy)
+    except (KeyError, ValueError) as exc:
+        st.error(f"No se pueden emparejar decisiones por evento: {exc}")
         return
-    local = pd.DataFrame({
-        "event_key": common_keys,
-        "ready_ms": baseline.loc[common_keys, "ready_ms"].to_numpy(),
-        "baseline": baseline.loc[common_keys, "decision"].to_numpy(),
-        "policy": variant.loc[common_keys, "decision"].to_numpy(),
-        "baseline_reason": baseline.loc[common_keys, "reason"].to_numpy(),
-        "policy_reason": variant.loc[common_keys, "reason"].to_numpy(),
-    }).sort_values(["ready_ms", "event_key"])
-    local["Hora ARG"] = local["ready_ms"].map(_clock)
-    local["Difiere"] = ((local["baseline"] != local["policy"]) |
-                        (local["baseline_reason"] != local["policy_reason"]))
-    st.dataframe(local[["Hora ARG", "event_key", "baseline", "baseline_reason",
-                        "policy", "policy_reason", "Difiere"]],
-                 hide_index=True, use_container_width=True, height=320)
-    st.caption("Se incluyen decisiones con el mismo `event_key` en ambas carteras. "
-               "Las filas posteriores muestran consecuencias observadas, no un test causal independiente.")
-
+    observed_keys = set(zip(paired.loc[paired["differs"], "ready_ms"],
+                            paired.loc[paired["differs"], "event_key"]))
+    expected_keys = set(zip(local["ready_ms"], local["event_key"]))
+    if observed_keys != expected_keys:
+        st.error("Divergencias y decisiones del replay no coinciden dentro de esta ventana. "
+                 "No se muestran consecuencias hasta auditar ambos CSV.")
+        return
+    st.markdown("**Decisiones de ambas carteras en la ventana**")
+    only_diff = st.checkbox("Mostrar solo filas diferentes", value=True,
+                            key="policy_research_only_diff_42")
+    show = paired.loc[paired["differs"]] if only_diff else paired
+    show = show.copy()
+    show["Hora ARG"] = show["ready_ms"].map(_clock)
+    st.dataframe(show[["Hora ARG","event_key","decision_baseline","reason_baseline",
+                       "decision_policy","reason_policy","differs"]].rename(columns={
+                       "decision_baseline":"Room", "reason_baseline":"Motivo Room",
+                       "decision_policy":"Alternativa", "reason_policy":"Motivo alternativa",
+                       "differs":"Difiere"}),
+                 hide_index=True, use_container_width=True, height=310)
+    # Occupancy from actual order event lifecycle, including pending LIMIT.
+    st.markdown("**Timeline de ocupación real simulada del slot**")
+    st.caption("Barra punteada = LIMIT pendiente · barra continua = posición abierta · "
+               "cruz = señal bloqueada por slot. Se usan los timestamps de los eventos "
+               "del motor, no se estima la duración por `slot_busy_through`.")
+    event_file = root / "policy_events.csv"
+    try:
+        lifecycle = _policy_events_cached(str(root), event_file.stat().st_mtime_ns,
+                                          strategy, (service.POLICY_BASE, policy),
+                                          int(start_ms), int(end_ms))
+        segments, incomplete = service.build_observed_slot_segments(lifecycle,start_ms,end_ms)
+        if incomplete:
+            st.warning(f"{incomplete} reservas sin ciclo completo verificable: se omiten del gráfico "
+                       "en lugar de inferir su fecha de liberación.")
+        if segments.empty:
+            st.info("No hay reservas completas observables en el tramo.")
+        else:
+            st.plotly_chart(_slot_timeline_chart(segments,paired,policy,start_ms,end_ms),
+                            use_container_width=True, config={"displaylogo":False,"scrollZoom":True},
+                            key="policy_research_slot_timeline_42")
+    except (OSError, KeyError, ValueError) as exc:
+        st.warning(f"No es posible mostrar una línea temporal verificable: {exc}")
+    st.markdown("**Órdenes realmente enviadas que cambiaron entre carteras**")
+    st.caption("Una orden NO_FILL no es una operación con PnL. Una señal bloqueada tampoco. "
+               "Los netos son de operaciones simuladas ejecutadas, no shadow outcomes.")
+    changed = paired.loc[paired["decision_changed"]]
+    keys = tuple(changed["event_key"].astype(str))
+    try:
+        path = root / "policy_trades.csv"
+        trades = _trades_cached(str(root),path.stat().st_mtime_ns,strategy,
+                                (service.POLICY_BASE,policy),keys) if keys else pd.DataFrame()
+        actual = service.actual_order_consequences(paired,trades,policy)
+        if actual.empty:
+            st.info("Sin cambios en órdenes enviadas dentro de esta ventana")
+        else:
+            actual["Hora ARG"] = actual["ready_ms"].map(_clock)
+            st.dataframe(actual[["Hora ARG","event_key","baseline","baseline_net_pct",
+                                 "policy","policy_net_pct"]].rename(columns={
+                                 "baseline":"Room · resultado", "baseline_net_pct":"Room net %",
+                                 "policy":"Alternativa · resultado", "policy_net_pct":"Alternativa net %"}),
+                         use_container_width=True, hide_index=True)
+    except (OSError, KeyError, ValueError) as exc:
+        st.error(f"No se pudieron auditar las operaciones enviadas: {exc}")
 
 def render_policy_research(competition_root, strategy):
     """App-compatible entry point. Called from existing Candidate Competition view."""

@@ -205,7 +205,7 @@ def load_decisions_window(root, strategy, policies, start_ms, end_ms):
     path = Path(root) / "policy_decisions.csv"
     for part in pd.read_csv(path, chunksize=80000, keep_default_na=False):
         mask = ((part["strategy"] == strategy) & part["policy"].isin(policies) &
-                pd.to_numeric(part["ready_ms"], errors="coerce").between(start_ms, end_ms))
+                pd.to_numeric(part["ready_ms"], errors="coerce").between(start_ms, end_ms, inclusive="left"))
         if mask.any():
             results.append(part.loc[mask])
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
@@ -261,3 +261,182 @@ def equity_curve(root, strategy, policies, *, bucket_minutes=60):
         return pd.DataFrame(columns=["policy", "timestamp_ms", "marked_equity_usdt", "wallet_usdt"])
     frame = pd.DataFrame(rows).drop_duplicates(["policy", "timestamp_ms"])
     return frame.sort_values(["policy", "timestamp_ms"]).reset_index(drop=True)
+
+
+# Phase 4.2: bounded observed slot consequences, from frozen CSV exports only.
+def next_fresh_competition(competitions, strategy, policy, ready_ms):
+    """Next *new changed pick* with both slots free, not a causal reset.
+
+    A further event at which both slots are busy is not a new selection.
+    If this happens after a prior divergence, later state may still inherit
+    capital differences: the boundary only separates analysis windows.
+    """
+    pairs = competition_comparison(competitions, strategy, policy)
+    if pairs.empty:
+        return None
+    x = pairs[(pairs["ready_ms"] > int(ready_ms)) &
+              pairs["baseline_slot_free"] & pairs["policy_slot_free"] &
+              pairs["changed_pick"]]
+    return None if x.empty else int(x.iloc[0]["ready_ms"])
+
+
+def scoped_consequences(divergences, competitions, strategy, policy, ready_ms, hours):
+    """Calculate all counters from precisely the same [start, end) window.
+
+    Return local, later, prior-divergence flag, end timestamp, next new
+    selection. The later records remain observational, not attributed.
+    """
+    if not 1 <= int(hours) <= 24:
+        raise ValueError("Horas posteriores deben estar entre 1 y 24")
+    start = int(ready_ms)
+    requested_end = start + int(hours) * 3_600_000
+    boundary = next_fresh_competition(competitions, strategy, policy, start)
+    end = min(requested_end, boundary) if boundary is not None else requested_end
+    all_after, prior = divergence_after(divergences, strategy, policy, start)
+    local = all_after[(all_after["ready_ms"] >= start) &
+                      (all_after["ready_ms"] < end)].copy()
+    later = all_after[all_after["ready_ms"] >= end].copy()
+    return local, later, prior, end, boundary
+
+
+def paired_window_decisions(events, baseline=POLICY_BASE, alternative=None):
+    """Join both portfolios by event identity; do not interpret absent rows."""
+    if alternative is None or alternative == baseline:
+        raise ValueError("Se necesita política alternativa")
+    required = {"event_key", "ready_ms", "policy", "decision", "reason"}
+    if not required.issubset(events.columns):
+        raise ValueError("Columnas faltantes en policy_decisions")
+    a = events.loc[events["policy"] == baseline, list(required)].copy()
+    b = events.loc[events["policy"] == alternative, list(required)].copy()
+    if a.duplicated(["event_key", "ready_ms"]).any() or b.duplicated(["event_key", "ready_ms"]).any():
+        raise ValueError("Decisiones duplicadas en la ventana")
+    result = a.merge(b, on=["event_key", "ready_ms"], how="outer",
+                     suffixes=("_baseline", "_policy"), validate="one_to_one", indicator=True)
+    if not result["_merge"].eq("both").all():
+        raise ValueError("Decisiones no emparejadas entre las carteras")
+    result = result.drop(columns="_merge").sort_values(["ready_ms", "event_key"])
+    result["differs"] = ((result["decision_baseline"] != result["decision_policy"]) |
+                         (result["reason_baseline"] != result["reason_policy"]))
+    result["decision_changed"] = result["decision_baseline"] != result["decision_policy"]
+    return result.reset_index(drop=True)
+
+
+def load_policy_event_window(root, strategy, policies, start_ms, end_ms, *, history_hours=24):
+    """Stream actual ORDER_PLACED/FILLED/EXIT/EXPIRED events, not inferred busy_until.
+
+    Frozen simulator horizon is <= 180m with <= 30m pending order; 24h
+    lookback is deliberately conservative. Missing close is never invented.
+    """
+    path = Path(root) / "policy_events.csv"
+    if not path.is_file():
+        raise ValueError("Falta policy_events.csv; no inferir duración de slot")
+    required = {"strategy", "policy", "event_key", "kind", "timestamp_ms", "status"}
+    if not required.issubset(set(csv_columns(path))):
+        raise ValueError("policy_events.csv carece de columnas esenciales")
+    earliest = int(start_ms) - int(history_hours) * 3_600_000
+    # Read closures AFTER the visible interval so an open position crossing
+    # the chart boundary is drawn correctly and clipped, not marked incomplete.
+    # The simulator's frozen 180m horizon is safely inside this 24h lookahead.
+    latest = int(end_ms) + 24 * 3_600_000
+    pieces = []
+    for part in pd.read_csv(path, chunksize=80000, keep_default_na=False):
+        ts = pd.to_numeric(part["timestamp_ms"], errors="raise")
+        sub = part.loc[(part["strategy"] == strategy) & part["policy"].isin(policies) &
+                       (ts >= earliest) & (ts < latest)].copy()
+        if not sub.empty:
+            sub["timestamp_ms"] = pd.to_numeric(sub["timestamp_ms"], errors="raise").astype("int64")
+            pieces.append(sub)
+    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame(columns=list(required))
+
+
+def build_observed_slot_segments(events, start_ms, end_ms):
+    """Two exact states: pending order and filled position; never extrapolate.
+
+    Return (segments, incomplete_count). A trade can have zero-length pending
+    if filled at placement, and terminal follows exchange-estimated replay.
+    """
+    terminal = {"ORDER_EXPIRED", "POSITION_EXIT", "UNRESOLVED_WINDOW",
+                "UNRESOLVED_FILL", "UNRESOLVED_POSITION"}
+    segments, incomplete = [], 0
+    if events.empty:
+        return pd.DataFrame(columns=["policy", "event_key", "stage", "start_ms", "end_ms", "terminal"]), 0
+    for (policy, event_key), group in events.groupby(["policy", "event_key"], sort=False):
+        group = group.sort_values("timestamp_ms")
+        if group.duplicated(["kind"]).any():
+            raise ValueError("Evento de orden duplicado para el mismo candidato/política")
+        placed = group[group["kind"] == "ORDER_PLACED"]
+        endings = group[group["kind"].isin(terminal)]
+        fills = group[group["kind"] == "ORDER_FILLED"]
+        # Orders placed after the window are only present because the reader
+        # also fetched future closing events; they are irrelevant, not errors.
+        if len(placed) == 1 and int(placed.iloc[0]["timestamp_ms"]) >= int(end_ms):
+            continue
+        if len(placed) != 1 or len(endings) != 1 or len(fills) > 1:
+            incomplete += 1
+            continue
+        # UNRESOLVED_POSITION denotes uncertainty; its event timestamp is NOT
+        # a verified release of the slot. We must never draw a false closure.
+        if endings.iloc[0]["kind"] == "UNRESOLVED_POSITION":
+            incomplete += 1
+            continue
+        start = int(placed.iloc[0]["timestamp_ms"])
+        stop = int(endings.iloc[0]["timestamp_ms"])
+        if stop < start:
+            raise ValueError("Cierre de orden anterior a colocación")
+        if not (start < int(end_ms) and stop > int(start_ms)):
+            continue
+        fill = int(fills.iloc[0]["timestamp_ms"]) if len(fills) else None
+        if fill is not None and not start <= fill <= stop:
+            raise ValueError("Fill fuera del intervalo de reserva")
+        states = (("Orden pendiente", start, fill), ("Posición abierta", fill, stop)) if fill is not None else (("Orden pendiente", start, stop),)
+        for stage, a, b in states:
+            if a is None or b is None:
+                continue
+            a, b = max(a, int(start_ms)), min(b, int(end_ms))
+            if b > a:
+                segments.append({"policy":policy, "event_key":event_key, "stage":stage,
+                                 "start_ms":a, "end_ms":b,
+                                 "terminal":endings.iloc[0]["kind"]})
+    return pd.DataFrame(segments, columns=["policy", "event_key", "stage", "start_ms", "end_ms", "terminal"]), incomplete
+
+
+def actual_order_consequences(paired, trades, alternative_policy):
+    """Only changed submission decisions; distinguish simulated trades vs NO_FILL.
+
+    Does not assign shadow profit to blocked candidates.
+    """
+    differing = paired[paired["decision_changed"] & (
+        paired["decision_baseline"].eq("ORDER_SUBMITTED") |
+        paired["decision_policy"].eq("ORDER_SUBMITTED"))].copy()
+    if differing.empty:
+        return pd.DataFrame(columns=["event_key", "ready_ms", "baseline", "policy",
+                                     "baseline_net_pct", "policy_net_pct"])
+    lookup = {}
+    if not trades.empty:
+        if trades.duplicated(["policy", "event_key"]).any():
+            raise ValueError("Trades duplicados por candidato/política")
+        lookup = {(str(r["policy"]), str(r["event_key"])):r for _,r in trades.iterrows()}
+    rows = []
+    for _,row in differing.iterrows():
+        result = {"event_key":row["event_key"], "ready_ms":int(row["ready_ms"])}
+        for label, code, decision_col, reason_col in (
+            ("baseline", POLICY_BASE, "decision_baseline", "reason_baseline"),
+            ("policy", None, "decision_policy", "reason_policy"),
+        ):
+            if label == "policy":
+                code = alternative_policy
+            decision, reason = row[decision_col], row[reason_col]
+            match = lookup.get((code, row["event_key"]))
+            if decision != "ORDER_SUBMITTED":
+                status, net = "No enviada", None
+            elif match is not None:
+                status = str(match.get("status", "DESCONOCIDO"))
+                net = float(match["net_pct"]) if str(match.get("net_pct", "")).strip() else None
+            elif reason in ("NO_FILL", "UNOBSERVABLE_WINDOW"):
+                status, net = str(reason), None
+            else:
+                status, net = "SIN_DETALLE_VERIFICABLE", None
+            result[label] = status
+            result[label + "_net_pct"] = net
+        rows.append(result)
+    return pd.DataFrame(rows)

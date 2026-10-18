@@ -386,3 +386,17 @@ ls -lh /root/runner_policy_14d20_20sym_v1/manifest.json
 Después abrir el ledger `runner_competition_14d20_shadow_v2` y seleccionar la cartera (Challenger o Extreme Guard). El visor ubica su Selection Research enlazado, y busca únicamente Policy Replays con SHA de Selection correspondientes. La guía detallada, limitaciones de proveniencia, preparación para 290 y semántica de `Slot Consequences` están en `docs/PORTFOLIO_POLICY_DASHBOARD.md`.
 
 **Nunca** seleccionar otra política por ver un outcome futuro; las variantes de prioridad son las ya ejecutadas en el motor causal de Fase 4. Para 290 repetir Replay → Context → Portfolio → Competition → Shadow → Selection → Policy Replay y abrir su run correspondiente.
+
+---
+
+## Actualización Fase 4.2 — auditoría local de Slot Consequences
+
+Una vez generado `Portfolio Policy Replay` y sus `policy_events.csv`, habilitar el visor corregido reemplazando únicamente `dashboard/views/reaction_lab_policy_research_view.py` y `dashboard/services/reaction_lab_policy_dashboard.py`.
+
+**Por qué:** El contador antiguo incluía diferencias varios días después de la competencia seleccionada; la vista nueva aplica `Horas posteriores` a las **mismas** métricas y tablas, y corta el alcance al llegar al siguiente desempate con ambos slots libres (sin afirmar causalidad independiente).
+
+**Verificación 20 símbolos:** Challenger #220, política Strength vs BTC 4h proxy, fecha 20/09 18:04 ARG, ventana 6 horas → seis divergencias locales (3 de decisión, 3 de motivo/reserva), y dos divergencias del 24/09 fuera de ventana. Mostrar timeline `ORDER_PLACED / ORDER_FILLED / POSITION_EXIT / ORDER_EXPIRED` leído del CSV; NO_FILL no es trade.
+
+**Verificación general (incluida próxima cohorte 290):** comprobar que `policy_events.csv`, `policy_decisions.csv`, `policy_trades.csv`, `policy_divergences.csv` y `policy_competitions.csv` provienen del mismo run auditado; el enlace de manifests del visor sigue verificando el Selection Lab original. Ninguna selección histórica se altera ni se vuelve a simular desde Streamlit.
+
+Detalles y límites en `docs/PORTFOLIO_POLICY_DASHBOARD.md`, sección Fase 4.2.
