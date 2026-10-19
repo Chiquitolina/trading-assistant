@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from dashboard.services.micro_flow_v3_dashboard_service import V3DashboardError
+from dashboard.micro_flow_v3_quality_tab import render_quality_baseline
 from dashboard.services.micro_flow_v3_multi_session import (
     analyze_sessions, load_replay_sessions, MAX_SESSIONS,
 )
@@ -235,6 +236,16 @@ def render_multi_session_research(project_root, tapes):
                 st.json(ev)
                 if fa: st.json(fa)
     st.caption('Se preservan V1/V2 y PM2; la vista solo lee Replay V3 y SQLite cerrados.')
+    render_quality_baseline(root, sessions, result, parameters={
+        'lookback': int(lookback), 'relative_volume': float(relative),
+        'min_imbalance': float(imbalance), 'min_trades': int(min_trades),
+        'cooldown_seconds': int(cooldown), 'episode_seconds': int(episode_seconds),
+        'confirmation_seconds': int(confirm), 'min_opposite_pct': float(opposite),
+        'max_favorable_pct': float(max_favorable),
+        'min_followthrough_pct': float(followthrough),
+        'freshness_seconds': int(freshness), 'neutral_band_pct': float(neutral),
+    })
+
 
 
 def _utc(ms):
