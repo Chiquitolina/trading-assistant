@@ -96,7 +96,7 @@ class RawRecorderTests(unittest.TestCase):
             [trade(300), trade(301), ConnectionError('simulated cut')],
             [trade(305), trade(306)],
         )
-        result = self.run_pilot(factory)
+        result = self.run_pilot(factory, duration=0.0006)
         self.assertEqual(result['trades'], 4)
         self.assertEqual(result['missing_ids'], 3)
         self.assertEqual(result['anomalies'], 1)
