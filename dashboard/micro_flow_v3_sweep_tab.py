@@ -16,6 +16,9 @@ from research.micro_flow_v3.sweep_entry_research import (
     analyze_sweep_entries, save_entry_research_run,
 )
 from research.micro_flow_v3.aggression_exhaustion_discovery import discover_exhaustion
+from research.micro_flow_v3.exhaustion_entry_research import (
+    evaluate_exhaustion_entries, save_exhaustion_entry_run,
+)
 
 
 def _fmt(ms):
@@ -151,7 +154,7 @@ def _exhaustion_frame(events, reveal):
     return pd.DataFrame(out)
 
 
-def _exhaustion_chart(session, ev, *, before, after, reveal):
+def _exhaustion_chart(session, ev, *, before, after, reveal, entry_cases=None):
     seg=ev['segment_id']
     ts=ev['impulse']['available_ms']
     start=ts-before*60_000
@@ -182,6 +185,20 @@ def _exhaustion_chart(session, ev, *, before, after, reveal):
             fig.add_vline(x=t,line_color=color,line_dash='dot',row=1,col=1)
             fig.add_annotation(x=t,y=1.015,yref='paper',text=label,showarrow=False,
                                font=dict(size=10,color=color),bgcolor='rgba(0,0,0,.7)')
+    # Only show post-impulse structure and signal references when future is revealed.
+    if reveal and entry_cases:
+        for case in entry_cases:
+            if case['variant'] == 'FAILURE_SWING_BREAK' and case.get('preknown_swing'):
+                level=case['preknown_swing']['level']
+                fig.add_hline(y=level,line=dict(color='#f59e0b',dash='dash',width=1),row=1,col=1)
+            stage=case.get('signal')
+            if stage and start<=stage['available_ms']<=end:
+                color='#06b6d4' if case['variant']=='FAILURE' else '#e879f9'
+                t=pd.to_datetime(stage['available_ms'],unit='ms',utc=True)
+                fig.add_vline(x=t,line_color=color,line_dash='dot',row=1,col=1)
+                fig.add_annotation(x=t,y=.95 if case['variant']=='FAILURE' else .89,
+                    yref='paper',showarrow=False,bgcolor='rgba(0,0,0,.7)',
+                    text='Señal '+case['variant'],font=dict(color=color,size=9))
     fig.update_layout(height=680,hovermode='x unified',margin=dict(l=10,r=10,t=75,b=20),
                       legend=dict(orientation='h',y=-.12))
     return fig
@@ -243,18 +260,21 @@ def render_swing_sweep_discovery(root, tapes):
                      retest_tolerance_pct=tolerance,retest_seconds=retest)
                 entries=analyze_sweep_entries(session['buckets'],result)
                 exhaustion=discover_exhaustion(session['buckets'])
-                st.session_state['mfv3_sweep_discovery']=(settings,session,result,entries,exhaustion)
+                exhaustion_entries=evaluate_exhaustion_entries(
+                    session['buckets'], exhaustion, result['swings'])
+                st.session_state['mfv3_sweep_discovery']=(
+                    settings,session,result,entries,exhaustion,exhaustion_entries)
         except Exception as exc:
             st.error(f'No fue posible completar el estudio: {exc}'); return
     data=st.session_state.get('mfv3_sweep_discovery')
     if not data:
         st.info('Seleccioná un tape cerrado y ejecutá el detector. Los 1s originales no se modifican.')
         return
-    if len(data) != 5:
+    if len(data) != 6:
         st.session_state.pop('mfv3_sweep_discovery',None)
-        st.info('La sesión del inspector es anterior a Fase 2. Ejecutá nuevamente Descubrir barridos.')
+        st.info('La sesión del inspector es anterior a Fase 3. Ejecutá nuevamente Descubrir barridos.')
         return
-    saved_settings,session,result,entry_study,exhaustion=data
+    saved_settings,session,result,entry_study,exhaustion,exhaustion_entries=data
     if saved_settings != settings:
         st.warning('Cambiaron los parámetros o la sesión. Ejecutá nuevamente el análisis.'); return
     s=result['summary']
@@ -391,7 +411,10 @@ def render_swing_sweep_discovery(root, tapes):
         exhaustion_id=st.selectbox('Inspeccionar impulso independiente',
              [e['event_id'] for e in exhaustion['events']],key='mfv3_exhaustion_selected')
         inspected=next(e for e in exhaustion['events'] if e['event_id']==exhaustion_id)
-        fig=_exhaustion_chart(session,inspected,before=before,after=after,reveal=reveal)
+        inspected_cases=[c for c in exhaustion_entries['entries']
+                         if c['event_id']==exhaustion_id]
+        fig=_exhaustion_chart(session,inspected,before=before,after=after,
+                              reveal=reveal,entry_cases=inspected_cases)
         if fig is not None:
             st.plotly_chart(fig,use_container_width=True,key='mfv3_exhaustion_chart')
         if reveal:
@@ -400,6 +423,87 @@ def render_swing_sweep_discovery(root, tapes):
         st.download_button('Exportar todos los impulsos de agotamiento (CSV)',
             exhaustion_table.to_csv(index=False),file_name='aggression_exhaustion_v1.csv',
             mime='text/csv')
+    st.markdown('#### Exhaustion Entry Research · confirmación vs ruptura de swing')
+    st.caption('A FAILURE: referencia posterior al fracaso. B FAILURE_SWING_BREAK: '
+        'tras el fracaso, cierre posterior más allá de un swing confirmado ANTES '
+        'del impulso (timeframe y pivote seleccionados arriba). '
+        'Todos los impulsos permanecen en las dos variantes. '
+        'Los precios son OPEN 1s retrospectivos: NO son fills ejecutables.')
+    cases=exhaustion_entries['entries']
+    summary=exhaustion_entries['summary']
+    if reveal:
+        for variant in ('FAILURE','FAILURE_SWING_BREAK'):
+            side_summary=summary['by_variant'][variant]
+            n_signals=sum(row['signals'] for row in side_summary.values())
+            n_refs=sum(row['entry_references'] for row in side_summary.values())
+            st.write(f'**{variant}** · señales: {n_signals} · referencias observadas: {n_refs}')
+        all_rows=[]
+        for case in cases:
+            ref=case.get('entry_reference') or {}
+            known=case.get('preknown_swing') or {}
+            row={
+                'ID':case['event_id'], 'Variante':case['variant'],
+                'Presión':case['pressure_side'],
+                'Sesgo':case['hypothesis_direction'],
+                'Estado señal':case['signal_state'],
+                'Señal UTC':_fmt(case['signal']['available_ms']) if case['signal'] else None,
+                'Swing conocido':known.get('swing_id'),
+                'Nivel conocido':known.get('level'),
+                'Referencia':case['entry_state'],
+                'Precio ref. NO fill':ref.get('entry_reference_price'),
+                'Ref disponible UTC':_fmt(ref['entry_reference_available_ms']) if ref else None,
+            }
+            for horizon in exhaustion_entries['parameters']['horizons_seconds']:
+                h=case['outcomes'].get(f'{horizon}s',{})
+                row[f'Estado {horizon}s']=h.get('state')
+                row[f'Bruto {horizon}s %']=h.get('return_directional_pct')
+                row[f'Neto ilustrativo {horizon}s %']=h.get('net_after_illustrative_cost_pct')
+                row[f'MFE {horizon}s %']=h.get('mfe_directional_pct')
+                row[f'MAE {horizon}s %']=h.get('mae_directional_pct')
+                row[f'Cobertura {horizon}s']=h.get('coverage_fraction')
+            all_rows.append(row)
+        study_frame=pd.DataFrame(all_rows)
+        st.dataframe(study_frame,use_container_width=True,hide_index=True)
+        st.download_button('Exportar todas las entradas de agotamiento A/B (CSV)',
+            study_frame.to_csv(index=False),
+            file_name='exhaustion_entry_research_v1.csv',mime='text/csv',
+            key='mfv3_exhaustion_entries_csv')
+        if exhaustion['events']:
+            st.markdown('**Caso seleccionado: ambas entradas y todos los horizontes**')
+            st.dataframe(study_frame[study_frame['ID']==exhaustion_id],
+                         use_container_width=True,hide_index=True)
+        st.markdown('**Resumen por dirección y horizonte (solo outcomes completos)**')
+        report=[]
+        for variant, sides in summary['by_variant'].items():
+            for side, metrics in sides.items():
+                for horizon, outcome in metrics['horizons'].items():
+                    report.append({'Variante':variant,'Presión':side,'Horizonte':horizon,
+                        'Impulsos':metrics['impulses'],'Señales':metrics['signals'],
+                        'Referencias':metrics['entry_references'],
+                        'Outcomes completos':outcome['observed'],
+                        'Sin outcome completo':outcome['censored_or_no_signal'],
+                        'Bruto medio %':outcome['mean_gross_pct'],
+                        'Neto ilustrativo medio %':outcome['mean_net_illustrative_pct'],
+                        'MFE medio %':outcome['mean_mfe_pct'],
+                        'MAE medio %':outcome['mean_mae_pct']})
+        st.dataframe(pd.DataFrame(report),use_container_width=True,hide_index=True)
+        st.write('**Comparación A/B en la misma cohorte de impulsos**',summary['paired'])
+        st.warning('Los 12 bps son un costo fijo ILUSTRATIVO, no spread/fees/slippage '
+                   'medidos. Las entradas no son fills; señales y ventanas pueden '
+                   'solaparse y los grupos A/B no son aleatorios. Esto NO demuestra edge.')
+    else:
+        st.info('Resultados posteriores ocultos. Activá Revelar etapas para ver '
+                'rupturas, entradas A/B, MFE/MAE y retornos.')
+    if st.button('Guardar corrida Fase 3 · entradas agotamiento + hashes RAW',
+                 key='mfv3_exhaustion_entry_save'):
+        try:
+            with st.spinner('Verificando SHA256 Replay, digest lógico RAW y guardando...'):
+                target=save_exhaustion_entry_run(root,session,exhaustion,
+                                               result['swings'],exhaustion_entries,
+                                               verify_raw=True)
+            st.success(f'Corrida Fase 3 inmutable: {target}')
+        except Exception as exc:
+            st.error(f'No se guardó ninguna corrida válida: {exc}')
     st.caption('Las fases temporales están separadas. El resultado a 180s se mide solo '
       'después de una posible referencia posterior al fracaso, y se censura sin cobertura. '
       'No hay órdenes ni fills.')
