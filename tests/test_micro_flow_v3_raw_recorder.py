@@ -116,7 +116,7 @@ class RawRecorderTests(unittest.TestCase):
             ConnectionRefusedError('open failed'),
             [trade(1000)],
         )
-        result = self.run_pilot(factory)
+        result = self.run_pilot(factory, duration=0.0006)
         self.assertEqual(result['trades'], 1)
         self.assertGreaterEqual(result['reconnects'], 1)
         self.assertEqual(result['anomalies'], 0)
