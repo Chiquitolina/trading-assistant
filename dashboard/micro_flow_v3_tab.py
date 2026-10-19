@@ -15,6 +15,9 @@ from dashboard.services.micro_flow_v3_research import (
     detect_pressure_events, cluster_pressure_events,
     outcome_comparison, classify_observed_outcome,
 )
+from dashboard.services.micro_flow_v3_failed_aggression import (
+    analyze_failed_aggression, summarize_failed_aggression,
+)
 
 
 def _display_ts(ms):
@@ -85,7 +88,7 @@ def _chart(frame, events, title):
     return fig
 
 
-def _inspector_chart(frame, event, before_seconds, after_seconds):
+def _inspector_chart(frame, event, before_seconds, after_seconds, failure_case=None):
     """Observed data only, restricted to the event causal segment."""
     ready = int(event['ready_ms'])
     subset = frame[
@@ -111,6 +114,23 @@ def _inspector_chart(frame, event, before_seconds, after_seconds):
         fig.add_annotation(x=x, y=1.04, xref='x', yref='paper', text=label,
                            showarrow=False, font=dict(color=shade,size=10),
                            bgcolor='rgba(0,0,0,.65)')
+    # Second clock: the experimental confirmation is NOT the original signal.
+    # Show it only when it belongs to the same selected causal event.
+    if failure_case is not None:
+        for ts_ms, label, shade in (
+            (failure_case['decision_ms'], 'Evaluación posterior', '#a78bfa'),
+            (failure_case.get('entry_ms'), 'Proxy posconfirmación', '#22d3ee'),
+        ):
+            if ts_ms is None:
+                continue
+            x = pd.to_datetime(int(ts_ms), unit='ms', utc=True)
+            fig.add_shape(type='line', x0=x, x1=x, y0=0, y1=1,
+                          xref='x', yref='paper',
+                          line=dict(color=shade,width=1.6,dash='dot'))
+            fig.add_annotation(x=x, y=1.10, xref='x', yref='paper',
+                               text=label, showarrow=False,
+                               font=dict(color=shade,size=9),
+                               bgcolor='rgba(0,0,0,.7)')
     outcomes = [(h, event.get(f'exit_observed_ms_{h}s'),
                  event.get(f'exit_proxy_{h}s')) for h in (30,60,180)]
     available = [(h, ts, px) for h,ts,px in outcomes if ts is not None and px is not None
@@ -337,6 +357,107 @@ def render_micro_flow_v3_research(project_root):
         st.caption('Continuación: retorno direccional > banda neutral. Reversión: < -banda. '
                    'Es una etiqueta EX POST; no se conoce al detectar la señal. '
                    'Válidos excluye horizontes censurados; retornos sin costos/fills.')
+        # Phase 2C: a SECOND, LATER observation time. These are not labels
+        # inferred from the original 180s outcome or historical optimizations.
+        st.markdown('#### 🧪 Failed Aggression · confirmación observable')
+        st.caption(
+            'Se evalúa DESPUÉS de la señal original. La decisión utiliza solo '
+            'buckets publicados hasta el momento de confirmación (available_ms). '
+            'Si confirma un fracaso, la hipótesis contraria empieza únicamente '
+            'en una nueva entrada proxy posterior. No son órdenes, fills ni PnL.'
+        )
+        fa1, fa2 = st.columns(2)
+        with fa1:
+            confirm_seconds = st.select_slider(
+                'Esperar para evaluar presión (s)',
+                options=[10,20,30,60,90,120], value=30,
+                key='mfv3_failed_confirmation_seconds',
+            )
+        with fa2:
+            min_opposite_pct = st.number_input(
+                'Desplazamiento contrario mínimo (%)',
+                min_value=0.005, max_value=1.0, value=0.03, step=0.01,
+                format='%.3f', key='mfv3_failed_opposite_pct',
+            )
+        with st.expander('Criterios adicionales de confirmación', expanded=False):
+            fa3, fa4, fa5 = st.columns(3)
+            with fa3:
+                max_favorable_pct = st.number_input(
+                    'Máxima excursión a favor original (%)',
+                    min_value=0.0, max_value=2.0, value=0.10, step=0.025,
+                    format='%.3f', key='mfv3_failed_max_favorable',
+                )
+            with fa4:
+                min_followthrough_pct = st.number_input(
+                    'Continuación mínima (%)',
+                    min_value=0.005, max_value=1.0, value=0.03, step=0.01,
+                    format='%.3f', key='mfv3_failed_followthrough',
+                )
+            with fa5:
+                freshness_s = st.select_slider(
+                    'Antigüedad máxima del precio (s)',
+                    options=[1,2,3,5,10], value=3,
+                    key='mfv3_failed_freshness',
+                )
+        failed_cases = analyze_failed_aggression(
+            buckets, anchor_events,
+            confirmation_seconds=int(confirm_seconds),
+            min_opposite_pct=float(min_opposite_pct),
+            max_favorable_pct=float(max_favorable_pct),
+            min_followthrough_pct=float(min_followthrough_pct),
+            freshness_seconds=int(freshness_s),
+        )
+        failed_by_id = {r['event_id']:r for r in failed_cases}
+        failures = sum(r['state']=='FAILED_AGGRESSION' for r in failed_cases)
+        continued = sum(r['state']=='PRESSURE_CONTINUED' for r in failed_cases)
+        unresolved = sum(r['state']=='UNRESOLVED' for r in failed_cases)
+        censored = sum(r['state'].startswith('CENSORED') for r in failed_cases)
+        z1,z2,z3,z4 = st.columns(4)
+        z1.metric('Fracaso confirmado', failures)
+        z2.metric('Presión continuó', continued)
+        z3.metric('Sin confirmación', unresolved)
+        z4.metric('Observación censurada', censored)
+        if failed_cases:
+            st.dataframe(pd.DataFrame(summarize_failed_aggression(failed_cases)).rename(
+                columns={
+                    'state':'Grupo posconfirmación',
+                    'original_side':'Presión original',
+                    'horizon_s':'Horizonte desde proxy (s)',
+                    'episodes':'Episodios', 'observed':'Observados',
+                    'censored':'Censurados',
+                    'mean_return_pct':'Retorno direccional medio %',
+                    'positive_pct':'Positivos %',
+                }), use_container_width=True, hide_index=True,
+                key='mfv3_failed_summary')
+            failed_df = pd.DataFrame(failed_cases)
+            failed_df['decision_utc'] = pd.to_datetime(
+                failed_df['decision_ms'],unit='ms',utc=True,
+            )
+            columns = [
+                'decision_utc','original_side','state','candidate_side',
+                'directional_progress_pct','peak_original_favorable_pct',
+                'opposite_progress_pct','confirmation_net_delta_qty',
+                'entry_state','entry_proxy','return_30s_pct',
+                'return_60s_pct','return_180s_pct','return_300s_pct',
+                'event_id',
+            ]
+            st.dataframe(failed_df[columns].iloc[::-1],
+                         use_container_width=True, hide_index=True,
+                         key='mfv3_failed_cases')
+            st.download_button(
+                'Descargar confirmaciones y casos censurados (CSV)',
+                data=failed_df.to_csv(index=False).encode('utf-8'),
+                file_name='micro_flow_v3_failed_aggression_research.csv',
+                mime='text/csv', key='mfv3_failed_export',
+            )
+        st.caption(
+            'FAILED: desplazamiento contrario suficiente Y pico favorable '
+            'original acotado. CONTINUED: progreso en dirección original. '
+            'UNRESOLVED: sin condición; CENSORED: información insuficiente. '
+            'La comparación se basa en primeras señales de episodios. '
+            'Rendimientos desde una entrada POSTERIOR a la confirmación; '
+            'no incluyen costos, spread, ejecución ni controles de tendencia.'
+        )
         duration = st.select_slider('Ventana del gráfico general (últimos minutos)',
                                     options=[5,10,30,60,120,360], value=30,
                                     key='mfv3_window')
@@ -411,7 +532,9 @@ def render_micro_flow_v3_research(project_root):
                 after_s = st.select_slider('Segundos posteriores',
                                            options=[60,120,180,240,360], value=240,
                                            key='mfv3_after')
-            detail = _inspector_chart(frame,selected_event,before_s,after_s)
+            failure_case = failed_by_id.get(selected_id)
+            detail = _inspector_chart(frame,selected_event,before_s,after_s,
+                                      failure_case=failure_case)
             if detail is not None:
                 st.plotly_chart(detail, use_container_width=True,
                                 key='mfv3_event_inspector_chart',
@@ -438,6 +561,23 @@ def render_micro_flow_v3_research(project_root):
                        'MFE positivo = excursión favorable; MAE negativo = adversa. '
                        'Los extremos de precio sin ajustar siguen disponibles '
                        'como price_high_excursion/price_low_excursion en el JSON.')
+            if failure_case is not None:
+                st.markdown('##### Resultado de la confirmación posterior')
+                ff1, ff2, ff3 = st.columns(3)
+                ff1.metric('Estado a la evaluación', failure_case['state'])
+                ff2.metric('Dirección evaluada', failure_case['candidate_side'] or '—')
+                ff3.metric('Entrada proxy posterior',
+                           f"{failure_case['entry_proxy']:.2f}"
+                           if failure_case['entry_proxy'] is not None else '—')
+                st.caption(
+                    'La señal original y la evaluación posterior tienen relojes '
+                    'diferentes (naranja y violeta). La posible entrada posterior '
+                    'se marca en cian; ninguna línea representa un fill real.'
+                )
+                with st.expander('Detalles causales de Failed Aggression', expanded=False):
+                    st.json(failure_case)
+            else:
+                st.caption('Failed Aggression analiza solo la primera señal de cada episodio.')
             with st.expander('Evento completo y datos crudos', expanded=False):
                 st.json(selected_event)
         else:
