@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from dashboard.micro_flow_v3_multi_session_tab import render_multi_session_research
+from dashboard.micro_flow_v3_sweep_tab import render_swing_sweep_discovery
 
 from dashboard.services.micro_flow_v3_dashboard_service import (
     V3DashboardError, list_v3_tapes, inspect_v3_tape, existing_replay,
@@ -177,7 +178,7 @@ def render_micro_flow_v3_research(project_root):
         st.info('No se encontraron tapes V3 en reports/micro_flow_v3/tapes/. '
                 'Revisá el servicio micro-flow-v3-ethusdt en PM2.')
         return
-    monitor_tab, replay_tab, multi_tab = st.tabs(['📡 Recorder V3', '🧪 Replay & presión agresiva', '📊 Multi-Session Research'])
+    monitor_tab, replay_tab, multi_tab, sweep_tab = st.tabs(['📡 Recorder V3', '🧪 Replay & presión agresiva', '📊 Multi-Session Research', '🧭 Swing Sweep Discovery'])
     with monitor_tab:
         newest = tapes[0]
         try:
@@ -217,6 +218,8 @@ def render_micro_flow_v3_research(project_root):
                 st.rerun()
     with multi_tab:
         render_multi_session_research(root, tapes)
+    with sweep_tab:
+        render_swing_sweep_discovery(root, tapes)
     with replay_tab:
         closed = []
         for p in tapes:
