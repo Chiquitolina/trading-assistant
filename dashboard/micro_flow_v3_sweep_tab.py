@@ -12,6 +12,10 @@ from dashboard.services.micro_flow_v3_multi_session import load_replay_sessions
 from research.micro_flow_v3.swing_sweep_discovery import (
     discover, save_immutable_run,
 )
+from research.micro_flow_v3.sweep_entry_research import (
+    analyze_sweep_entries, save_entry_research_run,
+)
+from research.micro_flow_v3.aggression_exhaustion_discovery import discover_exhaustion
 
 
 def _fmt(ms):
@@ -38,7 +42,7 @@ def _table(events, reveal):
     return pd.DataFrame(out)
 
 
-def _inspect_chart(session, result, event, before_minutes, after_minutes, reveal):
+def _inspect_chart(session, result, event, before_minutes, after_minutes, reveal, entry_cases=None):
     sweep_ms = event['sweep']['available_ms']
     start = sweep_ms - before_minutes * 60_000
     finish = sweep_ms + after_minutes * 60_000 if reveal else sweep_ms
@@ -100,10 +104,86 @@ def _inspect_chart(session, result, event, before_minutes, after_minutes, reveal
         fig.add_annotation(x=x,y=1.025,xref='x',yref='paper',text=label,
                   font=dict(color=color,size=10),showarrow=False,
                   bgcolor='rgba(0,0,0,.6)')
+    if reveal and entry_cases:
+        for case, color in zip(entry_cases, ('#2dd4bf', '#e879f9')):
+            ref = case.get('entry_reference')
+            if not ref:
+                continue
+            stamp = ref['entry_reference_second_start_ms']
+            if start <= stamp <= finish:
+                x = pd.to_datetime(stamp,unit='ms',utc=True)
+                fig.add_vline(x=x,line_color=color,line_dash='dash',line_width=1,row=1,col=1)
+                fig.add_annotation(x=x,y=.96,xref='x',yref='paper',
+                   text=f"Referencia {case['variant']} · NO fill",showarrow=False,
+                   font=dict(color=color,size=9),bgcolor='rgba(0,0,0,.6)')
     fig.update_layout(height=790,hovermode='x unified',showlegend=True,
                       legend=dict(orientation='h',y=-.1),
                       margin=dict(l=10,r=10,t=85,b=30))
     fig.update_xaxes(rangeslider_visible=False)
+    return fig
+
+
+
+def _exhaustion_frame(events, reveal):
+    """Avoid revealing later classification/outcomes until explicitly requested."""
+    out=[]
+    for e in events:
+        snap=e['impulse_features']
+        row={
+            'ID':e['event_id'], 'Impulso UTC':_fmt(e['impulse']['available_ms']),
+            'Presión':e['pressure_side'],'Hipótesis':e['hypothesis_direction'],
+            'Volumen relativo':snap['relative_volume'],
+            'Imbalance':snap['imbalance'], 'Delta ETH':snap['delta_qty'],
+            'Movimiento presión %':snap['pressure_signed_displacement_pct'],
+            'Segundos observados':snap['observed_seconds'],
+        }
+        if reveal:
+            row.update({
+                'Debilitamiento':_fmt(e['weakening']['available_ms']) if e['weakening'] else None,
+                'Fracaso':_fmt(e['failure']['available_ms']) if e['failure'] else None,
+                'Estado observación':e['followup_state'],
+                'Referencia de entrada':e['entry_state'],
+                'Retorno 180s %':e['outcomes'].get('180s',{}).get('return_directional_pct'),
+                'MFE 180s %':e['outcomes'].get('180s',{}).get('mfe_directional_pct'),
+                'MAE 180s %':e['outcomes'].get('180s',{}).get('mae_directional_pct'),
+            })
+        out.append(row)
+    return pd.DataFrame(out)
+
+
+def _exhaustion_chart(session, ev, *, before, after, reveal):
+    seg=ev['segment_id']
+    ts=ev['impulse']['available_ms']
+    start=ts-before*60_000
+    end=ts+after*60_000 if reveal else ts
+    rows=[r for r in session['buckets']
+          if r['segment_id']==seg and start<=r['second_start_ms']<=end and
+          r['available_wall_ns']<=end*1_000_000]
+    if not rows:
+        return None
+    x=pd.to_datetime([r['second_start_ms'] for r in rows],unit='ms',utc=True)
+    fig=make_subplots(rows=3,cols=1,shared_xaxes=True,vertical_spacing=.045,
+                      row_heights=[.55,.23,.22],
+                      subplot_titles=('Precio observado 1s','Delta agresivo ETH','CVD observado ETH'))
+    fig.add_trace(go.Scatter(x=x,y=[float(r['close']) for r in rows],
+                   mode='lines',name='Precio 1s',line=dict(color='#38bdf8')),row=1,col=1)
+    fig.add_trace(go.Bar(x=x,y=[float(r['delta_qty']) for r in rows],
+                   name='Delta ETH',marker_color=['#16a34a' if float(r['delta_qty'])>=0 else '#dc2626' for r in rows]),row=2,col=1)
+    fig.add_trace(go.Scatter(x=x,y=[float(r['cvd_qty']) for r in rows],
+                   mode='lines',name='CVD',line=dict(color='#f472b6')),row=3,col=1)
+    timeline=[('impulse','Impulso','#f59e0b')]
+    if reveal:
+        timeline += [('weakening','Menor eficacia','#a78bfa'),
+                     ('failure','Fracaso confirmado','#22c55e')]
+    for field,label,color in timeline:
+        stage=ev.get(field)
+        if stage and start<=stage['available_ms']<=end:
+            t=pd.to_datetime(stage['available_ms'],unit='ms',utc=True)
+            fig.add_vline(x=t,line_color=color,line_dash='dot',row=1,col=1)
+            fig.add_annotation(x=t,y=1.015,yref='paper',text=label,showarrow=False,
+                               font=dict(size=10,color=color),bgcolor='rgba(0,0,0,.7)')
+    fig.update_layout(height=680,hovermode='x unified',margin=dict(l=10,r=10,t=75,b=20),
+                      legend=dict(orientation='h',y=-.12))
     return fig
 
 
@@ -161,14 +241,20 @@ def render_swing_sweep_discovery(root, tapes):
                      swing_bars=swing,max_swing_age_minutes=age,
                      reclaim_seconds=reclaim,departure_pct=departure,
                      retest_tolerance_pct=tolerance,retest_seconds=retest)
-                st.session_state['mfv3_sweep_discovery']=(settings,session,result)
+                entries=analyze_sweep_entries(session['buckets'],result)
+                exhaustion=discover_exhaustion(session['buckets'])
+                st.session_state['mfv3_sweep_discovery']=(settings,session,result,entries,exhaustion)
         except Exception as exc:
             st.error(f'No fue posible completar el estudio: {exc}'); return
     data=st.session_state.get('mfv3_sweep_discovery')
     if not data:
         st.info('Seleccioná un tape cerrado y ejecutá el detector. Los 1s originales no se modifican.')
         return
-    saved_settings,session,result=data
+    if len(data) != 5:
+        st.session_state.pop('mfv3_sweep_discovery',None)
+        st.info('La sesión del inspector es anterior a Fase 2. Ejecutá nuevamente Descubrir barridos.')
+        return
+    saved_settings,session,result,entry_study,exhaustion=data
     if saved_settings != settings:
         st.warning('Cambiaron los parámetros o la sesión. Ejecutá nuevamente el análisis.'); return
     s=result['summary']
@@ -196,7 +282,10 @@ def render_swing_sweep_discovery(root, tapes):
     ev=next(e for e in result['events'] if e['event_id']==key)
     before=st.slider('Minutos anteriores',5,90,20,5,key='mfv3_sweep_before')
     after=st.slider('Minutos posteriores (solo si se revelan)',5,30,15,5,key='mfv3_sweep_after')
-    chart=_inspect_chart(session,result,ev,before,after,reveal)
+    # Pure analysis over already-verified, complete Replay. No source writes.
+    event_cases = [c for c in entry_study['entries'] if c['event_id']==key]
+    event_effort = next(d for d in entry_study['effort_diagnostics'] if d['event_id']==key)
+    chart=_inspect_chart(session,result,ev,before,after,reveal,event_cases)
     if chart is not None:
         st.plotly_chart(chart,use_container_width=True)
     st.caption(f"Swing conocido: {_fmt(ev['swing_confirm_available_ms'])} · "
@@ -207,6 +296,113 @@ def render_swing_sweep_discovery(root, tapes):
         st.json(ev)
         st.warning('Los outcomes posteriores son descriptivos, sin fills, spread ni costos. '
                    'El retest requiere observación posterior al alejamiento.')
+    st.divider()
+    st.markdown('#### Sweep Entry Research · A/B + esfuerzo agresivo')
+    st.caption('A: primer segundo posterior al reclaim. B: primer segundo posterior al retest. '
+        'Solo referencias de precio observadas, NO fills. Sin spread, fees ni órdenes. '
+        'Cada barrido permanece en ambas cohortes aun cuando la señal no aparezca.')
+    totals = entry_study['summary']['variants']
+    cols=st.columns(4)
+    for col,variant,metric in (
+        (cols[0],'RECLAIM','signal_seen'), (cols[1],'RECLAIM','observed_180s'),
+        (cols[2],'RETEST','signal_seen'), (cols[3],'RETEST','observed_180s')):
+        col.metric(f'{variant}: '+('señales' if metric=='signal_seen' else 'resultados 180s'),
+                   totals[variant][metric])
+    # Effort diagnostics at sweep-time can be shown with the future HIDDEN.
+    st.markdown('**Presión observada en este barrido (sin mirar el futuro)**')
+    st.write({k:event_effort.get(k) for k in (
+        'high_effort_candidate','delta_qty','signed_price_displacement_pct',
+        'signed_impact_pct_per_100eth_delta','recovery_from_window_extreme_fraction',
+        'observed_seconds','sweep_relative_volume','sweep_imbalance')})
+    st.caption('"High effort" = presión alineada, volumen ≥2x e |imbalance| ≥0,70 '
+               '(solo referencia exploratoria). No prueba agotamiento ni absorción.')
+    if reveal:
+        st.markdown('**Referencias de entrada del barrido seleccionado**')
+        selected_rows=[]
+        for case in event_cases:
+            ref=case['entry_reference'] or {}
+            horizon=case['outcomes'].get('180s',{})
+            selected_rows.append({
+                'Variante':case['variant'], 'Señal':case['signal_state'],
+                'Referencia':case['entry_state'],
+                'Instante señal UTC':_fmt(case['signal_available_ms']) if case['signal_available_ms'] else None,
+                'Precio 1s open (NO fill)':ref.get('entry_reference_price'),
+                'Primer segundo observado UTC':_fmt(ref['entry_reference_second_start_ms']) if ref else None,
+                'Estado 180s':horizon.get('state'),
+                'Retorno bruto 180s %':horizon.get('return_directional_pct'),
+                'MFE 180s %':horizon.get('mfe_directional_pct'),
+                'MAE 180s %':horizon.get('mae_directional_pct'),
+            })
+        st.dataframe(pd.DataFrame(selected_rows),use_container_width=True,hide_index=True)
+        st.markdown('**Todas las observaciones · sin seleccionar ganadoras**')
+        all_rows=[]
+        for case in entry_study['entries']:
+            p=case.get('entry_reference') or {}
+            h=case['outcomes'].get('180s',{})
+            all_rows.append({'Evento':case['event_id'],'Variante':case['variant'],
+                'Sesgo':case['hypothesis_direction'],'Señal':case['signal_state'],
+                'Referencia':case['entry_state'],
+                'Precio ref. NO fill':p.get('entry_reference_price'),
+                'Estado 180s':h.get('state'),'Retorno 180s %':h.get('return_directional_pct'),
+                'MFE 180s %':h.get('mfe_directional_pct'),
+                'MAE 180s %':h.get('mae_directional_pct'),
+                'Cobertura 180s':h.get('coverage_fraction')})
+        frame=pd.DataFrame(all_rows)
+        st.dataframe(frame,use_container_width=True,hide_index=True)
+        st.download_button('Exportar A/B (todos los casos)',frame.to_csv(index=False),
+                           file_name='sweep_entry_research_ab.csv',mime='text/csv')
+        effort_frame=pd.DataFrame(entry_study['effort_diagnostics'])
+        st.download_button('Exportar presión / posible agotamiento',
+                 effort_frame.to_csv(index=False),file_name='sweep_aggression_effort.csv',
+                 mime='text/csv')
+        st.caption('Los outcomes se censuran ante huecos de observación o fin de sesión. '
+          'Las variantes no son operaciones independientes ni un backtest ejecutable. '
+          'Que haya rally más adelante no implica un retorno favorable a 180s.')
+    else:
+        st.info('El futuro sigue oculto. Activá Revelar etapas posteriores para '
+                'comparar entradas A/B y los resultados observados.')
+    if st.button('Guardar investigación A/B + agotamiento (verificando RAW)',
+                 key='mfv3_sweep_entry_save'):
+        try:
+            with st.spinner('Verificando fuente RAW y SHA256 del Replay...'):
+                saved=save_entry_research_run(root,session,result,entry_study,
+                                              exhaustion=exhaustion,verify_raw=True)
+            st.success(f'Corrida de investigación A/B conservada: {saved}')
+        except Exception as exc:
+            st.error(f'No se guardó la nueva corrida: {exc}')
+    st.divider()
+    st.markdown('#### Aggression Exhaustion Discovery · independiente de swings')
+    st.caption('Detecta impulsos BUY/SELL por volumen e imbalance observados; después evalúa '
+      'si la presión pierde eficacia y si el precio cruza el comienzo del impulso en '
+      'sentido contrario. NO prueba absorción ni implica una entrada en el máximo/mínimo.')
+    es=exhaustion['summary']
+    aa,bb,cc=st.columns(3)
+    aa.metric('Impulsos BUY',es['buy_impulses'])
+    bb.metric('Impulsos SELL',es['sell_impulses'])
+    if reveal:
+        cc.metric('Fracaso confirmado después',es['failure_observed'])
+        st.caption(f"Debilitamiento observado: {es['weakening_observed']} · "
+                   f"Seguimientos censurados: {es['censored_followup']}")
+    else:
+        cc.metric('Impulsos totales',es['impulses'])
+    exhaustion_table=_exhaustion_frame(exhaustion['events'],reveal)
+    st.dataframe(exhaustion_table,use_container_width=True,hide_index=True)
+    if exhaustion['events']:
+        exhaustion_id=st.selectbox('Inspeccionar impulso independiente',
+             [e['event_id'] for e in exhaustion['events']],key='mfv3_exhaustion_selected')
+        inspected=next(e for e in exhaustion['events'] if e['event_id']==exhaustion_id)
+        fig=_exhaustion_chart(session,inspected,before=before,after=after,reveal=reveal)
+        if fig is not None:
+            st.plotly_chart(fig,use_container_width=True,key='mfv3_exhaustion_chart')
+        if reveal:
+            st.json(inspected)
+    if reveal:
+        st.download_button('Exportar todos los impulsos de agotamiento (CSV)',
+            exhaustion_table.to_csv(index=False),file_name='aggression_exhaustion_v1.csv',
+            mime='text/csv')
+    st.caption('Las fases temporales están separadas. El resultado a 180s se mide solo '
+      'después de una posible referencia posterior al fracaso, y se censura sin cobertura. '
+      'No hay órdenes ni fills.')
     st.divider()
     st.markdown('#### Persistencia reproducible')
     st.caption('Replay SHA256 verificado al cargar; guardar exige verificar también el '
