@@ -11,7 +11,10 @@ from dashboard.services.micro_flow_v3_dashboard_service import (
     V3DashboardError, list_v3_tapes, inspect_v3_tape, existing_replay,
     replay_paths, load_buckets_jsonl,
 )
-from dashboard.services.micro_flow_v3_research import detect_pressure_events
+from dashboard.services.micro_flow_v3_research import (
+    detect_pressure_events, cluster_pressure_events,
+    outcome_comparison, classify_observed_outcome,
+)
 
 
 def _display_ts(ms):
@@ -71,7 +74,7 @@ def _chart(frame, events, title):
                 fig.add_trace(go.Scatter(
                     x=pd.to_datetime([e['second_start_ms'] for e in selected], unit='ms', utc=True),
                     y=[e['signal_price'] for e in selected], mode='markers', name=side,
-                    marker=dict(color=color, symbol=sym, size=9),
+                    marker=dict(color=color, symbol=sym, size=10),
                     customdata=[[e['relative_volume'],e['imbalance']] for e in selected],
                     hovertemplate='%{x}<br>Precio %{y:.2f}<br>Vol x%{customdata[0]:.2f}'
                                   '<br>Imbalance %{customdata[1]:.2f}<extra></extra>'), row=1, col=1)
@@ -80,6 +83,66 @@ def _chart(frame, events, title):
                       legend=dict(orientation='h',y=-.10), margin=dict(l=20,r=20,t=65,b=40))
     fig.update_xaxes(rangeslider_visible=False)
     return fig
+
+
+def _inspector_chart(frame, event, before_seconds, after_seconds):
+    """Observed data only, restricted to the event causal segment."""
+    ready = int(event['ready_ms'])
+    subset = frame[
+        frame['segment_id'].eq(event['segment_id'])
+        & frame['second_start_ms'].between(
+            ready - int(before_seconds) * 1000,
+            ready + int(after_seconds) * 1000,
+        )
+    ].copy()
+    if subset.empty:
+        return None
+    fig = _chart(subset, [event], f"Inspección · {event['event_id']}")
+    color = '#16a34a' if event['direction'] > 0 else '#dc2626'
+    for ts_ms, label, shade in (
+        (event['ready_ms'], 'Señal disponible', '#f59e0b'),
+        (event.get('entry_ms'), 'Entrada proxy', color),
+    ):
+        if ts_ms is None:
+            continue
+        x = pd.to_datetime(int(ts_ms), unit='ms', utc=True)
+        fig.add_shape(type='line', x0=x, x1=x, y0=0, y1=1,
+                      xref='x', yref='paper', line=dict(color=shade,width=2,dash='dash'))
+        fig.add_annotation(x=x, y=1.04, xref='x', yref='paper', text=label,
+                           showarrow=False, font=dict(color=shade,size=10),
+                           bgcolor='rgba(0,0,0,.65)')
+    outcomes = [(h, event.get(f'exit_observed_ms_{h}s'),
+                 event.get(f'exit_proxy_{h}s')) for h in (30,60,180)]
+    available = [(h, ts, px) for h,ts,px in outcomes if ts is not None and px is not None
+                 and (ready - before_seconds * 1000) <= ts <= (ready + after_seconds*1000)]
+    if available:
+        fig.add_trace(go.Scatter(
+            x=pd.to_datetime([ts for _,ts,_ in available], unit='ms', utc=True),
+            y=[px for _,_,px in available], mode='markers+text',
+            text=[f'{h}s' for h,_,_ in available], textposition='top center',
+            name='Horizontes observados', marker=dict(symbol='diamond',size=10,color='#eab308'),
+            hovertemplate='Observado: %{x}<br>Precio proxy %{y:.2f}<extra></extra>'
+        ), row=1, col=1)
+    fig.update_layout(height=670, margin=dict(l=20,r=20,t=80,b=40))
+    return fig
+
+
+def _report_table(events, *, neutral_band_pct):
+    summary = outcome_comparison(events, neutral_band_pct=neutral_band_pct)
+    rows = []
+    for r in summary:
+        rows.append({
+            'Dirección señal': 'BUY' if r['side'] == 'BUY_PRESSURE' else 'SELL',
+            'Horizonte': f"{r['horizon_s']}s",
+            'Señales': r['signals'], 'Válidos': r['observed'],
+            'Censurados': r['censored'], 'Continúan': r['continuation'],
+            'Revierten': r['reversal'], 'Neutrales': r['neutral'],
+            'Continuación %': (round(r['continuation_pct'],1)
+                                if r['continuation_pct'] is not None else None),
+            'Ret. dir. medio %': (round(r['mean_directional_return_pct'],4)
+                                   if r['mean_directional_return_pct'] is not None else None),
+        })
+    return pd.DataFrame(rows)
 
 
 def render_micro_flow_v3_research(project_root):
@@ -227,22 +290,54 @@ def render_micro_flow_v3_research(project_root):
                                         min_imbalance=float(imbalance),
                                         min_trades=int(min_trades),
                                         cooldown_seconds=int(cooldown))
-        event_frame = pd.DataFrame(events)
+        # Event clustering is ANALYTICAL; it never changes the raw signal set.
+        a_episode, b_episode = st.columns([1, 2])
+        with a_episode:
+            episode_seconds = st.select_slider(
+                'Agrupar señales dentro de (s)',
+                options=[30,60,90,120,180,240,300], value=180,
+                key='mfv3_episode_window',
+            )
+        with b_episode:
+            population = st.radio(
+                'Base de comparación',
+                ['Episodios (primera señal)', 'Todas las señales (solapadas)'],
+                horizontal=True, key='mfv3_population',
+            )
+        annotated_events, episodes = cluster_pressure_events(
+            events, window_seconds=int(episode_seconds),
+        )
+        anchor_events = [event for event in annotated_events if event['is_episode_anchor']]
+        compared = (anchor_events if population.startswith('Episodios')
+                    else annotated_events)
+        mixed_count = sum(ep['mixed_sides'] for ep in episodes)
         k1,k2,k3,k4 = st.columns(4)
-        k1.metric('Eventos detectados', f'{len(events):,}')
-        if not event_frame.empty and 'return_60s_pct' in event_frame:
-            valid = pd.to_numeric(event_frame['return_60s_pct'], errors='coerce').dropna()
-        else:
-            valid = pd.Series(dtype='float64')
-        k2.metric('Outcomes válidos · 60s', f'{len(valid):,}')
-        k3.metric('Retorno direccional medio · 60s',
-                  f'{valid.mean():+.3f}%' if len(valid) else '—')
-        k4.metric('Continuación favorable · 60s',
-                  f'{(valid > 0).mean()*100:.1f}%' if len(valid) else '—')
-        st.caption('Exploratorio: evento causal a `ready_ms`, entrada proxy al primer '
-                   'bucket posterior; retornos/máximos/mínimos observados, no fills '
-                   'ni PnL. Los horizontes sin datos se censuran. Eventos solapados.')
-        duration = st.select_slider('Ventana de gráfico (últimos minutos)',
+        k1.metric('Señales detectadas', f'{len(events):,}')
+        k2.metric('Episodios', f'{len(episodes):,}')
+        k3.metric('Con BUY y SELL', f'{mixed_count:,}')
+        valid_60 = [float(e['return_60s_pct']) for e in compared
+                    if e.get('return_60s_pct') is not None]
+        k4.metric('Retorno direccional medio · 60s',
+                  f'{sum(valid_60)/len(valid_60):+.3f}%' if valid_60 else '—')
+        st.caption(
+            'Agrupación por ventanas FIJAS desde la primera señal observada en cada tramo; '
+            'cada señal pertenece a un solo episodio. Los resultados por episodio usan '
+            'solo su primera señal, aunque existan disparadores opuestos posteriores. '
+            'Esta convención reduce duplicados, pero no demuestra independencia estadística.'
+        )
+        st.markdown('#### Momentum vs Exhaustion · resultados observados')
+        neutral_band = st.select_slider(
+            'Zona neutral del retorno direccional (%)',
+            options=[0.0, 0.005, 0.01, 0.02, 0.05], value=0.01,
+            key='mfv3_neutral_band',
+        )
+        st.dataframe(_report_table(compared,neutral_band_pct=float(neutral_band)),
+                     use_container_width=True, hide_index=True,
+                     key='mfv3_outcome_comparison')
+        st.caption('Continuación: retorno direccional > banda neutral. Reversión: < -banda. '
+                   'Es una etiqueta EX POST; no se conoce al detectar la señal. '
+                   'Válidos excluye horizontes censurados; retornos sin costos/fills.')
+        duration = st.select_slider('Ventana del gráfico general (últimos minutos)',
                                     options=[5,10,30,60,120,360], value=30,
                                     key='mfv3_window')
         start_ms = int(frame['second_start_ms'].max()) - int(duration)*60_000
@@ -250,27 +345,101 @@ def render_micro_flow_v3_research(project_root):
         if chart_frame.empty:
             st.warning('No hay datos para esa ventana.')
         else:
-            st.plotly_chart(_chart(chart_frame, events, 'ETHUSDT · Replay V3'),
+            st.plotly_chart(_chart(chart_frame, anchor_events,
+                                  'ETHUSDT · Replay V3 · anclas de episodios'),
                             use_container_width=True, key='mfv3_price_flow_chart',
                             config={'displaylogo':False,'scrollZoom':True})
-        if events:
+        if annotated_events:
+            st.markdown('#### Episodios (sin duplicar disparadores)')
+            episode_frame = pd.DataFrame(episodes)
+            episode_frame['inicio_utc'] = pd.to_datetime(
+                episode_frame['anchor_ready_ms'], unit='ms', utc=True,
+            )
+            display_eps = ['inicio_utc', 'episode_id', 'episode_side', 'trigger_count',
+                           'buy_triggers', 'sell_triggers', 'anchor_entry_proxy']
+            st.dataframe(episode_frame[display_eps].iloc[::-1],
+                         use_container_width=True, hide_index=True,
+                         key='mfv3_episode_table')
+            st.markdown('#### Todas las señales y su episodio')
+            event_frame = pd.DataFrame(annotated_events)
             event_frame['hora_utc'] = pd.to_datetime(event_frame['ready_ms'],
                                                       unit='ms', utc=True)
-            visible = ['hora_utc','side','relative_volume','imbalance','delta_qty',
-                       'entry_proxy','return_30s_pct','return_60s_pct','return_180s_pct',
-                       'mfe_180s_pct','mae_180s_pct','event_id']
-            st.markdown('#### Eventos para inspeccionar')
+            visible = ['hora_utc','side','episode_id','is_episode_anchor',
+                       'relative_volume','imbalance','delta_qty','entry_proxy',
+                       'return_30s_pct','return_60s_pct','return_180s_pct',
+                       'directional_mfe_180s_pct','directional_mae_180s_pct',
+                       'outcome_state_180s','event_id']
             st.dataframe(event_frame[visible].iloc[::-1],
                          use_container_width=True, hide_index=True,
                          key='mfv3_event_table')
-            st.download_button('Descargar eventos V3 (CSV)',
+            st.download_button('Descargar eventos V3 (CSV, con episodios)',
                                event_frame.to_csv(index=False).encode('utf-8'),
-                               file_name='micro_flow_v3_ethusdt_pressure_events.csv',
+                               file_name='micro_flow_v3_ethusdt_episodes_events.csv',
                                mime='text/csv', key='mfv3_download_events')
-            selected_id = st.selectbox('Inspeccionar evento', [e['event_id'] for e in events[::-1]],
-                                       key='mfv3_inspect_id')
-            selected_event = next(e for e in events if e['event_id'] == selected_id)
-            st.json(selected_event)
+            st.download_button('Descargar episodios V3 (CSV)',
+                               episode_frame.to_csv(index=False).encode('utf-8'),
+                               file_name='micro_flow_v3_ethusdt_episodes.csv',
+                               mime='text/csv', key='mfv3_download_episodes')
+            st.markdown('#### 🔎 Event Inspector')
+            inspect_all = st.checkbox('Incluir señales secundarias en el selector',
+                                      value=False, key='mfv3_inspect_all')
+            candidates = annotated_events if inspect_all else anchor_events
+            event_by_id = {e['event_id']:e for e in candidates}
+            options = [e['event_id'] for e in candidates[::-1]]
+            selected_id = st.selectbox(
+                'Seleccionar evento', options,
+                format_func=lambda ident: (
+                    f"{_display_ts(event_by_id[ident]['ready_ms'])} · "
+                    f"{event_by_id[ident]['side']} · "
+                    f"{'ANCLA' if event_by_id[ident]['is_episode_anchor'] else 'secundaria'} · "
+                    f"{ident}"
+                ), key='mfv3_inspect_id',
+            )
+            selected_event = event_by_id[selected_id]
+            i1, i2, i3 = st.columns(3)
+            i1.metric('Señal disponible',_display_ts(selected_event['ready_ms']))
+            i2.metric('Entrada proxy',
+                      f"{selected_event['entry_proxy']:.2f}"
+                      if selected_event['entry_proxy'] is not None else 'CENSURADA')
+            i3.metric('Episodio',selected_event['episode_id'])
+            before_col, after_col = st.columns(2)
+            with before_col:
+                before_s = st.select_slider('Segundos previos',
+                                            options=[15,30,60,120,180], value=60,
+                                            key='mfv3_before')
+            with after_col:
+                after_s = st.select_slider('Segundos posteriores',
+                                           options=[60,120,180,240,360], value=240,
+                                           key='mfv3_after')
+            detail = _inspector_chart(frame,selected_event,before_s,after_s)
+            if detail is not None:
+                st.plotly_chart(detail, use_container_width=True,
+                                key='mfv3_event_inspector_chart',
+                                config={'displaylogo':False,'scrollZoom':True})
+            else:
+                st.info('No hay buckets de ese tramo en el rango seleccionado.')
+            outcomes = []
+            for h in (30,60,180):
+                suffix=f'{h}s'
+                result = selected_event.get(f'return_{suffix}_pct')
+                outcomes.append({
+                    'Horizonte': suffix,
+                    'Estado': selected_event.get(f'outcome_state_{suffix}'),
+                    'Clasificación posterior': classify_observed_outcome(
+                        result, neutral_band_pct=neutral_band),
+                    'Retorno direccional %':result,
+                    'MFE favorable %': selected_event.get(f'directional_mfe_{suffix}_pct'),
+                    'MAE adverso %': selected_event.get(f'directional_mae_{suffix}_pct'),
+                    'Precio observado horizonte': selected_event.get(f'exit_proxy_{suffix}'),
+                })
+            st.dataframe(pd.DataFrame(outcomes),use_container_width=True,
+                         hide_index=True,key='mfv3_inspected_outcomes')
+            st.caption('Para BUY un alza favorece; para SELL una baja favorece. '
+                       'MFE positivo = excursión favorable; MAE negativo = adversa. '
+                       'Los extremos de precio sin ajustar siguen disponibles '
+                       'como price_high_excursion/price_low_excursion en el JSON.')
+            with st.expander('Evento completo y datos crudos', expanded=False):
+                st.json(selected_event)
         else:
             st.info('No se detectaron eventos con estos umbrales. '
                     'Podés reducir el volumen relativo o el desequilibrio.')
