@@ -7,6 +7,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+from dashboard.micro_flow_v3_multi_session_tab import render_multi_session_research
+
 from dashboard.services.micro_flow_v3_dashboard_service import (
     V3DashboardError, list_v3_tapes, inspect_v3_tape, existing_replay,
     replay_paths, load_buckets_jsonl,
@@ -175,7 +177,7 @@ def render_micro_flow_v3_research(project_root):
         st.info('No se encontraron tapes V3 en reports/micro_flow_v3/tapes/. '
                 'Revisá el servicio micro-flow-v3-ethusdt en PM2.')
         return
-    monitor_tab, replay_tab = st.tabs(['📡 Recorder V3', '🧪 Replay & presión agresiva'])
+    monitor_tab, replay_tab, multi_tab = st.tabs(['📡 Recorder V3', '🧪 Replay & presión agresiva', '📊 Multi-Session Research'])
     with monitor_tab:
         newest = tapes[0]
         try:
@@ -213,6 +215,8 @@ def render_micro_flow_v3_research(project_root):
             if st.button('Actualizar datos del recorder', key='mfv3_refresh'):
                 _inspect_cached.clear()
                 st.rerun()
+    with multi_tab:
+        render_multi_session_research(root, tapes)
     with replay_tab:
         closed = []
         for p in tapes:
@@ -586,3 +590,4 @@ def render_micro_flow_v3_research(project_root):
         with st.expander('Fuente, hash y límites del Replay', expanded=False):
             st.json(summary)
             st.caption('No se agregan datos desde CSV V1/V2, endpoints de Binance ni Redis.')
+
