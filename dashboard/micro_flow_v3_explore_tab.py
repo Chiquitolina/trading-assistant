@@ -13,6 +13,7 @@ from dashboard.services.micro_flow_v3_dashboard_service import list_v3_tapes
 from dashboard.services.micro_flow_v3_multi_session import (
     find_replay_for_closed_tape, load_replay_sessions,
 )
+from dashboard.micro_flow_v3_context_tab import render_micro_flow_v3_context
 from dashboard.services.micro_flow_v3_explore_service import (
     FOCUS_OPTIONS, build_explore_catalog, filter_explore_events, observed_view,
 )
@@ -239,5 +240,6 @@ def render_micro_flow_v3_explore(root):
         st.info('El futuro se muestra para investigación visual, no para seleccionar '
                 'eventos ganadores ni simular un fill. Los outcomes causales y sus censuras '
                 'se analizan en Strategy Research.')
+    render_micro_flow_v3_context(root,session,study,chosen,identity)
     st.caption('Explore no guarda ni modifica tapes, Replay, resultados ni parámetros '
                'congelados de las investigaciones anteriores.')
