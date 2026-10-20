@@ -84726,6 +84726,7 @@ if selected_section == "reaction_swing_lab":
                 "🎯 Pivots / Confirmations",
                 "📍 Event swing structure",
                 "🧬 Volume → future swings",
+                "🏃 Runner Discovery",
                 "⚙️ Runner Optimization",
                 "📈 Runner Portfolio",
                 "🎯 Candidate Competition",
@@ -84742,7 +84743,12 @@ if selected_section == "reaction_swing_lab":
 
         # Runner search always reads only LIVE_OBSERVED; never triggers legacy
         # materialization, returns results only in Streamlit session memory.
-        if lab_mode == "⚙️ Runner Optimization":
+        if lab_mode == "🏃 Runner Discovery":
+            from dashboard.views.reaction_lab_runner_discovery_v2_view import (
+                render_runner_discovery_v2,
+            )
+            render_runner_discovery_v2(BASE_DIR)
+        elif lab_mode == "⚙️ Runner Optimization":
             render_reaction_lab_runner_optimizer(BASE_DIR)
         elif lab_mode == "📈 Runner Portfolio":
             from dashboard.views.reaction_lab_portfolio_view import (
@@ -84757,7 +84763,7 @@ if selected_section == "reaction_swing_lab":
 
         # Continuous always reads the same persisted Event IDs in EVERY view.
         # Legacy engines are intentionally unchanged and never run in Continuous.
-        if lab_mode not in ("⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition") and cohort_mode in ("Continuous V1", "Todos"):
+        if lab_mode not in ("🏃 Runner Discovery", "⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition") and cohort_mode in ("Continuous V1", "Todos"):
             from reaction_lab_research_view import render_cohort_research
             render_cohort_research(
                 BASE_DIR, "Continuous V1", lab_mode, structural_symbols,
