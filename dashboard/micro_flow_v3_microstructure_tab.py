@@ -105,7 +105,7 @@ def render_microstructure_feature_study(root,session,aggression,selected_event=N
     if plot_rows:
         fig=go.Figure()
         fig.add_trace(go.Bar(x=[r['Ventana'] for r in plot_rows],
-                    y=[r['Impacto bps/100 ETH'] for r in plot_rows],
+                    y=[r['Impacto bps/100 base'] for r in plot_rows],
                     name='Impacto firmado, bps/100 unidades base'))
         fig.update_layout(height=280,title='Eficiencia de la agresión al instante del impulso',
                      xaxis_title='Ventanas retrospectivas',yaxis_title='Impacto bps / 100 unidades base',
