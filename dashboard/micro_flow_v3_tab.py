@@ -1,6 +1,7 @@
 """Micro Flow V3-only Streamlit interface. No Legacy V1/V2 data is queried."""
 from datetime import datetime, timezone
 from pathlib import Path
+import sqlite3
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -168,7 +169,7 @@ def _report_table(events, *, neutral_band_pct):
     return pd.DataFrame(rows)
 
 
-def render_micro_flow_v3_research(project_root):
+def render_micro_flow_v3_legacy(project_root):
     root = Path(project_root)
     st.markdown('## ⚡ Micro Flow V3 · Research Lab')
     st.caption('Fuente exclusiva: AggTrades de V3 en SQLite y Replay causal 1s. '
@@ -594,3 +595,97 @@ def render_micro_flow_v3_research(project_root):
             st.json(summary)
             st.caption('No se agregan datos desde CSV V1/V2, endpoints de Binance ni Redis.')
 
+
+
+
+def render_micro_flow_v3_research(project_root):
+    """Focused workspace navigation; original V3 renderer remains available.
+
+    Only the selected workspace is executed. Avoid st.tabs with eager expensive
+    simultaneous Replay/Research and never touch LIVE/PM2 or source artifacts.
+    """
+    from dashboard.micro_flow_v3_explore_tab import render_micro_flow_v3_explore
+
+    root = Path(project_root)
+    st.markdown('## Micro Flow V3 · Exhaustion Research Workspace')
+    st.caption('Research-only · fuente AggTrades RAW + Replay V3 · ' 
+               'Explore primero, evidencia estadística por separado.')
+    page = st.radio(
+        'Espacio de trabajo',
+        ['🔎 Explore', '📈 Strategy Research', '🛡️ Data & Replay Quality',
+         '🗂️ Research Archive'],
+        horizontal=True, key='mfv3_workspace_page',
+    )
+    if page == '🔎 Explore':
+        render_micro_flow_v3_explore(root)
+        return
+    if page == '📈 Strategy Research':
+        st.subheader('Strategy Research · métodos originales sin cambios')
+        st.caption('Comparaciones A/B, agotamiento, confluencia y outcomes: ' 
+                   'sus reglas siguen siendo las originales. ' 
+                   'Por ahora, esta sección conserva los controles técnicos existentes.')
+        render_swing_sweep_discovery(root, list_v3_tapes(root))
+        return
+    if page == '🛡️ Data & Replay Quality':
+        st.subheader('Data & Replay Quality')
+        st.caption('Estado de los SQLite V3. Un proceso PM2 online no prueba la ' 
+                   'frescura del tape ni la integridad del Replay.')
+        paths = list_v3_tapes(root)
+        summary = []
+        for path in paths[:40]:
+            try:
+                info = _details(path)
+                state = ('CERRADO' if info['closed'] else 'ABIERTO')
+                summary.append({'Tape':path.name, 'Estado':state,
+                    'AggTrades':info['trades'], 'ID jumps':info['id_jumps'],
+                    'Anomalías':info['anomalies'],
+                    'MB':round(info['size_bytes']/1024**2,1)})
+            except (OSError,ValueError,KeyError,TypeError,sqlite3.Error) as exc:
+                summary.append({'Tape':path.name, 'Estado':'INVÁLIDO / NO LEGIBLE',
+                                'Detalle':str(exc)})
+        if summary:
+            st.dataframe(pd.DataFrame(summary),hide_index=True,use_container_width=True)
+        else:
+            st.warning('Sin tapes V3 en la ruta configurada.')
+        with st.expander('Verificación estricta RAW ↔ Replay (lectura intensa)',expanded=False):
+            closed = [p for p in paths if _safe_closed_for_workspace(p)]
+            if not closed:
+                st.info('Sin tapes cerrados legibles.')
+            else:
+                tape=st.selectbox('Tape cerrado',closed,format_func=lambda p:p.name,
+                                  key='mfv3_workspace_verify_tape')
+                if st.button('Verificar digest RAW y hash del Replay',
+                             key='mfv3_workspace_verify_btn'):
+                    try:
+                        from dashboard.services.micro_flow_v3_multi_session import (
+                            find_replay_for_closed_tape, hash_replay)
+                        from research.micro_flow_v3.tape import replay_digest
+                        pair=find_replay_for_closed_tape(root,tape)
+                        if pair is None:
+                            st.error('No hay Replay reconocido para este tape cerrado.')
+                        else:
+                            replay_path, _, meta, _ = pair
+                            count, digest = replay_digest(tape)
+                            equal = (count==meta['source_tape_rows'] and
+                                     digest==meta['source_tape_digest_sha256'] and
+                                     hash_replay(replay_path)==meta['replay_jsonl_sha256'])
+                            if equal:
+                                st.success('RAW lógico + SHA256 Replay coinciden.')
+                            else:
+                                st.error('No coinciden las fuentes: conservar, auditar, no sobrescribir.')
+                    except (OSError,ValueError,KeyError,TypeError,sqlite3.Error) as exc:
+                        st.error(f'Verificación incompleta: {exc}')
+        st.caption('Los huecos de observación y los límites entre tapes conservan ' 
+                   'su semántica original. Esta fase NO altera la política de censura.')
+        return
+    st.subheader('Research Archive · interfaz V3 anterior')
+    st.caption('Todos los experimentos anteriores siguen accesibles. ' 
+               'Este archivo no elimina ni reescribe sus implementaciones.')
+    render_micro_flow_v3_legacy(root)
+
+
+def _safe_closed_for_workspace(path):
+    try:
+        return bool(_details(path)['closed'])
+    except (OSError,ValueError,KeyError,TypeError,sqlite3.Error):
+        return False
