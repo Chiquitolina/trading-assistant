@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from research.micro_flow_v3.raw_recorder import run_live_raw
-from research.micro_flow_v3.tape import replay_digest
+from research.micro_flow_v3.tape import TapeStore, replay_digest
 
 
 def trade(agg_id, *, extra_space=False):
@@ -65,7 +65,9 @@ class RawRecorderTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_pilot(self, connector, duration=0.00008):
+    def run_pilot(self, connector, duration=0.001):
+        # Simulated startup includes SQLite fsync and asyncio scheduling.
+        # 0.00008 h (0.288s) was racy under VPS I/O load; 0.001 h = 3.6s.
         return run_live_raw('ETHUSDT', self.path, max_hours=duration,
                             min_free_gb=0, reconnect_min=0,
                             reconnect_max=0, connect_factory=connector)
@@ -130,7 +132,15 @@ class RawRecorderTests(unittest.TestCase):
         self.assertEqual(self.rows("SELECT quality FROM tape WHERE kind='TRADE' ORDER BY seq")[-1][0], 'ID_JUMP_SUSPECTED')
 
     def test_never_append_existing_or_overwrite(self):
-        self.run_pilot(FakeConnector([trade(900)]))
+        # This test is about refusing to open an existing tape, not timing
+        # the arrival of an initial simulated trade. Build a valid closed tape.
+        writer = TapeStore(self.path, symbol='ETHUSDT')
+        try:
+            writer.marker('TEST_EXISTING_TAPE')
+            writer.ingest(trade(900), connection=1)
+            writer.marker('PROCESS_STOP')
+        finally:
+            writer.close()
         before = replay_digest(self.path)
         with self.assertRaises(FileExistsError):
             self.run_pilot(FakeConnector([trade(901)]))
