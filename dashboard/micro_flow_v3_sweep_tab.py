@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from dashboard.micro_flow_v3_confluence_tab import render_confluence_study
+from dashboard.micro_flow_v3_microstructure_tab import render_microstructure_feature_study
 from dashboard.services.micro_flow_v3_multi_session import load_replay_sessions
 from research.micro_flow_v3.swing_sweep_discovery import (
     discover, save_immutable_run,
@@ -288,7 +289,8 @@ def render_swing_sweep_discovery(root, tapes):
                'Datos 1s observados, sin rellenar segundos/minutos vacíos; '
                'swings disponibles después del cierre real de la vela confirmadora.')
     if not result['events']:
-        st.warning('No hay barridos con esta configuración. La confluencia VE + AE puede estudiarse igual.')
+        st.warning('No hay barridos con esta configuración. AggTrades y Confluence pueden estudiarse igual.')
+        render_microstructure_feature_study(root,session,exhaustion)
         render_confluence_study(root,session,exhaustion)
         return
     reveal=st.checkbox('Revelar etapas posteriores y outcomes (modo exploratorio)',
@@ -426,6 +428,8 @@ def render_swing_sweep_discovery(root, tapes):
         st.download_button('Exportar todos los impulsos de agotamiento (CSV)',
             exhaustion_table.to_csv(index=False),file_name='aggression_exhaustion_v1.csv',
             mime='text/csv')
+    render_microstructure_feature_study(root,session,exhaustion,
+                                        selected_event=exhaustion_id if exhaustion['events'] else None)
     st.markdown('#### Exhaustion Entry Research · confirmación vs ruptura de swing')
     st.caption('A FAILURE: referencia posterior al fracaso. B FAILURE_SWING_BREAK: '
         'tras el fracaso, cierre posterior más allá de un swing confirmado ANTES '
