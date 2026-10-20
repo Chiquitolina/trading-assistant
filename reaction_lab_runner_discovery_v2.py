@@ -28,7 +28,7 @@ MINUTE_MS = 60_000
 HORIZONS = (15, 30, 60, 120, 180, 360)
 TARGETS = (2, 3, 5)
 SL_PCT = 1.0
-SCHEMA_VERSION = "runner-discovery-v2.1"
+SCHEMA_VERSION = "runner-discovery-v2.2-dna"
 
 # Labels only: never infer that missing values indicate weak market behavior.
 FEATURE_LABELS = {
@@ -52,6 +52,7 @@ FIELDS = [
     "entry_observed_ts", "entry_observed_open", "observed_delay_min", "observed_bars", "observed_quality",
     "mfe_360_pct", "mae_360_pct", "mfe_180_pct", "mae_180_pct",
     *[f"time_to_run_{tp}pct" for tp in TARGETS],
+    *[f"obs_time_to_run_{tp}pct" for tp in TARGETS],
     *[f"struct_tp{tp}_result" for tp in TARGETS],
     *[f"struct_tp{tp}_min" for tp in TARGETS],
     *[f"obs_tp{tp}_result" for tp in TARGETS],
@@ -154,6 +155,27 @@ def path_metrics(bars, price, side):
             if first_hits[t] is None and f >= t:
                 first_hits[t] = i
     return mfe, mae, mfe180, mae180, first_hits
+
+
+def first_favorable_hits(bars, *, side, price, targets=TARGETS):
+    """First favorable high/low hit from a fixed entry; ignores SL entirely.
+
+    Null = target not observed in available candles. One-based bar numbers.
+    Unlike first_touch(), an earlier adverse move does not end the search.
+    """
+    hits = {int(tp): None for tp in targets}
+    if str(side).upper() not in ("LONG", "SHORT") or as_number(price) is None or price <= 0:
+        return hits
+    remaining = set(hits)
+    for i, bar in enumerate(bars, 1):
+        favorable, _ = favorable_adverse(bar, float(price), str(side).upper())
+        for tp in tuple(remaining):
+            if favorable >= tp:
+                hits[tp] = i
+                remaining.remove(tp)
+        if not remaining:
+            break
+    return hits
 
 
 def readonly_uri(path):
@@ -268,7 +290,10 @@ def generate_rows(project):
                     row["entry_observed_ts"] = int(bars[idx][0])
                     row["entry_observed_open"] = float(bars[idx][1])
                     row["observed_delay_min"] = int(idx)
+                    observed_first_hits = first_favorable_hits(
+                        bars[idx:], side=side, price=float(bars[idx][1]))
                     for tp in TARGETS:
+                        row[f"obs_time_to_run_{tp}pct"] = observed_first_hits[tp]
                         result, minute = first_touch(
                             bars[idx:], side=side, price=float(bars[idx][1]),
                             target_pct=tp)
@@ -332,6 +357,7 @@ def build_dataset(project):
             "Structural uses retest_close (not executable).",
             "Observed proxy only LIVE_OBSERVED, first archived 1m open at/after known and first seen.",
             "Costs, latency, funding, portfolio slots and intra-1m fill order not simulated.",
+            "DNA runner hit means favorable target touched regardless of SL: never a TP-first trade label.",
             "Outcomes are descriptive; factor availability is as-of verified where archived.",
         ],
     }

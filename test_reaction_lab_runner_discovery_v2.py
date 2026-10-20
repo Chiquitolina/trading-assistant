@@ -10,7 +10,7 @@ import unittest
 from reaction_lab_auto_paths import encode_path
 from reaction_lab_runner_discovery_v2 import (
     build_dataset, first_touch, validate_path, first_bar_observable,
-    outcome_at_horizon, generate_rows,
+    outcome_at_horizon, generate_rows, first_favorable_hits,
 )
 
 M = 60_000
@@ -84,6 +84,9 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(a["struct_tp2_result"],"TP_FIRST")
             self.assertEqual(a["struct_tp2_min"],10)
             self.assertEqual(a["obs_tp2_min"],9)  # observation AFTER first bar
+            self.assertEqual(a["obs_time_to_run_2pct"],9)
+            self.assertIsNone(b["obs_time_to_run_2pct"])
+            self.assertIsNone(c["obs_time_to_run_2pct"])
             self.assertEqual(b["observed_quality"],"RECOVERED_NOT_LIVE")
             self.assertIsNone(b["obs_tp2_result"])
             self.assertEqual(c["quality"],"NO_COMPLETE_PATH")

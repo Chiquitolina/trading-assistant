@@ -9,6 +9,10 @@ import html
 from pathlib import Path
 import sqlite3
 
+from dashboard.services.runner_discovery_dna import (
+    runner_labels, compare_traits, assign_families, family_report, FAMILY_ORDER,
+)
+
 from reaction_lab_runner_discovery_v2 import (
     FEATURE_LABELS, HORIZONS, TARGETS, build_dataset,
     outcome_at_horizon, project_results_dir, readonly_uri,
@@ -123,7 +127,7 @@ def _detail_bars(project, event_key):
     return decode_path(row[0]) if row and row[0] else []
 
 
-def _signal_chart(project, event, *, mode, tp, horizon):
+def _signal_chart(project, event, *, mode, tp, horizon, show_sl=True):
     import plotly.graph_objects as go
     import pandas as pd
     import streamlit as st
@@ -156,16 +160,157 @@ def _signal_chart(project, event, *, mode, tp, horizon):
     side=event["side"]
     tpprice=reference*(1 + tp/100 if side=="LONG" else 1 - tp/100)
     slprice=reference*(.99 if side=="LONG" else 1.01)
-    for price, col, name in ((reference,"#b5c7d7","Entrada"),
-                             (tpprice,"#20b99a",f"TP {tp}%"),
-                             (slprice,"#ef7177","SL 1%")):
+    lines = [(reference,"#b5c7d7","Referencia" if not show_sl else "Entrada"),
+             (tpprice,"#20b99a",f"+{tp}% favorable" if not show_sl else f"TP {tp}%")]
+    if show_sl:
+        lines.append((slprice,"#ef7177","SL 1%"))
+    for price, col, name in lines:
         fig.add_hline(y=price,line_color=col,line_dash="dash",line_width=1.25,
                       annotation_text=name,annotation_position="top right")
     fig.update_layout(xaxis_rangeslider_visible=False, showlegend=False, hovermode="x unified")
     st.plotly_chart(_chart_style(fig,height=355),use_container_width=True,config={"displaylogo":False})
-    st.caption("OHLC de 1m; si TP y SL están en la misma vela no se puede conocer su orden. "
-               "Las líneas son barreras teóricas, no órdenes ejecutadas.")
+    if show_sl:
+        st.caption("OHLC de 1m; si TP y SL están en la misma vela no se puede conocer su orden. "
+                   "Las líneas son barreras teóricas, no órdenes ejecutadas.")
+    else:
+        st.caption("Movimiento favorable contado desde la referencia indicada, incluso si hubo retrocesos. "
+                   "No representa una operación ejecutada.")
 
+
+
+
+def _render_runner_dna(project, working, *, mode, tp, horizon):
+    """Simple descriptive DNA: hit target regardless of any SL or fill."""
+    import pandas as pd
+    import plotly.graph_objects as go
+    import streamlit as st
+
+    st.markdown(f"### 🧬 ¿Qué tienen en común los runners de +{tp}%?")
+    st.caption(
+        f"Movimiento favorable alcanzado en hasta {horizon} minutos, **sin importar si antes hubo retroceso**. "
+        + ("La referencia es el cierre del retest (no ejecutable)." if mode == "structural" else
+           "Referencia: primer OPEN 1m observado en LIVE (entrada idealizada).")
+    )
+    try:
+        pool = runner_labels(working, mode=mode, target=tp, horizon=horizon)
+    except KeyError:
+        st.warning("Este CSV es de la versión anterior. Presioná **↻ Actualizar análisis** arriba "
+                   "para calcular los nuevos tiempos de runner sin SL. Los collectors LIVE siguen intactos.")
+        return
+    if pool.empty:
+        st.info("No hay eventos con recorrido completo para esta configuración.")
+        return
+    pool = assign_families(pool)
+    runner = pool.loc[pool["es_runner"]].copy()
+    n = len(pool); nr = len(runner)
+    moments = runner["minute_group"].nunique()
+    typical = f"{int(runner['dna_minuto'].median())} min" if nr else "—"
+    cells = st.columns(4, gap="small")
+    cards = [
+        ("Runners encontrados",f"{nr:,}".replace(",","."), f"De {n:,} señales con recorrido evaluable"),
+        ("Frecuencia", _pct(nr,n), "Sobre todas las REACTIONs evaluables"),
+        ("Tiempo típico al movimiento", typical, "Mediana entre runners"),
+        ("Minutos del mercado", f"{moments:,}".replace(",","."), "No todos los eventos son independientes"),
+    ]
+    for cell,(name,value,note) in zip(cells,cards):
+        cell.markdown(_metric(name,value,note),unsafe_allow_html=True)
+    if not nr:
+        st.info("Ninguna señal alcanzó este objetivo durante la ventana seleccionada.")
+        return
+
+    traits = compare_traits(pool)
+    families = family_report(pool)
+    left,right=st.columns([1.25,1],gap="large")
+    with left:
+        st.markdown("#### Rasgos más repetidos")
+        st.caption("De cada 100 runners, ¿cuántos tenían este rasgo? Comparado con otras REACTIONs "
+                   "que disponen del mismo dato.")
+        if traits.empty:
+            st.info("Faltan factores con suficiente cobertura para esta comparación.")
+        else:
+            top = traits.head(6).iloc[::-1]
+            fig=go.Figure()
+            fig.add_bar(name="Runners",y=top["Rasgo"],x=top["runner_pct"],orientation="h",
+                        marker_color="#38bfad",
+                        customdata=top[["runner_con_rasgo","runner_con_dato"]].to_numpy(),
+                        hovertemplate="%{y}: %{x:.1f}% (%{customdata[0]}/%{customdata[1]})<extra>Runners</extra>")
+            fig.add_bar(name="Otras REACTIONs",y=top["Rasgo"],x=top["resto_pct"],orientation="h",
+                        marker_color="#7795b0",
+                        customdata=top[["resto_con_rasgo","resto_con_dato"]].to_numpy(),
+                        hovertemplate="%{y}: %{x:.1f}% (%{customdata[0]}/%{customdata[1]})<extra>Resto</extra>")
+            fig.update_layout(barmode="group",xaxis_title="Eventos con el rasgo (%)",showlegend=True,
+                              xaxis_range=[0,105],margin=dict(l=160,r=15,t=10,b=35))
+            st.plotly_chart(_chart_style(fig,height=330).update_layout(
+                margin=dict(l=150,r=15,t=10,b=35)),use_container_width=True,
+                config={"displaylogo":False})
+            best=traits.iloc[0]
+            st.caption(f"Mayor diferencia descriptiva: **{best['Rasgo']}** "
+                       f"({best['runner_pct']:.1f}% en runners vs {best['resto_pct']:.1f}% "
+                       "en el resto con dato disponible). No demuestra causalidad.")
+            with st.expander("Ver todos los rasgos y sus muestras",expanded=False):
+                detail=traits[["Rasgo","runner_con_rasgo","runner_con_dato","resto_con_rasgo",
+                                "resto_con_dato","runner_pct","resto_pct"]].rename(columns={
+                    "runner_con_rasgo":"Runners con rasgo","runner_con_dato":"Runners con dato",
+                    "resto_con_rasgo":"Resto con rasgo","resto_con_dato":"Resto con dato",
+                    "runner_pct":"Runners %","resto_pct":"Resto %"})
+                st.dataframe(detail,hide_index=True,use_container_width=True,height=280)
+    with right:
+        st.markdown("#### Familias de runners")
+        st.caption("Clasificación sencilla según tres rasgos fijos: "
+                   "Departure ≥2%, Room 1h ≥2% y fuerza BTC extrema ±2%. "
+                   "Cada evento pertenece a una sola familia.")
+        fam= families.loc[families["runners"].gt(0)].copy()
+        if fam.empty:
+            st.info("Sin runners clasificados.")
+        else:
+            chart=go.Figure(go.Bar(x=fam["runners"],y=fam["familia_adn"],orientation="h",
+                                   marker_color="#4ba9cd",text=fam["runners"],textposition="auto"))
+            chart.update_layout(xaxis_title="Runners",showlegend=False,
+                                margin=dict(l=135,r=12,t=10,b=35),
+                                yaxis=dict(autorange="reversed",showgrid=False))
+            st.plotly_chart(_chart_style(chart,height=295).update_layout(
+                margin=dict(l=125,r=12,t=10,b=35)),use_container_width=True,
+                config={"displaylogo":False})
+            st.caption("**Contexto incompleto** es una categoría separada: "
+                       "no significa que el evento carezca de los rasgos.")
+            with st.expander("Frecuencia sobre todas las señales por familia",expanded=False):
+                out=families.rename(columns={"familia_adn":"Familia","senales":"REACTIONs",
+                                               "runners":"Runners","tasa_runner_pct":"Runner %"})
+                st.dataframe(out,hide_index=True,use_container_width=True,height=280)
+
+    st.markdown("#### Explorar runners concretos")
+    a,b=st.columns([1.5,1],gap="small")
+    family_options=["Todas las familias"]+[f for f in FAMILY_ORDER if (runner["familia_adn"]==f).any()]
+    family=a.selectbox("Familia",family_options,key="rdv2_dna_family")
+    ordering=b.selectbox("Orden",["Más recientes","Más rápidos"],key="rdv2_dna_order")
+    events=runner if family=="Todas las familias" else runner.loc[runner["familia_adn"].eq(family)]
+    if ordering=="Más rápidos":
+        events=events.sort_values(["dna_minuto","retest_ts"],ascending=[True,False])
+    else:
+        events=events.sort_values("retest_ts",ascending=False)
+    st.caption(f"{len(events)} runners en esta selección · mostrando {min(len(events),60)}. "
+               "Cada fila se puede localizar por Event ID.")
+    display=events.head(60).copy()
+    display["UTC"]=pd.to_datetime(display["retest_ts"],unit="ms",utc=True).dt.strftime("%d/%m %H:%M")
+    display["Departure %"]=pd.to_numeric(display.get("max_departure_pct"),errors="coerce")
+    display["Room 1h %"]=pd.to_numeric(display.get("opposing_room_1h_pct"),errors="coerce")
+    st.dataframe(display[["UTC","symbol","side","dna_minuto","familia_adn","Departure %","Room 1h %"]]
+                 .rename(columns={"symbol":"Símbolo","side":"Lado","dna_minuto":"Min hasta run",
+                                  "familia_adn":"Familia"}),hide_index=True,use_container_width=True,
+                 height=265,column_config={"Departure %":st.column_config.NumberColumn(format="%.2f"),
+                                          "Room 1h %":st.column_config.NumberColumn(format="%.2f")})
+    with st.expander("Inspeccionar gráfico de un runner",expanded=False):
+        choices=events["event_key"].astype(str).head(250).tolist()
+        if choices:
+            key=st.selectbox("Evento",choices,key="rdv2_dna_event")
+            row=events.loc[events["event_key"].eq(key)].iloc[0]
+            st.caption(f"{row['symbol']} · {row['side']} · +{tp}% en {int(row['dna_minuto'])} min · {row['familia_adn']}")
+            _signal_chart(project,row,mode=mode,tp=tp,horizon=horizon,show_sl=False)
+    with st.expander("Exportar este estudio",expanded=False):
+        st.download_button("CSV · todas las señales y su familia",pool.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"adn_runner_{tp}pct_{horizon}m.csv",mime="text/csv",key="rdv2_dna_export")
+    st.caption("Estudio exploratorio: rasgos definidos de antemano para la vista; se necesitan nuevas fechas "
+               "para evaluar poder predictivo. Movimientos de monedas simultáneas comparten mercado.")
 
 def render_runner_discovery_v2(project_root):
     """Drop-in entrypoint for Reaction & Swing Lab in dashboard/app.py."""
@@ -259,18 +404,21 @@ def render_runner_discovery_v2(project_root):
     prefix="obs" if mode=="observed" else "struct"
     times=pd.to_numeric(eligible.loc[eligible["Resultado"].eq("TP_FIRST"),f"{prefix}_tp{tp}_min"],errors="coerce")
     median_min=f"{int(times.median())} min" if len(times) else "—"
-    col=st.columns(4,gap="small")
-    cards=[("Señales evaluables",f"{n:,}".replace(",","."),f"{len(working):,} REACTIONs filtradas"),
-           ("TP antes de SL",_pct(wins,n),f"{wins} eventos · +{tp}%"),
-           ("SL antes de TP",_pct(losses,n),f"{losses} eventos · −1%"),
-           ("Tiempo típico al TP",median_min,"Mediana de TP-first")]
-    for cell,(name,value,detail) in zip(col,cards):
-        cell.markdown(_metric(name,value,detail),unsafe_allow_html=True)
-    caption="Referencia al cierre del retest: movimiento estructural, no entrada operable." if mode=="structural" else (
-        "Proxy LIVE: entrada idealizada en primer OPEN 1m no anterior a known_ts y first_seen_ms; sin latencia, fills ni comisiones.")
-    st.caption(f"{caption} · {len(working)-len(selected)} sin evaluación inicial · {insufficient} sin cobertura para {minutes} min · {len(eligible)} denominador válido.")
-
-    tab_pan,tab_signals,tab_factors=st.tabs(["📊 Panorama", "🔎 Señales", "🧬 Factores"])
+    tab_dna,tab_pan,tab_signals,tab_factors=st.tabs([
+        "🧬 ADN del Runner", "📊 Panorama", "🔎 Señales", "📈 Factores"])
+    with tab_dna:
+        _render_runner_dna(project, working, mode=mode, tp=tp, horizon=minutes)
+    with tab_pan:
+        col=st.columns(4,gap="small")
+        cards=[("Señales evaluables",f"{n:,}".replace(",","."),f"{len(working):,} REACTIONs filtradas"),
+               ("TP antes de SL",_pct(wins,n),f"{wins} eventos · +{tp}%"),
+               ("SL antes de TP",_pct(losses,n),f"{losses} eventos · −1%"),
+               ("Tiempo típico al TP",median_min,"Mediana de TP-first")]
+        for cell,(name,value,detail) in zip(col,cards):
+            cell.markdown(_metric(name,value,detail),unsafe_allow_html=True)
+        caption="Referencia al cierre del retest: movimiento estructural, no entrada operable." if mode=="structural" else (
+            "Proxy LIVE: entrada idealizada en primer OPEN 1m no anterior a known_ts y first_seen_ms; sin latencia, fills ni comisiones.")
+        st.caption(f"{caption} · {len(working)-len(selected)} sin evaluación inicial · {insufficient} sin cobertura para {minutes} min · {len(eligible)} denominador válido.")
     with tab_pan:
         chart_l, chart_r=st.columns([1,1.25],gap="large")
         with chart_l:
