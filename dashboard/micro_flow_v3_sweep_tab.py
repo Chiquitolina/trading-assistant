@@ -290,7 +290,7 @@ def render_swing_sweep_discovery(root, tapes):
                'swings disponibles después del cierre real de la vela confirmadora.')
     if not result['events']:
         st.warning('No hay barridos con esta configuración. AggTrades y Confluence pueden estudiarse igual.')
-        render_microstructure_feature_study(root,session,exhaustion)
+        render_microstructure_feature_study(root,session,exhaustion,entry_study=exhaustion_entries)
         render_confluence_study(root,session,exhaustion)
         return
     reveal=st.checkbox('Revelar etapas posteriores y outcomes (modo exploratorio)',
@@ -429,7 +429,8 @@ def render_swing_sweep_discovery(root, tapes):
             exhaustion_table.to_csv(index=False),file_name='aggression_exhaustion_v1.csv',
             mime='text/csv')
     render_microstructure_feature_study(root,session,exhaustion,
-                                        selected_event=exhaustion_id if exhaustion['events'] else None)
+                                        selected_event=exhaustion_id if exhaustion['events'] else None,
+                                        entry_study=exhaustion_entries)
     st.markdown('#### Exhaustion Entry Research · confirmación vs ruptura de swing')
     st.caption('A FAILURE: referencia posterior al fracaso. B FAILURE_SWING_BREAK: '
         'tras el fracaso, cierre posterior más allá de un swing confirmado ANTES '

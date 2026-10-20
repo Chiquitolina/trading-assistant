@@ -7,6 +7,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from dashboard.micro_flow_v3_feature_outcomes_tab import render_microstructure_feature_outcomes
+
 from research.micro_flow_v3.microstructure_exhaustion_features import (
     DEFAULT_WINDOWS_SECONDS, build_exhaustion_feature_catalog,
     read_footprint_from_closed_raw, save_feature_run,
@@ -47,7 +49,7 @@ def _flat(catalog, seconds):
     return pd.DataFrame(rows)
 
 
-def render_microstructure_feature_study(root,session,aggression,selected_event=None):
+def render_microstructure_feature_study(root,session,aggression,selected_event=None,entry_study=None):
     st.divider()
     st.subheader('🧬 Microstructure Exhaustion Features · capa compartida')
     st.caption('Solo información que existía al publicarse cada impulso agresivo. '
@@ -87,6 +89,9 @@ def render_microstructure_feature_study(root,session,aggression,selected_event=N
     st.download_button('Exportar features de todos los impulsos (CSV)',
         frame.to_csv(index=False),file_name=f'microstructure_features_{win_choice}s.csv',
         mime='text/csv',key='mfv3_micro_csv')
+    if entry_study is not None:
+        render_microstructure_feature_outcomes(root,session,aggression,cat,entry_study,
+                                               window_seconds=win_choice)
     if not cat['features']:
         return
     ids=[e['event_id'] for e in cat['features']]
