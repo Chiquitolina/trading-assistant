@@ -404,8 +404,11 @@ def render_runner_discovery_v2(project_root):
     prefix="obs" if mode=="observed" else "struct"
     times=pd.to_numeric(eligible.loc[eligible["Resultado"].eq("TP_FIRST"),f"{prefix}_tp{tp}_min"],errors="coerce")
     median_min=f"{int(times.median())} min" if len(times) else "—"
-    tab_dna,tab_pan,tab_signals,tab_factors=st.tabs([
-        "🧬 ADN del Runner", "📊 Panorama", "🔎 Señales", "📈 Factores"])
+    tab_dna,tab_episodes,tab_pan,tab_signals,tab_factors=st.tabs([
+        "🧬 ADN del Runner", "🧩 Episodios", "📊 Panorama", "🔎 Señales", "📈 Factores"])
+    with tab_episodes:
+        from dashboard.views.reaction_lab_movement_episodes_view import render_movement_episodes
+        render_movement_episodes(project)
     with tab_dna:
         _render_runner_dna(project, working, mode=mode, tp=tp, horizon=minutes)
     with tab_pan:
