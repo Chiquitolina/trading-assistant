@@ -67,6 +67,11 @@ from dashboard.services.geometry_scanner_data_service import (
     GeometryScannerDataService,
 )
 
+from dashboard.services.compression_market_scanner_service import (
+    scan_compression_market,
+    filter_compression_market,
+)
+
 from dashboard.services.geometry_market_scanner_service import (
     GeometryMarketScannerService,
 )
@@ -519,6 +524,30 @@ st.sidebar.button(
     use_container_width=True,
     on_click=st.cache_data.clear,
 )
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_compression_scanner_market():
+    """One batched read from Redis, reused across slider changes."""
+    histories = geometry_scanner_data_service.get_market_candles(
+        timeframe="30m",
+        limit=150,
+        symbols=None,  # All available symbols in the Market Data producer.
+    )
+    return (
+        histories,
+        dict(geometry_scanner_data_service.last_market_diagnostics),
+        geometry_scanner_data_service.last_error,
+    )
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def compute_compression_scanner_candidates(histories, lookback, base_lookback):
+    return scan_compression_market(
+        histories,
+        lookback=lookback,
+        base_lookback=base_lookback,
+    )
 
 
 @st.cache_data(
@@ -8483,6 +8512,7 @@ DASHBOARD_SECTIONS = {
     "reaction_swing_lab": "🧪 Reaction & Swing Lab",
     "swing_sweep_reclaim": "🧹 Swing Sweep → Reclaim",
     "geometry_scanner": "📐 Geometry Scanner",
+    "compression_scanner": "🗜️ Compression Scanner",
     "btc_correlation": "₿ BTC Correlation",
     "btc_alignment": "🧭 BTC Alignment Edge",
     "mfe_mae": "📐 MFE / MAE",
@@ -8521,6 +8551,7 @@ selected_section = st.sidebar.radio(
 if (
     df_raw.empty
     and selected_section not in {
+        "compression_scanner",
         "geometry_scanner",
         "volume_exhaustion",
         "micro_flow",
@@ -86267,6 +86298,216 @@ if selected_section == "reaction_swing_lab":
                 render_volume_exhaustion_outcome_research(
                     events=events,
                 )
+
+
+if selected_section == "compression_scanner":
+    st.markdown("## 🗜️ Compression Scanner · 30m")
+    st.caption(
+        "Escanea TODOS los símbolos disponibles: ~30 velas cerradas (15 horas), "
+        "compresión de rango, ATR y volumen; cercanía al techo/piso. "
+        "Solo observación: no crea watches, señales ni órdenes."
+    )
+
+    c_window, c_baseline, c_wall = st.columns(3)
+    with c_window:
+        compression_scan_window = st.slider(
+            "Velas de compresión (30m)", 20, 40, 30,
+            key="cs_window",
+        )
+    with c_baseline:
+        compression_scan_base = st.slider(
+            "Velas de referencia anteriores", 40, 80, 60, step=10,
+            key="cs_base",
+        )
+    with c_wall:
+        compression_scan_near_wall = st.checkbox(
+            "Solo cerca de techo/piso", value=True,
+            key="cs_near_wall",
+        )
+
+    st.markdown("#### Umbrales de compresión")
+    t1, t2, t3, t4 = st.columns(4)
+    with t1:
+        cs_range = st.slider("Range ratio máximo", .40, 1.50, .80, .05, key="cs_range")
+    with t2:
+        cs_atr = st.slider("ATR ratio máximo", .40, 1.50, .90, .05, key="cs_atr")
+    with t3:
+        cs_volume = st.slider("Volume ratio máximo", .30, 2.00, 1.10, .05, key="cs_volume")
+    with t4:
+        cs_body = st.slider("Body fraction máximo", .20, 1.00, .60, .05, key="cs_body")
+
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        cs_min_conditions = st.slider("Condiciones mínimas / 4", 1, 4, 3, key="cs_score")
+    with f2:
+        cs_height = st.slider("Altura máxima del box (%)", 0.5, 12.0, 4.0, .5, key="cs_height")
+    with f3:
+        cs_touches = st.slider("Toques mínimos por lado", 0, 5, 2, key="cs_touches")
+    with f4:
+        cs_liquidity = st.number_input(
+            "Mediana volumen 30m (USDT)", min_value=0, max_value=5_000_000,
+            value=25_000, step=25_000, key="cs_liquidity",
+        )
+
+    extra1, extra2, extra3 = st.columns(3)
+    with extra1:
+        cs_wall_distance = st.slider(
+            "Distancia máxima a pared (% del box)", 5, 50, 30, 5,
+            key="cs_wall_distance",
+        )
+    with extra2:
+        cs_micro = st.checkbox(
+            "Exigir achicamiento últimas velas", value=False,
+            key="cs_micro",
+        )
+    with extra3:
+        cs_micro_ratio = st.slider(
+            "Ratio últimas / primeras velas", .40, 1.50, 1.00, .05,
+            key="cs_micro_ratio",
+        )
+
+    with st.spinner("Leyendo velas cerradas del mercado (lectura en lote)..."):
+        cs_histories, cs_market_diag, cs_market_error = load_compression_scanner_market()
+
+    if not cs_histories:
+        st.error(f"No hay históricos de 30m disponibles en Redis: {cs_market_error}")
+    else:
+        with st.spinner("Calculando métricas estructurales por símbolo..."):
+            cs_raw, cs_scan_diag = compute_compression_scanner_candidates(
+                cs_histories, compression_scan_window, compression_scan_base,
+            )
+        cs_filtered = filter_compression_market(
+            cs_raw,
+            max_range_ratio=cs_range,
+            max_atr_ratio=cs_atr,
+            max_volume_ratio=cs_volume,
+            max_body_pct=cs_body,
+            min_conditions=cs_min_conditions,
+            max_height_pct=cs_height,
+            min_touches=cs_touches,
+            min_quote_volume=float(cs_liquidity),
+            only_near_wall=compression_scan_near_wall,
+            max_wall_distance_pct=float(cs_wall_distance),
+            require_micro_contraction=cs_micro,
+            max_micro_range_ratio=cs_micro_ratio,
+        )
+
+        ms1, ms2, ms3, ms4 = st.columns(4)
+        ms1.metric("Símbolos con histórico", cs_scan_diag["symbols_with_history"])
+        ms2.metric("Evaluados", cs_scan_diag["scanned"])
+        ms3.metric("Compresiones filtradas", len(cs_filtered))
+        ms4.metric(
+            "Cerca de romper (ranking)",
+            int((cs_filtered["status"] == "CERCA_DE_ROMPER").sum())
+            if "status" in cs_filtered else 0,
+        )
+
+        with st.expander("Diagnóstico de cobertura", expanded=False):
+            st.json({"market": cs_market_diag, "scanner": cs_scan_diag})
+            st.caption(
+                "Se excluyen velas abiertas, históricos incompletos, "
+                "huecos y símbolos desactualizados. "
+                "Reference window es SEPARADA (no superpuesta)."
+            )
+
+        if cs_filtered.empty:
+            st.info(
+                "No hay compresiones que cumplan estos umbrales ahora. "
+                "Probá bajar toques, subir altura, desmarcar 'cerca de techo/piso' "
+                "o exigir 2 de las 4 condiciones."
+            )
+        else:
+            cs_columns = [
+                "symbol", "status", "readiness_score", "closest_wall",
+                "wall_distance_pct", "compression_height_pct", "range_ratio",
+                "atr_ratio", "volume_ratio", "micro_range_ratio", "core_score",
+                "touches_high", "touches_low", "compression_shape", "median_quote_volume",
+            ]
+            st.dataframe(
+                cs_filtered[cs_columns].rename(columns={
+                    "symbol": "Símbolo", "status": "Estado",
+                    "readiness_score": "Ranking /100",
+                    "closest_wall": "Pared", "wall_distance_pct": "Dist. pared % box",
+                    "compression_height_pct": "Altura %", "range_ratio": "Range ratio",
+                    "atr_ratio": "ATR ratio", "volume_ratio": "Volume ratio",
+                    "micro_range_ratio": "Micro ratio", "core_score": "Score /4",
+                    "touches_high": "Toques techo", "touches_low": "Toques piso",
+                    "compression_shape": "Forma", "median_quote_volume": "Mediana vol. USDT",
+                }),
+                hide_index=True, use_container_width=True,
+                key="compression_scanner_table",
+            )
+            st.download_button(
+                "⬇️ Exportar compresiones CSV",
+                data=cs_filtered.to_csv(index=False).encode("utf-8"),
+                file_name="compression_scanner_30m.csv",
+                mime="text/csv", key="cs_export",
+            )
+
+            cs_selected_symbol = st.selectbox(
+                "Inspeccionar compresión",
+                options=cs_filtered["symbol"].tolist(),
+                format_func=lambda s: (
+                    f"{s} · "
+                    f"ranking {cs_filtered.loc[cs_filtered['symbol'] == s, 'readiness_score'].iloc[0]:.1f}"
+                ),
+                key="cs_selected_symbol",
+            )
+            cs_row = cs_filtered.loc[
+                cs_filtered["symbol"] == cs_selected_symbol
+            ].iloc[0]
+            cs_chart_data = cs_histories[cs_selected_symbol].tail(80).copy()
+            cs_chart_data["date"] = pd.to_datetime(
+                cs_chart_data["timestamp"], unit="ms", utc=True,
+            ).dt.tz_convert(TZ)
+
+            cs_fig = make_subplots(
+                rows=2, cols=1, shared_xaxes=True,
+                row_heights=[0.79, 0.21], vertical_spacing=0.03,
+            )
+            cs_fig.add_trace(go.Candlestick(
+                x=cs_chart_data["date"], open=cs_chart_data["open"],
+                high=cs_chart_data["high"], low=cs_chart_data["low"],
+                close=cs_chart_data["close"], name="30m OHLC",
+            ), row=1, col=1)
+            cs_fig.add_trace(go.Bar(
+                x=cs_chart_data["date"], y=cs_chart_data["volume"],
+                name="Volumen", marker_color="rgba(110,130,170,0.55)",
+            ), row=2, col=1)
+            cs_start = pd.to_datetime(int(cs_row["start_ts"]), unit="ms", utc=True).tz_convert(TZ)
+            cs_end = pd.to_datetime(int(cs_row["end_ts"]), unit="ms", utc=True).tz_convert(TZ)
+            cs_fig.add_shape(
+                type="rect", x0=cs_start, x1=cs_end,
+                y0=float(cs_row["low"]), y1=float(cs_row["high"]),
+                fillcolor="rgba(59,130,246,0.10)",
+                line=dict(color="rgba(59,130,246,0.70)", width=1),
+                row=1, col=1,
+            )
+            cs_fig.add_hline(
+                y=float(cs_row["high"]), line_dash="dash",
+                line_color="rgb(230,110,110)", row=1, col=1,
+                annotation_text="Techo compresión",
+            )
+            cs_fig.add_hline(
+                y=float(cs_row["low"]), line_dash="dash",
+                line_color="rgb(90,190,145)", row=1, col=1,
+                annotation_text="Piso compresión",
+            )
+            cs_fig.update_layout(
+                height=650, xaxis_rangeslider_visible=False,
+                title=f"{cs_selected_symbol} · 30m · {compression_scan_window} velas",
+                margin=dict(l=20, r=30, t=60, b=20),
+            )
+            st.plotly_chart(
+                cs_fig, use_container_width=True, key="cs_selected_chart",
+                config={"displaylogo": False, "scrollZoom": True},
+            )
+            st.caption(
+                f"Rango [{cs_row['low']:.8g} - {cs_row['high']:.8g}] · "
+                f"Último cierre {cs_row['last_close']:.8g} · "
+                f"Distancia a la pared {cs_row['wall_distance_pct']:.1f}% del box · "
+                "Ranking descriptivo, NO probabilidad de ruptura."
+            )
 
 
 if selected_section == "geometry_scanner":
