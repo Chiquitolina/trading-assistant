@@ -41,6 +41,32 @@ BAR = struct.Struct('<qdddd')
 VERSION = 'runner-precursors-pilot-v1.0'
 DEFAULT_DIR = 'reports/reaction_lab'
 DB_NAME = 'runner_precursor_pilot_v1.sqlite3'
+
+# MANUALLY VERIFIED exchange cross-timeframe anomalies, 2026-10-21 (UTC).
+# Operator independently queried Binance Futures USD-M /fapi/v1/klines,
+# 15x 1m candles and 1x 15m candle per case, and checked that BOTH stored
+# versions still match the exchange API field-by-field. Neither data series
+# is modified. THESE ARE NOT UNIVERSAL TOLERANCES OR A WILDCARD ALLOWLIST.
+# Full 9-field tuples: O,H,L,C,baseVolume,quoteVolume,trades,takerBuyBase,
+# takerBuyQuote. Exact case key and both tuples must match; every other
+# mismatch remains a failing audit error.
+# If Binance revises either version, the old exception MUST stop matching.
+BINANCE_VERIFIED_15M_ANOMALIES = {
+    ('ASRUSDT', 1791913500000): {
+        'one_min_aggregate': (0.8401, 0.8401, 0.8367, 0.8369, 3811.2, 3193.36513, 140, 1670.4, 1399.54516),
+        'binance_15m':      (0.8395, 0.8400, 0.8367, 0.8369, 3811.2, 3193.36513, 140, 1670.4, 1399.54516),
+    },
+    ('ASRUSDT', 1791916200000): {
+        'one_min_aggregate': (0.8370, 0.8391, 0.8368, 0.8378, 7436.2, 6231.02925, 180, 3819.9, 3202.32419),
+        'binance_15m':      (0.8373, 0.8391, 0.8368, 0.8378, 7436.2, 6231.02925, 180, 3819.9, 3202.32419),
+    },
+    ('GASUSDT', 1791830700000): {
+        'one_min_aggregate': (1.343, 1.343, 1.340, 1.341, 5454.6, 7313.1722, 90, 496.9, 666.1435),
+        'binance_15m':      (1.342, 1.342, 1.340, 1.341, 5454.6, 7313.1722, 90, 496.9, 666.1435),
+    },
+}
+BINANCE_ANOMALY_CHECK_DATE = '2026-10-21'
+BINANCE_ANOMALY_CHECK_METHOD = 'operator_direct_binance_usdm_klines_15x1m_and_1x15m'
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS samples (
@@ -487,9 +513,44 @@ def window_rows(con,sym,tf,end_excl,n):
     return rows,'COMPLETE'
 
 
-def validate_aggregation(con, sample,pre1,pre15):
-    """Check full 15-minute bars for which all 15 1m historical bars are available."""
-    issues=[]; matched=0
+def exact_verified_provider_anomaly(sym,ts,agg,expected):
+    """Recognize *only* the three independently checked Binance discrepancies.
+
+    All nine 1m-derived and 15m values are pinned, including nonprice fields.
+    Strict price comparisons rule out treating a changed candle as verified.
+    Volume/trade tolerances match the generic 1m->15m audit only to absorb
+    harmless float accumulation (e.g. 3202.3241900000003 vs 3202.32419).
+    """
+    proof=BINANCE_VERIFIED_15M_ANOMALIES.get((sym,int(ts)))
+    if proof is None:return None
+
+    for actual,known in (
+        (agg,proof['one_min_aggregate']),
+        (expected,proof['binance_15m']),
+    ):
+        if not equal(actual[:4],known[:4],rel=1e-12,abs_=1e-11):return None
+        if not equal(actual[4:6],known[4:6],rel=1e-9,abs_=1e-7):return None
+        if actual[6]!=known[6]:return None
+        if not equal(actual[7:],known[7:],rel=1e-9,abs_=1e-7):return None
+
+    return {
+        'type':'BINANCE_USDM_VERIFIED_CROSS_TF_ANOMALY',
+        'symbol':sym,'utc':utc(ts),'open_ts':int(ts),
+        'one_min_aggregate':list(agg),
+        'binance_15m':list(expected),
+        'verification_date_utc':BINANCE_ANOMALY_CHECK_DATE,
+        'verification_method':BINANCE_ANOMALY_CHECK_METHOD,
+        'note':'Exchange itself returned different OHLC at 1m vs 15m; data unchanged',
+    }
+
+
+def validate_aggregation(con, sample,pre1,pre15,include_verified=False):
+    """Check full 15m bars where all 15 underlying 1m bars are present.
+
+    Only three exact, manually cross-verified exchange inconsistencies are
+    recognized. All unrecognized mismatches fail the audit, as before.
+    """
+    issues=[]; matched=0; verified=[]
     symbols={s['symbol'] for s in sample}|{'BTCUSDT'}
     # compare only candle timestamps present for that sample, not global unrelated rows
     for sym in sorted(symbols):
@@ -508,8 +569,13 @@ def validate_aggregation(con, sample,pre1,pre15):
                     and equal(agg[4:6],expected[4:6],rel=1e-6,abs_=1e-5)
                     and agg[6]==expected[6]
                     and equal(agg[7:],expected[7:],rel=1e-6,abs_=1e-5)):
-                if len(issues)<25:issues.append({'type':'AGGREGATION_MISMATCH','symbol':sym,'utc':utc(ts),'got':agg,'expected':expected})
+                exception=exact_verified_provider_anomaly(sym,ts,agg,expected)
+                if exception is not None:
+                    verified.append(exception)
+                elif len(issues)<25:
+                    issues.append({'type':'AGGREGATION_MISMATCH','symbol':sym,'utc':utc(ts),'got':agg,'expected':expected})
             else:matched+=1
+    if include_verified:return matched,issues,verified
     return matched,issues
 
 
@@ -559,7 +625,11 @@ def audit(root,db_path,output=None):
                             report['incomplete'].append({'event':s['event_key'],'kind':sym_type,
                                                         'anchor':anchor_name,'tf':tf,'status':state})
         report['timeframe_coverage']=dict(report['timeframe_coverage'])
-        report['aggregate_match'],report['aggregate_issues']=validate_aggregation(con,samples,pre1,pre15)
+        (report['aggregate_match'], report['aggregate_issues'],
+         report['aggregate_verified_provider_exceptions']) = validate_aggregation(
+             con,samples,pre1,pre15,include_verified=True)
+        report['aggregate_verified_provider_exception_count'] = len(
+            report['aggregate_verified_provider_exceptions'])
         report['auto_paths_parity']=autopaths_overlap(root,con,samples,post)
         report['success']=(not report['incomplete'] and report['conflicts']==0 and not report['aggregate_issues']
                            and report['auto_paths_parity']['different']==0 and
@@ -715,6 +785,11 @@ def export(root,db_path,out_dir,require_audit=True):
         summary={'exported':len(rows),'runner_count':sum(r['class_label']=='RUNNER_3' for r in rows),
                  'control_count':sum(r['class_label']=='CONTROL_LT3' for r in rows),
                  'features':len(feature_keys),'sampled_balanced':True,
+                 'verified_provider_15m_exceptions':report['aggregate_verified_provider_exception_count'],
+                 'verified_provider_15m_exception_cases':[
+                     {'symbol':x['symbol'],'utc':x['utc']}
+                     for x in report['aggregate_verified_provider_exceptions']
+                 ],
                  'warning':'Do not estimate true population probabilities from balanced sample. Structural retest-time labels are NOT executable LIVE fills. PRE_RETEST is the primary precursor anchor.',
                  'artifacts':['features_before_retest.csv','features_at_known.csv','outcomes_future.csv','descriptive_comparison.csv','audit.json']}
         (out_dir/'summary.json').write_text(json.dumps(summary,indent=2)+'\n',encoding='utf-8')

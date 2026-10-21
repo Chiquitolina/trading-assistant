@@ -119,6 +119,65 @@ class PilotTests(unittest.TestCase):
                 matched,issues=p.validate_aggregation(con,[{'symbol':'XUSDT'}],120,96)
                 self.assertEqual((matched,issues),(1,[]))
 
+    def _make_provider_anomaly(self,con,symbol,ts,proof):
+        # 15 synthetic 1m bars with exact observed aggregate totals. SQLite
+        # uses the same schema/aggregation path as the real pilot database.
+        got=proof['one_min_aggregate'];expected=proof['binance_15m']
+        for i in range(15):
+            row=(ts+i*p.MIN,got[0],got[1],got[2],
+                 got[3] if i==14 else got[0],
+                 got[4]/15,got[5]/15,0,got[7]/15,got[8]/15)
+            # Preserve exact trade total as integers.
+            row=list(row)
+            row[7]=got[6]//15+(1 if i<got[6]%15 else 0)
+            p.ingest(con,symbol,'1m',ts+i*p.MIN,ts+i*p.MIN,[tuple(row)],'one_min')
+        p.ingest(con,symbol,'15m',ts,ts,[(ts,*expected)],'fifteen_min')
+
+    def test_provider_anomalies_only_three_exact_cases(self):
+        with tempfile.TemporaryDirectory() as td:
+            with closing(p.connect(Path(td)/'db.sqlite')) as con:
+                for (sym,ts), proof in p.BINANCE_VERIFIED_15M_ANOMALIES.items():
+                    self._make_provider_anomaly(con,sym,ts,proof)
+                samples=[{'symbol':sym} for sym,ts in p.BINANCE_VERIFIED_15M_ANOMALIES]
+                matched,issues,verified=p.validate_aggregation(
+                    con,samples,120,96,include_verified=True)
+                self.assertEqual(matched,0)
+                self.assertEqual(issues,[])
+                self.assertEqual(len(verified),3)
+                self.assertEqual({(x['symbol'],x['open_ts']) for x in verified},
+                                 set(p.BINANCE_VERIFIED_15M_ANOMALIES))
+                self.assertTrue(all(x['verification_method']==p.BINANCE_ANOMALY_CHECK_METHOD
+                                    for x in verified))
+
+    def test_provider_exception_rejects_new_or_changed_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            with closing(p.connect(Path(td)/'db.sqlite')) as con:
+                (sym,ts),proof=next(iter(p.BINANCE_VERIFIED_15M_ANOMALIES.items()))
+                self._make_provider_anomaly(con,sym,ts,proof)
+                _,issues,verified=p.validate_aggregation(con,[{'symbol':sym}],120,96,True)
+                self.assertEqual((len(issues),len(verified)),(0,1))
+                # Existing case becomes INVALID if the recorded 15m changes.
+                con.execute('UPDATE candles SET high=high+0.0002 WHERE symbol=? AND timeframe=? AND open_ts=?',
+                            (sym,'15m',ts))
+                con.commit()
+                _,issues,verified=p.validate_aggregation(con,[{'symbol':sym}],120,96,True)
+                self.assertEqual((len(issues),len(verified)),(1,0))
+                # Even if the price profile matches exactly, another date is NOT whitelisted.
+                self.assertIsNone(p.exact_verified_provider_anomaly(
+                    sym,ts+15*p.MIN,proof['one_min_aggregate'],proof['binance_15m']))
+                self.assertIsNone(p.exact_verified_provider_anomaly(
+                    'NOT'+sym,ts,proof['one_min_aggregate'],proof['binance_15m']))
+
+    def test_provider_exception_does_not_allow_volume_or_trade_changes(self):
+        (sym,ts),proof=next(iter(p.BINANCE_VERIFIED_15M_ANOMALIES.items()))
+        agg=list(proof['one_min_aggregate']);expected=list(proof['binance_15m'])
+        agg[5]+=2.0
+        self.assertIsNone(p.exact_verified_provider_anomaly(sym,ts,agg,expected))
+        agg=list(proof['one_min_aggregate']);agg[6]+=1
+        self.assertIsNone(p.exact_verified_provider_anomaly(sym,ts,agg,expected))
+        agg=list(proof['one_min_aggregate']);expected[0]+=0.0001
+        self.assertIsNone(p.exact_verified_provider_anomaly(sym,ts,agg,expected))
+
     def test_full_offline_run_audit_export(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);base=root/'reports'/'reaction_lab';base.mkdir(parents=True)
