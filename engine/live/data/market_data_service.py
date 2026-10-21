@@ -1980,49 +1980,125 @@ class MarketDataService:
         )
         return result
 
+    def _stage_bootstrap_missing_closes(self, gaps, max_attempts=3):
+        """Fetch bootstrap-boundary gaps without publishing out of order.
+
+        REST data are queued alongside buffered WS closes.  The bootstrap
+        flush then publishes both in one close-time-ordered pass instead of
+        inserting older repairs into Redis ahead of earlier buffered closes.
+        """
+        tasks = []
+        for timeframe, timeframe_gaps in gaps.items():
+            timeframe_ms = self._timeframe_ms(timeframe)
+            for candle_timestamp, missing_symbols in timeframe_gaps.items():
+                candle_timestamp = int(candle_timestamp)
+                for symbol in sorted(set(missing_symbols)):
+                    tasks.append((
+                        candle_timestamp + timeframe_ms - 1,
+                        symbol,
+                        timeframe,
+                        candle_timestamp,
+                    ))
+
+        tasks.sort(key=lambda item: (
+            item[0], item[1], self._timeframe_ms(item[2]), item[3]
+        ))
+
+        staged = 0
+        for close_ts, symbol, timeframe, candle_timestamp in tasks:
+            if not self.running:
+                raise RuntimeError("Bootstrap reconciliation interrupted")
+
+            candle = None
+            last_error = None
+            for attempt in range(max_attempts):
+                try:
+                    candle = fetch_closed_futures_candle(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        candle_timestamp=candle_timestamp,
+                    )
+                    if candle is None:
+                        raise RuntimeError("candle_unavailable")
+                    if int(candle["timestamp"]) != candle_timestamp:
+                        raise RuntimeError("candle_timestamp_mismatch")
+                    if int(candle["close_timestamp"]) != close_ts:
+                        raise RuntimeError("candle_close_timestamp_mismatch")
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}:{exc}"
+                    if attempt + 1 < max_attempts:
+                        if self.stop_event.wait(1):
+                            raise RuntimeError(
+                                "Bootstrap reconciliation interrupted"
+                            ) from exc
+
+            if last_error is not None:
+                raise RuntimeError(
+                    "Bootstrap reconciliation failed "
+                    f"symbol={symbol} timeframe={timeframe} "
+                    f"timestamp={candle_timestamp} error={last_error}"
+                )
+
+            # The WS thread may have received this exact close during REST.
+            # Keep both queued, but publish only once in the sorted catchup.
+            with self.bootstrap_lock:
+                self.bootstrap_buffer_sequence += 1
+                self.bootstrap_closed_messages.append((
+                    close_ts,
+                    symbol,
+                    timeframe,
+                    candle_timestamp,
+                    self.bootstrap_buffer_sequence,
+                    {"_bootstrap_rest_repair": candle},
+                ))
+            staged += 1
+
+        if staged:
+            print(
+                "[MARKET DATA BOOTSTRAP] "
+                f"REST gaps staged={staged}"
+            )
+        return staged
+
     def _flush_bootstrap_ws_buffer(self):
         if self.history_cutoff_ms is None:
-            raise RuntimeError(
-                "History cutoff is not initialized"
-            )
+            raise RuntimeError("History cutoff is not initialized")
 
-        cutoff_ms = int(
-            self.history_cutoff_ms
-        )
-
+        cutoff_ms = int(self.history_cutoff_ms)
         published_keys = set()
         published = 0
+        recovered = 0
         discarded_before_cutoff = 0
         duplicates = 0
         passes = 0
 
+        # During the entire REST seed, callbacks stayed in this buffer.
+        # Check all settled closes since that seed's cutoff (not just the
+        # three-minute periodic integrity horizon) BEFORE releasing them.
         while True:
+            scan_until_ms = self._recovery_scan_until_ms()
+            gaps = self._find_recovery_gaps(
+                disconnected_at_ms=cutoff_ms,
+                reconnected_at_ms=scan_until_ms,
+            )
+            if gaps:
+                self._stage_bootstrap_missing_closes(gaps)
+
             with self.bootstrap_lock:
-                batch = (
-                    self.bootstrap_closed_messages
-                )
+                batch = self.bootstrap_closed_messages
                 self.bootstrap_closed_messages = []
 
             if batch:
                 passes += 1
-
-                batch.sort(
-                    key=lambda item: (
-                        item[0],
-                        item[1],
-                        int(
-                            TIMEFRAME_CONFIGS.get(
-                                item[2],
-                                {},
-                            ).get(
-                                "ms_per_candle",
-                                10**18,
-                            )
-                        ),
-                        item[3],
-                        item[4],
-                    )
-                )
+                batch.sort(key=lambda item: (
+                    item[0],
+                    item[1],
+                    self._timeframe_ms(item[2]),
+                    item[3],
+                    item[4],
+                ))
 
                 for (
                     close_timestamp,
@@ -2032,61 +2108,76 @@ class MarketDataService:
                     _sequence,
                     message,
                 ) in batch:
-                    if (
-                        int(close_timestamp)
-                        < cutoff_ms
-                    ):
+                    if int(close_timestamp) < cutoff_ms:
                         discarded_before_cutoff += 1
                         continue
 
-                    key = (
-                        symbol,
-                        timeframe,
-                        int(open_timestamp),
-                    )
-
+                    key = (symbol, timeframe, int(open_timestamp))
                     if key in published_keys:
                         duplicates += 1
                         continue
 
-                    self._process_ws_message(
-                        message,
-                        publish_price=False,
-                    )
+                    if (
+                        isinstance(message, dict)
+                        and "_bootstrap_rest_repair" in message
+                    ):
+                        self.publisher.publish_recovered_candle(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            candle=message["_bootstrap_rest_repair"],
+                        )
+                        recovered += 1
+                        if timeframe in MARKET_FLOW_TIMEFRAMES:
+                            self._register_market_flow_close(
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                candle_timestamp=int(open_timestamp),
+                            )
+                    else:
+                        self._process_ws_message(
+                            message,
+                            publish_price=False,
+                        )
 
                     published_keys.add(key)
                     published += 1
+
+                # A new close may have arrived during publication.  Do not
+                # release the buffer without repeating the continuity check.
+                continue
 
             with self.bootstrap_lock:
                 if self.bootstrap_closed_messages:
                     continue
 
-                # Atomic handoff:
-                # callbacks blocked on this same lock will either
-                # have been buffered already or will observe False
-                # and publish directly after the lock is released.
+                if not (self.ws and self.ws.is_connected):
+                    # Fail closed.  PM2 can restart bootstrap rather than
+                    # falsely announcing READY after a lost connection.
+                    raise RuntimeError(
+                        "WebSocket disconnected during bootstrap handoff"
+                    )
+
+                # Atomic handoff against the same lock used by WS callbacks.
                 self.bootstrap_buffering = False
+                # Covers a disconnect immediately after startup, before the
+                # first iteration of _detect_ws_connection_transition().
+                self.ws_was_connected = True
                 break
 
         print(
             "[MARKET DATA BOOTSTRAP] "
-            f"catchup complete "
-            f"passes={passes} "
-            f"published={published} "
-            f"discarded_before_cutoff="
-            f"{discarded_before_cutoff} "
+            f"catchup complete passes={passes} "
+            f"published={published} rest_recovered={recovered} "
+            f"discarded_before_cutoff={discarded_before_cutoff} "
             f"duplicates={duplicates}"
         )
-
         return {
             "passes": passes,
             "published": published,
-            "discarded_before_cutoff": (
-                discarded_before_cutoff
-            ),
+            "rest_recovered": recovered,
+            "discarded_before_cutoff": discarded_before_cutoff,
             "duplicates": duplicates,
         }
-
 
     def _enqueue_micro_flow_seconds(
         self,
