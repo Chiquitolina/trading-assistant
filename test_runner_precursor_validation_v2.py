@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -137,5 +138,48 @@ class ValidationV2Tests(unittest.TestCase):
             self.assertTrue((destination/'historical_validation_events.csv').is_file())
             rows=v.read_csv(destination/'historical_validation_events.csv')
             self.assertEqual(set(x['tp3_sl1_state'] for x in rows),{'TP_FIRST','SL_FIRST'})
+
+
+    def test_v2_13_verified_binance_anomalies_are_exact_and_pinned(self):
+        # V2 cross-TF discrepancies were verified against both Binance REST
+        # timeframes on 2026-10-21. A new case or mutated observation fails.
+        case_specs = [
+            ('ACUUSDT', '2026-10-13 21:15'),
+            ('ALICEUSDT', '2026-10-17 20:15'),
+            ('ASRUSDT', '2026-10-15 23:45'),
+            ('ASRUSDT', '2026-10-19 04:30'),
+            ('DRIFTUSDT', '2026-10-13 21:30'),
+            ('JOEUSDT', '2026-10-13 06:30'),
+            ('JOEUSDT', '2026-10-17 20:45'),
+            ('KSMUSDT', '2026-10-13 20:30'),
+            ('MELANIAUSDT', '2026-10-20 03:30'),
+            ('OGUSDT', '2026-10-15 22:45'),
+            ('REDUSDT', '2026-10-20 21:45'),
+            ('TAUSDT', '2026-10-13 23:45'),
+            ('XNYUSDT', '2026-10-16 06:45'),
+        ]
+        keys = {
+            (sym, int(datetime.strptime(day, '%Y-%m-%d %H:%M')
+                      .replace(tzinfo=timezone.utc).timestamp() * 1000))
+            for sym, day in case_specs
+        }
+        self.assertEqual(len(keys), 13)
+        self.assertTrue(keys.issubset(v.v1.BINANCE_VERIFIED_15M_ANOMALIES))
+        for symbol, ts in keys:
+            proof = v.v1.BINANCE_VERIFIED_15M_ANOMALIES[(symbol, ts)]
+            self.assertIsNotNone(v.v1.exact_verified_provider_anomaly(
+                symbol, ts, proof['one_min_aggregate'], proof['binance_15m']))
+            self.assertIsNone(v.v1.exact_verified_provider_anomaly(
+                symbol, ts + 15 * v.v1.MIN,
+                proof['one_min_aggregate'], proof['binance_15m']))
+            changed = list(proof['binance_15m'])
+            changed[0] += 0.0001
+            self.assertIsNone(v.v1.exact_verified_provider_anomaly(
+                symbol, ts, proof['one_min_aggregate'], changed))
+            changed = list(proof['one_min_aggregate'])
+            changed[6] += 1
+            self.assertIsNone(v.v1.exact_verified_provider_anomaly(
+                symbol, ts, changed, proof['binance_15m']))
+
 
 if __name__=='__main__':unittest.main()

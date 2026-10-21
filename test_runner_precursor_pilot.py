@@ -133,7 +133,7 @@ class PilotTests(unittest.TestCase):
             p.ingest(con,symbol,'1m',ts+i*p.MIN,ts+i*p.MIN,[tuple(row)],'one_min')
         p.ingest(con,symbol,'15m',ts,ts,[(ts,*expected)],'fifteen_min')
 
-    def test_provider_anomalies_only_three_exact_cases(self):
+    def test_provider_anomalies_only_16_exact_cases(self):
         with tempfile.TemporaryDirectory() as td:
             with closing(p.connect(Path(td)/'db.sqlite')) as con:
                 for (sym,ts), proof in p.BINANCE_VERIFIED_15M_ANOMALIES.items():
@@ -143,7 +143,7 @@ class PilotTests(unittest.TestCase):
                     con,samples,120,96,include_verified=True)
                 self.assertEqual(matched,0)
                 self.assertEqual(issues,[])
-                self.assertEqual(len(verified),3)
+                self.assertEqual(len(verified),16)
                 self.assertEqual({(x['symbol'],x['open_ts']) for x in verified},
                                  set(p.BINANCE_VERIFIED_15M_ANOMALIES))
                 self.assertTrue(all(x['verification_method']==p.BINANCE_ANOMALY_CHECK_METHOD

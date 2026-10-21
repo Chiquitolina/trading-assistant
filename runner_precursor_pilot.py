@@ -42,7 +42,7 @@ VERSION = 'runner-precursors-pilot-v1.0'
 DEFAULT_DIR = 'reports/reaction_lab'
 DB_NAME = 'runner_precursor_pilot_v1.sqlite3'
 
-# MANUALLY VERIFIED exchange cross-timeframe anomalies, 2026-10-21 (UTC).
+# MANUALLY VERIFIED exchange cross-timeframe anomalies, 2026-10-21 (UTC): 3 V1 + 13 V2.
 # Operator independently queried Binance Futures USD-M /fapi/v1/klines,
 # 15x 1m candles and 1x 15m candle per case, and checked that BOTH stored
 # versions still match the exchange API field-by-field. Neither data series
@@ -63,6 +63,62 @@ BINANCE_VERIFIED_15M_ANOMALIES = {
     ('GASUSDT', 1791830700000): {
         'one_min_aggregate': (1.343, 1.343, 1.340, 1.341, 5454.6, 7313.1722, 90, 496.9, 666.1435),
         'binance_15m':      (1.342, 1.342, 1.340, 1.341, 5454.6, 7313.1722, 90, 496.9, 666.1435),
+    },
+# Validated additionally in the independently chosen V2 cohort on 2026-10-21:
+# 13 further Binance cross-timeframe inconsistencies, independently
+# re-fetched by the operator (15×1m + 1×15m per symbol/timestamp).
+# No observed/source candle is rewritten; all fields remain pinned.
+    ('ACUUSDT', 1791926100000): {  # 2026-10-13 21:15 UTC
+        "one_min_aggregate": (0.09637, 0.09653, 0.09637, 0.09649, 19159.0, 1848.37882, 113, 9238.0, 891.40508),
+        "binance_15m": (0.0964, 0.09653, 0.09638, 0.09649, 19159.0, 1848.37882, 113, 9238.0, 891.40508),
+    },
+    ('ALICEUSDT', 1792268100000): {  # 2026-10-17 20:15 UTC
+        "one_min_aggregate": (0.1475, 0.1477, 0.147, 0.1473, 83350.2, 12285.53204, 282, 33149.8, 4890.04028),
+        "binance_15m": (0.1476, 0.1477, 0.147, 0.1473, 83350.2, 12285.53204, 282, 33149.8, 4890.04028),
+    },
+    ('ASRUSDT', 1792107900000): {  # 2026-10-15 23:45 UTC
+        "one_min_aggregate": (0.8266, 0.8273, 0.8258, 0.8261, 1400.6, 1157.65814, 84, 529.5, 437.69765),
+        "binance_15m": (0.8265, 0.8273, 0.8258, 0.8261, 1400.6, 1157.65814, 84, 529.5, 437.69765),
+    },
+    ('ASRUSDT', 1792384200000): {  # 2026-10-19 04:30 UTC
+        "one_min_aggregate": (0.7974, 0.8002, 0.7974, 0.7988, 3195.0, 2552.90288, 114, 1900.4, 1518.35811),
+        "binance_15m": (0.7976, 0.8002, 0.7976, 0.7988, 3195.0, 2552.90288, 114, 1900.4, 1518.35811),
+    },
+    ('DRIFTUSDT', 1791927000000): {  # 2026-10-13 21:30 UTC
+        "one_min_aggregate": (0.01722, 0.01734, 0.01722, 0.0173, 248673.0, 4302.36395, 197, 87833.0, 1518.78212),
+        "binance_15m": (0.01724, 0.01734, 0.01722, 0.0173, 248673.0, 4302.36395, 197, 87833.0, 1518.78212),
+    },
+    ('JOEUSDT', 1791873000000): {  # 2026-10-13 06:30 UTC
+        "one_min_aggregate": (0.03729, 0.03729, 0.03721, 0.03727, 76797.0, 2860.07138, 143, 25597.0, 953.49123),
+        "binance_15m": (0.03727, 0.03729, 0.03721, 0.03727, 76797.0, 2860.07138, 143, 25597.0, 953.49123),
+    },
+    ('JOEUSDT', 1792269900000): {  # 2026-10-17 20:45 UTC
+        "one_min_aggregate": (0.03276, 0.03279, 0.03274, 0.03276, 63662.0, 2086.23076, 64, 34109.0, 1118.20512),
+        "binance_15m": (0.03275, 0.03279, 0.03274, 0.03276, 63662.0, 2086.23076, 64, 34109.0, 1118.20512),
+    },
+    ('KSMUSDT', 1791923400000): {  # 2026-10-13 20:30 UTC
+        "one_min_aggregate": (4.663, 4.683, 4.661, 4.665, 3429.7, 16023.132, 358, 988.6, 4614.9921),
+        "binance_15m": (4.662, 4.683, 4.661, 4.665, 3429.7, 16023.132, 358, 988.6, 4614.9921),
+    },
+    ('MELANIAUSDT', 1792467000000): {  # 2026-10-20 03:30 UTC
+        "one_min_aggregate": (0.08197, 0.08246, 0.08191, 0.08235, 98293.16, 8082.8121775, 158, 14487.28, 1190.4157129),
+        "binance_15m": (0.08191, 0.08246, 0.08191, 0.08235, 98293.16, 8082.8121775, 158, 14487.28, 1190.4157129),
+    },
+    ('OGUSDT', 1792104300000): {  # 2026-10-15 22:45 UTC
+        "one_min_aggregate": (2.71, 2.712, 2.71, 2.712, 905.5, 2454.608, 99, 586.3, 1589.576),
+        "binance_15m": (2.711, 2.712, 2.71, 2.712, 905.5, 2454.608, 99, 586.3, 1589.576),
+    },
+    ('REDUSDT', 1792532700000): {  # 2026-10-20 21:45 UTC
+        "one_min_aggregate": (0.1399, 0.1402, 0.1396, 0.1396, 80523.0, 11270.4798, 166, 51122.0, 7157.4587),
+        "binance_15m": (0.14, 0.1402, 0.1396, 0.1396, 80523.0, 11270.4798, 166, 51122.0, 7157.4587),
+    },
+    ('TAUSDT', 1791935100000): {  # 2026-10-13 23:45 UTC
+        "one_min_aggregate": (0.04886, 0.04888, 0.04874, 0.04874, 49429.0, 2412.10868, 130, 33684.0, 1643.70163),
+        "binance_15m": (0.04884, 0.04888, 0.04874, 0.04874, 49429.0, 2412.10868, 130, 33684.0, 1643.70163),
+    },
+    ('XNYUSDT', 1792133100000): {  # 2026-10-16 06:45 UTC
+        "one_min_aggregate": (0.005081, 0.005083, 0.005046, 0.005076, 2682135.0, 13579.967024, 236, 1021748.0, 5183.982799),
+        "binance_15m": (0.00508, 0.005083, 0.005046, 0.005076, 2682135.0, 13579.967024, 236, 1021748.0, 5183.982799),
     },
 }
 BINANCE_ANOMALY_CHECK_DATE = '2026-10-21'
@@ -514,7 +570,7 @@ def window_rows(con,sym,tf,end_excl,n):
 
 
 def exact_verified_provider_anomaly(sym,ts,agg,expected):
-    """Recognize *only* the three independently checked Binance discrepancies.
+    """Recognize *only* the 16 independently checked Binance discrepancies.
 
     All nine 1m-derived and 15m values are pinned, including nonprice fields.
     Strict price comparisons rule out treating a changed candle as verified.
@@ -547,7 +603,7 @@ def exact_verified_provider_anomaly(sym,ts,agg,expected):
 def validate_aggregation(con, sample,pre1,pre15,include_verified=False):
     """Check full 15m bars where all 15 underlying 1m bars are present.
 
-    Only three exact, manually cross-verified exchange inconsistencies are
+    Only 16 exact, manually cross-verified exchange inconsistencies are
     recognized. All unrecognized mismatches fail the audit, as before.
     """
     issues=[]; matched=0; verified=[]
