@@ -531,7 +531,7 @@ def load_compression_scanner_market():
     """One batched read from Redis, reused across slider changes."""
     histories = geometry_scanner_data_service.get_market_candles(
         timeframe="30m",
-        limit=150,
+        limit=250,  # 80 compression + 160 reference + 10-bar buffer.
         symbols=None,  # All available symbols in the Market Data producer.
     )
     return (
@@ -86303,20 +86303,37 @@ if selected_section == "reaction_swing_lab":
 if selected_section == "compression_scanner":
     st.markdown("## 🗜️ Compression Scanner · 30m")
     st.caption(
-        "Escanea TODOS los símbolos disponibles: ~30 velas cerradas (15 horas), "
-        "compresión de rango, ATR y volumen; cercanía al techo/piso. "
+        "Escanea TODOS los símbolos disponibles: ventanas de 20 a 80 velas "
+        "cerradas de 30m, comparadas contra 40 a 160 velas anteriores. "
+        "Evalúa rango, ATR, volumen y cercanía al techo/piso. "
         "Solo observación: no crea watches, señales ni órdenes."
     )
+
+    # Existing Streamlit sessions may retain previous slider values. The reset
+    # button explicitly reapplies the research preset without restarting LIVE.
+    if st.button("🎯 Restaurar perfil TAKE-like", key="cs_reset_take_profile"):
+        preset = {
+            "cs_window": 40, "cs_base": 80, "cs_near_wall": True,
+            "cs_range": 0.85, "cs_atr": 0.95, "cs_volume": 0.80,
+            "cs_body": 0.60, "cs_score": 3, "cs_height": 6.0,
+            "cs_touches": 2, "cs_liquidity": 20_000,
+            "cs_wall_distance": 10, "cs_micro": True,
+            "cs_micro_ratio": 0.70, "cs_wall_side": "TECHO",
+            "cs_shape": "TODAS", "cs_sort": "Distancia a pared",
+        }
+        for key, value in preset.items():
+            st.session_state[key] = value
+        st.rerun()
 
     c_window, c_baseline, c_wall = st.columns(3)
     with c_window:
         compression_scan_window = st.slider(
-            "Velas de compresión (30m)", 20, 40, 30,
+            "Velas de compresión (30m)", 20, 80, 40,
             key="cs_window",
         )
     with c_baseline:
         compression_scan_base = st.slider(
-            "Velas de referencia anteriores", 40, 80, 60, step=10,
+            "Velas de referencia anteriores", 40, 160, 80, step=10,
             key="cs_base",
         )
     with c_wall:
@@ -86328,11 +86345,11 @@ if selected_section == "compression_scanner":
     st.markdown("#### Umbrales de compresión")
     t1, t2, t3, t4 = st.columns(4)
     with t1:
-        cs_range = st.slider("Range ratio máximo", .40, 1.50, .80, .05, key="cs_range")
+        cs_range = st.slider("Range ratio máximo", .40, 1.50, .85, .05, key="cs_range")
     with t2:
-        cs_atr = st.slider("ATR ratio máximo", .40, 1.50, .90, .05, key="cs_atr")
+        cs_atr = st.slider("ATR ratio máximo", .40, 1.50, .95, .05, key="cs_atr")
     with t3:
-        cs_volume = st.slider("Volume ratio máximo", .30, 2.00, 1.10, .05, key="cs_volume")
+        cs_volume = st.slider("Volume ratio máximo", .30, 2.00, .80, .05, key="cs_volume")
     with t4:
         cs_body = st.slider("Body fraction máximo", .20, 1.00, .60, .05, key="cs_body")
 
@@ -86340,31 +86357,69 @@ if selected_section == "compression_scanner":
     with f1:
         cs_min_conditions = st.slider("Condiciones mínimas / 4", 1, 4, 3, key="cs_score")
     with f2:
-        cs_height = st.slider("Altura máxima del box (%)", 0.5, 12.0, 4.0, .5, key="cs_height")
+        cs_height = st.slider("Altura máxima del box (%)", 0.5, 12.0, 6.0, .5, key="cs_height")
     with f3:
         cs_touches = st.slider("Toques mínimos por lado", 0, 5, 2, key="cs_touches")
     with f4:
         cs_liquidity = st.number_input(
             "Mediana volumen 30m (USDT)", min_value=0, max_value=5_000_000,
-            value=25_000, step=25_000, key="cs_liquidity",
+            value=20_000, step=5_000, key="cs_liquidity",
         )
 
     extra1, extra2, extra3 = st.columns(3)
     with extra1:
         cs_wall_distance = st.slider(
-            "Distancia máxima a pared (% del box)", 5, 50, 30, 5,
+            "Distancia máxima a pared (% del box)", 5, 50, 10, 5,
             key="cs_wall_distance",
         )
     with extra2:
         cs_micro = st.checkbox(
-            "Exigir achicamiento últimas velas", value=False,
+            "Exigir achicamiento últimas velas", value=True,
             key="cs_micro",
         )
     with extra3:
         cs_micro_ratio = st.slider(
-            "Ratio últimas / primeras velas", .40, 1.50, 1.00, .05,
+            "Ratio últimas / primeras velas", .40, 1.50, .70, .05,
             key="cs_micro_ratio",
         )
+
+    # TAKE-like is a descriptive bullish compression preset, NOT a
+    # trained predictor. Every control can still be adjusted manually.
+    side_col, shape_col, sort_col = st.columns(3)
+    with side_col:
+        cs_wall_side = st.selectbox(
+            "Pared objetivo",
+            ("TECHO", "AMBOS", "PISO"),
+            index=0,
+            help="TAKE estaba cerca del TECHO antes de romper al alza.",
+            key="cs_wall_side",
+        )
+    with shape_col:
+        cs_shape = st.selectbox(
+            "Forma (opcional)",
+            ("TODAS", "ascending_triangle", "horizontal_range", "symmetrical_triangle", "descending_triangle"),
+            format_func=lambda shape: {
+                "TODAS": "Todas",
+                "ascending_triangle": "Triángulo ascendente",
+                "horizontal_range": "Rango horizontal",
+                "symmetrical_triangle": "Triángulo simétrico",
+                "descending_triangle": "Triángulo descendente",
+            }.get(shape, shape),
+            key="cs_shape",
+        )
+    with sort_col:
+        cs_sort = st.selectbox(
+            "Ordenar resultados",
+            ("Distancia a pared", "Ranking /100"),
+            key="cs_sort",
+        )
+
+    st.caption(
+        "Perfil inicial TAKE-like: prioriza compresiones junto al techo, "
+        "con contracción reciente y altura hasta 6%. No implica "
+        "probabilidad de breakout. Los ratios dependen de las ventanas "
+        "de compresión/referencia elegidas."
+    )
 
     with st.spinner("Leyendo velas cerradas del mercado (lectura en lote)..."):
         cs_histories, cs_market_diag, cs_market_error = load_compression_scanner_market()
@@ -86390,16 +86445,31 @@ if selected_section == "compression_scanner":
             max_wall_distance_pct=float(cs_wall_distance),
             require_micro_contraction=cs_micro,
             max_micro_range_ratio=cs_micro_ratio,
+            closest_wall_filter=cs_wall_side,
+            shape_filter=cs_shape,
         )
+
+        if not cs_filtered.empty and cs_sort == "Distancia a pared":
+            cs_filtered = cs_filtered.sort_values(
+                ["wall_distance_pct", "readiness_score", "symbol"],
+                ascending=[True, False, True],
+            ).reset_index(drop=True)
 
         ms1, ms2, ms3, ms4 = st.columns(4)
         ms1.metric("Símbolos con histórico", cs_scan_diag["symbols_with_history"])
         ms2.metric("Evaluados", cs_scan_diag["scanned"])
         ms3.metric("Compresiones filtradas", len(cs_filtered))
         ms4.metric(
-            "Cerca de romper (ranking)",
+            "Cerca de romper (ranking o pared)",
             int((cs_filtered["status"] == "CERCA_DE_ROMPER").sum())
             if "status" in cs_filtered else 0,
+        )
+
+        st.caption(
+            "Estado CERCA_DE_ROMPER: ranking ≥70 y dentro de la distancia máxima "
+            "a pared, o distancia ≤10% de la altura del box con al menos 3/4 "
+            "condiciones de compresión. Es proximidad estructural, no una "
+            "predicción ni una señal de entrada."
         )
 
         with st.expander("Diagnóstico de cobertura", expanded=False):
@@ -86456,7 +86526,9 @@ if selected_section == "compression_scanner":
             cs_row = cs_filtered.loc[
                 cs_filtered["symbol"] == cs_selected_symbol
             ].iloc[0]
-            cs_chart_data = cs_histories[cs_selected_symbol].tail(80).copy()
+            # Keep the full selected structure and 30 preceding bars visible.
+            cs_chart_bars = max(80, compression_scan_window + 30)
+            cs_chart_data = cs_histories[cs_selected_symbol].tail(cs_chart_bars).copy()
             cs_chart_data["date"] = pd.to_datetime(
                 cs_chart_data["timestamp"], unit="ms", utc=True,
             ).dt.tz_convert(TZ)

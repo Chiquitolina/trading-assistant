@@ -231,6 +231,8 @@ def filter_compression_market(
     max_wall_distance_pct: float = 30.0,
     require_micro_contraction: bool = False,
     max_micro_range_ratio: float = 1.0,
+    closest_wall_filter: str = "AMBOS",
+    shape_filter: str = "TODAS",
 ) -> pd.DataFrame:
     """Cheap filters over fixed snapshots; changing sliders never re-fetches."""
     if raw is None or raw.empty:
@@ -257,13 +259,36 @@ def filter_compression_market(
         qualified &= filtered["wall_distance_pct"] <= max_wall_distance_pct
     if require_micro_contraction:
         qualified &= filtered["micro_range_ratio"] <= max_micro_range_ratio
+    if closest_wall_filter not in {"AMBOS", "TECHO", "PISO"}:
+        raise ValueError(f"Invalid closest_wall_filter: {closest_wall_filter}")
+    if shape_filter not in {
+        "TODAS", "ascending_triangle", "horizontal_range",
+        "symmetrical_triangle", "descending_triangle",
+    }:
+        raise ValueError(f"Invalid shape_filter: {shape_filter}")
+    if closest_wall_filter != "AMBOS":
+        qualified &= filtered["closest_wall"] == closest_wall_filter
+    if shape_filter != "TODAS":
+        qualified &= filtered["compression_shape"] == shape_filter
 
     filtered = filtered.loc[qualified].copy()
     if filtered.empty:
         return filtered
-    filtered["status"] = np.where(
+    # Ranking describes overall quality, but must not hide an already
+    # qualified compression sitting almost on its nearest boundary.
+    # Distances here are percentages of BOX HEIGHT, not price percentages.
+    # A very close structure needs >=3 of the 4 core conditions; otherwise
+    # the proximity alone could flag a poor-quality box as breakout-ready.
+    ranking_ready = (
         (filtered["readiness_score"] >= 70)
-        & (filtered["wall_distance_pct"] <= max_wall_distance_pct),
+        & (filtered["wall_distance_pct"] <= max_wall_distance_pct)
+    )
+    near_boundary_ready = (
+        (filtered["core_score"] >= 3)
+        & (filtered["wall_distance_pct"] <= min(10.0, max_wall_distance_pct))
+    )
+    filtered["status"] = np.where(
+        ranking_ready | near_boundary_ready,
         "CERCA_DE_ROMPER", "COMPRIMIENDO",
     )
     return filtered.sort_values(
