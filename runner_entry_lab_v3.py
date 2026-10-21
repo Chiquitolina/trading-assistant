@@ -146,6 +146,25 @@ def evaluate_trade(rows,side,entry_i,stop,stop_pct,tp,horizon=HORIZON):
             'ambiguous_lower_bound':False}
 
 
+def original_v2_selection_hash(samples):
+    """Recreate the SHA-256 input used *before* V2 inserted the cohort into SQLite.
+
+    v1.outcomes() produces integer zero through ``max(0, ...)`` when an MFE or
+    MAE is exactly zero. SQLite's REAL columns deserialize those integer zeros
+    to floats (0.0), changing json.dumps() and thus v1.sample_hash(). Only
+    these two known outcome fields need their original JSON scalar type restored.
+    Every other field, sample, order, and numeric value is hashed unchanged.
+    """
+    original=[]
+    for s in samples:
+        row=dict(s)
+        for field in ('mfe_180_pct','mae_180_pct'):
+            if type(row[field]) is float and row[field]==0.0:
+                row[field]=0
+        original.append(row)
+    return v1.sample_hash(original)
+
+
 def load_inputs(root):
     output=root/V2_OUT
     with closing(v1.ro(root/V2_DB)) as con:
@@ -155,7 +174,7 @@ def load_inputs(root):
         raise ValueError('Expected the isolated V2 cohort, not V1')
     if len(samples)!=600 or len({s['event_key'] for s in samples})!=600:
         raise ValueError('V2 sample must be the 600 frozen unique cases')
-    digest=v1.sample_hash(samples)
+    digest=original_v2_selection_hash(samples)
     if digest!=meta['sample_sha256']:
         raise ValueError('Frozen V2 sample SHA does not match SQLite metadata')
     audit=json.loads((output/'audit.json').read_text(encoding='utf-8'))

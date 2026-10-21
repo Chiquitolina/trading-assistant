@@ -18,6 +18,44 @@ def path(side='LONG',price=100.,start=1800000000000,n=360):
 
 
 class EntryLabTests(unittest.TestCase):
+    def test_frozen_sample_hash_recovers_original_integer_zero(self):
+        # V2 computed the hash over source_candidates before insertion. A zero
+        # from max(0, negative_price_excursion) was an int, but SQLite REAL
+        # normalizes it to 0.0. The digest must still match the frozen source.
+        original={'event_key':'XUSDT|LONG|1800000000000','symbol':'XUSDT',
+             'side':'LONG','retest_ts':1800000000000,'known_ts':1800000060000,
+             'first_seen_ms':1800000090000,'observation_type':'LIVE_OBSERVED',
+             'episode_id':None,'wave_minute':30000001,'entry_open':100.0,
+             'class_label':'CONTROL_LT3','mfe_180_pct':0,'mae_180_pct':1.25,
+             'first_2m':None,'first_3m':None,'first_5m':None}
+        expected=e.v1.sample_hash([original])
+        with tempfile.TemporaryDirectory() as td:
+            db=Path(td)/'frozen.sqlite3'
+            with closing(e.v1.connect(db)) as con:
+                fields=[r[1] for r in con.execute('PRAGMA table_info(samples)')]
+                con.execute('INSERT INTO samples VALUES ('+','.join('?'*len(fields))+')',
+                            [original[f] for f in fields])
+                con.commit()
+                reread=e.v1.load_samples(con)
+        self.assertEqual(reread[0]['mfe_180_pct'],0.0)
+        self.assertNotEqual(e.v1.sample_hash(reread),expected)
+        self.assertEqual(e.original_v2_selection_hash(reread),expected)
+
+    def test_frozen_sample_hash_still_rejects_mutation(self):
+        original={'event_key':'XUSDT|SHORT|1800000000000','symbol':'XUSDT',
+             'side':'SHORT','retest_ts':1800000000000,'known_ts':1800000060000,
+             'first_seen_ms':1800000090000,'observation_type':'LIVE_OBSERVED',
+             'episode_id':'ep1','wave_minute':30000001,'entry_open':99.0,
+             'class_label':'RUNNER_3','mfe_180_pct':3.3,'mae_180_pct':0,
+             'first_2m':9,'first_3m':10,'first_5m':None}
+        digest=e.v1.sample_hash([original])
+        restored=dict(original,mae_180_pct=0.0)
+        self.assertEqual(e.original_v2_selection_hash([restored]),digest)
+        restored['mfe_180_pct']=3.31
+        self.assertNotEqual(e.original_v2_selection_hash([restored]),digest)
+        restored=dict(original,mae_180_pct=0.0,event_key='OTHERUSDT|SHORT|1800000000000')
+        self.assertNotEqual(e.original_v2_selection_hash([restored]),digest)
+
     def test_strict_observation_after_actual_first_seen(self):
         base=1800000000000//MIN*MIN
         self.assertEqual(e.observed_open_index(base+43000,base),1)
@@ -132,7 +170,7 @@ class EntryLabTests(unittest.TestCase):
                         sample={'event_key':key,'symbol':sym,'side':'LONG','retest_ts':ret,
                            'known_ts':known,'first_seen_ms':known+40000,'observation_type':'LIVE_OBSERVED',
                            'episode_id':None,'wave_minute':known//MIN,'entry_open':100.,
-                           'class_label':'CONTROL_LT3','mfe_180_pct':0.,'mae_180_pct':0.,
+                           'class_label':'CONTROL_LT3','mfe_180_pct':0,'mae_180_pct':0,
                            'first_2m':None,'first_3m':None,'first_5m':None}
                         samples.append(sample)
                         arr=[(known+j*MIN,100.,100.,100.,100.) for j in range(360)]
