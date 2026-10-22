@@ -37,6 +37,7 @@ class FakeStreamlit(types.ModuleType):
     def markdown(self,t,*a,**kw):self.texts.append(t)
     def caption(self,*a,**kw):pass
     def info(self,*a,**kw):pass
+    def expander(self,*a,**kw):return FakeColumn()
     def warning(self,*a,**kw):pass
     def dataframe(self,*a,**kw):pass
     def plotly_chart(self,*a,**kw):self.plots+=1
@@ -55,7 +56,7 @@ class RichCardViewSmoke(unittest.TestCase):
     def test_dashboard_streamlit_path_no_hidden_keyerror(self):
         fake=FakeStreamlit()
         engine=types.ModuleType('reaction_structural_level_atlas_v2')
-        engine.v1=types.SimpleNamespace(lineage=types.SimpleNamespace(ROOT_REL=Path('reports/reaction_lab')))
+        engine.v1=types.SimpleNamespace(lineage=types.SimpleNamespace(ROOT_REL=Path('reports/reaction_lab'),HISTORY_NAME='reaction_compression_history_v1.sqlite3'))
         engine.OUTPUT='reaction_structural_level_atlas_v2'
         import plotly.graph_objects as go
         from dashboard.views import reaction_structural_level_atlas_v2_view as source
@@ -75,6 +76,12 @@ class RichCardViewSmoke(unittest.TestCase):
                 'primary_distance_atr':0.0,'primary_state_pre':'ACCEPTED_DEFENDED',
                 'setup_pre':'RUPTURA_POTENCIAL','known_candle_label':'PRUEBA_SIN_QUIEBRE',
                 'pre_contacts_5':4,'pressure_pre':True,
+                'arrival_origin_pre':'BELOW',
+                'structure_pre':'HL_HACIA_RESISTENCIA',
+                'structure_role_pre':'RESISTENCIA',
+                'structure_relation_pre':'PRESION_CONTRA_REACTION',
+                'structure_tf':'15m',
+                'structure_reason':'DOS_PIVOTES_CONFIRMADOS_PRE',
             }])
             levels=pd.DataFrame([{'event_key':'a','timeframe':'15m','zone_id':'z',
                                   'level_price':100,'zone_low':99,'zone_high':101}])
@@ -83,6 +90,7 @@ class RichCardViewSmoke(unittest.TestCase):
             with patch.dict(sys.modules,{'streamlit':fake,'reaction_structural_level_atlas_v2':engine}), \
                 patch.object(source,'load',return_value=(levels,atlas,{})), \
                 patch.object(view.logic,'enrich_events',side_effect=lambda project, events:events), \
+                patch.object(view.structure,'enrich_pre_structure',side_effect=lambda project, events:events), \
                 patch.object(source,'_read_structural_figure',return_value=go.Figure()), \
                 patch.object(overlay,'get_post_bars',return_value=([],'MISSING_PATH')):
                 view.render_horizontal_level_rich_card(source_rows,p,

@@ -177,7 +177,24 @@ def groups_summary(events):
         sl=int(g.outcome.eq('SL_FIRST').sum())
         out.append({'Situación ANTES':setup,'REACTIONs':len(g),'TP':tp,'SL':sl,
                     'NO_HIT':int(g.outcome.eq('NO_HIT').sum()),
-                    'Sin resultado':int(len(g)-g.outcome.isin(['TP_FIRST','SL_FIRST','NO_HIT']).sum()),
+                    'AMBIGUOUS':int(g.outcome.eq('AMBIGUOUS').sum()),
+                    'Sin resultado':int((~g.outcome.isin(['TP_FIRST','SL_FIRST','NO_HIT','AMBIGUOUS'])).sum()),
                     'TP resueltos (%)':round(100*tp/(tp+sl),1) if tp+sl else None,
                     'N resueltos':tp+sl})
     return pd.DataFrame(out)
+
+
+def summary_by(events, field, label='Grupo'):
+    """Outcome summary by PRE factor; remains descriptive, never uses outcomes to classify."""
+    if field not in events.columns or 'outcome' not in events.columns:
+        return pd.DataFrame()
+    rows=[]
+    for key,g in events.groupby(field,dropna=False):
+        tp=int(g.outcome.eq('TP_FIRST').sum());sl=int(g.outcome.eq('SL_FIRST').sum())
+        rows.append({label:str(key), 'REACTIONs':len(g),'TP':tp,'SL':sl,
+                     'NO_HIT':int(g.outcome.eq('NO_HIT').sum()),
+                     'AMBIGUOUS':int(g.outcome.eq('AMBIGUOUS').sum()),
+                     'SIN_RESULTADO':int((~g.outcome.isin(['TP_FIRST','SL_FIRST','NO_HIT','AMBIGUOUS'])).sum()),
+                     'TP resueltos (%)':round(100*tp/(tp+sl),1) if (tp+sl) else None,
+                     'N resueltos':tp+sl})
+    return pd.DataFrame(rows).sort_values('REACTIONs',ascending=False)

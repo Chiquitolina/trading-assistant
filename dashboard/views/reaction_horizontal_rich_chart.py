@@ -51,7 +51,21 @@ def confirmed_swing_lows(candles, *, left=3, right=3, latest=None):
     return out
 
 
-def enhance_pre_candles(fig, timeframe, *, show_higher_lows=True, visible_hours=12):
+
+
+def confirmed_swing_highs(candles, *, left=3, right=3, latest=None):
+    """PRE-confirmed 3x3 highs; caller supplies only closed HTF candles."""
+    out = []
+    for i in range(left, len(candles)-right):
+        h = float(candles[i][2])
+        others = ([float(candles[j][2]) for j in range(i-left,i)]
+                  + [float(candles[j][2]) for j in range(i+1,i+right+1)])
+        if all(h > other for other in others):
+            if latest is None or candles[i][0] >= latest:
+                out.append((candles[i][0], h, candles[i+right][0]))
+    return out
+
+def enhance_pre_candles(fig, timeframe, *, show_higher_lows=True, visible_hours=12, zone_role=None):
     """Return fig and PRE-only diagnostic, preserving all Atlas/POST information.
 
     Replace only the original HTF candlestick with filled bars and wicks.
@@ -121,36 +135,49 @@ def enhance_pre_candles(fig, timeframe, *, show_higher_lows=True, visible_hours=
 
     last_stamp=candles[-1][0]
     lower_bound=last_stamp-pd.Timedelta(hours=visible_hours)
-    lows=confirmed_swing_lows(candles,latest=lower_bound)
+    # SUPPORT -> annotate lower highs (potential selling pressure).
+    # RESISTANCE -> annotate higher lows (potential buying pressure).
+    use_high = zone_role == 'SOPORTE'
+    swings=(confirmed_swing_highs(candles, latest=lower_bound) if use_high else
+            confirmed_swing_lows(candles, latest=lower_bound))
     status='INSUFFICIENT_PIVOTS'
-    if len(lows)>=2:
-        a,b=lows[-2:]
-        if b[1]>a[1]: status='HIGHER_LOWS'
-        elif b[1]<a[1]: status='LOWER_LOWS'
-        else: status='EQUAL_LOWS'
-        # Always mark the local lows; dashed connecting segment conveys their
-        # progression without asserting that a triangle/breakout exists.
+    if len(swings)>=2:
+        a,b=swings[-2:]
+        if use_high:
+            status=('LOWER_HIGHS' if b[1]<a[1] else
+                    'HIGHER_HIGHS' if b[1]>a[1] else 'EQUAL_HIGHS')
+        else:
+            status=('HIGHER_LOWS' if b[1]>a[1] else
+                    'LOWER_LOWS' if b[1]<a[1] else 'EQUAL_LOWS')
         fig.add_trace(go.Scatter(
             x=[a[0],b[0]],y=[a[1],b[1]],mode='lines+markers',
             line=dict(color='#fbbf24',width=2,dash='dot'),
             marker=dict(color='#fbbf24',size=8,symbol='circle-open',line=dict(width=2)),
-            name='Mínimos locales confirmados PRE 3×3',showlegend=True,
-            hovertemplate='Mínimo local 3×3 confirmado PRE<br>%{x|%d %b %H:%M} UTC · %{y:.8g}<extra></extra>',
+            name=('Máximos PRE 3×3' if use_high else 'Mínimos PRE 3×3'),showlegend=True,
+            hovertemplate='Pivote 3×3 confirmado PRE<br>%{x|%d %b %H:%M} UTC · %{y:.8g}<extra></extra>',
         ))
-    return fig, {'status':status,'count':len(lows),
-                 'last_two': tuple((l[0],l[1]) for l in lows[-2:])}
+    return fig, {'status':status,'count':len(swings),
+                 'kind':'HIGH' if use_high else 'LOW',
+                 'last_two': tuple((z[0],z[1]) for z in swings[-2:])}
 
 
 def diagnostic_text(diag,tf):
     status=diag.get('status')
     if status=='HIGHER_LOWS':
         return f'**{tf} · mínimos ascendentes (HL)** entre los últimos dos pivotes 3×3 confirmados PRE. No confirma un triángulo ni predice ruptura.'
+    if status=='LOWER_HIGHS':
+        return f'**{tf} · máximos descendentes (LH)** entre pivotes 3×3 PRE: posible presión bajista sobre soporte, NO pérdida confirmada.'
+    if status=='HIGHER_HIGHS':
+        return f'**{tf} · máximos ascendentes (HH)** PRE; no se detectan LH en esos dos pivotes.'
+    if status=='EQUAL_HIGHS':
+        return f'**{tf} · máximos iguales** entre los últimos dos pivotes PRE.'
     if status=='LOWER_LOWS':
         return f'**{tf} · mínimos descendentes (LL)** en los últimos dos pivotes 3×3 confirmados PRE.'
     if status=='EQUAL_LOWS':
         return f'**{tf} · dos mínimos locales de precio igual** (PRE).'
     if status=='INSUFFICIENT_PIVOTS':
-        return f'**{tf} · no hay dos mínimos 3×3 confirmados en las últimas 12h PRE.** Eso no descarta HL de menor timeframe.'
+        kind='máximos' if diag.get('kind')=='HIGH' else 'mínimos'
+        return f'**{tf} · no hay dos {kind} 3×3 confirmados en las últimas 24h PRE.** Esto no demuestra ausencia de presión.'
     if status=='DISABLED':
         return 'Marcas HL ocultas; velas HTF con cuerpos rellenos.'
     return 'No hay histórico HTF suficiente para inspeccionar mínimos.'
