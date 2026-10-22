@@ -15,6 +15,7 @@ import pandas as pd
 MINUTE = 60_000
 WINDOW_HOURS = 24
 RECENCY_HOURS = 12
+RECENT_APPROACH_MINUTES = 120  # frozen PRE lookback, no outcome tuning
 TF_STEPS = {'15m': 15 * MINUTE, '30m': 30 * MINUTE}
 LEVEL_NEAR_ATR = 1.5  # unchanged Atlas V2 context-distance band; NOT tuned to outcomes
 UNKNOWN = 'NO_EVALUABLE'
@@ -30,6 +31,11 @@ def _finite(value):
 
 def _empty(reason='SIN_HISTORICO', *, role='INDETERMINADO', tf=None):
     return dict(structure_pre=UNKNOWN, structure_relation_pre=UNKNOWN,
+                structure_recent_direction_pre='NO_EVALUABLE',
+                structure_recent_delta_pct_pre=None,
+                structure_recent_agreement_pre='NO_EVALUABLE',
+                structure_recent_vs_reaction_pre='NO_EVALUABLE',
+                structure_recent_start_ts_pre=None, structure_recent_end_ts_pre=None,
                 structure_role_pre=role, structure_tf=tf,
                 structure_pivot_first=None, structure_pivot_second=None,
                 structure_pivot_first_ts=None, structure_pivot_second_ts=None,
@@ -52,6 +58,46 @@ def confirmed_pivots(bars, kind, left=3, right=3):
         if is_pivot:
             found.append((int(stamps[i]), float(x[i]), int(stamps[i+right]) + step))
     return found
+
+
+
+def recent_approach_pre(bars, step):
+    """Describe the last 120m of *fully closed* HTF candles, never a fill/outcome.
+
+    The reading is conservative: endpoints must agree with the majority of
+    successive close changes. Ignore net drift smaller than 1/4 of the typical
+    HTF candle high-low range (noise guard, NOT calibrated with outcomes).
+    No 1m REACTION bar or following HTF bar is allowed in `bars`.
+    """
+    count = RECENT_APPROACH_MINUTES * MINUTE // step + 1
+    if len(bars) < count:
+        return {'direction': 'NO_EVALUABLE', 'delta_pct': None, 'reason': 'VENTANA_RECIENTE_INSUFICIENTE',
+                'start_ts': None, 'end_ts': None}
+    window = bars.tail(count)
+    closes = window['close'].tolist()
+    opens = window['open'].tolist()
+    highs = window['high'].tolist()
+    lows = window['low'].tolist()
+    if any(_finite(v) is None for v in closes + opens + highs + lows):
+        return {'direction': 'NO_EVALUABLE', 'delta_pct': None, 'reason': 'OHLC_RECIENTE_INVALIDO',
+                'start_ts': None, 'end_ts': None}
+    # The latest close is always from the most recent fully closed HTF bar.
+    delta = closes[-1] - closes[0]
+    ranges = sorted(h-l for h,l in zip(highs,lows))
+    typical_range = ranges[len(ranges)//2]
+    pairs = [b-a for a,b in zip(closes,closes[1:])]
+    majority = len(pairs)//2 + 1  # strict majority of consecutive changes
+    sign_count = sum(d > 0 for d in pairs) if delta > 0 else sum(d < 0 for d in pairs)
+    large_enough = abs(delta) > 0.25 * typical_range
+    if large_enough and sign_count >= majority:
+        direction = 'ALCISTA' if delta > 0 else 'BAJISTA'
+    else:
+        direction = 'LATERAL_O_DIVERGENTE'
+    stamps = window['timestamp'].tolist()
+    return {'direction': direction, 'delta_pct': 100*delta/closes[0],
+            'reason': 'MAYORIA_Y_DESPLAZAMIENTO_PRE' if direction != 'LATERAL_O_DIVERGENTE'
+                      else 'APROXIMACION_NO_CONCLUYENTE',
+            'start_ts': int(stamps[0]), 'end_ts': int(stamps[-1]) + step}
 
 
 def classify_structure_pre(event, candles):
@@ -106,6 +152,12 @@ def classify_structure_pre(event, candles):
         if None in (o,h,l,c) or min(o,h,l,c) <= 0 or h < max(o,c,l) or l > min(o,c):
             return _empty('OHLC_INVALIDO', role=role, tf=tf)
     bars['step_ms'] = step
+    recent = recent_approach_pre(bars, step)
+    movement = recent['direction']
+    direction_relation = ('CONTRA_REACTION' if (movement == 'ALCISTA' and str(event.get('side')) == 'SHORT') or
+                          (movement == 'BAJISTA' and str(event.get('side')) == 'LONG') else
+                          'A_FAVOR_REACTION' if (movement == 'ALCISTA' and str(event.get('side')) == 'LONG') or
+                          (movement == 'BAJISTA' and str(event.get('side')) == 'SHORT') else 'SIN_DIRECCION_CLARA')
     pivots = confirmed_pivots(bars, 'HIGH' if role == 'SOPORTE' else 'LOW')
     pivots = [p for p in pivots if p[2] <= r]
     if len(pivots) < 2:
@@ -118,16 +170,33 @@ def classify_structure_pre(event, candles):
     else:
         pattern = 'HL_HACIA_RESISTENCIA' if b[1] > a[1] else 'SIN_HL_CONFIRMADOS'
     if pattern in ('LH_HACIA_SOPORTE', 'HL_HACIA_RESISTENCIA'):
-        against = ((role == 'SOPORTE' and str(event.get('side')) == 'LONG') or
-                   (role == 'RESISTENCIA' and str(event.get('side')) == 'SHORT'))
-        relation = 'PRESION_CONTRA_REACTION' if against else 'PRESION_A_FAVOR_REACTION'
+        required = 'BAJISTA' if role == 'SOPORTE' else 'ALCISTA'
+        opposite = 'ALCISTA' if role == 'SOPORTE' else 'BAJISTA'
+        if movement == required:
+            agreement = 'CONCORDANTE'
+            against = ((role == 'SOPORTE' and str(event.get('side')) == 'LONG') or
+                       (role == 'RESISTENCIA' and str(event.get('side')) == 'SHORT'))
+            relation = 'PRESION_CONTRA_REACTION' if against else 'PRESION_A_FAVOR_REACTION'
+        elif movement == opposite:
+            agreement = 'CONTRADICTORIA'
+            relation = 'PRESION_MIXTA'
+        else:
+            agreement = 'SIN_DIRECCION_RECIENTE' if movement == 'LATERAL_O_DIVERGENTE' else 'NO_EVALUABLE'
+            relation = 'SIN_PRESION_CLARA' if movement == 'LATERAL_O_DIVERGENTE' else UNKNOWN
     else:
         relation = 'SIN_PRESION_CLARA'
+        agreement = 'SIN_PROGRESION_HTF'
     return dict(structure_pre=pattern, structure_relation_pre=relation,
                 structure_role_pre=role, structure_tf=tf,
                 structure_pivot_first=a[1],structure_pivot_second=b[1],
                 structure_pivot_first_ts=a[0],structure_pivot_second_ts=b[0],
-                structure_reason='DOS_PIVOTES_CONFIRMADOS_PRE')
+                structure_recent_direction_pre=movement,
+                structure_recent_delta_pct_pre=recent['delta_pct'],
+                structure_recent_agreement_pre=agreement,
+                structure_recent_vs_reaction_pre=direction_relation,
+                structure_recent_start_ts_pre=recent['start_ts'],
+                structure_recent_end_ts_pre=recent['end_ts'],
+                structure_reason='DOS_PIVOTES_CONFIRMADOS_PRE;'+recent['reason'])
 
 
 def enrich_pre_structure(project, events):

@@ -16,7 +16,7 @@ from dashboard.views.reaction_horizontal_level_rich_card_view import normalized_
 from reaction_horizontal_level_card import summary_by, groups_summary
 
 
-def make_bars(tf='15m', kind='HIGH', value1=110, value2=108):
+def make_bars(tf='15m', kind='HIGH', value1=110, value2=108, approach='BAJISTA'):
     step=TF_STEPS[tf]
     n=96 if tf=='15m' else 48
     time=[i*step for i in range(n)]
@@ -27,6 +27,13 @@ def make_bars(tf='15m', kind='HIGH', value1=110, value2=108):
         else:lows[i]=v
     o=[100.0]*n
     c=[101.0]*n
+    # A short approach is intentionally independent of older structural pivots.
+    # 120m HTF closes form a contiguous local upward/downward trend.
+    k=120//(step//MINUTE)
+    if approach=='ALCISTA':
+        for j in range(k+1): c[n-k-1+j]=99.0+0.35*j
+    elif approach=='BAJISTA':
+        for j in range(k+1): c[n-k-1+j]=101.0-0.30*j
     return pd.DataFrame({'timestamp':time,'open':o,'high':highs,'low':lows,'close':c}).set_index('timestamp')
 
 
@@ -44,21 +51,39 @@ class StructuralPressureTests(unittest.TestCase):
         self.assertEqual(s['structure_relation_pre'],'PRESION_CONTRA_REACTION')
         self.assertEqual((s['structure_pivot_first'],s['structure_pivot_second']),(111,109))
     def test_bull_short_higher_lows_into_resistance(self):
-        bars=make_bars(kind='LOW',value1=94,value2=95)
+        bars=make_bars(kind='LOW',value1=94,value2=95,approach='ALCISTA')
         s=classify_structure_pre(ev(role='BELOW',side='SHORT'),bars)
         self.assertEqual(s['structure_pre'],'HL_HACIA_RESISTENCIA')
         self.assertEqual(s['structure_relation_pre'],'PRESION_CONTRA_REACTION')
     def test_pressure_with_trade_direction_does_not_become_confirmed_breakout(self):
         s=classify_structure_pre(ev(role='BELOW',side='LONG'),
-                                 make_bars(kind='LOW',value1=94,value2=95))
+                                 make_bars(kind='LOW',value1=94,value2=95,approach='ALCISTA'))
         self.assertEqual(s['structure_relation_pre'],'PRESION_A_FAVOR_REACTION')
     def test_short_support_falling_highs_is_pressure_with_short(self):
         s=classify_structure_pre(ev(side='SHORT'),
                                  make_bars(kind='HIGH',value1=111,value2=109))
         self.assertEqual(s['structure_relation_pre'],'PRESION_A_FAVOR_REACTION')
+    def test_enso_short_lower_highs_but_rebound_is_mixed_and_recent_against_short(self):
+        s=classify_structure_pre(ev(side='SHORT'),
+             make_bars(kind='HIGH',value1=111,value2=109,approach='ALCISTA'))
+        self.assertEqual(s['structure_pre'],'LH_HACIA_SOPORTE')
+        self.assertEqual(s['structure_recent_direction_pre'],'ALCISTA')
+        self.assertEqual(s['structure_recent_vs_reaction_pre'],'CONTRA_REACTION')
+        self.assertEqual(s['structure_relation_pre'],'PRESION_MIXTA')
+    def test_rebound_long_into_support_after_lh_is_mixed_and_recent_with_long(self):
+        s=classify_structure_pre(ev(side='LONG'),
+             make_bars(kind='HIGH',value1=111,value2=109,approach='ALCISTA'))
+        self.assertEqual(s['structure_recent_vs_reaction_pre'],'A_FAVOR_REACTION')
+        self.assertEqual(s['structure_relation_pre'],'PRESION_MIXTA')
+    def test_side_by_side_same_pivots_change_relation_without_POST(self):
+        e=ev(role='ABOVE',side='SHORT')
+        down=classify_structure_pre(e,make_bars(kind='HIGH',value1=111,value2=109,approach='BAJISTA'))
+        up=classify_structure_pre(e,make_bars(kind='HIGH',value1=111,value2=109,approach='ALCISTA'))
+        self.assertEqual(down['structure_relation_pre'],'PRESION_A_FAVOR_REACTION')
+        self.assertEqual(up['structure_relation_pre'],'PRESION_MIXTA')
     def test_current_incomplete_HTF_is_excluded(self):
         e=ev(role='BELOW',side='SHORT')
-        pre=make_bars(kind='LOW',value1=94,value2=95)
+        pre=make_bars(kind='LOW',value1=94,value2=95,approach='ALCISTA')
         s1=classify_structure_pre(e,pre)
         late=pre.copy()
         # Candle *opening* at retest time is not closed and must not influence PRE
@@ -79,7 +104,7 @@ class StructuralPressureTests(unittest.TestCase):
         self.assertEqual(s['structure_relation_pre'],'NO_EVALUABLE')
     def test_30m_context_supported(self):
         s=classify_structure_pre(ev(tf='30m',role='BELOW',side='SHORT'),
-                                 make_bars('30m','LOW',94,95))
+                                 make_bars('30m','LOW',94,95,approach='ALCISTA'))
         self.assertEqual(s['structure_pre'],'HL_HACIA_RESISTENCIA')
     def test_missing_outcome_is_not_NO_HIT(self):
         for x in (None,float('nan'),pd.NA,'nan','None','null','','NaT'):

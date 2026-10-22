@@ -15,6 +15,7 @@ import reaction_horizontal_pre_structure as structure
 STRUCTURE_LABELS={
     'PRESION_CONTRA_REACTION':'Presión contraria a la REACTION',
     'PRESION_A_FAVOR_REACTION':'Presión a favor de la REACTION',
+    'PRESION_MIXTA':'Presión mixta / contradictoria',
     'SIN_PRESION_CLARA':'Sin presión estructural clara',
     'NO_EVALUABLE':'No evaluable (histórico/estructura)',
 }
@@ -70,11 +71,17 @@ def structure_description(item):
     else:
         return ('Contexto PRE no evaluable: '+str(getattr(item,'structure_reason','SIN_DATOS'))
                 +'. No se supone que el nivel sostendrá o romperá.')
+    recent=str(getattr(item,'structure_recent_direction_pre','NO_EVALUABLE'))
+    movement={'ALCISTA':'alcista','BAJISTA':'bajista','LATERAL_O_DIVERGENTE':'no concluyente',
+              'NO_EVALUABLE':'no evaluable'}.get(recent,recent)
+    detail=f' Aproximación reciente PRE (120m): {movement}.'
+    if relation=='PRESION_MIXTA':
+        return why+detail+' La aproximación reciente contradice la progresión HTF histórica; el sesgo conjunto queda MIXTO.'
     if relation=='PRESION_CONTRA_REACTION':
-        return why+' Es una presión potencial CONTRARIA a esta '+str(item.side)+', no ruptura confirmada.'
+        return why+detail+' Hay concordancia direccional; presión potencial CONTRARIA a esta '+str(item.side)+', no ruptura confirmada.'
     if relation=='PRESION_A_FAVOR_REACTION':
-        return why+' Compatible con la dirección de esta '+str(item.side)+', no ruptura confirmada.'
-    return why
+        return why+detail+' Hay concordancia direccional compatible con esta '+str(item.side)+', no ruptura confirmada.'
+    return why+detail+' Sin confirmación direccional suficiente; no atribuir presión de ruptura.'
 
 
 
@@ -151,7 +158,7 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,sl
         st.info('Primero generá Structural Level Atlas V2 (--run y --audit).');return
 
     @st.cache_data(max_entries=2,show_spinner='Leyendo pivotes HTF confirmados antes de la REACTION...')
-    def cached(base,meta_mtime,source_mtime,history_mtime):
+    def cached(base,meta_mtime,source_mtime,history_mtime,method_version):
         zones,ev,summary=load(Path(base))
         annotated=logic.enrich_events(Path(base),ev)
         annotated=structure.enrich_pre_structure(Path(base),annotated)
@@ -162,7 +169,8 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,sl
         history_path=project/logic.ROOT/atlas.v1.lineage.HISTORY_NAME
         zones,events,summary=cached(str(project),(out/'summary.json').stat().st_mtime_ns,
                                    context_path.stat().st_mtime_ns,
-                                   history_path.stat().st_mtime_ns if history_path.exists() else 0)
+                                   history_path.stat().st_mtime_ns if history_path.exists() else 0,
+                                   'approach_concordance_v2')
         expected=['event_key','outcome','entry_ts','entry_price','first_touch_minute']
         miss=[c for c in expected if c not in source_events.columns]
         if miss:raise ValueError('Faltan columnas del First-Touch: '+', '.join(miss))
@@ -211,9 +219,9 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,sl
     structural_table=_summary_pre_structure(pre_filtered)
     if not structural_table.empty:
         st.dataframe(structural_table,hide_index=True,use_container_width=True)
-    st.caption('Solo se etiqueta posible presión cuando la zona estaba a ≤1,5 ATR, con dos pivotes '
-               '3×3 confirmados y una ventana PRE contigua de 24h. '
-               'No implica defensa ni ruptura. SIN_PRESION_CLARA no significa nivel seguro.')
+    st.caption('Para presión favorable/contraria exigimos concordancia entre pivotes 3×3 HTF PRE '
+               'y la aproximación reciente de 120m (cierres HTF completos). Si se contradicen: presión mixta. '
+               'Sin progresión clara no significa nivel seguro. No confirma ninguna ruptura.')
     with st.expander('Filtrar inspector por estructura PRE',expanded=False):
         structure_filter=st.selectbox('Contexto estructural',('TODAS',)+tuple(STRUCTURE_LABELS),
              format_func=lambda q:'Todas' if q=='TODAS' else STRUCTURE_LABELS[q],
@@ -245,6 +253,19 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,sl
         relation=str(item.structure_relation_pre)
         st.info(STRUCTURE_LABELS.get(relation,relation))
         st.caption(structure_description(item))
+        direction_pre=getattr(item,'structure_recent_direction_pre','NO_EVALUABLE')
+        delta_pre=getattr(item,'structure_recent_delta_pct_pre',None)
+        recent_vs=getattr(item,'structure_recent_vs_reaction_pre','NO_EVALUABLE')
+        st.caption('**Presión reciente respecto de la REACTION:** '+
+                   {'CONTRA_REACTION':'EN CONTRA de '+str(item.side),
+                    'A_FAVOR_REACTION':'A FAVOR de '+str(item.side),
+                    'SIN_DIRECCION_CLARA':'Sin dirección reciente clara',
+                    'NO_EVALUABLE':'No evaluable'}.get(recent_vs,'No evaluable')+'.')
+        st.caption('Aproximación reciente (120m HTF cerrado): '+
+                   {'ALCISTA':'alcista','BAJISTA':'bajista',
+                    'LATERAL_O_DIVERGENTE':'lateral/divergente',
+                    'NO_EVALUABLE':'no evaluable'}.get(direction_pre,str(direction_pre))
+                   +' · cambio de cierre: '+_pretty(delta_pre,3)+'%.')
         if pd.notna(item.pre_contacts_5):
             st.caption(f'Contacto con la zona: {int(item.pre_contacts_5)}/5 velas anteriores. '
                        +('Contactos persistentes 1m: no son defensas independientes ni prueban presión direccional.'
