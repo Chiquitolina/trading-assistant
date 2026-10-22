@@ -307,7 +307,7 @@ def render_microstructure_quality_lab(project_root):
             f'Missing (muestra): {", ".join(missing_preview)}'
         )
 
-    tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa','🧬 Morfologías','🗜️ Compression Lineage','🧱 Breakout Retest V4','🧱 Structural Level Atlas','🧭 Estructuras independientes'])
+    tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa','🧬 Morfologías','🗜️ Compression Lineage','🧱 Breakout Retest V4','🧱 Structural Level Atlas','🧭 Estructuras independientes','🟩 Horizontal Level Rich Card'])
     with tabs[0]:
         st.markdown('#### Ranking descriptivo TP-first frente a SL-first')
         st.caption('AUC por variable en la cohorte filtrada: 0,50 ≈ azar; NO es un resultado validado fuera de muestra. KNOWN no es previo al retest.')
@@ -593,16 +593,26 @@ def render_microstructure_quality_lab(project_root):
 
     with tabs[6]:
         from dashboard.views.reaction_compression_lineage_view import render_lineage_atlas
-        render_lineage_atlas(analysis_before_result_filter,project)
+        render_lineage_atlas(analysis_before_result_filter,project,
+            tp_pct=float(pair[0]),sl_pct=float(pair[1]),outcome_horizon=int(horizon),entry_mode=mode)
 
     with tabs[7]:
         from dashboard.views.reaction_compression_breakout_retest_v4_view import render_v4
-        render_v4(analysis_before_result_filter,project)
+        render_v4(analysis_before_result_filter,project,
+            tp_pct=float(pair[0]),sl_pct=float(pair[1]),outcome_horizon=int(horizon),entry_mode=mode)
 
     with tabs[8]:
         from dashboard.views.reaction_structural_level_atlas_view import render_level_atlas
-        render_level_atlas(analysis_before_result_filter,project)
+        render_level_atlas(analysis_before_result_filter,project,
+            tp_pct=float(pair[0]),sl_pct=float(pair[1]),outcome_horizon=int(horizon),entry_mode=mode)
 
     with tabs[9]:
         from dashboard.views.reaction_structure_independent_view import render_independent_structures
-        render_independent_structures(analysis_before_result_filter,project)
+        render_independent_structures(analysis_before_result_filter,project,
+            tp_pct=float(pair[0]),sl_pct=float(pair[1]),outcome_horizon=int(horizon),entry_mode=mode)
+
+    with tabs[10]:
+        from dashboard.views.reaction_horizontal_level_rich_card_view import render_horizontal_level_rich_card
+        render_horizontal_level_rich_card(analysis_before_result_filter,project,
+            tp_pct=float(pair[0]),sl_pct=float(pair[1]),
+            outcome_horizon=int(horizon),entry_mode=mode)
