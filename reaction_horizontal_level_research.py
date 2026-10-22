@@ -235,3 +235,132 @@ def group_summary(df,col='level_group',min_resolved=30):
             'IC Wilson 95% inferior':lo,'IC Wilson 95% superior':hi,
             'Muestra suficiente':bool(n>=min_resolved)})
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# INDEPENDENT PRE-ONLY EXPERIMENT: zone's role vs direction of REACTION.
+# No 1m retest candle, touch label, First Touch or post-retest path is read.
+# ---------------------------------------------------------------------------
+ROLE_VERSION = 'horizontal_role_pre_nearest_v1_frozen'
+ROLE_NEAR_ATR = NEAR_ATR  # existing 0.5 ATR, not fitted to results
+ROLE_REBOUND = 'PRE_REBOTE_COMPATIBLE'
+ROLE_BREAK = 'PRE_NECESITA_ROMPER'
+ROLE_IN_ZONE = 'PRE_DENTRO_O_EQUIDISTANTE'
+ROLE_NO_NEAR = 'PRE_SIN_NIVEL_CERCANO'
+ROLE_UNKNOWN = 'PRE_HISTORICO_NO_EVALUABLE'
+ROLE_LABELS = {
+    ROLE_REBOUND: 'Rebote compatible · LONG/soporte o SHORT/resistencia',
+    ROLE_BREAK: 'Necesita ruptura · LONG/resistencia o SHORT/soporte',
+    ROLE_IN_ZONE: 'Posición ambigua · dentro de zona o niveles equidistantes',
+    ROLE_NO_NEAR: 'Sin nivel importante cercano PRE',
+    ROLE_UNKNOWN: 'PRE no evaluable',
+}
+
+
+def _role_near_zones(event, candidates):
+    """Nearest qualified levels using *only* their frozen PRE attributes.
+
+    The normalized gap is recomputed from each zone's PRE closed price and ATR.
+    This never uses the actual retest 1m high/low, Atlas's known_touch or TP/SL.
+    """
+    eligible = []
+    incomplete = False
+    for z in candidates:
+        if not important(z):
+            continue
+        pre = finite(z.get('pre_last_close'))
+        atr = finite(z.get('atr_pre'))
+        low = finite(z.get('zone_low'))
+        high = finite(z.get('zone_high'))
+        if (None in (pre, atr, low, high) or pre <= 0 or atr <= 0
+                or low <= 0 or high < low):
+            incomplete = True
+            continue
+        gap = candle_zone_gap(z, pre, pre)
+        if gap is None:
+            incomplete = True
+            continue
+        distance_atr = gap / atr
+        if distance_atr <= ROLE_NEAR_ATR + 1e-10:
+            if low <= pre <= high:
+                position = 'INSIDE_ZONE'
+            elif pre > high:
+                position = 'SUPPORT_BELOW'
+            else:
+                position = 'RESISTANCE_ABOVE'
+            eligible.append((distance_atr, z, position, pre))
+    eligible.sort(key=lambda e:(e[0], -(finite(e[1].get('defense_episodes_pre')) or 0),
+                                -(finite(e[1].get('pivot_count')) or 0),
+                                str(e[1].get('timeframe')), str(e[1].get('zone_id'))))
+    return eligible, incomplete
+
+
+def classify_role_pre(event, candidates):
+    """Causal PRE hypothesis about one nearest important horizontal level.
+
+    'Rebound' is **not** a claim that the level will hold. 'Needs break' does
+    **not** mean the break happened. The last close of the HTF is earlier
+    than retest and role is based only on its side relative to frozen zones.
+    """
+    side = str(event.get('side', '')).upper()
+    complete = flag(event.get('all_covered')) is True
+    eligible, incomplete = _role_near_zones(event, candidates)
+    selected = None
+    if not complete or side not in ('LONG','SHORT'):
+        role = ROLE_UNKNOWN
+    elif not eligible:
+        role = ROLE_UNKNOWN if incomplete else ROLE_NO_NEAR
+    else:
+        best = eligible[0]
+        # If levels from different historical maps are equally near but lie
+        # on opposite sides of price, the directional meaning is ambiguous.
+        tied = [e for e in eligible if abs(e[0]-best[0]) <= 1e-9]
+        sides = {e[2] for e in tied}
+        selected = best
+        if best[2] == 'INSIDE_ZONE' or len(sides) > 1:
+            role = ROLE_IN_ZONE
+        elif ((side == 'LONG' and best[2] == 'SUPPORT_BELOW') or
+              (side == 'SHORT' and best[2] == 'RESISTANCE_ABOVE')):
+            role = ROLE_REBOUND
+        else:
+            role = ROLE_BREAK
+    z = selected[1] if selected is not None else None
+    return dict(event_key=event.get('event_key'),pre_role=role,
+                role_zone_id=z.get('zone_id') if z else None,
+                role_timeframe=z.get('timeframe') if z else None,
+                role_zone_low=finite(z.get('zone_low')) if z else None,
+                role_zone_high=finite(z.get('zone_high')) if z else None,
+                role_pre_close=selected[3] if selected else None,
+                role_distance_atr=selected[0] if selected else None,
+                role_position=selected[2] if selected else None,
+                role_defenses_pre=finite(z.get('defense_episodes_pre')) if z else None,
+                role_pivots_pre=finite(z.get('pivot_count')) if z else None,
+                role_origin=z.get('level_origin') if z else None,
+                role_near_count=len(eligible),
+                role_incomplete_candidates=bool(incomplete))
+
+
+def build_pre_roles(events, levels, timeframe='TODOS'):
+    """One PRE-only role for each REACTION; works without retest 1m OHLC.
+
+    ``events`` are Atlas V2 event_map records (not outcomes). ``levels``
+    are causal candidate_levels. The output is safe for a left one-to-one join
+    to the existing verified A/B/C and First Touch analytics.
+    """
+    if timeframe not in ('TODOS','15m','30m'):
+        raise ValueError('Timeframe invalid')
+    event_fields={'event_key','all_covered','side'}
+    level_fields={'event_key','zone_id','timeframe','pivot_count',
+                  'defense_episodes_pre','formation_closed_ts','retest_ts',
+                  'pre_last_close','atr_pre','zone_low','zone_high'}
+    missing_e=event_fields-set(events.columns)
+    missing_l=level_fields-set(levels.columns)
+    if missing_e or missing_l:
+        raise ValueError(f'PRE role columns missing: events={sorted(missing_e)}, levels={sorted(missing_l)}')
+    if events.event_key.duplicated().any():
+        raise ValueError('Duplicate event_key in PRE role input')
+    chosen=levels if timeframe=='TODOS' else levels.loc[levels.timeframe.eq(timeframe)]
+    grouped={k:g.to_dict('records') for k,g in chosen.groupby('event_key',sort=False)}
+    records=[classify_role_pre(e,grouped.get(e['event_key'],[]))
+             for e in events.to_dict('records')]
+    return pd.DataFrame.from_records(records)

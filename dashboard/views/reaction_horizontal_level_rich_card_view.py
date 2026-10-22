@@ -12,6 +12,8 @@ import pandas as pd
 from reaction_horizontal_level_research import (
     MODEL_VERSION, GROUPS, A, B, C, UNKNOWN, NEAR_ATR,
     build, important, outcome, group_summary, zone_rank, load_retest_candles,
+    ROLE_VERSION, ROLE_LABELS, ROLE_REBOUND, ROLE_BREAK, ROLE_IN_ZONE,
+    ROLE_NO_NEAR, ROLE_UNKNOWN, build_pre_roles,
 )
 
 
@@ -67,6 +69,9 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
         # report false contact with levels many ATR away. Never reuse it.
         events_ohlc=load_retest_candles(project,events)
         categorized,qualifying=build(events_ohlc,levels,tf)
+        # Independent causal PRE-only role; no retest 1m OHLC enters this computation.
+        role_data=build_pre_roles(events,levels,tf)
+        categorized=categorized.merge(role_data,on='event_key',how='left',validate='one_to_one')
         chosen=source_events[needed].drop_duplicates('event_key').copy()
         chosen['outcome_norm']=chosen['outcome'].map(outcome)
         df=categorized.merge(chosen,on='event_key',how='inner',validate='one_to_one')
@@ -122,6 +127,53 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                'En cambio, A (tocó) y B (no tocó) usan la vela 1m de REACTION '
                'ya cerrada: sus tasas son descriptivas y NO prueban una entrada al open.')
 
+    # Experimental structural role versus the direction of the REACTION.
+    # This entire block is PRE causal and is disjoint from KNOWN A/B/C.
+    st.markdown('**Nuevo experimento · rol PRE del nivel vs dirección de la REACTION**')
+    st.caption('Se elige exclusivamente el nivel importante MÁS CERCANO al último cierre '
+               '15m/30m anterior, siempre dentro de 0,50 ATR de su propio timeframe. '
+               'LONG sobre soporte y SHORT bajo resistencia son rebotes compatibles; '
+               'LONG bajo resistencia y SHORT sobre soporte requieren ruptura. '
+               'Dentro de la zona no se asigna dirección. **No se usa la vela de '
+               'REACTION ni el TP/SL para elegir el nivel o su rol.**')
+    role_tab=df.assign(role_pre_label=df.pre_role.map(ROLE_LABELS))
+    role_summary=group_summary(role_tab,col='role_pre_label',min_resolved=30)
+    role_order={ROLE_LABELS[k]:i for i,k in enumerate(
+        (ROLE_REBOUND,ROLE_BREAK,ROLE_IN_ZONE,ROLE_NO_NEAR,ROLE_UNKNOWN))}
+    if not role_summary.empty:
+        role_summary=role_summary.sort_values('Grupo',
+            key=lambda col:col.map(role_order).fillna(5))
+        st.dataframe(role_summary,hide_index=True,use_container_width=True)
+    st.caption('Comparación descriptiva del escenario First Touch seleccionado arriba. '
+               'NO_HIT, ambigüedades y SIN_RESULTADO no son SL ni integran la tasa entre '
+               'resueltas; se informan por separado. No son retornos netos ni resultados '
+               'independientes entre eventos del mismo símbolo.')
+    with st.expander('Desglose causal · LONG / SHORT y timeframe del nivel',expanded=False):
+        by_side=[]
+        for side,part in role_tab.groupby('side'):
+            table=group_summary(part,col='role_pre_label',min_resolved=30)
+            if not table.empty:
+                table.insert(0,'Dirección',side)
+                by_side.append(table)
+        if by_side:
+            st.dataframe(pd.concat(by_side,ignore_index=True),hide_index=True,
+                         use_container_width=True)
+        st.caption('Un mismo evento tiene un único nivel PRE elegido por proximidad '
+                   'normalizada; una zona originada en HIGH puede convertirse en soporte '
+                   'tras un flip, por lo que NO se interpreta HIGH como resistencia eterna.')
+        tf_rows=[]
+        for tf_value,part in role_tab.loc[role_tab.role_timeframe.notna()].groupby('role_timeframe'):
+            table=group_summary(part,col='role_pre_label',min_resolved=30)
+            if not table.empty:
+                table.insert(0,'TF del nivel',tf_value)
+                tf_rows.append(table)
+        if tf_rows:
+            st.dataframe(pd.concat(tf_rows,ignore_index=True),hide_index=True,
+                         use_container_width=True)
+        st.caption('Si la muestra por grupo no alcanza 30 TP/SL resueltos, no se '
+                   'muestra porcentaje ni Wilson; inspeccionar conteos y ampliar '
+                   'la cohorte sin cambiar criterios.')
+
     with st.expander('Auditoría simple · dirección, defensa previa y placebo',expanded=False):
         st.markdown('**Resultados separados por LONG / SHORT (no mezcla de direcciones)**')
         subtables=[]
@@ -148,12 +200,17 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
         st.caption('Muestra explorada retrospectivamente, no validación fuera de muestra. '
                    'Cualquier corte futuro debe evaluarse sobre fechas aún no inspeccionadas.')
 
-    st.markdown('**Inspector · una REACTION y su desenlace (nivel solo si A/B)**')
+    st.markdown('**Inspector · una REACTION, el nivel PRE y su desenlace**')
     group_option=st.selectbox('Interacción con nivel importante',
         ('TODOS',A,B,C,UNKNOWN),
         format_func=lambda x:'Todos los grupos' if x=='TODOS' else GROUPS[x],
         key='hlr_v1_group')
     inspect=df if group_option=='TODOS' else df.loc[df.level_group.eq(group_option)]
+    role_option=st.selectbox('Rol del nivel ANTES de la señal (solo inspector)',
+        ('TODOS',ROLE_REBOUND,ROLE_BREAK,ROLE_IN_ZONE,ROLE_NO_NEAR,ROLE_UNKNOWN),
+        format_func=lambda x:'Todos los roles PRE' if x=='TODOS' else ROLE_LABELS[x],
+        key='hlr_v1_role')
+    if role_option!='TODOS': inspect=inspect.loc[inspect.pre_role.eq(role_option)]
     result=st.selectbox('Resultado (solo filtra el inspector)',
         ('TODOS','TP_FIRST','SL_FIRST','NO_HIT','AMBIGUOUS','SIN_RESULTADO'),
         key='hlr_v1_result')
@@ -162,14 +219,25 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
         st.info('No hay eventos para el filtro del inspector.');return
     recent=inspect.sort_values('retest_ts',ascending=False)
     labels={r.event_key:f'{r.symbol} {r.side} · {r.date_utc} · '
-            f'{GROUPS[r.level_group]} · {r.outcome_norm}'
+            f'{GROUPS[r.level_group]} · {ROLE_LABELS.get(r.pre_role,r.pre_role)} · {r.outcome_norm}'
             for r in recent.itertuples(index=False)}
     key=st.selectbox('Abrir REACTION',list(labels),format_func=lambda k:labels[k],
                      key='hlr_v1_event')
     item=recent.loc[recent.event_key.eq(key)].iloc[0].copy()
     st.markdown(f'#### {item.symbol} {item.side} · {GROUPS[item.level_group]}')
+    st.caption('**Rol PRE:** '+ROLE_LABELS.get(item.pre_role,str(item.pre_role))+
+               '. Es posición del nivel respecto al último cierre HTF; '
+               'no confirma defensa, rechazo ni ruptura posterior.')
+    if pd.notna(item.role_zone_id):
+        st.caption('**Nivel elegido para el experimento PRE:** '+str(item.role_timeframe)+
+                   ' · zona '+_pretty(item.role_zone_low)+'–'+_pretty(item.role_zone_high)+
+                   ' · cierre previo '+_pretty(item.role_pre_close)+
+                   ' · distancia '+_pretty(item.role_distance_atr)+' ATR · '+
+                   _pretty(item.role_defenses_pre)+' episodios de defensa previos · '+
+                   'posición '+str(item.role_position)+
+                   ' · origen '+str(item.role_origin)+'.')
     if pd.notna(item.relevant_zone_id):
-        st.caption('Nivel PRE: '+str(item.relevant_timeframe)+' · zona '+
+        st.caption('Nivel del grupo A/B (evaluado con vela KNOWN): '+str(item.relevant_timeframe)+' · zona '+
              _pretty(item.relevant_zone_low)+'–'+_pretty(item.relevant_zone_high)+
              ' · '+_pretty(item.relevant_gap_atr)+' ATR del cierre PRE · '+
              str(int(item.relevant_pivots))+' pivotes confirmados · '+
@@ -177,17 +245,23 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
 
     else:
         if item.level_group==C:
-            st.info('No hay nivel importante dentro de 0,50 ATR de la vela 1m de REACTION. '
-                    'No dibujamos zonas lejanas para evitar distorsionar la escala.')
+            st.info('Grupo C: no hay nivel importante dentro de 0,50 ATR del rango 1m KNOWN. '
+                    'Puede existir un nivel cercano en el cierre HTF PRE anterior; '
+                    'ambas mediciones corresponden a momentos diferentes.')
         else:
             st.info('No existe contacto verificable o falta cobertura 1m; no se inventa un nivel cercano.')
     if item.level_group in (A,B):
         st.caption('La etiqueta de contacto se conoce SOLO al cierre de la vela de REACTION. '
                    'Si se opera basándose en ella, la entrada debe re-simularse después.')
 
-    # Plot ONLY one selected verified level. No HL/LH, no other decorative zones.
+    # Plot one level. Prefer the PRE-chosen level used in the role comparison;
+    # otherwise use the verified A/B level. NEVER choose using TP/SL.
     candidate=qualifying.loc[qualifying.event_key.eq(key)]
-    selected_zone=candidate.loc[candidate.zone_id.eq(item.relevant_zone_id)]
+    plot_id=(item.role_zone_id if pd.notna(item.role_zone_id)
+             else item.relevant_zone_id)
+    plot_origin=(item.role_timeframe if pd.notna(item.role_zone_id)
+                 else item.relevant_timeframe)
+    selected_zone=candidate.loc[candidate.zone_id.eq(plot_id)]
     if not selected_zone.empty:
         single=selected_zone.iloc[[0]].copy()
         item['primary_zone_id']=single.iloc[0].zone_id
@@ -204,11 +278,11 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                            value=180,key='hlr_v1_post')
     try:
         plot_zone=single.copy()
-        if not plot_zone.empty and str(item.relevant_timeframe)!=shown_tf:
+        if not plot_zone.empty and str(plot_origin)!=shown_tf:
             # Visually project the SAME frozen level onto the alternate TF;
             # do not reassign its source/confirmation timeframe.
             plot_zone['timeframe']=shown_tf
-            st.caption(f'Zona originada y confirmada en {item.relevant_timeframe}, '
+            st.caption(f'Zona originada y confirmada en {plot_origin}, '
                        f'proyectada sobre velas {shown_tf} (mismo precio).')
         fig=_read_structural_figure(project,item,plot_zone,display_tf=shown_tf)
         if fig is None:
@@ -230,19 +304,24 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
         st.caption(outcome_explanation(item.outcome_norm,item.first_touch_minute,
                tp_pct=tp_pct,sl_pct=sl_pct,outcome_horizon=outcome_horizon,
                display_minutes=post_m,path_state=path_state,entry_mode=entry_mode))
-        st.caption('Gráfico: solo zonas A/B con contacto/proximidad 1m comprobada; '
-                   'cierre de REACTION (KNOWN), trayectoria POST (solo evaluación). '
-                   'No se dibujan niveles distantes como si fueran soporte/resistencia local.')
+        st.caption('Gráfico: nivel PRE más cercano (si existe); de lo contrario, '
+                   'zona A/B validada usando OHLC 1m. Un nivel puede ser cercano '
+                   'PRE aunque no haya contacto KNOWN, o viceversa. '
+                   'El cierre de REACTION y la trayectoria POST solo sirven '
+                   'para evaluación, nunca para elegir nivel o rol PRE.')
     except Exception as exc:
         st.error(f'Inspector: no se pudo reconstruir el gráfico: {exc}')
 
     with st.expander('Exportar la muestra clasificada (sin recalcular señales)',expanded=False):
         cols=['event_key','symbol','side','date_utc','level_group','pre_bucket',
+              'pre_role','role_zone_id','role_timeframe','role_position',
+              'role_pre_close','role_zone_low','role_zone_high','role_distance_atr',
+              'role_defenses_pre','role_pivots_pre','role_near_count',
               'important_levels','relevant_zone_id','relevant_timeframe','relevant_gap_atr',
               'relevant_episodes','relevant_pivots','known_touch_verified',
               'known_low','known_high','relevant_retest_gap_atr',
               'atlas_claimed_touch','atlas_claimed_touch_not_verified','outcome_norm']
-        st.download_button('Descargar CSV de investigación',
+        st.download_button('Descargar CSV de investigación PRE + KNOWN',
               df[cols].to_csv(index=False).encode('utf-8'),
               file_name='horizontal_level_research_v1.csv',mime='text/csv',
               key='hlr_v1_export')
