@@ -112,6 +112,8 @@ def outcome_subset(r,mode,tp,sl,horizon):
 def score_binary(frame,feature):
     """Rank AUC descriptiva, not fit/holdout validation. Higher predicts TP."""
     import pandas as pd
+    if feature not in frame.columns:
+        return None
     z=frame.loc[frame['outcome'].isin(['TP_FIRST','SL_FIRST']),[feature,'outcome']].dropna()
     good=z.outcome.eq('TP_FIRST')
     if not good.any() or good.all() or len(z)<20:return None
@@ -125,6 +127,8 @@ def score_binary(frame,feature):
 
 def matrix(frame,fx,fy,n_bins=4,min_bin=30):
     import pandas as pd
+    if fx not in frame.columns or fy not in frame.columns:
+        return None,None
     z=frame.loc[frame['outcome'].isin(['TP_FIRST','SL_FIRST']),[fx,fy,'outcome']].dropna().copy()
     if z.empty:return None,None
     z['x']=pd.qcut(z[fx],q=n_bins,duplicates='drop')
@@ -289,12 +293,26 @@ def render_microstructure_quality_lab(project_root):
     tp=int(counts.get('TP_FIRST',0));sl=int(counts.get('SL_FIRST',0))
     st.caption(f'TP sobre resueltas (sin ambiguas): {100*tp/(tp+sl):.1f}%' if tp+sl else 'Sin casos resueltos')
 
+    available_features=[c for c in FEATURES if c in merged.columns]
+    available_morph=[c for c in MORPH_NUMERIC if not c.startswith('post_') and c in merged.columns]
+    all_rankable=available_features+available_morph
+    missing_features=[c for c in FEATURES if c not in merged.columns]
+    missing_morph=[c for c in MORPH_NUMERIC if not c.startswith('post_') and c not in merged.columns]
+    if missing_features or missing_morph:
+        missing_preview=(missing_features+missing_morph)[:12]
+        st.warning(
+            'Hay columnas esperadas que no están en el CSV derivado actual. '
+            'Se ocultan para evitar que el dashboard falle. '
+            'Probablemente haya desalineación entre la vista y retest_quality_features.csv. '
+            f'Missing (muestra): {", ".join(missing_preview)}'
+        )
+
     tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa','🧬 Morfologías','🗜️ Compression Lineage','🧱 Breakout Retest V4','🧱 Structural Level Atlas'])
     with tabs[0]:
         st.markdown('#### Ranking descriptivo TP-first frente a SL-first')
         st.caption('AUC por variable en la cohorte filtrada: 0,50 ≈ azar; NO es un resultado validado fuera de muestra. KNOWN no es previo al retest.')
         ranks=[]
-        for col in (*FEATURES,*(x for x in MORPH_NUMERIC if not x.startswith('post_'))):
+        for col in all_rankable:
             s=score_binary(merged,col)
             if s:ranks.append({'feature':FEATURE_LABELS.get(col,col),'campo':col,
                              'N':s['n'],'AUC ↑TP':round(s['auc_higher_is_tp'],3),
@@ -304,46 +322,55 @@ def render_microstructure_quality_lab(project_root):
         if not ranking.empty:
             st.dataframe(ranking.sort_values('AUC separación',ascending=False),use_container_width=True,hide_index=True)
         else:st.info('Se necesitan suficientes casos TP y SL para comparar las variables.')
-        feature=st.selectbox('Distribución por resultado',list(FEATURES)+[x for x in MORPH_NUMERIC if not x.startswith('post_')],
-             format_func=lambda x:FEATURE_LABELS.get(x,x),key='rql_distfeature')
-        z=merged[merged.outcome.isin(['TP_FIRST','SL_FIRST'])].dropna(subset=[feature])
-        if len(z)>1:
-            import plotly.express as px
-            fig=px.box(z,x='outcome',y=feature,color='outcome',points=False,
-               color_discrete_map=PALETTE,labels={'outcome':'Primer toque',feature:FEATURE_LABELS.get(feature,feature)})
-            fig.update_layout(height=350,showlegend=False,margin=dict(l=0,r=0,t=10,b=0))
-            st.plotly_chart(fig,use_container_width=True)
+        if all_rankable:
+            feature=st.selectbox('Distribución por resultado',all_rankable,
+                 format_func=lambda x:FEATURE_LABELS.get(x,x),key='rql_distfeature')
+            z=merged[merged.outcome.isin(['TP_FIRST','SL_FIRST'])].dropna(subset=[feature])
+            if len(z)>1:
+                import plotly.express as px
+                fig=px.box(z,x='outcome',y=feature,color='outcome',points=False,
+                   color_discrete_map=PALETTE,labels={'outcome':'Primer toque',feature:FEATURE_LABELS.get(feature,feature)})
+                fig.update_layout(height=350,showlegend=False,margin=dict(l=0,r=0,t=10,b=0))
+                st.plotly_chart(fig,use_container_width=True)
+        else:
+            st.info('No hay variables numéricas disponibles en el CSV derivado actual para mostrar distribuciones.')
     with tabs[1]:
         st.markdown('#### Matriz de interacciones (TP primero entre resueltas)')
-        cols=st.columns([1,1,1])
-        fx=cols[0].selectbox('Variable X',list(FEATURES),index=3,
-           format_func=lambda x:FEATURE_LABELS.get(x,x),key='rql_x')
-        fy=cols[1].selectbox('Variable Y',[x for x in FEATURES if x!=fx],index=3,
-           format_func=lambda x:FEATURE_LABELS.get(x,x),key='rql_y')
-        min_n=cols[2].slider('Mínimo eventos por celda',10,100,30,10,key='rql_min_n')
-        cells,z=matrix(merged,fx,fy,n_bins=4,min_bin=min_n)
-        if cells is None or cells.empty or z['x'].nunique()<2 or z['y'].nunique()<2:
-            st.info('Se necesitan al menos dos cuantiles distintos en cada eje.')
+        if len(available_features) < 2:
+            st.info('Se necesitan al menos dos variables disponibles en el CSV derivado para construir matrices.')
         else:
-            import plotly.express as px
-            xs=list(z['x'].cat.categories);ys=list(z['y'].cat.categories)
-            namesx=[f'Q{i+1}' for i in range(len(xs))];namesy=[f'Q{i+1}' for i in range(len(ys))]
-            rate=[];txt=[]
-            for y in ys:
-                rr=[];tt=[]
-                for x in xs:
-                    sub=cells[(cells.x==x)&(cells.y==y)]
-                    if len(sub):
-                        n=int(sub.n.iloc[0]);val=float(sub.rate.iloc[0]);rr.append(val)
-                        tt.append(f'{val:.1f}% · n={n}' if val==val else f'n={n} · insuficiente')
-                    else:rr.append(float('nan'));tt.append('n=0')
-                rate.append(rr);txt.append(tt)
-            fig=px.imshow(rate,x=namesx,y=namesy,color_continuous_scale='Teal',
-                zmin=0,zmax=100,labels={'color':'TP primero (%)'})
-            fig.update_traces(text=txt,texttemplate='%{text}',hovertemplate='%{text}<extra></extra>')
-            fig.update_layout(height=390,margin=dict(l=0,r=0,t=0,b=0))
-            st.plotly_chart(fig,use_container_width=True)
-            st.caption('Q1–Q4: cuartiles calculados en la cohorte filtrada. No hay corrección por múltiples pruebas; las celdas con pocas observaciones quedan sin tasa.')
+            cols=st.columns([1,1,1])
+            default_fx=min(3,len(available_features)-1)
+            fx=cols[0].selectbox('Variable X',available_features,index=default_fx,
+               format_func=lambda x:FEATURE_LABELS.get(x,x),key='rql_x')
+            fy_options=[x for x in available_features if x!=fx]
+            default_fy=min(3,len(fy_options)-1)
+            fy=cols[1].selectbox('Variable Y',fy_options,index=default_fy,
+               format_func=lambda x:FEATURE_LABELS.get(x,x),key='rql_y')
+            min_n=cols[2].slider('Mínimo eventos por celda',10,100,30,10,key='rql_min_n')
+            cells,z=matrix(merged,fx,fy,n_bins=4,min_bin=min_n)
+            if cells is None or cells.empty or z['x'].nunique()<2 or z['y'].nunique()<2:
+                st.info('Se necesitan al menos dos cuantiles distintos en cada eje.')
+            else:
+                import plotly.express as px
+                xs=list(z['x'].cat.categories);ys=list(z['y'].cat.categories)
+                namesx=[f'Q{i+1}' for i in range(len(xs))];namesy=[f'Q{i+1}' for i in range(len(ys))]
+                rate=[];txt=[]
+                for y in ys:
+                    rr=[];tt=[]
+                    for x in xs:
+                        sub=cells[(cells.x==x)&(cells.y==y)]
+                        if len(sub):
+                            n=int(sub.n.iloc[0]);val=float(sub.rate.iloc[0]);rr.append(val)
+                            tt.append(f'{val:.1f}% · n={n}' if val==val else f'n={n} · insuficiente')
+                        else:rr.append(float('nan'));tt.append('n=0')
+                    rate.append(rr);txt.append(tt)
+                fig=px.imshow(rate,x=namesx,y=namesy,color_continuous_scale='Teal',
+                    zmin=0,zmax=100,labels={'color':'TP primero (%)'})
+                fig.update_traces(text=txt,texttemplate='%{text}',hovertemplate='%{text}<extra></extra>')
+                fig.update_layout(height=390,margin=dict(l=0,r=0,t=0,b=0))
+                st.plotly_chart(fig,use_container_width=True)
+                st.caption('Q1–Q4: cuartiles calculados en la cohorte filtrada. No hay corrección por múltiples pruebas; las celdas con pocas observaciones quedan sin tasa.')
     with tabs[2]:
         st.markdown('#### Gráficos y metadatos de cada evento')
         pick=merged.sort_values('retest_ts',ascending=False).copy()
