@@ -217,6 +217,45 @@ def candles_plot(bars,title,verticals=None,horizontal=None,volume=False):
     return fig
 
 
+def _render_compatible_research_tab(renderer, source_events, project_root, *,
+                                    label, tp_pct, sl_pct, outcome_horizon,
+                                    entry_mode):
+    """Call either legacy (frame, root) or newer scenario-aware research tabs.
+
+    Do not quietly claim the global outcome controls were propagated to a
+    legacy renderer: report that its own/default scenario may apply.
+    """
+    import inspect
+    import streamlit as st
+
+    requested = {
+        'tp_pct': tp_pct,
+        'sl_pct': sl_pct,
+        'outcome_horizon': outcome_horizon,
+        'entry_mode': entry_mode,
+    }
+    parameters = inspect.signature(renderer).parameters
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD
+                         for p in parameters.values())
+    accepted = {
+        name: value for name, value in requested.items()
+        if accepts_kwargs or (name in parameters and parameters[name].kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ))
+    }
+    missing = [name for name in requested if name not in accepted]
+    if missing:
+        st.warning(
+            f'{label}: el módulo instalado usa una firma anterior y no acepta '
+            f'{", ".join(missing)}. Se puede abrir con su interfaz original, '
+            'pero sus estadísticas pueden no coincidir con el TP/SL, horizonte '
+            'y modo de entrada seleccionados arriba. Para comparaciones, '
+            'actualizá esa vista a la versión compatible con los controles globales.'
+        )
+    return renderer(source_events, project_root, **accepted)
+
+
 def render_microstructure_quality_lab(project_root):
     import pandas as pd
     import plotly.graph_objects as go
@@ -593,23 +632,31 @@ def render_microstructure_quality_lab(project_root):
 
     with tabs[6]:
         from dashboard.views.reaction_compression_lineage_view import render_lineage_atlas
-        render_lineage_atlas(analysis_before_result_filter,project,
-            tp_pct=float(pair[0]),sl_pct=float(pair[1]),outcome_horizon=int(horizon),entry_mode=mode)
+        _render_compatible_research_tab(
+            render_lineage_atlas, analysis_before_result_filter, project,
+            label='Compression Lineage', tp_pct=float(pair[0]), sl_pct=float(pair[1]),
+            outcome_horizon=int(horizon), entry_mode=mode)
 
     with tabs[7]:
         from dashboard.views.reaction_compression_breakout_retest_v4_view import render_v4
-        render_v4(analysis_before_result_filter,project,
-            tp_pct=float(pair[0]),sl_pct=float(pair[1]),outcome_horizon=int(horizon),entry_mode=mode)
+        _render_compatible_research_tab(
+            render_v4, analysis_before_result_filter, project,
+            label='Breakout Retest V4', tp_pct=float(pair[0]), sl_pct=float(pair[1]),
+            outcome_horizon=int(horizon), entry_mode=mode)
 
     with tabs[8]:
         from dashboard.views.reaction_structural_level_atlas_view import render_level_atlas
-        render_level_atlas(analysis_before_result_filter,project,
-            tp_pct=float(pair[0]),sl_pct=float(pair[1]),outcome_horizon=int(horizon),entry_mode=mode)
+        _render_compatible_research_tab(
+            render_level_atlas, analysis_before_result_filter, project,
+            label='Structural Level Atlas', tp_pct=float(pair[0]), sl_pct=float(pair[1]),
+            outcome_horizon=int(horizon), entry_mode=mode)
 
     with tabs[9]:
         from dashboard.views.reaction_structure_independent_view import render_independent_structures
-        render_independent_structures(analysis_before_result_filter,project,
-            tp_pct=float(pair[0]),sl_pct=float(pair[1]),outcome_horizon=int(horizon),entry_mode=mode)
+        _render_compatible_research_tab(
+            render_independent_structures, analysis_before_result_filter, project,
+            label='Estructuras independientes', tp_pct=float(pair[0]), sl_pct=float(pair[1]),
+            outcome_horizon=int(horizon), entry_mode=mode)
 
     with tabs[10]:
         from dashboard.views.reaction_horizontal_level_rich_card_view import render_horizontal_level_rich_card
