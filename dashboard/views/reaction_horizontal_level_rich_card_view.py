@@ -77,6 +77,44 @@ def structure_description(item):
     return why
 
 
+
+def _summary_pre_structure(events):
+    """Summarize PRE HTF structure without relying on a newer root logic module.
+
+    Streamlit may keep an older `reaction_horizontal_level_card` in
+    sys.modules. This report is UI-only; it does not classify reactions.
+    Missing outcomes are not counted as NO_HIT or as losses.
+    """
+    field='structure_relation_pre'
+    if field not in events.columns or 'outcome' not in events.columns:
+        return pd.DataFrame()
+
+    source=events[[field,'outcome']].copy()
+    source[field]=source[field].fillna('NO_EVALUABLE')
+    source['outcome']=source['outcome'].map(normalized_outcome)
+    allowed={'TP_FIRST','SL_FIRST','NO_HIT','AMBIGUOUS'}
+    rows=[]
+    for relation,group in source.groupby(field,dropna=False):
+        counts=group['outcome'].value_counts(dropna=True)
+        tp=int(counts.get('TP_FIRST',0))
+        sl=int(counts.get('SL_FIRST',0))
+        resolved=tp+sl
+        rows.append({
+            'Lectura PRE':STRUCTURE_LABELS.get(str(relation),str(relation)),
+            'REACTIONs':int(len(group)),
+            'TP':tp,
+            'SL':sl,
+            'NO_HIT':int(counts.get('NO_HIT',0)),
+            'AMBIGUOUS':int(counts.get('AMBIGUOUS',0)),
+            'SIN_RESULTADO':int((~group['outcome'].isin(allowed)).sum()),
+            'TP resueltos (%)':round(100*tp/resolved,1) if resolved else None,
+            'N resueltos':resolved,
+        })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values('REACTIONs',ascending=False).reset_index(drop=True)
+
+
 def _pretty(n,places=5):
     try:
         if pd.notna(n):return f'{float(n):.{places}g}'
@@ -170,7 +208,7 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,sl
                'del denominador, pero se muestran. Los grupos con pocos casos no demuestran una ventaja.')
 
     st.markdown('**Progresión HTF ANTES de la señal (solo hipótesis PRE)**')
-    structural_table=logic.summary_by(pre_filtered,'structure_relation_pre','Lectura PRE')
+    structural_table=_summary_pre_structure(pre_filtered)
     if not structural_table.empty:
         st.dataframe(structural_table,hide_index=True,use_container_width=True)
     st.caption('Solo se etiqueta posible presión cuando la zona estaba a ≤1,5 ATR, con dos pivotes '
