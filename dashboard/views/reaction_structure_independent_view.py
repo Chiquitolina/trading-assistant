@@ -102,6 +102,29 @@ def render_independent_structures(source_events,project_root):
     st.dataframe(stats_by_group(joined,'relacion_independiente',min_n),use_container_width=True,hide_index=True)
     st.caption('No se seleccionan mejores umbrales a partir de TP/SL. Un nivel histórico presente en todos los eventos '
                'no demuestra ventaja predictiva; se requieren controles sin REACTION y fechas nuevas.')
+    st.markdown('#### Atlas V2: cercanía efectiva de los niveles, independiente de compresión')
+    try:
+        from dashboard.views.reaction_structural_level_atlas_v2_view import load as load_v2
+        z2,ev2,meta2=load_v2(project)
+        if meta2['frozen_cohort_sha256']!=lm['frozen_cohort_sha256']:
+            st.warning('Atlas V2 usa otra cohorte congelada; no se cruzan datos.')
+        else:
+            keep=['event_key','pre_family','primary_distance_atr','space_to_opposition_pct','all_covered']
+            add=ev2[keep].rename(columns={c:'atlas_v2_'+c for c in keep if c!='event_key'})
+            extra=joined.merge(add,on='event_key',how='inner',validate='one_to_one')
+            if extra.empty:
+                st.info('Atlas V2 todavía no contiene estas REACTIONs.')
+            else:
+                st.caption(f'{len(extra)} eventos en comparación Atlas V2 × Compression V4. '
+                    'Ambos detectores se evalúan por separado; solo después se examina su coincidencia.')
+                st.dataframe(stats_by_group(extra,'atlas_v2_pre_family',min_n),hide_index=True,use_container_width=True)
+                st.dataframe(extra[['symbol','side','date_utc','categoria_compresion','atlas_v2_pre_family',
+                   'atlas_v2_primary_distance_atr','atlas_v2_space_to_opposition_pct','outcome']],
+                   hide_index=True,use_container_width=True,height=290)
+    except FileNotFoundError:
+        st.info('Para añadir distancias y mapa multizona ejecutá Atlas V2 --run y --audit.')
+    except Exception as exc:
+        st.warning(f'No se pudo cargar comparación Atlas V2: {exc}')
     st.markdown('#### Inspector comparativo — el MISMO evento en ambos detectores')
     pick=joined.sort_values('retest_ts',ascending=False)
     labels={r.event_key:f'{r.symbol} {r.side} · {r.date_utc} · {r.relacion_independiente}'
@@ -134,5 +157,25 @@ def render_independent_structures(source_events,project_root):
             if fig is not None:st.plotly_chart(fig,use_container_width=True,key='ind_level_chart')
             st.caption(f"Estado previo: {item['level_selection_state_pre']}")
     st.dataframe(pd.DataFrame([item.to_dict()]),hide_index=True,use_container_width=True)
+    st.markdown('#### Desenlace POST: misma REACTION para ambos detectores')
+    st.caption('Auto Paths 1m archivadas. TP/SL de referencia visual fija (+1%/−0,5%); '
+               'el resultado oficial corresponde a los selectores superiores.')
+    try:
+        from dashboard.views.reaction_structural_level_atlas_v2_view import _read_post,_post_figure
+        sr=source_events[source_events.event_key.eq(selected)]
+        if len(sr):
+            srow=sr.iloc[0]
+            frame=type('PlotRow',(),{})()
+            for field in ('event_key','retest_ts','side','outcome','entry_ts','entry_price','first_touch_minute'):
+                setattr(frame,field,srow.get(field))
+            bars,state=_read_post(project,frame)
+            if bars:
+                post_minutes=st.select_slider('Recorrido posterior (minutos)',options=[15,30,60,180,360],
+                     value=180,key='ind_post_minutes')
+                fig=_post_figure(frame,bars,post_minutes,1.0,.5)
+                if fig is not None:st.plotly_chart(fig,use_container_width=True,key='ind_post_chart')
+            else:st.info(f'Trayectoria futura no completa: {state}')
+    except (ImportError,RuntimeError,ValueError,KeyError,OSError) as exc:
+        st.warning(f'No se pudo cargar trayectoria futura: {exc}')
     st.download_button('Exportar comparación independiente',joined.to_csv(index=False).encode('utf-8'),
                        file_name='compression_vs_level_independiente.csv',mime='text/csv',key='ind_export')

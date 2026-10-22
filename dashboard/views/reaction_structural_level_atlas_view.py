@@ -121,7 +121,7 @@ def chart_level(project,event_row,timeframe_row):
     return fig
 
 
-def render_level_atlas(source_events,project_root):
+def _render_level_atlas_v1(source_events,project_root):
     import pandas as pd
     import streamlit as st
     import reaction_structural_level_atlas as atlas
@@ -208,3 +208,18 @@ def render_level_atlas(source_events,project_root):
         st.caption('Velas HTF cerradas ANTES del retest; triángulo = precio de cierre de la vela 1m exacta de REACTION (KNOWN después de cerrar). Para el recorrido posterior usá el Inspector por REACTION.')
         st.download_button('Exportar eventos y niveles de estos filtros',x.to_csv(index=False).encode('utf-8'),
                            file_name='structural_level_atlas_filtered.csv',mime='text/csv',key='sla_export')
+
+
+def render_level_atlas(source_events,project_root):
+    """Version chooser: V2 is independent and V1 remains reproducible."""
+    import streamlit as st
+    import reaction_structural_level_atlas_v2 as v2
+    from dashboard.views.reaction_structural_level_atlas_v2_view import render_v2
+    folder=Path(project_root)/v2.v1.lineage.ROOT_REL/v2.OUTPUT
+    choices=['V2 · Mapa multizona y desenlaces','V1 · Detector original']
+    selection=st.radio('Structural Atlas',choices,index=0 if (folder/'summary.json').exists() else 1,
+        horizontal=True,key='sla_version_picker')
+    if selection==choices[0]:
+        render_v2(source_events,project_root)
+    else:
+        _render_level_atlas_v1(source_events,project_root)
