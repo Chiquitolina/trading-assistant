@@ -59,6 +59,7 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,sl
 
     project=Path(project_root).resolve()
     import reaction_structural_level_atlas_v2 as atlas
+    from dashboard.views.reaction_horizontal_rich_chart import enhance_pre_candles, diagnostic_text
     out=project/atlas.v1.lineage.ROOT_REL/atlas.OUTPUT
     st.markdown('### 🟩 Horizontal Level Rich Card')
     st.caption('Una zona principal ya confirmada · una REACTION · su desenlace. '
@@ -168,12 +169,14 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,sl
         bars,status=get_post_bars(project,item.event_key,item.retest_ts)
         if fig is None:
             st.warning('No hay velas previas disponibles para este gráfico.');return
+        fig,pre_diagnostic=enhance_pre_candles(fig,tf,show_higher_lows=True,visible_hours=12)
         if bars:
             fig=overlay_future(fig,bars,retest_ts=item.retest_ts,side=item.side,
                 entry_ts=item.entry_ts,entry_price=item.entry_price,outcome=item.outcome,
                 first_touch_minute=item.first_touch_minute,tp_pct=tp_pct,sl_pct=sl_pct,
                 outcome_horizon=outcome_horizon,display_minutes=post_n,pre_hours=12)
         st.plotly_chart(fig,use_container_width=True,key='hlrc_chart')
+        st.caption(diagnostic_text(pre_diagnostic,tf))
         st.caption(outcome_explanation(item.outcome,item.first_touch_minute,tp_pct=tp_pct,
             sl_pct=sl_pct,outcome_horizon=outcome_horizon,display_minutes=post_n,
             path_state=status,entry_mode=entry_mode))

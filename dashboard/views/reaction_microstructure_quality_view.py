@@ -101,9 +101,22 @@ def load_frame(project):
     return f,r,m
 
 
+def available_first_touch_horizons(outcomes):
+    """Offer only horizons actually stored (and SHA-audited) in First Touch.
+
+    In particular, an old 180m CSV must not silently masquerade as 240/300/360m.
+    """
+    all_horizons=(5,15,30,60,180,240,300,360)
+    return [h for h in all_horizons if
+            f'result_{h}m' in outcomes.columns and f'minute_{h}m' in outcomes.columns]
+
+
 def outcome_subset(r,mode,tp,sl,horizon):
     sub=r[(r.entry_mode==mode) & r.tp_pct.eq(tp) & r.sl_pct.eq(sl)].copy()
     col=f'result_{int(horizon)}m'
+    if col not in sub.columns or f'minute_{int(horizon)}m' not in sub.columns:
+        raise ValueError(f'First Touch no tiene resultados calculados para {horizon}m. '
+                         'Ejecutá --run y --audit de reaction_first_touch_lab.py.')
     sub['outcome']=sub[col].astype(str)
     sub['first_touch_minute']=sub[f'minute_{int(horizon)}m']
     return sub[['event_key','entry_ts','entry_price','entry_delay_min','outcome','first_touch_minute','mfe_180_pct','mae_180_pct']]
@@ -305,7 +318,17 @@ def render_microstructure_quality_lab(project_root):
     mode=v[1].selectbox('Entrada',['OBSERVED_OPEN','STRUCTURAL_OPEN'],key='rql_mode')
     pairs=[(0.5,0.5),(1.0,0.5),(1.0,1.0),(1.5,0.75),(2.0,1.0)]
     pair=v[2].selectbox('TP / SL',pairs,index=1,format_func=lambda x:f'+{x[0]:g}% / −{x[1]:g}%',key='rql_pair')
-    horizon=v[3].selectbox('Horizonte (min)',[5,15,30,60,180],index=4,key='rql_horizon')
+    available_horizons=available_first_touch_horizons(r)
+    if not available_horizons:
+        st.error('First Touch no tiene columnas de resultado/minuto coherentes. Revisá su auditoría.')
+        return
+    horizon=v[3].selectbox('Horizonte (min)',available_horizons,
+                           index=(available_horizons.index(180) if 180 in available_horizons else len(available_horizons)-1),
+                           key='rql_horizon')
+    if 360 not in available_horizons:
+        st.info('Para habilitar 240/300/360m, actualizá First Touch y ejecutá '
+                '`python3 reaction_first_touch_lab.py --run` y luego `--audit`. '
+                'Hasta entonces mostramos solo horizontes realmente calculados.')
     side=v[4].selectbox('Dirección',['TODAS','LONG','SHORT'],key='rql_side')
     day=v[5].selectbox('Fecha UTC',['TODAS']+sorted(f.date_utc.dropna().astype(str).unique().tolist()),key='rql_day')
     if mode=='STRUCTURAL_OPEN':st.warning('STRUCTURAL_OPEN usa entrada histórica teórica no ejecutable. Para causalidad de observación, preferí OBSERVED_OPEN.')

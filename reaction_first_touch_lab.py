@@ -20,11 +20,11 @@ import sqlite3
 import tempfile
 
 MIN = 60000
-HORIZONS = (5,15,30,60,180)
+HORIZONS = (5,15,30,60,180,240,300,360)
 SCENARIOS = ((0.5,0.5),(1.0,0.5),(1.0,1.0),(1.5,0.75),(2.0,1.0))
 MODES = ('STRUCTURAL_OPEN','OBSERVED_OPEN')
 REL = Path('reports/reaction_lab')
-VERSION = 'reaction-first-touch-lab-v1.0'
+VERSION = 'reaction-first-touch-lab-v1.1-horizons360'
 INPUT_EVENT_COLS = ('event_key','symbol','side','retest_ts','known_ts','first_seen_ms',
                    'observation_type','source_hash','causal_json','quality')
 EVENT_FIELDS = ('event_key','symbol','side','date_utc','retest_ts','known_ts','first_seen_ms',
@@ -126,7 +126,7 @@ def validate_path(bars,rec,e):
 def observed_index(bars,e):
     if e['observation_type']!='LIVE_OBSERVED':return None
     ready=max(e['known_ts'],e['first_seen_ms'])
-    for i,(ts,*_) in enumerate(bars[:180]):
+    for i,(ts,*_) in enumerate(bars[:360]):
         if ts>=ready:return i
     return None
 
