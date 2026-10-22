@@ -5,7 +5,7 @@ import json
 from contextlib import closing
 from collections import Counter
 
-from reaction_compression_lineage import ROOT_REL, OUT_NAME, hash_file, ro, _merge_bar_data, derive_30m, SCALE_GROUPS, SCALE_LABELS, M
+from reaction_compression_lineage import ROOT_REL, OUT_NAME, hash_file, ro, _merge_bar_data, derive_30m, SCALE_GROUPS, SCALE_LABELS, M, TF
 
 STATE_NAME={
  'BROKEN_RETEST_KNOWN':'Ruptura + retest del límite (vela cerrada)',
@@ -52,7 +52,6 @@ def summarize(frame,min_resolved=20):
 def chart_event(project,row):
     import pandas as pd
     import plotly.graph_objects as go
-    from reaction_compression_lineage import TF
     tf=row['timeframe'];r=int(row['retest_ts']);s=row['symbol']
     if pd.isna(row['box_start_ts']):return None
     start=int(row['box_start_ts'])-TF[tf]*5
