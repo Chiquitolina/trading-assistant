@@ -30,7 +30,19 @@ HISTORY_NAME = 'reaction_compression_history_v1.sqlite3'
 VERSION = 'compression-lineage-v1.0'
 M = 60_000
 TF = {'15m':15*M, '30m':30*M}
-WINDOWS = {'15m':(20,30), '30m':(40,60,80)}
+WINDOWS = {'15m':(20,30,40,60,80), '30m':(40,60,80)}
+# Multiscale groups are fixed before any TP/SL comparison.
+SCALE_GROUPS = {
+    'CORTA_15M': ('15m', (20, 30)),
+    'INTERMEDIA_15M': ('15m', (40, 60, 80)),
+    'AMPLIA_30M': ('30m', (40, 60, 80)),
+}
+SCALE_LABELS = {
+    'CORTA_15M': 'Corta · 15m · 20–30 velas · 5–7,5h',
+    'INTERMEDIA_15M': 'Intermedia · 15m · 40–80 velas · 10–20h',
+    'AMPLIA_30M': 'Amplia · 30m · 40–80 velas · 20–40h',
+}
+
 OUTPUT_COLS = ('event_key','symbol','side','retest_ts','date_utc','observation_type',
                'timeframe','window','base_window','coverage','history_source',
                'snapshots_eligible','snapshots_qualified','lineage_state','box_start_ts',
@@ -371,7 +383,7 @@ def build(root,max_events=0,search_hours=48,progress=100):
          'complete_universe':len(events)==audit['events'],
          'frozen_cohort_sha256':audit['frozen_cohort_sha256'],
          'rows':len(results),'windows':{x:list(y) for x,y in WINDOWS.items()},
-         'search_hours':search_hours,'max_events':max_events,
+         'search_hours':search_hours,'max_events':max_events,'scale_groups':{k:{'timeframe':tf,'windows':list(ns)} for k,(tf,ns) in SCALE_GROUPS.items()},
          'quality_counts':dict(counts),'sha256':hash_file(full_csv),
          'confluence_sha256':hash_file(alignment_file),
          'history_source_path':str(historypath) if historypath.is_file() else None,
@@ -423,10 +435,11 @@ def plan(root):
     return {'frozen_events':a['events'],'cohort_sha256':a['frozen_cohort_sha256'],
        'native_archive_bars':{'15m':n15,'30m':n30},
        'optional_history_cache_exists':cache.is_file(),
+       'scale_groups':{k:{'timeframe':tf,'windows':list(ns),'duration_hours':[n*TF[tf]/(60*M) for n in ns]} for k,(tf,ns) in SCALE_GROUPS.items()},
        'windows':{tf:[{'compression':n,'separate_base':2*n,'required_contiguous_bars':3*n,
             'required_hours':3*n*TF[tf]/(60*M)} for n in ns] for tf,ns in WINDOWS.items()},
        'run_is_offline':True,'original_sources_read_only':True,
-       'warning':'30m 40-80 boxes need 60-120h contiguous BEFORE the box; 96 closed 15m candles alone cannot prove absence'}
+       'warning':'La búsqueda de 15m/30m necesita cajas + base no superpuesta 2× y search_hours de antecedencia; cobertura incompleta NO equivale a ausencia de compresión'}
 
 
 def main(argv=None):

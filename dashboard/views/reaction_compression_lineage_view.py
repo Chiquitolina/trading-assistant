@@ -5,7 +5,7 @@ import json
 from contextlib import closing
 from collections import Counter
 
-from reaction_compression_lineage import ROOT_REL, OUT_NAME, hash_file, ro, _merge_bar_data, derive_30m
+from reaction_compression_lineage import ROOT_REL, OUT_NAME, hash_file, ro, _merge_bar_data, derive_30m, SCALE_GROUPS, SCALE_LABELS, M
 
 STATE_NAME={
  'BROKEN_RETEST_KNOWN':'Ruptura + retest del límite (vela cerrada)',
@@ -73,7 +73,8 @@ def chart_event(project,row):
         else:
             derived=derive_30m(extended15)
             candles=pd.concat([native,derived[~derived.timestamp.isin(native.timestamp)]],ignore_index=True)
-    candles=candles[(candles.timestamp>=start)&(candles.timestamp<r)].sort_values('timestamp')
+    # Do not display a higher-timeframe candle that was still open at REACTION.
+    candles=candles[(candles.timestamp>=start)&(candles.timestamp+TF[tf]<=r)].sort_values('timestamp')
     if candles.empty:return None
     x=pd.to_datetime(candles.timestamp,unit='ms',utc=True)
     fig=go.Figure(go.Candlestick(x=x,open=candles.open,high=candles.high,
@@ -90,8 +91,27 @@ def chart_event(project,row):
     if pd.notna(row['breakout_ts']):
         fig.add_vline(x=pd.to_datetime(int(row['breakout_ts']),unit='ms',utc=True),
              line_color='#159b84',line_dash='dot')
-    fig.add_vline(x=pd.to_datetime(r,unit='ms',utc=True),line_color='#d66d74',line_dash='dash')
+    # Marker is the close of the exact 1m REACTION candle: not a guessed 15m/30m price.
+    with closing(ro(project/ROOT_REL/'reaction_full_context_v1.sqlite3')) as ctx:
+        exact=ctx.execute(
+            "SELECT open,high,low,close FROM candles WHERE symbol=? AND timeframe='1m' AND open_ts=?",
+            (s,r)).fetchone()
+    point=pd.to_datetime(r+M,unit='ms',utc=True)
+    if exact is not None:
+        direction=str(row['side'])
+        fig.add_trace(go.Scatter(x=[point],y=[float(exact[3])],mode='markers+text',
+            marker=dict(symbol='triangle-up' if direction=='LONG' else 'triangle-down',
+                        color='#16a085' if direction=='LONG' else '#e87985',size=15,
+                        line=dict(width=1.5,color='#ffffff')),
+            text=[f'REACTION {direction}'],textposition='top center',
+            textfont=dict(size=11,color='#f2d486'),name='REACTION 1m cerrada',
+            hovertemplate=(f'REACTION {direction}<br>Vela 1m cerrada: %{{x}}<br>'
+                           f'O: {float(exact[0]):.8g} · H: {float(exact[1]):.8g}<br>'
+                           f'L: {float(exact[2]):.8g} · C: %{{y:.8g}}<extra></extra>')))
+    fig.add_vline(x=point,line_color='#d66d74',line_dash='dash')
+    fig.update_xaxes(range=[x.iloc[0],pd.to_datetime(r+2*TF[tf],unit='ms',utc=True)])
     fig.update_layout(height=490,xaxis_rangeslider_visible=False,
+
        title=f'{s} {row["side"]} · {tf} · caja congelada, ruptura y retest',
        margin=dict(t=45,r=10,b=10,l=10))
     return fig
@@ -103,7 +123,7 @@ def render_lineage_atlas(frame,project_root):
     from dashboard.services.reaction_reverse_engineering import one_per_symbol_wave
     project=Path(project_root)
     st.markdown('### 🗜️ Compression Lineage — cajas, rupturas y retests')
-    st.caption('Mismo detector del Compression Scanner; base SEPARADA de 2× duración. Solo velas 15m/30m históricas cerradas. No modifica scanners LIVE.')
+    st.caption('Escalas CORTA 15m (20–30), INTERMEDIA 15m (40–80), AMPLIA 30m (40–80); base SEPARADA 2×. Clasificación independiente de Structural Level Atlas. El nivel y la reacción se muestran sin datos posteriores en los gráficos.')
     store=project/ROOT_REL/OUT_NAME/'lineage_structures.csv'
     if not store.is_file():
         st.info('Primero construir el replay histórico offline en el VPS: `python3 reaction_compression_lineage.py --plan` y `--run --max-events 100`. Para el universo completo: `--run` sin límite.')
@@ -119,10 +139,15 @@ def render_lineage_atlas(frame,project_root):
     first[2].metric('Estructuras evaluadas',f"{len(struct):,}")
     first[3].metric('Universo completo','Sí' if meta['complete_universe'] else 'Piloto')
     if not meta['complete_universe']:st.warning('PILOTO PARCIAL: no extrapoles los porcentajes al universo completo.')
-    controls=st.columns([1,1,1])
-    tf=controls[0].selectbox('Timeframe',['15m','30m'],key='rql_lineage_tf')
-    opts=list(meta['windows'][tf]);n=controls[1].selectbox('Duración compresión',opts,key='rql_lineage_n',
-                         format_func=lambda v:f'{v} velas, base {2*v}')
+    controls=st.columns([1.3,1,1])
+    scale=controls[0].selectbox('Escala estructural',list(SCALE_GROUPS),
+         format_func=lambda v:SCALE_LABELS[v],key='rql_lineage_scale')
+    tf,expected_sizes=SCALE_GROUPS[scale]
+    opts=[n for n in expected_sizes if n in meta['windows'].get(tf,[])]
+    if not opts:
+        st.warning('El replay guardado es anterior a esta escala. Reejecutá --run y --audit para incluirla.');return
+    n=controls[1].selectbox('Duración compresión',opts,key='rql_lineage_n',
+                         format_func=lambda v:f'{v} velas ({v*TF[tf]/(60*M):g}h), base {2*v}')
     group=controls[2].selectbox('Cobertura',['Todas','Solo búsqueda completa','Completas + estructuras detectadas'],key='rql_lineage_cov')
     dat=struct[struct.timeframe.eq(tf)&struct.window.eq(n)].merge(
        frame[['event_key','outcome','entry_price','entry_ts','entry_delay_min',
@@ -153,7 +178,7 @@ def render_lineage_atlas(frame,project_root):
             x=summarize(valid[valid.date_utc.isin(ds)],min_resolved=15)
             if len(x):x.insert(0,'periodo',name);parts.append(x)
         if parts:st.dataframe(pd.concat(parts,ignore_index=True)[['periodo','estructura','REACTIONs','TP_FIRST','SL_FIRST','TP_resueltas_%','fechas']],hide_index=True,use_container_width=True)
-    st.markdown('#### Confluencia 15m + 30m (todas las duraciones)')
+    st.markdown('#### Coincidencias entre timeframes — COMPLEMENTARIAS, nunca requisito')
     confl_path=project/ROOT_REL/OUT_NAME/'lineage_confluence.csv'
     if confl_path.is_file() and hash_file(confl_path)==meta.get('confluence_sha256'):
         confluence=pd.read_csv(confl_path,low_memory=False)
@@ -181,6 +206,7 @@ def render_lineage_atlas(frame,project_root):
     selected=picks[picks.event_key.eq(chosen)].iloc[0]
     fig=chart_event(project,selected)
     if fig:st.plotly_chart(fig,use_container_width=True)
+    st.caption('Triángulo = precio de cierre de la vela 1m de REACTION (conocido al cerrar); línea roja = su cierre. Las velas HTF dibujadas están completas antes de la señal.')
     st.dataframe(pd.DataFrame([selected.to_dict()]),hide_index=True,use_container_width=True)
     st.caption('Una caja NO se define mirando su ruptura posterior. La detección ocurre antes; la ruptura se comprueba después y siempre antes del retest. Investigación retrospectiva, no confirmación de edge.')
     st.download_button('Descargar cruces estructurales CSV',

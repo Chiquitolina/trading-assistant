@@ -95,7 +95,26 @@ def chart_level(project,event_row,timeframe_row):
             xform=pd.to_datetime(int(form),unit='ms',utc=True)
             fig.add_shape(type='line',x0=xform,x1=xform,y0=zl,y1=zh,
                           line=dict(color='#64748b',width=1,dash='dot'))
-    fig.update_layout(title=f"{event_row['symbol']} · {tf} · nivel histórico ANTES del retest",
+    # The marker uses the archived exact REACTION 1m candle (only KNOWN after close).
+    with closing(atlas.lineage.ro(archive)) as ctx:
+        reaction=ctx.execute(
+            "SELECT open,high,low,close FROM candles WHERE symbol=? AND timeframe='1m' AND open_ts=?",
+            (str(event_row['symbol']),r)).fetchone()
+    stamp=pd.to_datetime(r+atlas.lineage.M,unit='ms',utc=True)
+    if reaction is not None:
+        direction=str(event_row['side'])
+        fig.add_trace(go.Scatter(x=[stamp],y=[float(reaction[3])],mode='markers+text',
+            marker=dict(symbol='triangle-up' if direction=='LONG' else 'triangle-down',
+                        color='#16a085' if direction=='LONG' else '#e87985',size=15,
+                        line=dict(color='#ffffff',width=1.5)),text=[f'REACTION {direction}'],
+            textposition='top center',textfont=dict(color='#f2d486',size=11),
+            hovertemplate=(f'REACTION {direction} · vela 1m cerrada<br>'
+                           f'O: {float(reaction[0]):.8g} · H: {float(reaction[1]):.8g}<br>'
+                           f'L: {float(reaction[2]):.8g} · C: %{{y:.8g}}<extra></extra>')))
+    fig.add_vline(x=stamp,line_dash='dash',line_color='#d87979')
+    fig.update_xaxes(range=[date.iloc[0],pd.to_datetime(r+2*step,unit='ms',utc=True)])
+    fig.update_layout(title=f"{event_row['symbol']} · {tf} · nivel histórico y REACTION",
+
                       height=460,margin=dict(l=6,r=6,t=40,b=6),
                       xaxis_rangeslider_visible=False,showlegend=False,
                       plot_bgcolor='rgba(0,0,0,0)',paper_bgcolor='rgba(0,0,0,0)')
@@ -109,7 +128,7 @@ def render_level_atlas(source_events,project_root):
     project=Path(project_root)
     folder=project/atlas.lineage.ROOT_REL/atlas.OUTPUT
     st.markdown('### 🧱 Structural Level Atlas V1')
-    st.caption('Niveles horizontales desde pivotes confirmados de 15m/30m; zonas ATR congeladas al segundo pivote. '
+    st.caption('Niveles horizontales INDEPENDIENTES de las compresiones: no se requiere una caja previa. Zonas ATR congeladas al segundo pivote de 15m/30m. '
                'La etiqueta PRE utiliza únicamente cierres anteriores al retest; el toque de 1m es conocido solo después de su cierre.')
     if not (folder/'summary.json').is_file():
         st.info('Primero ejecutá `python3 reaction_structural_level_atlas.py --plan`, '
@@ -186,7 +205,6 @@ def render_level_atlas(source_events,project_root):
         st.dataframe(pd.DataFrame([r.to_dict()]),hide_index=True,use_container_width=True)
         fig=chart_level(project,r,r)
         if fig is not None:st.plotly_chart(fig,use_container_width=True)
-        st.caption('Gráfico de velas HTF cerradas hasta ANTES del retest. '
-                   'Para el recorrido posterior usá el Inspector por REACTION existente.')
+        st.caption('Velas HTF cerradas ANTES del retest; triángulo = precio de cierre de la vela 1m exacta de REACTION (KNOWN después de cerrar). Para el recorrido posterior usá el Inspector por REACTION.')
         st.download_button('Exportar eventos y niveles de estos filtros',x.to_csv(index=False).encode('utf-8'),
                            file_name='structural_level_atlas_filtered.csv',mime='text/csv',key='sla_export')

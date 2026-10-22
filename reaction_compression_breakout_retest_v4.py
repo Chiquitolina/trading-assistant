@@ -343,7 +343,8 @@ def run(root,max_events=100,cohort='live-stratified',search_hours=48,scan_every=
                         print('V4_PROGRESS',json.dumps({'done':done,'total':len(events),'rows':len(result)}),flush=True)
         finally:
             if hist is not None:hist.close()
-    if len(result)!=5*len(events):raise RuntimeError('Expected 5 rows for every event')
+    expected_windows=sum(len(ns) for ns in v3.WINDOWS.values())
+    if len(result)!=expected_windows*len(events):raise RuntimeError(f'Expected {expected_windows} rows for every event')
     outcomes,first_summary=_load_outcomes(root)
     if first_summary['frozen_cohort_sha256']!=audit['frozen_cohort_sha256']:
         raise RuntimeError('Cohort mismatch vs First-Touch')
@@ -375,7 +376,8 @@ def run(root,max_events=100,cohort='live-stratified',search_hours=48,scan_every=
     _write_csv(out/'event_best_v4.csv',selected,BEST_COLS)
     meta=dict(version=VERSION,events=len(events),rows=len(result),
         frozen_cohort_sha256=audit['frozen_cohort_sha256'],cohort=cohort,max_events=max_events,
-        search_hours=search_hours,scan_every=scan_every,source_history=str(hpath) if hpath.exists() else None,
+        search_hours=search_hours,scan_every=scan_every,windows={tf:list(ns) for tf,ns in v3.WINDOWS.items()},
+        windows_per_event=expected_windows,source_history=str(hpath) if hpath.exists() else None,
         coverage=dict(Counter(r['coverage'] for r in result)),states_pre=dict(Counter(r['selection_state_pre'] for r in selected)),
         states_known=dict(Counter(r['selection_state_known'] for r in selected)),
         unique_events=len({r['event_key'] for r in result}),
@@ -420,7 +422,8 @@ def audit_output(root):
     chrono=all(int(x['box_last_close_ts']) < int(x['breakout_ts']) and
                int(x['breakout_closed_ts']) <= int(x['retest_ts']) for x in structs
         if x['breakout_ts'] and x['box_last_close_ts'])
-    valid=(len(structs)==5*meta['events'] and len(best)==meta['events']
+    expected_windows=sum(len(ns) for ns in v3.WINDOWS.values())
+    valid=(len(structs)==expected_windows*meta['events'] and len(best)==meta['events']
         and len(events)==meta['events'] and len(identities)==len(structs)
         and len({x['event_key'] for x in structs})==meta['events'] and chrono
         and meta['frozen_cohort_sha256']==v3.integrity(root)['frozen_cohort_sha256'])

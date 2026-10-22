@@ -18,12 +18,12 @@ import reaction_compression_breakout_retest_v4 as v4
 from reaction_compression_history_backfill import own_db, fetch_batches
 
 
-PRIOR_HOURS=180  # 120h box+separate base +48h search +12h margin
+PRIOR_HOURS=180  # At least longest box+separate base + 48h search + 12h margin
 
 
 def requests_for_selected(root,max_events=100,cohort='live-stratified',search_hours=48):
-    if search_hours>48:margin=max(180,120+search_hours+12)
-    else:margin=PRIOR_HOURS
+    required_prior=max((3*n*v3.TF[tf]/(60*v3.M) for tf,ns in v3.WINDOWS.items() for n in ns), default=120)
+    margin=max(PRIOR_HOURS,math.ceil(required_prior+search_hours+12))
     with closing(v3.ro(root/v3.ROOT_REL/v3.CTX_NAME)) as con:
         events=v4.select_events(con,cohort,max_events)
     groups=defaultdict(list)

@@ -307,7 +307,7 @@ def render_microstructure_quality_lab(project_root):
             f'Missing (muestra): {", ".join(missing_preview)}'
         )
 
-    tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa','🧬 Morfologías','🗜️ Compression Lineage','🧱 Breakout Retest V4','🧱 Structural Level Atlas'])
+    tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa','🧬 Morfologías','🗜️ Compression Lineage','🧱 Breakout Retest V4','🧱 Structural Level Atlas','🧭 Estructuras independientes'])
     with tabs[0]:
         st.markdown('#### Ranking descriptivo TP-first frente a SL-first')
         st.caption('AUC por variable en la cohorte filtrada: 0,50 ≈ azar; NO es un resultado validado fuera de muestra. KNOWN no es previo al retest.')
@@ -602,3 +602,7 @@ def render_microstructure_quality_lab(project_root):
     with tabs[8]:
         from dashboard.views.reaction_structural_level_atlas_view import render_level_atlas
         render_level_atlas(analysis_before_result_filter,project)
+
+    with tabs[9]:
+        from dashboard.views.reaction_structure_independent_view import render_independent_structures
+        render_independent_structures(analysis_before_result_filter,project)

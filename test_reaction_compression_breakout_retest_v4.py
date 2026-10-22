@@ -109,7 +109,7 @@ class V4Tests(unittest.TestCase):
             with patch.object(v4.v3,'integrity',return_value=fakeaudit),patch.object(v4.v3,'scan_snapshot',side_effect=fake_scan),patch.object(v4,'_load_outcomes',return_value=(fakeout,{'frozen_cohort_sha256':'abc'})):
                 out=v4.run(root,1,'all-live',6,1,0)
                 self.assertEqual(out['events'],1)
-                self.assertEqual(out['rows'],5)
+                self.assertEqual(out['rows'],8)
                 self.assertTrue(v4.audit_output(root)['success'])
             self.assertEqual(path.stat().st_size,before)
             import csv
@@ -117,7 +117,7 @@ class V4Tests(unittest.TestCase):
             self.assertEqual(len(rows),1)
             self.assertEqual(rows[0]['outcome'],'TP_FIRST')
             with (folder/v4.OUTPUT/'structures_v4.csv').open() as f:s=list(csv.DictReader(f))
-            self.assertEqual(len(s),5)
+            self.assertEqual(len(s),8)
             self.assertEqual(next(x for x in s if x['timeframe']=='15m' and x['window']=='20')['breakout_ts'],str(298*S))
 
 if __name__=='__main__':unittest.main()

@@ -37,7 +37,7 @@ class LineageTests(unittest.TestCase):
                 for tf, values in plan['windows'].items()
             }
             self.assertEqual(actual, {
-                '15m': [15.0, 22.5],
+                '15m': [15.0, 22.5, 30.0, 45.0, 60.0],
                 '30m': [60.0, 90.0, 120.0],
             })
 
@@ -150,13 +150,13 @@ class LineageTests(unittest.TestCase):
                 return None
             with patch.object(lab,'integrity',return_value=fakeaudit),patch.object(lab,'scan_snapshot',side_effect=mockscan):
                 out=lab.build(root,max_events=1,search_hours=8,progress=0)
-                self.assertEqual(out['rows'],5)
+                self.assertEqual(out['rows'],8)
                 aud=lab.audit_output(root)
                 self.assertTrue(aud['success'],aud)
             with (folder/lab.OUT_NAME/'lineage_structures.csv').open() as file:
                 rows=list(csv.DictReader(file))
             self.assertEqual({(x['timeframe'],x['window']) for x in rows},
-                             {('15m','20'),('15m','30'),('30m','40'),('30m','60'),('30m','80')})
+                             {('15m','20'),('15m','30'),('15m','40'),('15m','60'),('15m','80'),('30m','40'),('30m','60'),('30m','80')})
             self.assertFalse(out['complete_universe'])
 
 

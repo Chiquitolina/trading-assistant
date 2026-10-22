@@ -48,7 +48,7 @@ def render_v4(source_events,project_root):
     from dashboard.views.reaction_compression_lineage_view import chart_event
     project=Path(project_root)
     st.markdown('### 🧱 Compression Breakout Retest V4')
-    st.caption('Scanner original de compresiones aplicado a cierres históricos. Caja y selección congeladas ANTES del retest; ' 
+    st.caption('Compresiones CORTAS 15m (20–30), INTERMEDIAS 15m (40–80), AMPLIAS 30m (40–80); independientes del Atlas de niveles horizontales. Caja y selección congeladas ANTES del retest; ' 
                'etiquetas de toque y hold disponibles solo DESPUÉS de cerrar su vela 1m.')
     folder=project/v3.ROOT_REL/OUTPUT
     if not (folder/'summary.json').exists():
@@ -99,9 +99,14 @@ def render_v4(source_events,project_root):
         st.caption('Una partición posterior examinada reiteradamente NO es validación prospectiva independiente. ' 
                    'No seleccionar umbrales mirando sus resultados y luego llamarlos out-of-sample.')
     with t2:
-        tf=st.selectbox('Timeframe',['15m','30m'],key='v4_tf')
-        n=st.selectbox('Velas de compresión',list(v3.WINDOWS[tf]),key='v4_window',
-                       format_func=lambda x:f'{x} velas + referencia separada {2*x}')
+        scale=st.selectbox('Escala estructural',list(v3.SCALE_GROUPS),key='v4_scale',
+                          format_func=lambda x:v3.SCALE_LABELS[x])
+        tf,expected_sizes=v3.SCALE_GROUPS[scale]
+        sizes=[n for n in expected_sizes if n in meta.get('windows',{}).get(tf,[])]
+        if not sizes:
+            st.info('El replay actual no contiene esta escala: reejecutá V4 --run y --audit.');return
+        n=st.selectbox('Velas de compresión',sizes,key='v4_window',
+                       format_func=lambda x:f'{x} velas ({x*v3.TF[tf]/(60*v3.M):g}h) + referencia separada {2*x}')
         tab=structures[structures.timeframe.eq(tf)&structures.window.eq(n)&structures.event_key.isin(events.event_key)].copy()
         st.dataframe(_summary(tab.merge(events[['event_key','outcome']],on='event_key',validate='one_to_one'),
                               'state_known'),hide_index=True,use_container_width=True)
@@ -128,6 +133,7 @@ def render_v4(source_events,project_root):
         item=available[(available.event_key==key)&(available.timeframe==tf)&(available.window==int(window))].iloc[0]
         fig=chart_event(project,item)
         if fig:st.plotly_chart(fig,use_container_width=True)
+        st.caption('Marcador REACTION = cierre de su vela exacta 1m. El resto de las velas HTF precede a la señal.')
         st.dataframe(pd.DataFrame([item.to_dict()]),hide_index=True,use_container_width=True)
         st.caption('La caja y el breakout están anclados en velas de TF cerradas; el retest mostrado se evalúa ' 
                    'solo después del cierre de su vela 1m. La trayectoria POST se puede inspeccionar en la pestaña ' 
