@@ -27,11 +27,28 @@ CREATE INDEX IF NOT EXISTS idx_lineage_bars ON candles(symbol,timeframe,open_ts)
 URL='https://fapi.binance.com/fapi/v1/klines'
 
 
-def tasks(root):
+def tasks(root, max_events=0):
+    """Choose the SAME earliest events as lineage --max-events; never alphabetic subsets.
+
+    The resulting intervals refer only to selected reaction timestamps. No outcomes
+    or future path labels are queried to choose the historical sample.
+    """
     with closing(ro(root/ROOT_REL/CTX_NAME)) as con:
-        rows=con.execute('SELECT symbol,MIN(retest_ts),MAX(retest_ts) FROM events GROUP BY symbol ORDER BY symbol').fetchall()
-    # 120h box + 48h age + 12h safety = 180h prior to earliest event.
-    return [(s,int(lo)-180*60*M,int(hi)) for s,lo,hi in rows]
+        if max_events:
+            rows = con.execute("""
+                SELECT symbol, MIN(retest_ts), MAX(retest_ts)
+                FROM (
+                    SELECT symbol, retest_ts FROM events
+                    ORDER BY retest_ts, event_key LIMIT ?
+                ) subset
+                GROUP BY symbol ORDER BY symbol
+            """, (int(max_events),)).fetchall()
+        else:
+            rows = con.execute(
+                'SELECT symbol,MIN(retest_ts),MAX(retest_ts) FROM events GROUP BY symbol ORDER BY symbol'
+            ).fetchall()
+    # 120h of 30m bars + 48h scanning depth + 12h safety = 180h.
+    return [(s, int(lo)-180*60*M, int(hi)) for s,lo,hi in rows]
 
 
 def own_db(path):
@@ -74,19 +91,25 @@ def fetch_batches(session,symbol,tf,start,end,pause):
         if len(candles)<1500:break
 
 
-def backfill(root,max_symbols=20,pause=.45):
+def backfill(root,max_symbols=20,pause=.45,max_events=0):
     import requests
-    all_tasks=tasks(root)
+    all_tasks=tasks(root,max_events=max_events)
     if max_symbols:all_tasks=all_tasks[:max_symbols]
     cache=root/ROOT_REL/HISTORY_NAME
     with closing(own_db(cache)) as con, requests.Session() as session:
         for i,(symbol,start,end) in enumerate(all_tasks,1):
             for tf in ('15m','30m'):
-                saved=con.execute('SELECT MIN(open_ts),MAX(open_ts),COUNT(*) FROM candles WHERE symbol=? AND timeframe=?',(symbol,tf)).fetchone()
-                # Re-run is safe and uses upsert-ignore only after numeric equality check.
-                # Already covered date ranges skip REST; detected holes are audited by build.
-                if saved[2] and saved[0]<=((start//TF[tf])*TF[tf]) and saved[1]>=((end//TF[tf])*TF[tf]):
-                    print('HISTORY_SKIPPED',symbol,tf,'already covers range',flush=True);continue
+                aligned_start=(start//TF[tf])*TF[tf]
+                aligned_end=(end//TF[tf])*TF[tf]
+                expected=(aligned_end-aligned_start)//TF[tf]+1
+                covered=con.execute(
+                    'SELECT COUNT(*) FROM candles WHERE symbol=? AND timeframe=? '
+                    'AND open_ts BETWEEN ? AND ?',
+                    (symbol,tf,aligned_start,aligned_end)
+                ).fetchone()[0]
+                # Never treat matching min/max as complete: the interior could be gapped.
+                if covered==expected:
+                    print('HISTORY_SKIPPED',symbol,tf,'contiguous range cached',flush=True);continue
                 for batch in fetch_batches(session,symbol,tf,start,end,pause):
                     with con:
                         for row in batch:
@@ -106,19 +129,28 @@ def main():
     mode=ap.add_mutually_exclusive_group(required=True)
     mode.add_argument('--plan',action='store_true');mode.add_argument('--fetch',action='store_true')
     ap.add_argument('--root',type=Path,default=Path('/home/multiservices-1m'))
-    ap.add_argument('--max-symbols',type=int,default=20,help='0=all; 20 pilot default')
+    ap.add_argument('--max-symbols',type=int,default=20,help='0=all symbols from selected events; default 20')
+    ap.add_argument('--max-events',type=int,default=0,help='0=all events; 100 matches lineage --max-events 100')
     ap.add_argument('--pause',type=float,default=.45)
     args=ap.parse_args();root=args.root.resolve()
-    if args.max_symbols<0 or args.pause<0:ap.error('max-symbols, pause >=0')
+    if args.max_symbols<0 or args.max_events<0 or args.pause<0:ap.error('max-symbols, max-events, pause >=0')
     if args.plan:
-        group=tasks(root)
-        result={'symbols':len(group),'timeframes':['15m','30m'],
-          'required_minimum_prior_hours':180,'default_pilot_symbols':20,
+        selected=tasks(root,max_events=args.max_events)
+        effective=selected[:args.max_symbols] if args.max_symbols else selected
+        result={'symbols_in_event_selection':len(selected),'symbols_to_fetch':len(effective),
+          'first_symbols':[x[0] for x in effective[:15]],
+          'max_events':args.max_events,'max_symbols':args.max_symbols,
+          'timeframes':['15m','30m'],
+          'required_minimum_prior_hours':180,
+          'earliest_fetch_start_utc':datetime.fromtimestamp(min(x[1] for x in effective)/1000,timezone.utc).isoformat() if effective else None,
+          'latest_fetch_end_utc':datetime.fromtimestamp(max(x[2] for x in effective)/1000,timezone.utc).isoformat() if effective else None,
           'optional_native_cache':str(root/ROOT_REL/HISTORY_NAME),
           'network_calls':False,'writes':False,
-          'notes':['These bars are a separate research cache, not a modification of frozen Full Context.',
-            'An existing 15m bar differing from Binance historical REST stops offline merge instead of silently replacing data.']}
-    else:result=backfill(root,args.max_symbols,args.pause)
+          'notes':['--max-events 100 uses exactly the same first 100 event IDs as lineage --max-events 100.',
+            'Use --max-symbols 0 to include ALL symbols present in the selected events, not just 20 alphabetically.',
+            'This is a separate cache, never a modification of frozen Full Context.',
+            'An existing 15m bar differing from Binance historical REST prevents silent overwrite.']}
+    else:result=backfill(root,args.max_symbols,args.pause,args.max_events)
     print(json.dumps(result,ensure_ascii=False,indent=2))
 
 if __name__=='__main__':main()
