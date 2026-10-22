@@ -18,6 +18,12 @@ from reaction_horizontal_level_research import (
 from reaction_horizontal_lifecycle_meaning import (
     meaning_label as meaning_of_level_pre, origin_consistency as origin_consistency_pre,
 )
+from reaction_horizontal_transition_alignment import (
+    VERSION as TRANSITION_VERSION, add_transition_alignment,
+    LABELS as TRANSITION_LABELS, ALIGN as TRANSITION_ALIGN,
+    OPPOSE as TRANSITION_OPPOSE, INDET as TRANSITION_INDET,
+    NO_CHANGE as TRANSITION_NO_CHANGE, NO_LEVEL as TRANSITION_NO_LEVEL,
+)
 from reaction_horizontal_level_lifecycle import (
     LABELS as LIFECYCLE_LABELS, VERSION as LIFECYCLE_VERSION, OUTPUT as LIFECYCLE_OUTPUT,
     ACTIVE as LEVEL_ACTIVE, LOST as LEVEL_LOST, FAILED as LEVEL_FAILED,
@@ -184,9 +190,12 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                 (folder/'event_map.csv').stat().st_mtime_ns,
                 (folder/'candidate_levels.csv').stat().st_mtime_ns,LIFECYCLE_VERSION)
             lifecycle=lifecycle.rename(columns={'reason':'lifecycle_reason'})
-            df=df.merge(lifecycle.drop(columns=['tf_filter','symbol','side','date_utc','retest_ts',
+            merged=df.merge(lifecycle.drop(columns=['tf_filter','symbol','side','date_utc','retest_ts',
                        'role_pre','role_distance_atr','zone_low','zone_high','timeframe'],errors='ignore'),
                         on='event_key',how='left',validate='one_to_one')
+            # Align only with a CONFIRMED PRE zone transition; no OHLC from
+            # the REACTION and no outcome can influence the membership.
+            df=add_transition_alignment(merged)
             lifecycle_ready=True
             # Historical 'RECUPERADO' means a return to the initial pair-of-closes
             # side, not necessarily recovery of a previously lost SUPPORT.
@@ -213,6 +222,45 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                        'esta lectura tampoco consulta resultados futuros.')
             st.caption('La pertenencia a las clases se determina sin consultar outcomes. '
                        'Los porcentajes mostrados son descriptivos; no justifican modificar el Scanner LIVE.')
+            st.markdown('**Experimento PRE · ¿REACTION alineada con la última transición confirmada?**')
+            st.caption('Comparamos la dirección LONG/SHORT con el lado confirmado por el ciclo PRE '
+                       'del MISMO nivel congelado. Regresar al lado superior es favorable a LONG; '
+                       'regresar al inferior, a SHORT. Tras pérdida/retest se usa el nuevo lado '
+                       'confirmado. Es una hipótesis direccional, NO un filtro operativo ni una '
+                       'predicción. No mira la vela de REACTION ni el resultado TP/SL.')
+            transition_tab=df.assign(transition_label=df.transition_alignment.map(TRANSITION_LABELS))
+            transition_summary=group_summary(transition_tab,col='transition_label',min_resolved=30)
+            transition_order={TRANSITION_LABELS[k]:i for i,k in enumerate(
+                (TRANSITION_ALIGN,TRANSITION_OPPOSE,TRANSITION_INDET,
+                 TRANSITION_NO_CHANGE,TRANSITION_NO_LEVEL))}
+            if not transition_summary.empty:
+                transition_summary=transition_summary.sort_values('Grupo',
+                    key=lambda col:col.map(transition_order).fillna(99))
+                st.dataframe(transition_summary,hide_index=True,use_container_width=True)
+            n_transition=int(df.transition_alignment.isin((TRANSITION_ALIGN,TRANSITION_OPPOSE)).sum())
+            st.caption(f'Transiciones con dirección verificable: {n_transition}/{len(df)} eventos '
+                       f'(modelo {TRANSITION_VERSION}). Los vigentes sin cambio, sin nivel y '
+                       'no evaluables se informan APARTE y no son un control negativo. '
+                       'TP-first se calcula solamente entre TP y SL resueltos; '
+                       'por debajo de 30 casos se muestran conteos sin tasa.')
+            with st.expander('Auditoría de alineación · estado de transición y dirección',expanded=False):
+                direction_rows=[]
+                eligible=df[df.transition_alignment.isin((TRANSITION_ALIGN,TRANSITION_OPPOSE))]
+                for (state,side),part in eligible.groupby(['lifecycle_detail_label','side'],dropna=False):
+                    subset=part.assign(transition_label=part.transition_alignment.map(TRANSITION_LABELS))
+                    tab=group_summary(subset,col='transition_label',min_resolved=30)
+                    if not tab.empty:
+                        tab.insert(0,'Estado PRE',state)
+                        tab.insert(1,'Dirección',side)
+                        direction_rows.append(tab)
+                if direction_rows:
+                    st.dataframe(pd.concat(direction_rows,ignore_index=True),hide_index=True,
+                                 use_container_width=True)
+                else:
+                    st.info('Sin transiciones direccionales verificables en estos filtros.')
+                st.caption('Casos de referencia: XLM SHORT debajo de resistencia restablecida '
+                           'y ZEREBRO LONG encima de soporte recuperado deberían clasificar '
+                           'ALINEADA cuando las mismas zonas auditadas están seleccionadas.')
             with st.expander('Auditar ciclo PRE · estado por LONG/SHORT y timestamps',expanded=False):
                 dis=[]
                 for side,part in status_df.groupby('side'):
@@ -292,6 +340,13 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
         key='hlr_v1_role')
     if role_option!='TODOS': inspect=inspect.loc[inspect.pre_role.eq(role_option)]
     if lifecycle_ready:
+        transition_choice=st.selectbox('Alineación con transición PRE (solo inspector)',
+            ('TODOS',TRANSITION_ALIGN,TRANSITION_OPPOSE,TRANSITION_INDET,
+             TRANSITION_NO_CHANGE,TRANSITION_NO_LEVEL),
+            format_func=lambda x:'Todas las relaciones' if x=='TODOS' else TRANSITION_LABELS[x],
+            key='hlr_transition_alignment_v1_inspect')
+        if transition_choice!='TODOS':
+            inspect=inspect.loc[inspect.transition_alignment.eq(transition_choice)]
         lifecycle_choice=st.selectbox('Historia del nivel PRE (solo inspector)',
              ('TODOS',LEVEL_ACTIVE,LEVEL_LOST,LEVEL_FAILED,LEVEL_RECLAIMED,LEVEL_UNKNOWN,LEVEL_NO_NEAR),
              format_func=lambda x:'Todos los estados' if x=='TODOS' else LIFECYCLE_LABELS[x],
@@ -324,6 +379,10 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                    'posición '+str(item.role_position)+
                    ' · origen '+str(item.role_origin)+'.')
     if lifecycle_ready:
+        st.caption('**Alineación direccional PRE:** '+
+                   TRANSITION_LABELS.get(item.transition_alignment,'No evaluable')+
+                   ' · lado confirmado '+str(item.transition_confirmed_side)+
+                   ' · control '+str(item.transition_alignment_reason)+'.')
         st.caption('**Historia PRE del nivel:** '+meaning_of_level_pre(item.lifecycle_state,item.initial_side)+
                    ' · lado inicialmente aceptado '+str(item.initial_side)+
                    ' · última pérdida '+str(item.last_break_close_ts)+
@@ -416,9 +475,11 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
               'known_low','known_high','relevant_retest_gap_atr',
               'atlas_claimed_touch','atlas_claimed_touch_not_verified','outcome_norm']
         if lifecycle_ready:
-            cols.extend(['lifecycle_state','initial_side','last_break_close_ts',
-                         'last_failed_retest_close_ts','last_reclaim_close_ts',
-                         'history_quality','lifecycle_reason'])
+            cols.extend(['lifecycle_state','initial_side','current_confirmed_side',
+                         'last_break_close_ts','last_failed_retest_close_ts',
+                         'last_reclaim_close_ts','history_quality','lifecycle_reason',
+                         'transition_alignment','transition_confirmed_side',
+                         'transition_alignment_reason'])
         st.download_button('Descargar CSV de investigación PRE + KNOWN',
               df[cols].to_csv(index=False).encode('utf-8'),
               file_name='horizontal_level_research_v1.csv',mime='text/csv',
