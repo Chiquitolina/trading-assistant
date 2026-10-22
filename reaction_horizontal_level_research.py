@@ -1,20 +1,21 @@
-"""Horizontal Level Research V1 -- read-only, causal Atlas V2 zone triage.
+"""Horizontal Level Research: verified 1m candle/zone intersections.
 
-Importance is fixed before observing First Touch:
-- two confirmed same-kind pivot contacts (Atlas V2 freezes the level on pivot 2)
-- >= 1 PRE independent defense episode (NOT successive 1m candles)
-- the level has formed before the retest 1m candle
-
-PRE_NEAR uses the last completed HTF close; A/B use the *closed retest*
-1m candle, thus cannot be treated as an entry-at-open predictor.
+Atlas V2 provides *PRE* causal zones, but its ``known_touch`` predicate is
+one-sided and must never be used to assert a 1m candle actually touched a
+zone. Here, KNOWN contact is explicitly recomputed from the archived 1m OHLC.
+No First Touch outcome influences class assignment.
 """
 from __future__ import annotations
 
 import hashlib
 import math
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
 import pandas as pd
 
-MODEL_VERSION = 'horizontal_levels_importance_v1_frozen'
+MODEL_VERSION = 'horizontal_levels_verified_ohlc_contact_v2'
 MIN_CONFIRMED_PIVOTS = 2
 MIN_PRE_DEFENSE_EPISODES = 1
 NEAR_ATR = 0.5
@@ -53,7 +54,7 @@ def outcome(value):
 
 
 def important(zone):
-    """No KNOWN/outcome fields used here. Only PRE Atlas V2 evidence."""
+    """PRE-only Atlas qualification; outcome and KNOWN fields are ignored."""
     p=finite(zone['pivot_count'])
     episodes=finite(zone['defense_episodes_pre'])
     formed=finite(zone['formation_closed_ts'])
@@ -64,20 +65,19 @@ def important(zone):
 
 
 def zone_rank(zone):
-    """No outcomes. First favor proven episodes then closeness then identity."""
+    """PRE-only rank; used for choosing among equally classified contacts."""
     eps=finite(zone.get('defense_episodes_pre')) or 0
     pivots=finite(zone.get('pivot_count')) or 0
     dist=finite(zone.get('gap_to_zone_atr'))
-    return (-eps, -pivots, float('inf') if dist is None else dist,
-            str(zone.get('timeframe')), str(zone.get('zone_id')))
+    return (-eps,-pivots,float('inf') if dist is None else dist,
+            str(zone.get('timeframe')),str(zone.get('zone_id')))
 
 
 def _placebo_close(zone):
-    """Fixed ±3 ATR shift, diagnostic PRE proximity only; NOT placebo trading."""
     price=finite(zone.get('pre_last_close'))
     atr=finite(zone.get('atr_pre'))
     low=finite(zone.get('zone_low')); high=finite(zone.get('zone_high'))
-    if None in (price,atr,low,high) or atr<=0: return None
+    if None in (price,atr,low,high) or atr<=0:return None
     token=f"{zone.get('event_key')}|{zone.get('zone_id')}".encode()
     sign=1 if int(hashlib.sha256(token).hexdigest(),16)&1 else -1
     offset=sign*3*atr
@@ -85,60 +85,124 @@ def _placebo_close(zone):
     return gap/atr<=NEAR_ATR
 
 
-def classify(event, candidates):
-    """Return one event row. A/B use KNOWN close, PRE near remains independent."""
-    raw=list(candidates)
-    selected=[r for r in raw if important(r)]
+def candle_zone_gap(zone,candle_low,candle_high):
+    """Absolute gap between *closed* 1m candle's interval and frozen zone.
+
+    A zero gap means actual OHLC intersection (including boundary touch).
+    In contrast, a single directional inequality is not a valid touch test.
+    """
+    lo=finite(zone.get('zone_low'));hi=finite(zone.get('zone_high'))
+    if None in (lo,hi,candle_low,candle_high) or lo>hi or candle_low>candle_high:
+        return None
+    return max(lo-candle_high,candle_low-hi,0.0)
+
+
+def valid_retest_candle(event):
+    """Read-only 1m OHLC must be valid, without manufactured missing bars."""
+    o,h,l,c=[finite(event.get(f'known_{key}')) for key in ('open','high','low','close')]
+    if None in (o,h,l,c) or min(o,h,l,c)<=0 or l>h or not(l<=o<=h and l<=c<=h):
+        return None
+    return (l,h)
+
+
+def load_retest_candles(project,events):
+    """Read ONLY the exact retest 1m candles from Full Context SQLite.
+
+    Rows missing from SQLite remain NaN and are classified UNKNOWN, never C.
+    SQL uses exact (symbol, open_ts) rather than a nearest/future candle.
+    """
+    import reaction_structural_level_atlas_v2 as atlas
+    root=Path(project)/atlas.v1.lineage.ROOT_REL
+    path=root/atlas.v1.lineage.CTX_NAME
+    if not path.is_file():
+        raise FileNotFoundError(f'Falta Full Context para validar contacto 1m: {path}')
+    rows=[]
+    uri=path.resolve().as_uri()+'?mode=ro'
+    with closing(sqlite3.connect(uri,uri=True)) as connection:
+        connection.execute('PRAGMA query_only=ON')
+        sql=("SELECT open,high,low,close FROM candles "
+             "WHERE symbol=? AND timeframe='1m' AND open_ts=?")
+        for e in events.itertuples(index=False):
+            hit=connection.execute(sql,(str(e.symbol),int(e.retest_ts))).fetchone()
+            rows.append(dict(event_key=e.event_key,
+                             known_open=hit[0] if hit else float('nan'),
+                             known_high=hit[1] if hit else float('nan'),
+                             known_low=hit[2] if hit else float('nan'),
+                             known_close=hit[3] if hit else float('nan')))
+    fresh=events.drop(columns=['known_open','known_high','known_low','known_close'],errors='ignore')
+    return fresh.merge(pd.DataFrame(rows),on='event_key',how='left',validate='one_to_one')
+
+
+def classify(event,candidates):
+    """One group per REACTION, with verified 1m interval intersections.
+
+    PRE proximity uses the previous closed HTF candle as before; A/B/C use
+    the complete KNOWN 1m candle, which cannot be used at that candle's open.
+    """
+    selected=[r for r in candidates if important(r)]
     selected.sort(key=zone_rank)
+    atlas_claimed_touch=any(flag(z.get('known_touch')) is True for z in selected)
     complete=flag(event.get('all_covered')) is True
-    # Reject incomplete source before treating lack of levels as 'no level'.
-    if not complete:
-        group=UNKNOWN; chosen=None
+    known=valid_retest_candle(event)
+    pre_near=any(finite(z.get('gap_to_zone_atr')) is not None and
+                 float(z['gap_to_zone_atr'])<=NEAR_ATR for z in selected)
+    pre_bucket=('NO_EVALUABLE' if not complete else
+                'PRE_CERCA' if pre_near else 'PRE_LEJOS_O_SIN_NIVEL')
+    results=[]
+    if complete and known is not None:
+        candle_low,candle_high=known
+        for z in selected:
+            gap=candle_zone_gap(z,candle_low,candle_high)
+            atr=finite(z.get('atr_pre'))
+            gap_atr=gap/atr if gap is not None and atr is not None and atr>0 else None
+            results.append((z,gap,gap_atr))
+    if not complete or known is None:
+        group=UNKNOWN;chosen=None;chosen_gap_atr=None
     else:
-        touched=[r for r in selected if flag(r.get('known_touch')) is True]
-        near=[r for r in selected if finite(r.get('gap_to_zone_atr')) is not None
-              and float(r['gap_to_zone_atr'])<=NEAR_ATR]
-        unknown_contact=any(flag(r.get('known_touch')) is None for r in selected)
-        if touched:
-            group=A; chosen=sorted(touched,key=zone_rank)[0]
-        elif unknown_contact:
-            group=UNKNOWN; chosen=None
-        elif near:
-            group=B; chosen=sorted(near,key=zone_rank)[0]
+        touching=[r for r in results if r[1] is not None and r[1]<=0]
+        nearby=[r for r in results if r[2] is not None and r[2]<=NEAR_ATR]
+        invalid=[r for r in results if r[2] is None]
+        if touching:
+            group=A
+            chosen,_,chosen_gap_atr=sorted(touching,key=lambda r:zone_rank(r[0]))[0]
+        elif nearby:
+            group=B
+            chosen,_,chosen_gap_atr=sorted(nearby,key=lambda r:(r[2],zone_rank(r[0])))[0]
+        elif invalid:
+            group=UNKNOWN;chosen=None;chosen_gap_atr=None
         else:
-            group=C; chosen=selected[0] if selected else None
-    pre_near= any(finite(z.get('gap_to_zone_atr')) is not None
-                  and float(z['gap_to_zone_atr'])<=NEAR_ATR for z in selected)
-    pre_bucket = ('NO_EVALUABLE' if not complete else
-                  'PRE_CERCA' if pre_near else 'PRE_LEJOS_O_SIN_NIVEL')
-    placebo_near = any(_placebo_close(z) is True for z in selected) if selected and complete else None
+            group=C;chosen=None;chosen_gap_atr=None
+    placebo_near=any(_placebo_close(z) is True for z in selected) if selected and complete else None
     d=dict(event)
     d.update(level_group=group,pre_bucket=pre_bucket,
              important_levels=len(selected),
+             atlas_claimed_touch=atlas_claimed_touch,
+             atlas_claimed_touch_not_verified=(atlas_claimed_touch and group in (B,C)),
              relevant_zone_id=chosen.get('zone_id') if chosen else None,
              relevant_timeframe=chosen.get('timeframe') if chosen else None,
              relevant_zone_low=chosen.get('zone_low') if chosen else None,
              relevant_zone_high=chosen.get('zone_high') if chosen else None,
              relevant_gap_atr=chosen.get('gap_to_zone_atr') if chosen else None,
+             relevant_retest_gap_atr=chosen_gap_atr,
              relevant_episodes=chosen.get('defense_episodes_pre') if chosen else None,
              relevant_pivots=chosen.get('pivot_count') if chosen else None,
              relevant_state=chosen.get('level_state_pre') if chosen else None,
+             known_touch_verified=True if group==A else False if group in (B,C) else None,
              placebo_near_pre=placebo_near)
     return d
 
 
-def build(events, levels, timeframe='TODOS'):
-    """Source candidates are Atlas V2 only; no candle/replay recomputation."""
-    if timeframe not in ('TODOS','15m','30m'): raise ValueError('Timeframe invalid')
-    req_event={'event_key','all_covered','retest_ts','symbol','side','date_utc'}
+def build(events,levels,timeframe='TODOS'):
+    if timeframe not in ('TODOS','15m','30m'):raise ValueError('Timeframe invalid')
+    req_event={'event_key','all_covered','retest_ts','symbol','side','date_utc',
+               'known_open','known_high','known_low','known_close'}
     req_level={'event_key','zone_id','pivot_count','defense_episodes_pre','formation_closed_ts',
-               'retest_ts','timeframe','gap_to_zone_atr','known_touch'}
+               'retest_ts','timeframe','gap_to_zone_atr','zone_low','zone_high','atr_pre'}
     missing_e=req_event-set(events.columns)
     missing_l=req_level-set(levels.columns)
     if missing_e or missing_l:
-        raise ValueError(f'Atlas V2 columns missing: events={sorted(missing_e)}, levels={sorted(missing_l)}')
-    if events.event_key.duplicated().any(): raise ValueError('Duplicate event in Atlas V2')
-    # Fail closed if Atlas provided levels formed after signal.
+        raise ValueError(f'Atlas V2/contacto 1m columns missing: events={sorted(missing_e)}, levels={sorted(missing_l)}')
+    if events.event_key.duplicated().any():raise ValueError('Duplicate event in Atlas V2')
     for z in levels.to_dict('records'):
         a,b=finite(z.get('formation_closed_ts')),finite(z.get('retest_ts'))
         if a is not None and b is not None and a>=b:
@@ -146,7 +210,7 @@ def build(events, levels, timeframe='TODOS'):
     chosen=levels if timeframe=='TODOS' else levels.loc[levels.timeframe.eq(timeframe)]
     grouped={k:g.to_dict('records') for k,g in chosen.groupby('event_key',sort=False)}
     records=[classify(e,grouped.get(e['event_key'],[])) for e in events.to_dict('records')]
-    return pd.DataFrame(records), chosen.loc[chosen.apply(important,axis=1)].copy()
+    return pd.DataFrame(records),chosen.loc[chosen.apply(important,axis=1)].copy()
 
 
 def wilson(tp,n):
@@ -163,7 +227,7 @@ def group_summary(df,col='level_group',min_resolved=30):
         counts=g.outcome_norm.value_counts()
         tp=int(counts.get('TP_FIRST',0));sl=int(counts.get('SL_FIRST',0));n=tp+sl
         lo,hi=wilson(tp,n) if n>=min_resolved else (None,None)
-        rows.append({'Grupo':GROUPS.get(category,category), 'REACTIONs':len(g),
+        rows.append({'Grupo':GROUPS.get(category,category),'REACTIONs':len(g),
             'TP':tp,'SL':sl,'NO_HIT':int(counts.get('NO_HIT',0)),
             'AMBIGUOUS':int(counts.get('AMBIGUOUS',0)),
             'SIN_RESULTADO':int(counts.get('SIN_RESULTADO',0)),

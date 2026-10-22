@@ -11,7 +11,7 @@ import pandas as pd
 
 from reaction_horizontal_level_research import (
     MODEL_VERSION, GROUPS, A, B, C, UNKNOWN, NEAR_ATR,
-    build, important, outcome, group_summary, zone_rank,
+    build, important, outcome, group_summary, zone_rank, load_retest_candles,
 )
 
 
@@ -63,7 +63,10 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
     direction=controls[1].selectbox('Dirección',('TODAS','LONG','SHORT'),
         key='hlr_v1_side')
     try:
-        categorized,qualifying=build(events,levels,tf)
+        # Validate exact 1m OHLC. Atlas V2 `known_touch` is one-sided and can
+        # report false contact with levels many ATR away. Never reuse it.
+        events_ohlc=load_retest_candles(project,events)
+        categorized,qualifying=build(events_ohlc,levels,tf)
         chosen=source_events[needed].drop_duplicates('event_key').copy()
         chosen['outcome_norm']=chosen['outcome'].map(outcome)
         df=categorized.merge(chosen,on='event_key',how='inner',validate='one_to_one')
@@ -80,10 +83,18 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
     k[1].metric('A · Tocó',int(df.level_group.eq(A).sum()))
     k[2].metric('B · Cerca',int(df.level_group.eq(B).sum()))
     k[3].metric('C · Sin nivel cercano',int(df.level_group.eq(C).sum()))
+    false_old=int(df.atlas_claimed_touch_not_verified.sum())
+    if false_old:
+        st.warning(f'**Auditoría Atlas V2:** {false_old} REACTIONs que el indicador anterior '
+                   'consideraba contactos NO superan la prueba de intersección OHLC 1m. '
+                   'Esta pestaña las reclasifica; no modifica los CSV históricos Atlas V2.')
     if df.level_group.eq(UNKNOWN).any():
         st.warning(f'{int(df.level_group.eq(UNKNOWN).sum())} eventos NO EVALUABLES por cobertura o '
                    'cierre de REACTION no verificable. No se incluyen en el grupo C.')
 
+    st.caption('**Contacto REAL validado:** la vela 1m debe cruzar la zona: '
+               '`high >= zone_low` Y `low <= zone_high`. Se ignora el `known_touch` '
+               'unidireccional de Atlas V2. Las velas 1m ausentes son NO EVALUABLES.')
     st.caption(f'**Regla de importancia PRE congelada:** 2 pivotes 3×3 confirmados '
                f'+ al menos 1 episodio independiente de defensa previo, en 15m/30m. '
                f'**Cerca:** ≤{NEAR_ATR:g} ATR del último cierre HTF anterior. '
@@ -137,7 +148,7 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
         st.caption('Muestra explorada retrospectivamente, no validación fuera de muestra. '
                    'Cualquier corte futuro debe evaluarse sobre fechas aún no inspeccionadas.')
 
-    st.markdown('**Inspector · un nivel, una REACTION y su desenlace**')
+    st.markdown('**Inspector · una REACTION y su desenlace (nivel solo si A/B)**')
     group_option=st.selectbox('Interacción con nivel importante',
         ('TODOS',A,B,C,UNKNOWN),
         format_func=lambda x:'Todos los grupos' if x=='TODOS' else GROUPS[x],
@@ -163,12 +174,13 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
              ' · '+_pretty(item.relevant_gap_atr)+' ATR del cierre PRE · '+
              str(int(item.relevant_pivots))+' pivotes confirmados · '+
              str(int(item.relevant_episodes))+' episodios independientes de defensa antes de la señal.')
-        if item.level_group==C:
-            st.info('Hay un nivel previamente reconocido, pero queda lejos de la REACTION. '
-                    'Por eso el evento pertenece al grupo C.')
+
     else:
-        st.info('No se identificó un nivel importante seleccionable para este evento. '
-                'Esto no significa que el mercado careciera de otros soportes o resistencias.')
+        if item.level_group==C:
+            st.info('No hay nivel importante dentro de 0,50 ATR de la vela 1m de REACTION. '
+                    'No dibujamos zonas lejanas para evitar distorsionar la escala.')
+        else:
+            st.info('No existe contacto verificable o falta cobertura 1m; no se inventa un nivel cercano.')
     if item.level_group in (A,B):
         st.caption('La etiqueta de contacto se conoce SOLO al cierre de la vela de REACTION. '
                    'Si se opera basándose en ella, la entrada debe re-simularse después.')
@@ -191,7 +203,14 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
     post_m=r.select_slider('Velas POST 1m (solo gráfico)',options=[15,30,60,180,360],
                            value=180,key='hlr_v1_post')
     try:
-        fig=_read_structural_figure(project,item,single,display_tf=shown_tf)
+        plot_zone=single.copy()
+        if not plot_zone.empty and str(item.relevant_timeframe)!=shown_tf:
+            # Visually project the SAME frozen level onto the alternate TF;
+            # do not reassign its source/confirmation timeframe.
+            plot_zone['timeframe']=shown_tf
+            st.caption(f'Zona originada y confirmada en {item.relevant_timeframe}, '
+                       f'proyectada sobre velas {shown_tf} (mismo precio).')
+        fig=_read_structural_figure(project,item,plot_zone,display_tf=shown_tf)
         if fig is None:
             st.warning('No existe histórico PRE suficiente para dibujar este evento.');return
         try:
@@ -211,15 +230,18 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
         st.caption(outcome_explanation(item.outcome_norm,item.first_touch_minute,
                tp_pct=tp_pct,sl_pct=sl_pct,outcome_horizon=outcome_horizon,
                display_minutes=post_m,path_state=path_state,entry_mode=entry_mode))
-        st.caption('Gráfico: nivel PRE reconocido, cierre de REACTION (KNOWN), '
-                   'trayectoria POST (solo para evaluación). La línea verde no promete rebote.')
+        st.caption('Gráfico: solo zonas A/B con contacto/proximidad 1m comprobada; '
+                   'cierre de REACTION (KNOWN), trayectoria POST (solo evaluación). '
+                   'No se dibujan niveles distantes como si fueran soporte/resistencia local.')
     except Exception as exc:
         st.error(f'Inspector: no se pudo reconstruir el gráfico: {exc}')
 
     with st.expander('Exportar la muestra clasificada (sin recalcular señales)',expanded=False):
         cols=['event_key','symbol','side','date_utc','level_group','pre_bucket',
               'important_levels','relevant_zone_id','relevant_timeframe','relevant_gap_atr',
-              'relevant_episodes','relevant_pivots','outcome_norm']
+              'relevant_episodes','relevant_pivots','known_touch_verified',
+              'known_low','known_high','relevant_retest_gap_atr',
+              'atlas_claimed_touch','atlas_claimed_touch_not_verified','outcome_norm']
         st.download_button('Descargar CSV de investigación',
               df[cols].to_csv(index=False).encode('utf-8'),
               file_name='horizontal_level_research_v1.csv',mime='text/csv',

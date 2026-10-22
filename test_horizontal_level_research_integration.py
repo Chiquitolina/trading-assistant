@@ -79,7 +79,10 @@ class UiTests(unittest.TestCase):
                              'reaction_structural_level_atlas_v2':fake_engine,
                              'dashboard.views.reaction_structural_level_atlas_v2_view':fake_atlas,
                              'dashboard.views.reaction_outcome_overlay':overlay}):
-                render_horizontal_level_rich_card(source,t)
+                with patch('dashboard.views.reaction_horizontal_level_rich_card_view.load_retest_candles',
+                           side_effect=lambda root,df:df.assign(known_open=0.51,known_high=0.53,
+                                                                known_low=0.50,known_close=0.52)):
+                    render_horizontal_level_rich_card(source,t)
         self.assertEqual(fake.errors,[])
         self.assertEqual(fake.plots,1)
         self.assertGreaterEqual(len(fake.tables),2)
