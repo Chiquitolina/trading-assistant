@@ -161,3 +161,23 @@ class LineageTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+# Regression: the Binance 1m SQL tuple is (timestamp,open,HIGH,LOW,close).
+# LONG retest must use LOW at index 3; SHORT retest must use HIGH at index 2.
+class RetestWickIndexRegression(unittest.TestCase):
+    def test_long_retest_uses_low_not_high(self):
+        event={'symbol':'X','side':'LONG','retest_ts':100*S}
+        bar={'high':101,'low':99,'end_ts':92*S+S-1}
+        candles=df15(105).set_index('timestamp')
+        candles.loc[94*S,'close']=103.;candles.loc[94*S,'high']=103.
+        got=lab.classify_box(event,bar,candles,101.2,(100*S,101.1,103.,100.95,101.5),S)
+        self.assertEqual(got['lineage_state'],'BROKEN_RETEST_KNOWN')
+        self.assertAlmostEqual(got['known_wall_distance_pct'],100*(100.95/101-1))
+    def test_short_retest_uses_high_not_open(self):
+        event={'symbol':'X','side':'SHORT','retest_ts':100*S}
+        bar={'high':101,'low':99,'end_ts':92*S+S-1}
+        candles=df15(105).set_index('timestamp')
+        candles.loc[94*S,'close']=97.;candles.loc[94*S,'low']=97.
+        got=lab.classify_box(event,bar,candles,98.8,(100*S,97.,99.05,97.,98.5),S)
+        self.assertEqual(got['lineage_state'],'BROKEN_RETEST_KNOWN')
+        self.assertAlmostEqual(got['known_wall_distance_pct'],100*(99.05/99-1))

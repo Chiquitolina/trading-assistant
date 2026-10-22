@@ -181,7 +181,7 @@ def classify_box(e,bar,df,pre_close,retest,tf_ms,wall_tolerance_pct=.25):
     known=False;known_dist=None
     if retest:
         # LONG touches the old ceiling with its low, SHORT the old floor with high.
-        touch=float(retest[2] if side=='LONG' else retest[1])
+        touch=float(retest[3] if side=='LONG' else retest[2])
         known_dist=100*(touch/wall-1)
         known=abs(known_dist)<=wall_tolerance_pct
     pre_dist=100*((pre_close/wall)-1) if pre_close is not None else None

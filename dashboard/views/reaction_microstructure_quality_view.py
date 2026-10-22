@@ -289,7 +289,7 @@ def render_microstructure_quality_lab(project_root):
     tp=int(counts.get('TP_FIRST',0));sl=int(counts.get('SL_FIRST',0))
     st.caption(f'TP sobre resueltas (sin ambiguas): {100*tp/(tp+sl):.1f}%' if tp+sl else 'Sin casos resueltos')
 
-    tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa','🧬 Morfologías','🗜️ Compression Lineage'])
+    tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa','🧬 Morfologías','🗜️ Compression Lineage','🧱 Breakout Retest V4'])
     with tabs[0]:
         st.markdown('#### Ranking descriptivo TP-first frente a SL-first')
         st.caption('AUC por variable en la cohorte filtrada: 0,50 ≈ azar; NO es un resultado validado fuera de muestra. KNOWN no es previo al retest.')
@@ -567,3 +567,7 @@ def render_microstructure_quality_lab(project_root):
     with tabs[6]:
         from dashboard.views.reaction_compression_lineage_view import render_lineage_atlas
         render_lineage_atlas(analysis_before_result_filter,project)
+
+    with tabs[7]:
+        from dashboard.views.reaction_compression_breakout_retest_v4_view import render_v4
+        render_v4(analysis_before_result_filter,project)
