@@ -15,6 +15,9 @@ from reaction_horizontal_level_research import (
     ROLE_VERSION, ROLE_LABELS, ROLE_REBOUND, ROLE_BREAK, ROLE_IN_ZONE,
     ROLE_NO_NEAR, ROLE_UNKNOWN, build_pre_roles,
 )
+from reaction_horizontal_lifecycle_meaning import (
+    meaning_label as meaning_of_level_pre, origin_consistency as origin_consistency_pre,
+)
 from reaction_horizontal_level_lifecycle import (
     LABELS as LIFECYCLE_LABELS, VERSION as LIFECYCLE_VERSION, OUTPUT as LIFECYCLE_OUTPUT,
     ACTIVE as LEVEL_ACTIVE, LOST as LEVEL_LOST, FAILED as LEVEL_FAILED,
@@ -185,14 +188,29 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                        'role_pre','role_distance_atr','zone_low','zone_high','timeframe'],errors='ignore'),
                         on='event_key',how='left',validate='one_to_one')
             lifecycle_ready=True
-            status_df=df.assign(lifecycle_label=df.lifecycle_state.map(LIFECYCLE_LABELS))
+            # Historical 'RECUPERADO' means a return to the initial pair-of-closes
+            # side, not necessarily recovery of a previously lost SUPPORT.
+            # Keep raw classification for inspectors, but split the table by
+            # confirmed *side* so unlike transitions are not pooled as one.
+            df['lifecycle_detail_label'] = [
+                meaning_of_level_pre(st,side)
+                for st,side in zip(df.lifecycle_state,df.initial_side)
+            ]
+            status_df=df.assign(lifecycle_label=df.lifecycle_detail_label)
             status_summary=group_summary(status_df,col='lifecycle_label',min_resolved=30)
-            status_order={LIFECYCLE_LABELS[k]:i for i,k in enumerate(
-                (LEVEL_ACTIVE,LEVEL_LOST,LEVEL_FAILED,LEVEL_RECLAIMED,LEVEL_UNKNOWN,LEVEL_NO_NEAR))}
+            status_order={meaning_of_level_pre(st,side):i for i,(st,side) in enumerate(
+                [(s,d) for s in (LEVEL_ACTIVE,LEVEL_LOST,LEVEL_FAILED,LEVEL_RECLAIMED)
+                 for d in ('ABOVE','BELOW')] +
+                [(LEVEL_UNKNOWN,None),(LEVEL_NO_NEAR,None)])}
             if not status_summary.empty:
                 status_summary=status_summary.sort_values('Grupo',
                     key=lambda col:col.map(status_order).fillna(9))
                 st.dataframe(status_summary,hide_index=True,use_container_width=True)
+            st.caption('**Aclaración:** «regresó al lado inicial» no equivale necesariamente a '
+                       'recuperar soporte. El lado inicial son los primeros dos cierres HTF '
+                       'del mismo lado después de la formación, no el tipo de pivote de origen. '
+                       'Las recuperaciones ahora se separan por ARRIBA/ABAJO; '
+                       'esta lectura tampoco consulta resultados futuros.')
             st.caption('La pertenencia a las clases se determina sin consultar outcomes. '
                        'Los porcentajes mostrados son descriptivos; no justifican modificar el Scanner LIVE.')
             with st.expander('Auditar ciclo PRE · estado por LONG/SHORT y timestamps',expanded=False):
@@ -306,7 +324,7 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                    'posición '+str(item.role_position)+
                    ' · origen '+str(item.role_origin)+'.')
     if lifecycle_ready:
-        st.caption('**Historia PRE del nivel:** '+LIFECYCLE_LABELS.get(item.lifecycle_state,str(item.lifecycle_state))+
+        st.caption('**Historia PRE del nivel:** '+meaning_of_level_pre(item.lifecycle_state,item.initial_side)+
                    ' · lado inicialmente aceptado '+str(item.initial_side)+
                    ' · última pérdida '+str(item.last_break_close_ts)+
                    ' · último retest fallido '+str(item.last_failed_retest_close_ts)+
