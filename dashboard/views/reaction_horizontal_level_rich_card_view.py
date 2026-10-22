@@ -1,320 +1,226 @@
-"""Minimal Horizontal Level Rich Card in the Retest Quality dashboard.
+"""Replaces Horizontal Level Rich Card with minimalist Horizontal Level Research.
 
-Uses audited Atlas V2 levels + frozen pre-retest 1m candles, not a new
-support/resistance detector. PRE, retest candle KNOWN and POST separated.
+Single question: are REACTIONs near historically recognized/demonstrably defended
+15m/30m levels different from others? No HL/LH, triangles or compression features.
+Uses frozen Atlas V2 data and already selected First-Touch outcome, read-only.
 """
 from __future__ import annotations
 
 from pathlib import Path
-
 import pandas as pd
 
-import reaction_horizontal_level_card as logic
-import reaction_horizontal_pre_structure as structure
-
-STRUCTURE_LABELS={
-    'PRESION_CONTRA_REACTION':'Presión contraria a la REACTION',
-    'PRESION_A_FAVOR_REACTION':'Presión a favor de la REACTION',
-    'PRESION_MIXTA':'Presión mixta / contradictoria',
-    'SIN_PRESION_CLARA':'Sin presión estructural clara',
-    'NO_EVALUABLE':'No evaluable (histórico/estructura)',
-}
-
-SETUP_LABELS={
-    'DEFENSA_POTENCIAL':'Test compatible con defensa/rechazo',
-    'RUPTURA_POTENCIAL':'Test compatible con ataque al nivel',
-    'EN_ZONA_SIN_ORIGEN':'En zona · sin origen claro',
-    'DESCONOCIDO':'Indeterminado · datos insuficientes',
-}
-KNOWN_LABELS={
-    'RECHAZO_FAVORABLE_1M':'Rechazo favorable de la vela 1m',
-    'NIVEL_PERDIDO_EN_CIERRE':'Nivel perdido al cerrar 1m',
-    'TOQUE_SIN_DEFENSA_CONFIRMADA':'Contacto sin defensa confirmada',
-    'SIN_CONTACTO_1M':'Sin contacto en la vela',
-    'CRUCE_INICIAL_1M':'Cruce inicial de la zona (NO ruptura aceptada)',
-    'PRUEBA_SIN_QUIEBRE':'Prueba sin cierre de ruptura',
-    'SALE_POR_ARRIBA_1M':'Cierra por encima de la zona',
-    'SALE_POR_ABAJO_1M':'Cierra por debajo de la zona',
-    'DENTRO_O_INDEFINIDO_1M':'Cierra dentro / sin confirmación',
-    'SIN_VELA_CERRADA':'Vela 1m no disponible',
-    'SIN_HISTORICO':'Histórico incompleto',
-}
+from reaction_horizontal_level_research import (
+    MODEL_VERSION, GROUPS, A, B, C, UNKNOWN, NEAR_ATR,
+    build, important, outcome, group_summary, zone_rank,
+)
 
 
-def normalized_outcome(value):
-    """None/NaN and textual null are missing labels, NEVER NO_HIT or SL."""
+def _pretty(x):
     try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        return None
-    label=str(value).strip().upper()
-    return None if label in ('', 'NAN', 'NONE', 'NULL', 'NAT', '<NA>') else label
+        return f'{float(x):.6g}' if pd.notna(x) else '—'
+    except (ValueError,TypeError):
+        return '—'
 
 
-def outcome_label(value):
-    label=normalized_outcome(value)
-    return label if label is not None else 'SIN_RESULTADO'
-
-
-def structure_description(item):
-    label=str(getattr(item,'structure_pre','NO_EVALUABLE'))
-    role=str(getattr(item,'structure_role_pre','INDETERMINADO'))
-    relation=str(getattr(item,'structure_relation_pre','NO_EVALUABLE'))
-    tf=str(getattr(item,'structure_tf',''))
-    if label=='LH_HACIA_SOPORTE':
-        why=f'{tf}: máximos descendentes (LH) contra un soporte. Posible presión vendedora.'
-    elif label=='HL_HACIA_RESISTENCIA':
-        why=f'{tf}: mínimos ascendentes (HL) contra una resistencia. Posible presión compradora.'
-    elif label in ('SIN_LH_CONFIRMADOS','SIN_HL_CONFIRMADOS'):
-        why=f'{tf}: sin secuencia adversa LH/HL en los últimos dos pivotes confirmados. No implica defensa.'
-    else:
-        return ('Contexto PRE no evaluable: '+str(getattr(item,'structure_reason','SIN_DATOS'))
-                +'. No se supone que el nivel sostendrá o romperá.')
-    recent=str(getattr(item,'structure_recent_direction_pre','NO_EVALUABLE'))
-    movement={'ALCISTA':'alcista','BAJISTA':'bajista','LATERAL_O_DIVERGENTE':'no concluyente',
-              'NO_EVALUABLE':'no evaluable'}.get(recent,recent)
-    detail=f' Aproximación reciente PRE (120m): {movement}.'
-    if relation=='PRESION_MIXTA':
-        return why+detail+' La aproximación reciente contradice la progresión HTF histórica; el sesgo conjunto queda MIXTO.'
-    if relation=='PRESION_CONTRA_REACTION':
-        return why+detail+' Hay concordancia direccional; presión potencial CONTRARIA a esta '+str(item.side)+', no ruptura confirmada.'
-    if relation=='PRESION_A_FAVOR_REACTION':
-        return why+detail+' Hay concordancia direccional compatible con esta '+str(item.side)+', no ruptura confirmada.'
-    return why+detail+' Sin confirmación direccional suficiente; no atribuir presión de ruptura.'
-
-
-
-def _summary_pre_structure(events):
-    """Summarize PRE HTF structure without relying on a newer root logic module.
-
-    Streamlit may keep an older `reaction_horizontal_level_card` in
-    sys.modules. This report is UI-only; it does not classify reactions.
-    Missing outcomes are not counted as NO_HIT or as losses.
-    """
-    field='structure_relation_pre'
-    if field not in events.columns or 'outcome' not in events.columns:
-        return pd.DataFrame()
-
-    source=events[[field,'outcome']].copy()
-    source[field]=source[field].fillna('NO_EVALUABLE')
-    source['outcome']=source['outcome'].map(normalized_outcome)
-    allowed={'TP_FIRST','SL_FIRST','NO_HIT','AMBIGUOUS'}
-    rows=[]
-    for relation,group in source.groupby(field,dropna=False):
-        counts=group['outcome'].value_counts(dropna=True)
-        tp=int(counts.get('TP_FIRST',0))
-        sl=int(counts.get('SL_FIRST',0))
-        resolved=tp+sl
-        rows.append({
-            'Lectura PRE':STRUCTURE_LABELS.get(str(relation),str(relation)),
-            'REACTIONs':int(len(group)),
-            'TP':tp,
-            'SL':sl,
-            'NO_HIT':int(counts.get('NO_HIT',0)),
-            'AMBIGUOUS':int(counts.get('AMBIGUOUS',0)),
-            'SIN_RESULTADO':int((~group['outcome'].isin(allowed)).sum()),
-            'TP resueltos (%)':round(100*tp/resolved,1) if resolved else None,
-            'N resueltos':resolved,
-        })
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values('REACTIONs',ascending=False).reset_index(drop=True)
-
-
-def _pretty(n,places=5):
-    try:
-        if pd.notna(n):return f'{float(n):.{places}g}'
-    except (TypeError,ValueError):pass
-    return '—'
-
-
-def _explain(side,setup):
-    if setup=='DEFENSA_POTENCIAL':
-        return ('SHORT: resistencia por encima; posible rechazo bajista.' if side=='SHORT'
-                else 'LONG: soporte por debajo; posible rebote alcista.')
-    if setup=='RUPTURA_POTENCIAL':
-        return ('SHORT: soporte por debajo; posible quiebre bajista. No lo confundimos con defensa.'
-                if side=='SHORT' else 'LONG: resistencia por encima; posible ruptura alcista.')
-    if setup=='EN_ZONA_SIN_ORIGEN':
-        return 'La llegada lleva varias velas dentro de la zona: no se puede afirmar defensa ni ruptura.'
-    return 'No hay datos continuos para reconstruir el lado de llegada; no se atribuye dirección.'
-
-
-def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,sl_pct=0.5,
-                                      outcome_horizon=180,entry_mode='OBSERVED_OPEN'):
+def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
+                                      sl_pct=0.5,outcome_horizon=180,
+                                      entry_mode='OBSERVED_OPEN'):
+    """Compatibility entrypoint: integration tab index remains untouched."""
     import streamlit as st
-    from dashboard.views.reaction_structural_level_atlas_v2_view import load,_read_structural_figure
-    from dashboard.views.reaction_outcome_overlay import get_post_bars,overlay_future,outcome_explanation
+    import reaction_structural_level_atlas_v2 as atlas
+    from dashboard.views.reaction_structural_level_atlas_v2_view import load, _read_structural_figure
+    from dashboard.views.reaction_outcome_overlay import get_post_bars, overlay_future, outcome_explanation
 
     project=Path(project_root).resolve()
-    import reaction_structural_level_atlas_v2 as atlas
-    from dashboard.views.reaction_horizontal_rich_chart import enhance_pre_candles, diagnostic_text
-    out=project/atlas.v1.lineage.ROOT_REL/atlas.OUTPUT
-    st.markdown('### 🟩 Horizontal Level Rich Card')
-    st.caption('Una zona principal ya confirmada · una REACTION · su desenlace. '
-               'La línea verde es un NIVEL, no automáticamente una defensa.')
-    if not (out/'summary.json').is_file():
-        st.info('Primero generá Structural Level Atlas V2 (--run y --audit).');return
+    folder=project/atlas.v1.lineage.ROOT_REL/atlas.OUTPUT
+    st.markdown('### 🎯 Horizontal Level Research')
+    st.caption('Una pregunta: ¿las REACTIONs que interactúan con niveles horizontales '
+               'previamente reconocidos muestran mejores recorridos? '
+               'Reutiliza Atlas V2 y First Touch; no usa HL/LH, presión ni compresiones.')
+    if not (folder/'summary.json').is_file():
+        st.warning('No existe la cohorte Atlas V2; ejecutá su auditoría antes de estudiar niveles.')
+        return
 
-    @st.cache_data(max_entries=2,show_spinner='Leyendo pivotes HTF confirmados antes de la REACTION...')
-    def cached(base,meta_mtime,source_mtime,history_mtime,method_version):
-        zones,ev,summary=load(Path(base))
-        annotated=logic.enrich_events(Path(base),ev)
-        annotated=structure.enrich_pre_structure(Path(base),annotated)
-        return zones,annotated,summary
+    @st.cache_data(max_entries=3,show_spinner=False)
+    def _read_audited(root,summary_mtime,events_mtime,levels_mtime,version):
+        return load(Path(root))
 
     try:
-        context_path=project/logic.ROOT/'reaction_full_context_v1.sqlite3'
-        history_path=project/logic.ROOT/atlas.v1.lineage.HISTORY_NAME
-        zones,events,summary=cached(str(project),(out/'summary.json').stat().st_mtime_ns,
-                                   context_path.stat().st_mtime_ns,
-                                   history_path.stat().st_mtime_ns if history_path.exists() else 0,
-                                   'approach_concordance_v2')
-        expected=['event_key','outcome','entry_ts','entry_price','first_touch_minute']
-        miss=[c for c in expected if c not in source_events.columns]
-        if miss:raise ValueError('Faltan columnas del First-Touch: '+', '.join(miss))
-        source=source_events[expected].drop_duplicates('event_key').copy()
-        source['outcome']=source['outcome'].map(normalized_outcome)
-        selected=events.merge(source,on='event_key',how='inner',validate='one_to_one')
+        levels,events,summary=_read_audited(str(project),
+             (folder/'summary.json').stat().st_mtime_ns,
+             (folder/'event_map.csv').stat().st_mtime_ns,
+             (folder/'candidate_levels.csv').stat().st_mtime_ns,MODEL_VERSION)
+        needed=['event_key','outcome','entry_ts','entry_price','first_touch_minute']
+        missing=[x for x in needed if x not in source_events.columns]
+        if missing: raise ValueError('First Touch sin columnas: '+', '.join(missing))
     except Exception as exc:
-        st.error(f'Horizontal Rich Card: no se pudieron validar las fuentes: {exc}');return
+        st.error(f'No se pudieron auditar las fuentes Atlas V2 / First Touch: {exc}')
+        return
 
-    if selected.empty:
-        st.info('No hay REACTIONs del Atlas dentro de los filtros superiores.');return
-
-    total=len(selected)
-    all_def=int(selected.setup_pre.eq('DEFENSA_POTENCIAL').sum())
-    all_break=int(selected.setup_pre.eq('RUPTURA_POTENCIAL').sum())
-    all_unknown=total-all_def-all_break
-    k=st.columns(4)
-    k[0].metric('REACTIONs',total)
-    k[1].metric('Tests de defensa/rechazo',all_def)
-    k[2].metric('Tests de ataque al nivel',all_break)
-    k[3].metric('Indeterminadas',all_unknown)
-
-    st.caption('PRE = qué lado traía el precio antes de la vela 1m del retest. '
-               'KNOWN = cierre de esa vela. POST = replay histórico. '
-               f'{entry_mode} · TP +{tp_pct:g}% / SL −{sl_pct:g}% · {outcome_horizon}m.')
-    opts=st.columns([1.2,1,1],gap='small')
-    setup=opts[0].selectbox('Situación previa',('TODAS','DEFENSA_POTENCIAL','RUPTURA_POTENCIAL',
-                       'EN_ZONA_SIN_ORIGEN','DESCONOCIDO'),
-                       format_func=lambda v:'Todas' if v=='TODAS' else SETUP_LABELS[v],key='hlrc_setup')
-    direction=opts[1].selectbox('Dirección',('TODAS','LONG','SHORT'),key='hlrc_side')
-    result=opts[2].selectbox('Desenlace (solo inspector)',
-                   ('TODOS','TP_FIRST','SL_FIRST','NO_HIT','AMBIGUOUS','SIN_RESULTADO'),key='hlrc_outcome')
-    pre_filtered=selected.copy()
-    if setup!='TODAS':pre_filtered=pre_filtered[pre_filtered.setup_pre.eq(setup)]
-    if direction!='TODAS':pre_filtered=pre_filtered[pre_filtered.side.eq(direction)]
-
-    st.markdown('**Comparación sencilla — sin seleccionar ganadoras para calcular tasas**')
-    table=logic.groups_summary(pre_filtered)
-    if not table.empty:
-        table['Situación ANTES']=table['Situación ANTES'].map(lambda x:SETUP_LABELS.get(x,x))
-        st.dataframe(table,hide_index=True,use_container_width=True)
-    st.caption('TP% = TP / (TP + SL) entre resueltas. NO_HIT, ambiguas y faltantes quedan afuera '
-               'del denominador, pero se muestran. Los grupos con pocos casos no demuestran una ventaja.')
-
-    st.markdown('**Progresión HTF ANTES de la señal (solo hipótesis PRE)**')
-    structural_table=_summary_pre_structure(pre_filtered)
-    if not structural_table.empty:
-        st.dataframe(structural_table,hide_index=True,use_container_width=True)
-    st.caption('Para presión favorable/contraria exigimos concordancia entre pivotes 3×3 HTF PRE '
-               'y la aproximación reciente de 120m (cierres HTF completos). Si se contradicen: presión mixta. '
-               'Sin progresión clara no significa nivel seguro. No confirma ninguna ruptura.')
-    with st.expander('Filtrar inspector por estructura PRE',expanded=False):
-        structure_filter=st.selectbox('Contexto estructural',('TODAS',)+tuple(STRUCTURE_LABELS),
-             format_func=lambda q:'Todas' if q=='TODAS' else STRUCTURE_LABELS[q],
-             key='hlrc_structure')
-    for_inspector=pre_filtered
-    if structure_filter!='TODAS':
-        for_inspector=for_inspector[for_inspector.structure_relation_pre.eq(structure_filter)]
-    if result=='SIN_RESULTADO':
-        for_inspector=for_inspector[for_inspector.outcome.isna()]
-    elif result!='TODOS':
-        for_inspector=for_inspector[for_inspector.outcome.eq(result)]
-    if for_inspector.empty:
-        st.info('No hay eventos para estos filtros; probá con “TODOS”.');return
-
-    rows=for_inspector.sort_values('retest_ts',ascending=False)
-    labels={r.event_key:f'{r.symbol} {r.side} · {r.date_utc} · '
-                           f'{SETUP_LABELS.get(r.setup_pre,r.setup_pre)} · {outcome_label(r.outcome)}'
-            for r in rows.itertuples(index=False)}
-    event_key=st.selectbox('Abrir REACTION',list(labels),format_func=lambda k:labels[k],key='hlrc_event')
-    item=rows.loc[rows.event_key.eq(event_key)].iloc[0]
-    st.markdown(f'#### {item.symbol} · {item.side} · nivel {item.primary_timeframe}')
-
-    cards=st.columns(3,gap='small')
-    with cards[0]:
-        st.markdown('**1 · ANTES**')
-        st.info(SETUP_LABELS.get(item.setup_pre,item.setup_pre))
-        st.caption(_explain(str(item.side),str(item.setup_pre)))
-        st.markdown('**Progresión del precio PRE**')
-        relation=str(item.structure_relation_pre)
-        st.info(STRUCTURE_LABELS.get(relation,relation))
-        st.caption(structure_description(item))
-        direction_pre=getattr(item,'structure_recent_direction_pre','NO_EVALUABLE')
-        delta_pre=getattr(item,'structure_recent_delta_pct_pre',None)
-        recent_vs=getattr(item,'structure_recent_vs_reaction_pre','NO_EVALUABLE')
-        st.caption('**Presión reciente respecto de la REACTION:** '+
-                   {'CONTRA_REACTION':'EN CONTRA de '+str(item.side),
-                    'A_FAVOR_REACTION':'A FAVOR de '+str(item.side),
-                    'SIN_DIRECCION_CLARA':'Sin dirección reciente clara',
-                    'NO_EVALUABLE':'No evaluable'}.get(recent_vs,'No evaluable')+'.')
-        st.caption('Aproximación reciente (120m HTF cerrado): '+
-                   {'ALCISTA':'alcista','BAJISTA':'bajista',
-                    'LATERAL_O_DIVERGENTE':'lateral/divergente',
-                    'NO_EVALUABLE':'no evaluable'}.get(direction_pre,str(direction_pre))
-                   +' · cambio de cierre: '+_pretty(delta_pre,3)+'%.')
-        if pd.notna(item.pre_contacts_5):
-            st.caption(f'Contacto con la zona: {int(item.pre_contacts_5)}/5 velas anteriores. '
-                       +('Contactos persistentes 1m: no son defensas independientes ni prueban presión direccional.'
-                         if bool(item.pressure_pre) else 'Los contactos no confirman defensa ni ruptura.'))
-    with cards[1]:
-        st.markdown('**2 · VELA REACTION CERRADA**')
-        st.info(KNOWN_LABELS.get(item.known_candle_label,item.known_candle_label))
-        st.caption('Solo disponible después de cerrar 1m. Un cruce inicial no es aceptación.')
-    with cards[2]:
-        st.markdown('**3 · DESPUÉS**')
-        st.info(outcome_label(item.outcome))
-        st.caption('Resultado del escenario First-Touch elegido arriba; no intervino en PRE.')
-
-    st.caption('Zona verde: '+_pretty(item.primary_zone_low,8)+'–'+_pretty(item.primary_zone_high,8)
-              +' · distancia previa: '+_pretty(item.primary_distance_atr,3)+' ATR.'
-              +' · nivel original: '+str(item.primary_state_pre)+'.')
-    if pd.notna(item.primary_distance_atr) and float(item.primary_distance_atr)>1.5:
-        st.warning('El nivel principal está distante (>1,5 ATR): no atribuirle la REACTION actual.')
-    if pd.isna(item.primary_zone_id):
-        st.warning('Sin nivel principal confirmado.');return
-    available=zones[zones.event_key.eq(event_key)]
-    c1,c2=st.columns(2)
-    post_n=c1.select_slider('Velas POST 1m (min)',[15,30,60,180,360],value=180,key='hlrc_post')
-    tf=c2.radio('Velas previas',['15m','30m'],index=0 if str(item.primary_timeframe)=='15m' else 1,
-                horizontal=True,key='hlrc_tf')
+    controls=st.columns([1,1],gap='small')
+    tf=controls[0].selectbox('Timeframe del nivel',('TODOS','15m','30m'),
+        key='hlr_v1_tf')
+    direction=controls[1].selectbox('Dirección',('TODAS','LONG','SHORT'),
+        key='hlr_v1_side')
     try:
-        fig=_read_structural_figure(project,item,available,display_tf=tf,max_zones=2)
-        bars,status=get_post_bars(project,item.event_key,item.retest_ts)
+        categorized,qualifying=build(events,levels,tf)
+        chosen=source_events[needed].drop_duplicates('event_key').copy()
+        chosen['outcome_norm']=chosen['outcome'].map(outcome)
+        df=categorized.merge(chosen,on='event_key',how='inner',validate='one_to_one')
+    except Exception as exc:
+        st.error(f'No se pudo clasificar la cohorte causal: {exc}')
+        return
+    if direction!='TODAS':df=df[df.side.eq(direction)].copy()
+    if df.empty:
+        st.info('No hay REACTIONs del Atlas V2 en la cohorte y filtros actuales.');return
+
+    valid=df.loc[df.level_group.ne(UNKNOWN)]
+    k=st.columns(4)
+    k[0].metric('REACTIONs',len(df))
+    k[1].metric('A · Tocó',int(df.level_group.eq(A).sum()))
+    k[2].metric('B · Cerca',int(df.level_group.eq(B).sum()))
+    k[3].metric('C · Sin nivel cercano',int(df.level_group.eq(C).sum()))
+    if df.level_group.eq(UNKNOWN).any():
+        st.warning(f'{int(df.level_group.eq(UNKNOWN).sum())} eventos NO EVALUABLES por cobertura o '
+                   'cierre de REACTION no verificable. No se incluyen en el grupo C.')
+
+    st.caption(f'**Regla de importancia PRE congelada:** 2 pivotes 3×3 confirmados '
+               f'+ al menos 1 episodio independiente de defensa previo, en 15m/30m. '
+               f'**Cerca:** ≤{NEAR_ATR:g} ATR del último cierre HTF anterior. '
+               'No se utiliza TP/SL para elegir niveles.')
+    st.markdown('**Comparación principal · A / B / C**')
+    overall=group_summary(df,min_resolved=30)
+    order={GROUPS[A]:0,GROUPS[B]:1,GROUPS[C]:2,GROUPS[UNKNOWN]:3}
+    if not overall.empty:
+        overall=overall.sort_values('Grupo',key=lambda col:col.map(order).fillna(4))
+        st.dataframe(overall,hide_index=True,use_container_width=True)
+    st.caption(f'Resultados First Touch seleccionados arriba: {entry_mode}, '
+               f'TP +{tp_pct:g}% / SL −{sl_pct:g}%, {outcome_horizon} minutos. '
+               'Las tasas e IC Wilson solo se muestran con ≥30 resultados TP/SL; '
+               'NO_HIT y SIN_RESULTADO no son pérdidas automáticas.')
+
+    st.markdown('**Control temporal: cercanía conocida ANTES de la REACTION**')
+    pre=df.copy()
+    pre['pre_group']=pre.pre_bucket.map({'PRE_CERCA':'Nivel importante cerca (PRE)',
+             'PRE_LEJOS_O_SIN_NIVEL':'Sin nivel importante cerca (PRE)',
+             'NO_EVALUABLE':'Sin cobertura suficiente'})
+    pre_summary=group_summary(pre,col='pre_group',min_resolved=30)
+    if not pre_summary.empty:
+        st.dataframe(pre_summary,hide_index=True,use_container_width=True)
+    st.caption('La cercanía PRE sí era conocida antes de la REACTION. '
+               'En cambio, A (tocó) y B (no tocó) usan la vela 1m de REACTION '
+               'ya cerrada: sus tasas son descriptivas y NO prueban una entrada al open.')
+
+    with st.expander('Auditoría simple · dirección, defensa previa y placebo',expanded=False):
+        st.markdown('**Resultados separados por LONG / SHORT (no mezcla de direcciones)**')
+        subtables=[]
+        for side,part in df.groupby('side'):
+            out=group_summary(part,min_resolved=30)
+            if not out.empty:
+                out.insert(0,'Dirección',side)
+                subtables.append(out)
+        if subtables:
+            st.dataframe(pd.concat(subtables,ignore_index=True),hide_index=True,use_container_width=True)
+        st.caption('Episodios independientes y dos pivotes anteriores determinan importancia. '
+                   'No se suman velas consecutivas como defensas independientes.')
+        diag=valid[valid.important_levels.gt(0)]
+        if not diag.empty:
+            n=len(diag)
+            real=int(diag.pre_bucket.eq('PRE_CERCA').sum())
+            fake=int(diag.placebo_near_pre.eq(True).sum())
+            st.caption(f'**Placebo de proximidad (diagnóstico PRE, N={n}):** '
+                       f'zonas reales cerca: {real}/{n}; zonas trasladadas ±3 ATR cerca: {fake}/{n}. '
+                       'Este placebo NO simula contactos ni operaciones ficticias; '
+                       'no sustituye eventos sin REACTION ni validación futura.')
+        else:
+            st.caption('Sin niveles importantes elegibles para la comprobación placebo.')
+        st.caption('Muestra explorada retrospectivamente, no validación fuera de muestra. '
+                   'Cualquier corte futuro debe evaluarse sobre fechas aún no inspeccionadas.')
+
+    st.markdown('**Inspector · un nivel, una REACTION y su desenlace**')
+    group_option=st.selectbox('Interacción con nivel importante',
+        ('TODOS',A,B,C,UNKNOWN),
+        format_func=lambda x:'Todos los grupos' if x=='TODOS' else GROUPS[x],
+        key='hlr_v1_group')
+    inspect=df if group_option=='TODOS' else df.loc[df.level_group.eq(group_option)]
+    result=st.selectbox('Resultado (solo filtra el inspector)',
+        ('TODOS','TP_FIRST','SL_FIRST','NO_HIT','AMBIGUOUS','SIN_RESULTADO'),
+        key='hlr_v1_result')
+    if result!='TODOS': inspect=inspect.loc[inspect.outcome_norm.eq(result)]
+    if inspect.empty:
+        st.info('No hay eventos para el filtro del inspector.');return
+    recent=inspect.sort_values('retest_ts',ascending=False)
+    labels={r.event_key:f'{r.symbol} {r.side} · {r.date_utc} · '
+            f'{GROUPS[r.level_group]} · {r.outcome_norm}'
+            for r in recent.itertuples(index=False)}
+    key=st.selectbox('Abrir REACTION',list(labels),format_func=lambda k:labels[k],
+                     key='hlr_v1_event')
+    item=recent.loc[recent.event_key.eq(key)].iloc[0].copy()
+    st.markdown(f'#### {item.symbol} {item.side} · {GROUPS[item.level_group]}')
+    if pd.notna(item.relevant_zone_id):
+        st.caption('Nivel PRE: '+str(item.relevant_timeframe)+' · zona '+
+             _pretty(item.relevant_zone_low)+'–'+_pretty(item.relevant_zone_high)+
+             ' · '+_pretty(item.relevant_gap_atr)+' ATR del cierre PRE · '+
+             str(int(item.relevant_pivots))+' pivotes confirmados · '+
+             str(int(item.relevant_episodes))+' episodios independientes de defensa antes de la señal.')
+        if item.level_group==C:
+            st.info('Hay un nivel previamente reconocido, pero queda lejos de la REACTION. '
+                    'Por eso el evento pertenece al grupo C.')
+    else:
+        st.info('No se identificó un nivel importante seleccionable para este evento. '
+                'Esto no significa que el mercado careciera de otros soportes o resistencias.')
+    if item.level_group in (A,B):
+        st.caption('La etiqueta de contacto se conoce SOLO al cierre de la vela de REACTION. '
+                   'Si se opera basándose en ella, la entrada debe re-simularse después.')
+
+    # Plot ONLY one selected verified level. No HL/LH, no other decorative zones.
+    candidate=qualifying.loc[qualifying.event_key.eq(key)]
+    selected_zone=candidate.loc[candidate.zone_id.eq(item.relevant_zone_id)]
+    if not selected_zone.empty:
+        single=selected_zone.iloc[[0]].copy()
+        item['primary_zone_id']=single.iloc[0].zone_id
+        item['primary_timeframe']=single.iloc[0].timeframe
+    else:
+        single=candidate.iloc[:0].copy()
+        item['primary_zone_id']=None
+        item['primary_timeframe']='15m'
+    l,r=st.columns([1,1])
+    shown_tf=l.radio('Velas anteriores',['15m','30m'],
+                  index=0 if str(item.primary_timeframe)=='15m' else 1,
+                  horizontal=True,key='hlr_v1_tf_chart')
+    post_m=r.select_slider('Velas POST 1m (solo gráfico)',options=[15,30,60,180,360],
+                           value=180,key='hlr_v1_post')
+    try:
+        fig=_read_structural_figure(project,item,single,display_tf=shown_tf)
         if fig is None:
-            st.warning('No hay velas previas disponibles para este gráfico.');return
-        # When toggling TF, the graphic describes that displayed TF; the PRE
-        # cohort annotation above always uses the level's primary timeframe.
-        role=('SOPORTE' if item.arrival_origin_pre=='ABOVE' else
-              'RESISTENCIA' if item.arrival_origin_pre=='BELOW' else None)
-        fig,pre_diagnostic=enhance_pre_candles(fig,tf,show_higher_lows=True,
-                                              visible_hours=24,zone_role=role)
+            st.warning('No existe histórico PRE suficiente para dibujar este evento.');return
+        try:
+            from dashboard.views.reaction_horizontal_rich_chart import enhance_pre_candles
+        except ImportError:
+            st.caption('Helper HTF relleno no disponible; se muestran velas estándar.')
+        else:
+            fig,_=enhance_pre_candles(fig,shown_tf,show_higher_lows=False)
+        bars,path_state=get_post_bars(project,item.event_key,item.retest_ts)
         if bars:
             fig=overlay_future(fig,bars,retest_ts=item.retest_ts,side=item.side,
-                entry_ts=item.entry_ts,entry_price=item.entry_price,outcome=item.outcome,
-                first_touch_minute=item.first_touch_minute,tp_pct=tp_pct,sl_pct=sl_pct,
-                outcome_horizon=outcome_horizon,display_minutes=post_n,pre_hours=12)
-        st.plotly_chart(fig,use_container_width=True,key='hlrc_chart')
-        st.caption(diagnostic_text(pre_diagnostic,tf))
-        st.caption(outcome_explanation(item.outcome,item.first_touch_minute,tp_pct=tp_pct,
-            sl_pct=sl_pct,outcome_horizon=outcome_horizon,display_minutes=post_n,
-            path_state=status,entry_mode=entry_mode))
+               entry_ts=item.entry_ts,entry_price=item.entry_price,
+               outcome=item.outcome_norm,first_touch_minute=item.first_touch_minute,
+               tp_pct=tp_pct,sl_pct=sl_pct,outcome_horizon=outcome_horizon,
+               display_minutes=post_m,pre_hours=12)
+        st.plotly_chart(fig,use_container_width=True,key='hlr_v1_plot')
+        st.caption(outcome_explanation(item.outcome_norm,item.first_touch_minute,
+               tp_pct=tp_pct,sl_pct=sl_pct,outcome_horizon=outcome_horizon,
+               display_minutes=post_m,path_state=path_state,entry_mode=entry_mode))
+        st.caption('Gráfico: nivel PRE reconocido, cierre de REACTION (KNOWN), '
+                   'trayectoria POST (solo para evaluación). La línea verde no promete rebote.')
     except Exception as exc:
-        st.error(f'No se pudo dibujar el gráfico: {exc}')
-    st.caption('SIN_RESULTADO indica ausencia de etiqueta en el First-Touch seleccionado; '
-               'no significa que se haya perdido la operación, ni que haya expirado sin toque.')
-    st.caption('La reacción se señala al CIERRE de su vela 1m: no es necesariamente precio de entrada. '
-               'Si una ruptura requiere aceptación en velas futuras, esa aceptación NO existe todavía en PRE.')
+        st.error(f'Inspector: no se pudo reconstruir el gráfico: {exc}')
+
+    with st.expander('Exportar la muestra clasificada (sin recalcular señales)',expanded=False):
+        cols=['event_key','symbol','side','date_utc','level_group','pre_bucket',
+              'important_levels','relevant_zone_id','relevant_timeframe','relevant_gap_atr',
+              'relevant_episodes','relevant_pivots','outcome_norm']
+        st.download_button('Descargar CSV de investigación',
+              df[cols].to_csv(index=False).encode('utf-8'),
+              file_name='horizontal_level_research_v1.csv',mime='text/csv',
+              key='hlr_v1_export')
