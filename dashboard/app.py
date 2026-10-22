@@ -84757,6 +84757,7 @@ if selected_section == "reaction_swing_lab":
                 "🎯 Pivots / Confirmations",
                 "📍 Event swing structure",
                 "🧬 Volume → future swings",
+                "🔬 Retest Quality Lab",
                 "🏃 Runner Discovery",
                 "⚙️ Runner Optimization",
                 "📈 Runner Portfolio",
@@ -84774,7 +84775,12 @@ if selected_section == "reaction_swing_lab":
 
         # Runner search always reads only LIVE_OBSERVED; never triggers legacy
         # materialization, returns results only in Streamlit session memory.
-        if lab_mode == "🏃 Runner Discovery":
+        if lab_mode == "🔬 Retest Quality Lab":
+            from dashboard.views.reaction_microstructure_quality_view import (
+                render_microstructure_quality_lab,
+            )
+            render_microstructure_quality_lab(BASE_DIR)
+        elif lab_mode == "🏃 Runner Discovery":
             from dashboard.views.reaction_lab_runner_discovery_v2_view import (
                 render_runner_discovery_v2,
             )
@@ -84794,7 +84800,7 @@ if selected_section == "reaction_swing_lab":
 
         # Continuous always reads the same persisted Event IDs in EVERY view.
         # Legacy engines are intentionally unchanged and never run in Continuous.
-        if lab_mode not in ("🏃 Runner Discovery", "⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition") and cohort_mode in ("Continuous V1", "Todos"):
+        if lab_mode not in ("🔬 Retest Quality Lab", "🏃 Runner Discovery", "⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition") and cohort_mode in ("Continuous V1", "Todos"):
             from reaction_lab_research_view import render_cohort_research
             render_cohort_research(
                 BASE_DIR, "Continuous V1", lab_mode, structural_symbols,
@@ -84805,7 +84811,7 @@ if selected_section == "reaction_swing_lab":
                 st.divider()
                 st.markdown("### 🗄️ Legacy — herramientas existentes")
 
-        if cohort_mode == "Continuous V1" or lab_mode in ("⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition"):
+        if cohort_mode == "Continuous V1" or lab_mode in ("🔬 Retest Quality Lab", "⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition"):
             pass  # No hidden legacy rebuild; portfolio and optimizer are isolated read-only views.
         elif lab_mode == "📡 REACTION journal":
             st.caption(
