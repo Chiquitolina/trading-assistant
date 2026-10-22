@@ -15,6 +15,12 @@ from reaction_horizontal_level_research import (
     ROLE_VERSION, ROLE_LABELS, ROLE_REBOUND, ROLE_BREAK, ROLE_IN_ZONE,
     ROLE_NO_NEAR, ROLE_UNKNOWN, build_pre_roles,
 )
+from reaction_horizontal_level_lifecycle import (
+    LABELS as LIFECYCLE_LABELS, VERSION as LIFECYCLE_VERSION, OUTPUT as LIFECYCLE_OUTPUT,
+    ACTIVE as LEVEL_ACTIVE, LOST as LEVEL_LOST, FAILED as LEVEL_FAILED,
+    RECLAIMED as LEVEL_RECLAIMED, UNKNOWN as LEVEL_UNKNOWN,
+    NO_NEAR as LEVEL_NO_NEAR, read_checked_cache,
+)
 
 
 def _pretty(x):
@@ -148,6 +154,62 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                'NO_HIT, ambigüedades y SIN_RESULTADO no son SL ni integran la tasa entre '
                'resueltas; se informan por separado. No son retornos netos ni resultados '
                'independientes entre eventos del mismo símbolo.')
+    # Independent chronological PRE level lifecycle. An offline cache is required
+    # so the Streamlit renderer NEVER downloads prices or mutates Atlas/VPS data.
+    st.markdown('**Nuevo estudio PRE · ¿nivel vigente, perdido, retesteado o recuperado?**')
+    st.caption('Solo velas 15m/30m cerradas ANTES de la REACTION; zona congelada y '
+               'mismo nivel elegido por el rol PRE. Dos cierres HTF consecutivos '
+               'del otro lado confirman un cambio. Un retest fallido requiere una '
+               'vela HTF POST-ruptura que toque la banda y cierre rechazándola. '
+               'No usa el TP/SL para clasificar.')
+    lifecycle_ready=False
+    lifecycle_file=project/atlas.v1.lineage.ROOT_REL/LIFECYCLE_OUTPUT/'event_lifecycle.csv'
+    lifecycle_summary=project/atlas.v1.lineage.ROOT_REL/LIFECYCLE_OUTPUT/'summary.json'
+    if not lifecycle_file.is_file() or not lifecycle_summary.is_file():
+        st.info('Falta estudio PRE: ejecutar `python3 reaction_horizontal_level_lifecycle.py --plan`, '
+                '`--run` y `--audit` en la raíz del proyecto. El resto de la pestaña sigue disponible.')
+    else:
+        @st.cache_data(max_entries=6,show_spinner=False)
+        def _read_lifecycle_cache(root,tf_filter,cache_mtime,meta_mtime,atlas_mtime,atlas_levels_mtime,version):
+            # Load always against actual Atlas PRE event/zone selection (never TP/SL).
+            lv,ev,_=load(Path(root))
+            roles=build_pre_roles(ev,lv,tf_filter)
+            return read_checked_cache(root,ev,roles,tf_filter)
+        try:
+            lifecycle=_read_lifecycle_cache(str(project),tf,
+                lifecycle_file.stat().st_mtime_ns,lifecycle_summary.stat().st_mtime_ns,
+                (folder/'event_map.csv').stat().st_mtime_ns,
+                (folder/'candidate_levels.csv').stat().st_mtime_ns,LIFECYCLE_VERSION)
+            lifecycle=lifecycle.rename(columns={'reason':'lifecycle_reason'})
+            df=df.merge(lifecycle.drop(columns=['tf_filter','symbol','side','date_utc','retest_ts',
+                       'role_pre','role_distance_atr','zone_low','zone_high','timeframe'],errors='ignore'),
+                        on='event_key',how='left',validate='one_to_one')
+            lifecycle_ready=True
+            status_df=df.assign(lifecycle_label=df.lifecycle_state.map(LIFECYCLE_LABELS))
+            status_summary=group_summary(status_df,col='lifecycle_label',min_resolved=30)
+            status_order={LIFECYCLE_LABELS[k]:i for i,k in enumerate(
+                (LEVEL_ACTIVE,LEVEL_LOST,LEVEL_FAILED,LEVEL_RECLAIMED,LEVEL_UNKNOWN,LEVEL_NO_NEAR))}
+            if not status_summary.empty:
+                status_summary=status_summary.sort_values('Grupo',
+                    key=lambda col:col.map(status_order).fillna(9))
+                st.dataframe(status_summary,hide_index=True,use_container_width=True)
+            st.caption('La pertenencia a las clases se determina sin consultar outcomes. '
+                       'Los porcentajes mostrados son descriptivos; no justifican modificar el Scanner LIVE.')
+            with st.expander('Auditar ciclo PRE · estado por LONG/SHORT y timestamps',expanded=False):
+                dis=[]
+                for side,part in status_df.groupby('side'):
+                    tab=group_summary(part,col='lifecycle_label',min_resolved=30)
+                    if not tab.empty:
+                        tab.insert(0,'Dirección',side)
+                        dis.append(tab)
+                if dis:st.dataframe(pd.concat(dis,ignore_index=True),hide_index=True,use_container_width=True)
+                st.caption('Perdido: lado opuesto al lado inicialmente aceptado. '
+                           'Recuperado: vuelve al lado inicial con dos cierres confirmados. '
+                           'Indeterminado: histórico o cierres insuficientes; no equivale a nivel vigente.')
+        except Exception as exc:
+            st.warning('Estudio de ciclo PRE sin auditar o desactualizado: '+str(exc)+
+                       '. Ejecutar `python3 reaction_horizontal_level_lifecycle.py --run` y `--audit`.')
+
     with st.expander('Desglose causal · LONG / SHORT y timeframe del nivel',expanded=False):
         by_side=[]
         for side,part in role_tab.groupby('side'):
@@ -211,6 +273,13 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
         format_func=lambda x:'Todos los roles PRE' if x=='TODOS' else ROLE_LABELS[x],
         key='hlr_v1_role')
     if role_option!='TODOS': inspect=inspect.loc[inspect.pre_role.eq(role_option)]
+    if lifecycle_ready:
+        lifecycle_choice=st.selectbox('Historia del nivel PRE (solo inspector)',
+             ('TODOS',LEVEL_ACTIVE,LEVEL_LOST,LEVEL_FAILED,LEVEL_RECLAIMED,LEVEL_UNKNOWN,LEVEL_NO_NEAR),
+             format_func=lambda x:'Todos los estados' if x=='TODOS' else LIFECYCLE_LABELS[x],
+             key='hlr_lifecycle_v1_inspect')
+        if lifecycle_choice!='TODOS':
+            inspect=inspect.loc[inspect.lifecycle_state.eq(lifecycle_choice)]
     result=st.selectbox('Resultado (solo filtra el inspector)',
         ('TODOS','TP_FIRST','SL_FIRST','NO_HIT','AMBIGUOUS','SIN_RESULTADO'),
         key='hlr_v1_result')
@@ -236,6 +305,13 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
                    _pretty(item.role_defenses_pre)+' episodios de defensa previos · '+
                    'posición '+str(item.role_position)+
                    ' · origen '+str(item.role_origin)+'.')
+    if lifecycle_ready:
+        st.caption('**Historia PRE del nivel:** '+LIFECYCLE_LABELS.get(item.lifecycle_state,str(item.lifecycle_state))+
+                   ' · lado inicialmente aceptado '+str(item.initial_side)+
+                   ' · última pérdida '+str(item.last_break_close_ts)+
+                   ' · último retest fallido '+str(item.last_failed_retest_close_ts)+
+                   ' · última recuperación '+str(item.last_reclaim_close_ts)+
+                   ' · evaluación '+str(item.lifecycle_reason)+'.')
     if pd.notna(item.relevant_zone_id):
         st.caption('Nivel del grupo A/B (evaluado con vela KNOWN): '+str(item.relevant_timeframe)+' · zona '+
              _pretty(item.relevant_zone_low)+'–'+_pretty(item.relevant_zone_high)+
@@ -321,6 +397,10 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
               'relevant_episodes','relevant_pivots','known_touch_verified',
               'known_low','known_high','relevant_retest_gap_atr',
               'atlas_claimed_touch','atlas_claimed_touch_not_verified','outcome_norm']
+        if lifecycle_ready:
+            cols.extend(['lifecycle_state','initial_side','last_break_close_ts',
+                         'last_failed_retest_close_ts','last_reclaim_close_ts',
+                         'history_quality','lifecycle_reason'])
         st.download_button('Descargar CSV de investigación PRE + KNOWN',
               df[cols].to_csv(index=False).encode('utf-8'),
               file_name='horizontal_level_research_v1.csv',mime='text/csv',
