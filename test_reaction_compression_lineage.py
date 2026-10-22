@@ -19,6 +19,28 @@ def df15(n=240):
 
 
 class LineageTests(unittest.TestCase):
+    def test_plan_reports_actual_required_hours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / lab.ROOT_REL
+            folder.mkdir(parents=True)
+            con = sqlite3.connect(folder / lab.CTX_NAME)
+            con.execute("CREATE TABLE candles (timeframe TEXT)")
+            con.commit()
+            con.close()
+            with patch.object(lab, 'integrity', return_value={
+                'events': 7631, 'frozen_cohort_sha256': 'abc123'
+            }):
+                plan = lab.plan(root)
+            actual = {
+                tf: [item['required_hours'] for item in values]
+                for tf, values in plan['windows'].items()
+            }
+            self.assertEqual(actual, {
+                '15m': [15.0, 22.5],
+                '30m': [60.0, 90.0, 120.0],
+            })
+
     def test_30m_from_closed_contiguous_15m_only(self):
         df=df15(8)
         r=lab.derive_30m(df)

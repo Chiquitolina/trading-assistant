@@ -424,7 +424,7 @@ def plan(root):
        'native_archive_bars':{'15m':n15,'30m':n30},
        'optional_history_cache_exists':cache.is_file(),
        'windows':{tf:[{'compression':n,'separate_base':2*n,'required_contiguous_bars':3*n,
-            'required_hours':3*n*TF[tf]/(60*60*M)} for n in ns] for tf,ns in WINDOWS.items()},
+            'required_hours':3*n*TF[tf]/(60*M)} for n in ns] for tf,ns in WINDOWS.items()},
        'run_is_offline':True,'original_sources_read_only':True,
        'warning':'30m 40-80 boxes need 60-120h contiguous BEFORE the box; 96 closed 15m candles alone cannot prove absence'}
 
