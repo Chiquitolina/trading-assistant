@@ -11,6 +11,7 @@ from pathlib import Path
 from contextlib import closing
 
 from reaction_retest_quality_lab import BASE, OUTPUT, FEATURES, ro, rows_for, digest
+from reaction_retest_morphology import MORPH_NUMERIC, MORPH_FIELDS
 
 PALETTE={'TP_FIRST':'#19a78d','SL_FIRST':'#d97879','NO_HIT':'#dcab62',
          'AMBIGUOUS':'#8493a5','NOT_ENTERED':'#68778b'}
@@ -62,7 +63,20 @@ FEATURE_LABELS={
  'known_pivot_to_confirmation_pct':'Movimiento pivote-confirmación (%)',
  'known_penetration_pct':'Penetración del nivel (%)',
  'known_pivot_to_retest_min':'Pivote a retest (min)',
- 'known_triggering_swing_count':'Swings que disparan reacción'
+ 'known_triggering_swing_count':'Swings que disparan reacción',
+ 'pre_adverse_5m_pct':'Llegada adversa 5m (%)',
+ 'pre_adverse_15m_pct':'Llegada adversa 15m (%)',
+ 'pre_approach_speed_ratio':'Velocidad llegada 5m vs 15m',
+ 'pre_adverse_previous5m_pct':'Llegada adversa previa 5m (%)',
+ 'pre_adverse_deceleration_pct':'Desaceleración adversa entre bloques 5m',
+ 'pre_quote_recent5_vs_previous5':'Volumen reciente 5m vs anterior 5m',
+ 'pre_trades_recent5_vs_previous5':'Operaciones reciente 5m vs anterior 5m',
+ 'pre_taker_side_recent5':'Taker direccional reciente 5m',
+ 'pre_taker_side_previous5':'Taker direccional anterior 5m',
+ 'pre_taker_relief5':'Alivio presión taker 5m',
+ 'known_swing_penetration_pct':'Penetración mecha vs swing confirmado (%)',
+ 'known_retest_closes_beyond_level':'Retest termina fuera del swing (0/1)',
+ 'post_reclaim_minute_15m':'Minuto recuperación swing POST (NO predictor)',
 }
 
 
@@ -275,12 +289,12 @@ def render_microstructure_quality_lab(project_root):
     tp=int(counts.get('TP_FIRST',0));sl=int(counts.get('SL_FIRST',0))
     st.caption(f'TP sobre resueltas (sin ambiguas): {100*tp/(tp+sl):.1f}%' if tp+sl else 'Sin casos resueltos')
 
-    tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa'])
+    tabs=st.tabs(['📊 Variables y cruces','🧩 Matrices','🕯️ Inspector por REACTION','📋 Eventos','🧠 Ingeniería inversa','🧬 Morfologías','🗜️ Compression Lineage'])
     with tabs[0]:
         st.markdown('#### Ranking descriptivo TP-first frente a SL-first')
         st.caption('AUC por variable en la cohorte filtrada: 0,50 ≈ azar; NO es un resultado validado fuera de muestra. KNOWN no es previo al retest.')
         ranks=[]
-        for col in FEATURES:
+        for col in (*FEATURES,*(x for x in MORPH_NUMERIC if not x.startswith('post_'))):
             s=score_binary(merged,col)
             if s:ranks.append({'feature':FEATURE_LABELS.get(col,col),'campo':col,
                              'N':s['n'],'AUC ↑TP':round(s['auc_higher_is_tp'],3),
@@ -290,7 +304,7 @@ def render_microstructure_quality_lab(project_root):
         if not ranking.empty:
             st.dataframe(ranking.sort_values('AUC separación',ascending=False),use_container_width=True,hide_index=True)
         else:st.info('Se necesitan suficientes casos TP y SL para comparar las variables.')
-        feature=st.selectbox('Distribución por resultado',list(FEATURES),
+        feature=st.selectbox('Distribución por resultado',list(FEATURES)+[x for x in MORPH_NUMERIC if not x.startswith('post_')],
              format_func=lambda x:FEATURE_LABELS.get(x,x),key='rql_distfeature')
         z=merged[merged.outcome.isin(['TP_FIRST','SL_FIRST'])].dropna(subset=[feature])
         if len(z)>1:
@@ -343,6 +357,13 @@ def render_microstructure_quality_lab(project_root):
         except Exception as exc:st.error(str(exc));return
         selected=merged[merged.event_key==key].iloc[0]
         st.caption(f"{ev['symbol']} {ev['side']} · Estado Auto Paths: {ev['path_status']} · Observación: {ev['observation']}")
+        from dashboard.views.reaction_morphology_view import NAME as MORPH_NAME
+        mcols=st.columns(3)
+        for col,key_m,label_m in zip(mcols,('pre_morphology','known_morphology','post_morphology'),
+                ('Antes del retest','Retest cerrado','Recuperación POST · explicativa')):
+            code=str(selected.get(key_m,'SIN_CALCULAR'))
+            col.metric(label_m,MORPH_NAME.get(code,code))
+        st.caption('La recuperación POST se observa DESPUÉS del retest y NO puede usarse como predictor de una entrada anterior.')
         plotted_pre=st.slider('Velas 1m anteriores',30,180,90,10,key='rql_pre')
         plotted_post=st.slider('Velas 1m posteriores',30,360,180,30,key='rql_post')
         bars=ev['pre'][-plotted_pre:]+ev['retest']+ev['post'][:plotted_post]
@@ -415,7 +436,7 @@ def render_microstructure_quality_lab(project_root):
             fig=candles_plot(btc_anchor,'BTC 1m · '+('antes de observación' if anchor_mode=='PRE_OBSERVED' else 'previas retest'))
             if fig:st.plotly_chart(fig,use_container_width=True)
         st.markdown('**Características de la señal**')
-        st.dataframe(pd.DataFrame([{'variable':FEATURE_LABELS.get(k,k),'valor':selected.get(k)} for k in FEATURES]),
+        st.dataframe(pd.DataFrame([{'variable':FEATURE_LABELS.get(k,k),'valor':selected.get(k)} for k in (*FEATURES,*MORPH_FIELDS)]),
           use_container_width=True,hide_index=True)
         with st.expander('JSON causal original congelado'):
             st.json(ev['causal'])
@@ -458,9 +479,9 @@ def render_microstructure_quality_lab(project_root):
                 ['PRE_RETEST · solo velas anteriores', 'PRE_KNOWN · incluye vela del retest cerrada'],
                 horizontal=True, key='rql_reverse_stage',
             )
-            pre_fields=[name for name in FEATURES if name.startswith(('pre_','pre15m_','btc_'))]
+            pre_fields=[name for name in (*FEATURES,*MORPH_NUMERIC) if name.startswith(('pre_','pre15m_','btc_'))]
             if kind.startswith('PRE_KNOWN'):
-                pre_fields += [name for name in FEATURES if name.startswith('known_')]
+                pre_fields += [name for name in (*FEATURES,*MORPH_NUMERIC) if name.startswith('known_')]
             controls=st.columns([1,1,1])
             cost=controls[0].number_input('Coste total supuesto (pp)', min_value=0.0,
                  max_value=1.0,value=0.12,step=0.01,key='rql_reverse_cost')
@@ -538,3 +559,11 @@ def render_microstructure_quality_lab(project_root):
                         'este período posterior destruye su independencia; se requiere '
                         'congelar reglas, simular costes y salidas por tiempo, incorporar '
                         'controles SIN REACTION y evaluar señales nuevas.')
+
+    with tabs[5]:
+        from dashboard.views.reaction_morphology_view import render_morphology_atlas
+        render_morphology_atlas(analysis_before_result_filter,project,requested_tp=float(pair[0]),requested_sl=float(pair[1]))
+
+    with tabs[6]:
+        from dashboard.views.reaction_compression_lineage_view import render_lineage_atlas
+        render_lineage_atlas(analysis_before_result_filter,project)
