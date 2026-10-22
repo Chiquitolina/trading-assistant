@@ -63,7 +63,16 @@ def classify_transition(row):
 
     if _str(row.get('history_quality')) != 'COMPLETE_POST_FORMATION':
         return INDET, None, 'INCOMPLETE_PRE_HISTORY'
-    if _str(row.get('reason',row.get('lifecycle_reason'))) != 'CLASSIFIED_FROM_CLOSED_PRE_HTF_ONLY':
+    # Atlas V2 `event_map.csv` also has a column named `reason` (its own
+    # provenance, unrelated to lifecycle confirmation). The CLI audit reads
+    # the raw lifecycle `reason`; the Streamlit view renames it to
+    # `lifecycle_reason` on merge. Prefer that explicitly whenever it exists.
+    # If present but blank, fail CLOSED; never substitute the Atlas reason.
+    if 'lifecycle_reason' in row:
+        audited_reason = _str(row.get('lifecycle_reason'))
+    else:
+        audited_reason = _str(row.get('reason'))
+    if audited_reason != 'CLASSIFIED_FROM_CLOSED_PRE_HTF_ONLY':
         return INDET, None, 'NON_AUDITED_PRE_CLASSIFICATION'
 
     init = _str(row.get('initial_side'))

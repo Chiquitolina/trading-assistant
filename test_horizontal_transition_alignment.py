@@ -115,3 +115,51 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotIn('os.replace(',source)
 
 if __name__=='__main__':unittest.main()
+
+class AtlasReasonCollisionRegression(unittest.TestCase):
+    """Reproduce dashboard Atlas `reason` shadowing lifecycle provenance."""
+
+    def _frames(self):
+        raw=[]
+        for i in range(200):
+            r={**BASE,'event_key':f'event_{i}',
+               'reason':'CLASSIFIED_FROM_CLOSED_PRE_HTF_ONLY'}
+            r.pop('lifecycle_reason',None)  # Raw CLI lifecycle CSV has only `reason`.
+            if i<16:
+                r.update(side='SHORT',lifecycle_state='NIVEL_RECUPERADO_PRE',
+                         initial_side='BELOW',current_confirmed_side='BELOW')
+            elif i<33:
+                r.update(side='LONG',lifecycle_state='NIVEL_RECUPERADO_PRE',
+                         initial_side='BELOW',current_confirmed_side='BELOW')
+            elif i<124:
+                r.update(lifecycle_state='INDETERMINADO_PRE')
+            elif i<138:
+                r.update(lifecycle_state='NIVEL_VIGENTE_PRE')
+            else:
+                r.update(lifecycle_state='SIN_NIVEL_IMPORTANTE_CERCANO_PRE')
+            raw.append(r)
+        lifecycle=pd.DataFrame(raw)
+        dashboard=lifecycle.rename(columns={'reason':'lifecycle_reason'}).copy()
+        # This is the ACTUAL Atlas V2 event_map reason, not lifecycle provenance.
+        dashboard['reason']='PRE_ONLY_LEVEL_SELECTION;KNOWN_SEPARATE;OUTCOME_NEVER_READ'
+        return lifecycle,dashboard
+
+    def test_cli_and_dashboard_same_16_17_91_14_62_despite_atlas_reason(self):
+        from collections import Counter
+        raw,dashboard=self._frames()
+        expected=Counter({ALIGN:16,OPPOSE:17,INDET:91,NO_CHANGE:14,NO_LEVEL:62})
+        self.assertEqual(Counter(add_transition_alignment(raw).transition_alignment),expected)
+        self.assertEqual(Counter(add_transition_alignment(dashboard).transition_alignment),expected)
+
+    def test_empty_lifecycle_reason_never_falls_back_to_atlas_reason(self):
+        from reaction_horizontal_transition_alignment import classify_transition
+        row={**BASE,'reason':'CLASSIFIED_FROM_CLOSED_PRE_HTF_ONLY',
+             'lifecycle_reason':float('nan')}
+        self.assertEqual(classify_transition(row)[0],INDET)
+
+    def test_streamlit_has_parity_guard_for_real_audited_lifecycle(self):
+        from pathlib import Path
+        src=(Path(__file__).parent/'dashboard/views/reaction_horizontal_level_rich_card_view.py').read_text()
+        self.assertIn("rename(columns={'reason':'atlas_reason'})",src)
+        self.assertIn('audit_projection=add_transition_alignment(lifecycle)',src)
+        self.assertIn('if not from_view.equals(from_cli.reindex(from_view.index)):',src)

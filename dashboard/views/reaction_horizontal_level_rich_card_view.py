@@ -193,9 +193,19 @@ def render_horizontal_level_rich_card(source_events,project_root,*,tp_pct=1.0,
             merged=df.merge(lifecycle.drop(columns=['tf_filter','symbol','side','date_utc','retest_ts',
                        'role_pre','role_distance_atr','zone_low','zone_high','timeframe'],errors='ignore'),
                         on='event_key',how='left',validate='one_to_one')
-            # Align only with a CONFIRMED PRE zone transition; no OHLC from
-            # the REACTION and no outcome can influence the membership.
+            # Atlas event_map also contains `reason`. Keep the independent
+            # lifecycle provenance explicit so it cannot be mistaken for it.
+            if 'reason' in merged.columns:
+                merged=merged.rename(columns={'reason':'atlas_reason'})
+            # Validate the dashboard's PRE categories against the same audited
+            # read-only lifecycle frame used by audit_horizontal_transition_alignment.
+            # The outer UI cohort can be date/side-filtered, so compare by key.
+            audit_projection=add_transition_alignment(lifecycle)
             df=add_transition_alignment(merged)
+            from_cli=audit_projection.set_index('event_key').transition_alignment
+            from_view=df.set_index('event_key').transition_alignment
+            if not from_view.equals(from_cli.reindex(from_view.index)):
+                raise ValueError('Alineación PRE difiere de la auditoría: revisar unión Atlas/Lifecycle')
             lifecycle_ready=True
             # Historical 'RECUPERADO' means a return to the initial pair-of-closes
             # side, not necessarily recovery of a previously lost SUPPORT.
