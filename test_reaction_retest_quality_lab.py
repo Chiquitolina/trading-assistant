@@ -88,7 +88,7 @@ class TestRetestQuality(unittest.TestCase):
             events=[];rows=[]
             for j in (180,220):
                 ts=j*MIN
-                event=(f'TESTUSDT|LONG|{ts}','TESTUSDT','LONG',ts,ts+MIN,ts+MIN+20_000,'LIVE_OBSERVED','{}')
+                event=(f'TESTUSDT|LONG|{ts}','TESTUSDT','LONG',ts,ts+MIN,ts+MIN+20_000,'LIVE_OBSERVED',json.dumps({'swing_price':101}) if j==180 else '{}')
                 events.append(event)
             for sym,px in [('TESTUSDT',100),('BTCUSDT',200)]:
                 rows.extend([(sym,'1m',*bar) for bar in fake_bars(0,221,price=px)])
@@ -101,6 +101,15 @@ class TestRetestQuality(unittest.TestCase):
                     rows.append((sym,'15m',ts,px,px+.5,px-.5,px+.1,20,1000,10,10,600))
             con.executemany('INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',rows)
             con.executemany('INSERT INTO meta VALUES (?,?)',[('cohort_sha256','ABC'),('event_count','2')]);con.commit();con.close()
+            pathdb=root/BASE/'auto_paths_v1.sqlite3'
+            ap=sqlite3.connect(pathdb)
+            ap.execute('CREATE TABLE events (event_key TEXT,entry_ts INT,state TEXT,count INT,path_blob BLOB)')
+            from reaction_lab_auto_paths import encode_path
+            sample=events[0]
+            future=[((181+i)*MIN,100,100.2,99.8,100.0 if i<4 else 101.1) for i in range(360)]
+            ap.execute('INSERT INTO events VALUES (?,?,?,?,?)',
+                       (sample[0],sample[3]+MIN,'COMPLETE',360,encode_path(future)))
+            ap.commit();ap.close()
             audit_obj={'success':True,'conflicts':0,'incomplete_windows_total':0,'events':2,'ready':2,'frozen_cohort_sha256':'ABC','aggregate':{'unverified_mismatches_total':0}}
             (folder/'audit.json').write_text(json.dumps(audit_obj))
             with (out/'events_coverage_features.csv').open('w',newline='') as h:
@@ -112,6 +121,12 @@ class TestRetestQuality(unittest.TestCase):
             r=build(root)
             self.assertEqual(r['events'],2)
             self.assertEqual(r['feature_quality'],{'COMPLETE':2})
+            with (root/BASE/'reaction_retest_quality_lab_v1'/'retest_quality_features.csv').open() as stream:
+                indexed={row['event_key']:row for row in csv.DictReader(stream)}
+            self.assertEqual(indexed[events[0][0]]['known_morphology'],'DEEP_BREAK_OUTSIDE')
+            self.assertEqual(indexed[events[0][0]]['post_morphology'],'POST_LATE_RECLAIM_3_TO_15M')
+            self.assertEqual(int(float(indexed[events[0][0]]['post_reclaim_minute_15m'])),5)
+            self.assertEqual(indexed[events[1][0]]['post_morphology'],'NOT_DEEP_BREAK')
             self.assertTrue(audit(root)['success'])
             # Confirm the ONLY sqlite is the original, unchanged dataset.
             from contextlib import closing

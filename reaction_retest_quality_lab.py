@@ -18,6 +18,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 from datetime import datetime, timezone
+from reaction_retest_morphology import MORPH_FIELDS, MORPH_NUMERIC, MORPH_LABELS, MORPH_VERSION, calculate_morphology
 
 BASE = Path('reports/reaction_lab')
 OUTPUT = 'reaction_retest_quality_lab_v1'
@@ -50,7 +51,7 @@ FEATURES = (
 )
 FIELDS = ('event_key','symbol','side','date_utc','retest_ts','known_ts','first_seen_ms',
  'observation_type','first_seen_delay_sec','path_quality','path_status',
- 'ret_test_ohlc_source','quality_feature_status',*FEATURES)
+ 'ret_test_ohlc_source','quality_feature_status',*FEATURES,*MORPH_FIELDS)
 BAR_FIELDS = 'open_ts,open,high,low,close,volume,quote_volume,trades,taker_buy_base,taker_buy_quote'
 
 
@@ -223,7 +224,7 @@ def calc_features(side,asset,btc,retest,causal,asset15=None,btc15=None):
     return out,'COMPLETE'
 
 
-def build_row(con,e,path_quality=None,path_status=None):
+def build_row(con,e,path_quality=None,path_status=None,post=None):
     key,sym,side,r,k,seen,obs,causal=e
     pre=rows_for(con,sym,'1m',r-180*MIN,r)
     btc=rows_for(con,'BTCUSDT','1m',r-180*MIN,r)
@@ -247,6 +248,13 @@ def build_row(con,e,path_quality=None,path_status=None):
       'ret_test_ohlc_source':'CLOSED_1M_AT_KNOWN' if len(retest)==1 else 'MISSING',
       'quality_feature_status':quality}
     row.update(f)
+    if quality=='COMPLETE':
+        rt = retest[0] if aligned(retest,r+MIN,1) else None
+        morph=calculate_morphology(side,pre,rt,f.get('known_swing_level'),post=post)
+    else:
+        morph={key:None for key in MORPH_FIELDS}
+        for name in MORPH_LABELS:morph[name]='MISSING_PRE'
+    row.update(morph)
     return row
 
 
@@ -267,8 +275,10 @@ def build(root):
     csvpath=root/BASE/'reaction_first_touch_lab_v1'/'events_coverage_features.csv'
     with csvpath.open(encoding='utf-8',newline='') as h:
         existing={x['event_key']:x for x in csv.DictReader(h)}
-    result=[];counter=Counter()
-    with closing(ro(root/BASE/'reaction_full_context_v1.sqlite3')) as con:
+    result=[];counter=Counter();morph_counts=Counter()
+    from reaction_lab_auto_paths import decode_path
+    pathdb=root/BASE/'auto_paths_v1.sqlite3'
+    with closing(ro(root/BASE/'reaction_full_context_v1.sqlite3')) as con, closing(ro(pathdb)) as paths:
         meta=dict(con.execute('SELECT key,value FROM meta'))
         if meta.get('cohort_sha256')!=a['frozen_cohort_sha256'] or int(meta.get('event_count',0))!=a['events']:
             raise RuntimeError('SHA/count from frozen full context SQLite inconsistent')
@@ -276,15 +286,23 @@ def build(root):
         for e in con.execute('''SELECT event_key,symbol,side,retest_ts,known_ts,first_seen_ms,
                 observation_type,causal_json FROM events ORDER BY retest_ts,event_key'''):
             stat=existing.get(e[0],{})
-            row=build_row(con,e,stat.get('path_quality'),stat.get('path_status'))
+            post=None
+            if stat.get('path_quality')=='COMPLETE_VALID':
+                saved=paths.execute('SELECT entry_ts,state,count,path_blob FROM events WHERE event_key=?',(e[0],)).fetchone()
+                if saved and saved[0]==e[3]+MIN and saved[1]=='COMPLETE' and saved[2]==360:
+                    decoded=decode_path(saved[3])
+                    if len(decoded)==360 and all(int(bar[0])==e[3]+(i+1)*MIN for i,bar in enumerate(decoded)):
+                        post=decoded[:15]
+            row=build_row(con,e,stat.get('path_quality'),stat.get('path_status'),post=post)
             result.append(row);counter[row['quality_feature_status']]+=1
+            for morph_name in MORPH_LABELS:morph_counts[morph_name+':'+str(row[morph_name])]+=1
     if len(result)!=a['events'] or len(existing)!=a['events'] or len({r['event_key'] for r in result})!=len(result):
         raise RuntimeError('All frozen events must be represented exactly once')
     out=root/BASE/OUTPUT;out.mkdir(parents=True,exist_ok=True)
     features_file=out/'retest_quality_features.csv'
     atomic_csv(features_file,FIELDS,result)
     meta={'version':VERSION,'events':len(result),'frozen_cohort_sha256':a['frozen_cohort_sha256'],
-      'feature_quality':dict(counter),'fields':list(FEATURES),
+      'feature_quality':dict(counter),'fields':list(FEATURES),'morphology_fields':list(MORPH_FIELDS),'morphology_version':MORPH_VERSION,'morphology_distribution':dict(morph_counts),
       'retest_features_available_at':'KNOWN_TS_NOT_PRE_RETEST',
       'outcome_source':'reaction_first_touch_lab_v1/first_touch_scenarios.csv',
       'all_7631_events_preserved':True,'input_first_touch_sha256':b['file_sha256'],
@@ -293,6 +311,8 @@ def build(root):
       'KNOWN fields can use the 1m retest candle only after its close',
       'POST chart uses only archived 360x1m Auto Paths; there is no archived future 15m candle guarantee',
       'LIVE_OBSERVED and RECOVERED_WINDOW never conflated for observed execution',
+      'POST late reclaim is future-derived RETROSPECTIVE labeling, forbidden for predictive entry',
+      'Morfologías definidas antes del análisis, NO validación fuera de muestra',
       'No causal or trading performance claim: descriptive historical analysis']}
     (out/'summary.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     return meta
@@ -304,11 +324,22 @@ def audit(root):
     meta=json.loads((folder/'summary.json').read_text(encoding='utf-8'))
     path=folder/'retest_quality_features.csv'
     with path.open(newline='',encoding='utf-8') as f:rows=list(csv.DictReader(f))
-    ok=(meta.get('features_sha256')==digest(path) and meta.get('frozen_cohort_sha256')==a['frozen_cohort_sha256']
+    morph_ok=(meta.get('morphology_version')==MORPH_VERSION and
+       all(all(k in x for k in MORPH_FIELDS) for x in rows) and
+       all(x.get('known_morphology')=='DEEP_BREAK_OUTSIDE'
+           for x in rows if x.get('post_morphology') in (
+             'POST_LATE_RECLAIM_3_TO_15M','POST_EARLY_RECLAIM_1_TO_2M','POST_NO_RECLAIM_15M')) and
+       all(x.get('path_quality')=='COMPLETE_VALID'
+           for x in rows if x.get('post_morphology') in (
+             'POST_LATE_RECLAIM_3_TO_15M','POST_EARLY_RECLAIM_1_TO_2M','POST_NO_RECLAIM_15M')) and
+       all(sum(1 for x in rows if x.get(stage)==label)==count
+           for name,count in meta.get('morphology_distribution',{}).items()
+           for stage,label in [name.split(':',1)]))
+    ok=(morph_ok and meta.get('features_sha256')==digest(path) and meta.get('frozen_cohort_sha256')==a['frozen_cohort_sha256']
        and meta.get('events')==a['events']==len(rows) and len({r['event_key'] for r in rows})==len(rows)
        and meta.get('feature_quality',{}).get('COMPLETE')==a['events'])
     return {'success':ok,'events':len(rows),'expected':a['events'],
-            'feature_quality':meta.get('feature_quality'),'frozen_sha256_matches':meta.get('frozen_cohort_sha256')==a['frozen_cohort_sha256'],
+            'feature_quality':meta.get('feature_quality'),'morphology_verified':morph_ok,'morphology_distribution':meta.get('morphology_distribution'),'frozen_sha256_matches':meta.get('frozen_cohort_sha256')==a['frozen_cohort_sha256'],
             'features_sha256_matches':meta.get('features_sha256')==digest(path)}
 
 
