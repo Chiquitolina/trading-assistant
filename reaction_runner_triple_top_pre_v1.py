@@ -18,15 +18,19 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-VERSION = 'runner-triple-pivot-pre-v1.0'
+VERSION = 'runner-triple-geometry-pre-v2.0'
 TF_MS = 15 * 60_000
 LOOKBACK = 170
 MIN_BARS = 80
 LEFT = RIGHT = 3
 MIN_GAP = 5        # minimum separation between tops/bottoms in 15m bars
-MAX_SPAN = 130     # maximum time between first and third swing
+MAX_SPAN = 85      # compact pattern, first to third 15m bars
+MAX_PAIR_GAP = 44  # no remote revisit after a long separate trend
 THIRD_RECENCY = 24 # third touch must be within six hours of REACTION
 MIN_TROUGH_ATR = .75
+MAX_TROUGH_ATR = 5.0  # exclude major intervening crashes/rallies
+NECKLINE_MATCH_ATR = 1.0
+MIN_DEPTH_RATIO = .5
 PROXIMITY_ATR = 1.0
 STATES = ('TRIPLE_TOP_CONFIRMED_PRE', 'TRIPLE_TOP_FORMING_PRE',
           'TRIPLE_BOTTOM_CONFIRMED_PRE','TRIPLE_BOTTOM_FORMING_PRE',
@@ -34,6 +38,8 @@ STATES = ('TRIPLE_TOP_CONFIRMED_PRE', 'TRIPLE_TOP_FORMING_PRE',
 COLUMNS = ('event_key','symbol','side','retest_ts','pattern_pre','reason',
            'top_bottom_1_ts','top_bottom_2_ts','top_bottom_3_ts',
            'level_price','level_tolerance','atr14','third_confirmation_ts',
+           'neckline_price','valley_1_ts','valley_2_ts','valley_1_depth_atr',
+           'valley_2_depth_atr','valley_price_diff_atr',
            'n_pre_bars','pre_last_close_ts')
 
 
@@ -51,7 +57,7 @@ def results_dir(root):
 
 
 def label_path(root):
-    return results_dir(root)/'triple_pivot_pre_v1'/'triple_pivot_labels_pre.csv'
+    return results_dir(root)/'triple_pivot_geometry_pre_v2'/'triple_pivot_labels_pre.csv'
 
 
 def _atomic_csv(path, frame):
@@ -82,6 +88,8 @@ def _unknown(row, state, reason, n=0, last=0):
         side=str(row['side']),retest_ts=int(row['retest_ts']),pattern_pre=state,
         reason=reason,top_bottom_1_ts='',top_bottom_2_ts='',top_bottom_3_ts='',
         level_price='',level_tolerance='',atr14='',third_confirmation_ts='',
+        neckline_price='',valley_1_ts='',valley_2_ts='',valley_1_depth_atr='',
+        valley_2_depth_atr='',valley_price_diff_atr='',
         n_pre_bars=int(n),pre_last_close_ts=int(last) if last else '')
 
 
@@ -96,46 +104,66 @@ def _extrema(frame, side):
     return out
 
 
-def _pullback_ok(df, first, second, side, atr):
-    # Trough/peak between touches must be substantial, not one top plateau.
-    if second-first<MIN_GAP:return False
-    between=df.iloc[first+1:second]
-    if between.empty:return False
-    if side=='SHORT':
-        depth=min(float(df.iloc[first].high),float(df.iloc[second].high))-float(between.low.min())
+def _swing_valley(df, first, second, side, atr, opposite):
+    """A *confirmed opposite swing* between two same-side peaks, PRE only."""
+    if second-first < MIN_GAP or second-first > MAX_PAIR_GAP:
+        return None
+    candidates=[i for i in opposite if first < i < second]
+    if not candidates:
+        return None
+    if side == 'SHORT':
+        idx=min(candidates,key=lambda i:float(df.iloc[i].low))
+        price=float(df.iloc[idx].low)
+        depth=min(float(df.iloc[first].high),float(df.iloc[second].high))-price
     else:
-        depth=float(between.high.max())-max(float(df.iloc[first].low),float(df.iloc[second].low))
-    return depth>=MIN_TROUGH_ATR*atr
+        idx=max(candidates,key=lambda i:float(df.iloc[i].high))
+        price=float(df.iloc[idx].high)
+        depth=price-max(float(df.iloc[first].low),float(df.iloc[second].low))
+    ratio=depth/atr
+    if ratio < MIN_TROUGH_ATR or ratio > MAX_TROUGH_ATR:
+        return None
+    return idx,price,ratio
 
 
 def _candidate(df, ids, side, atr, price, *, confirmed):
-    # Search most recent third touch first, ties favor tighter band.
+    """Three like-kind peaks + two similar, independently confirmed valleys.
+
+    This excludes 3 touches of a band connected by a major collapse and
+    eventual recovery, which are not the compact M/W pattern being studied.
+    """
     if len(ids)<3:return None
     close_ts=df.timestamp.to_numpy(np.int64)+TF_MS
-    piv=ids
     vals=df.high.to_numpy(float) if side=='SHORT' else df.low.to_numpy(float)
+    opposite=_extrema(df,'LONG' if side=='SHORT' else 'SHORT')
     best=None
+    piv=ids
     for third in reversed(piv):
         if len(df)-1-third>THIRD_RECENCY:continue
         for j in range(len(piv)-2,-1,-1):
             second=piv[j]
-            if second>=third or third-second<MIN_GAP:continue
+            if second>=third or third-second<MIN_GAP or third-second>MAX_PAIR_GAP:continue
             for k in range(j-1,-1,-1):
                 first=piv[k]
-                if second-first<MIN_GAP or third-first>MAX_SPAN:continue
+                if second-first<MIN_GAP or second-first>MAX_PAIR_GAP or third-first>MAX_SPAN:continue
                 center=float(np.median([vals[first],vals[second],vals[third]]))
                 tol=min(max(.35*atr,.0035*center),.01*center)
-                if max(abs(float(vals[v])-center) for v in (first,second,third))>tol:continue
+                spread=max(abs(float(vals[v])-center) for v in (first,second,third))
+                if spread>tol:continue
                 if abs(price-center)>max(PROXIMITY_ATR*atr,.006*center):continue
-                if not _pullback_ok(df,first,second,side,atr):continue
-                if not _pullback_ok(df,second,third,side,atr):continue
-                # End-of-window location is part of the PRE event definition.
-                cand=(third, -max(abs(float(vals[v])-center) for v in (first,second,third)),
-                      first,second,third,center,tol)
+                valley1=_swing_valley(df,first,second,side,atr,opposite)
+                valley2=_swing_valley(df,second,third,side,atr,opposite)
+                if valley1 is None or valley2 is None:continue
+                v1,p1,d1=valley1;v2,p2,d2=valley2
+                if abs(p1-p2)>NECKLINE_MATCH_ATR*atr:continue
+                if min(d1,d2)/max(d1,d2)<MIN_DEPTH_RATIO:continue
+                cand=(third,-spread,first,second,third,center,tol,
+                      v1,v2,float((p1+p2)/2),d1,d2,abs(p1-p2)/atr)
                 if best is None or cand[:2]>best[:2]:best=cand
     if best is None:return None
-    _,_,i,j,k,center,tol=best
+    (_,_,i,j,k,center,tol,v1,v2,neckline,d1,d2,neckline_delta)=best
     return {'pivots':(i,j,k),'center':center,'tol':tol,
+            'valleys':(v1,v2),'neckline':neckline,'valley_depths':(d1,d2),
+            'neckline_delta_atr':neckline_delta,
             'third_confirmation_ts':int(close_ts[k+RIGHT]) if confirmed else ''}
 
 
@@ -199,7 +227,14 @@ def classify_pre(row, candles):
     out=_unknown(row,status,'THREE_DISTINCT_TOUCHES_PRE' if match else 'NO_QUALIFIED_TRIPLE_PRE',n,last)
     if match:
         i,j,k=match['pivots']
-        out.update(top_bottom_1_ts=int(df.timestamp.iloc[i])+TF_MS,
+        v1,v2=match['valleys']
+        out.update(neckline_price=round(match['neckline'],12),
+                   valley_1_ts=int(df.timestamp.iloc[v1])+TF_MS,
+                   valley_2_ts=int(df.timestamp.iloc[v2])+TF_MS,
+                   valley_1_depth_atr=round(match['valley_depths'][0],4),
+                   valley_2_depth_atr=round(match['valley_depths'][1],4),
+                   valley_price_diff_atr=round(match['neckline_delta_atr'],4),
+                   top_bottom_1_ts=int(df.timestamp.iloc[i])+TF_MS,
                    top_bottom_2_ts=int(df.timestamp.iloc[j])+TF_MS,
                    top_bottom_3_ts=int(df.timestamp.iloc[k])+TF_MS,
                    third_confirmation_ts=match['third_confirmation_ts'],
@@ -209,6 +244,8 @@ def classify_pre(row, candles):
             raise ValueError('Noncausal pivot timestamp')
         if out['third_confirmation_ts'] and int(out['third_confirmation_ts'])>=event_ts:
             raise ValueError('Noncausal pivot confirmation')
+        if any(int(out[f'valley_{v}_ts'])>=event_ts for v in (1,2)):
+            raise ValueError('Noncausal valley timestamp')
     return out
 
 
@@ -267,8 +304,10 @@ def generate(root, max_events=0):
               'symbols':int(events.symbol.nunique()),'pilot_size':int(max_events),
               'counts':{s:int((labels.pattern_pre==s).sum()) for s in STATES},
               'parameters':dict(lookback=LOOKBACK,min_bars=MIN_BARS,swing_left=LEFT,
-                 swing_right=RIGHT,min_gap=MIN_GAP,max_span=MAX_SPAN,
+                 swing_right=RIGHT,min_gap=MIN_GAP,max_pair_gap=MAX_PAIR_GAP,max_span=MAX_SPAN,
                  third_recency=THIRD_RECENCY,min_pullback_atr=MIN_TROUGH_ATR,
+                 max_pullback_atr=MAX_TROUGH_ATR,neckline_match_atr=NECKLINE_MATCH_ATR,
+                 min_depth_ratio=MIN_DEPTH_RATIO,
                  near_reaction_atr=PROXIMITY_ATR),
               'no_outcomes_used':True,'strict_15m_close_before_event':True}
     _atomic_json(path.with_suffix('.json'),manifest)

@@ -180,113 +180,153 @@ def _signal_chart(project, event, *, mode, tp, horizon, show_sl=True):
 
 
 
-def _render_triple_runner_filter(project, pool, runner):
-    """PRE triple-top/bottom labels, calculated independently of runner outcomes.
-
-    Called within ADN del Runner, immediately before the existing runner table.
-    Other DNA stats/families and Runner Discovery classification stay unchanged.
-    """
+def _render_triple_runner_filter(project, working, pool, *, mode, tp, horizon):
+    """All REACTIONs first, runner outcomes only afterward: avoid winner selection."""
     import pandas as pd
     import streamlit as st
 
-    st.markdown("##### ⛰️ Triple techo / triple piso · estructura 15m PRE")
-    st.caption("En este estudio CONFIRMADO significa tercer swing 3×3 confirmado antes de la REACTION; "
-               "no exige ruptura de neckline. FORMACIÓN indica tercer rechazo observado, "
-               "sin confirmación 3×3 todavía.")
-    st.caption("Swings 3×3 con tres rechazos independientes antes de la REACTION. "
-               "El tercer intento puede estar confirmado o todavía en formación "
-               "con rechazo observado. Sin mirar los resultados del runner.")
+    st.markdown("##### ⛰️ Triple techo / triple piso · geometría 15m PRE")
+    st.caption("Busca pico–valle–pico–valle–pico (o su inverso), con DOS valles "
+               "confirmados, similares y de profundidad acotada. Excluye techos "
+               "separados por grandes desplomes o por una tendencia extensa. "
+               "Confirmado: tercer swing 3×3 conocido PRE. Formación: tercer rechazo "
+               "observado PRE sin tres velas de confirmación. No exige romper neckline.")
     try:
-        from reaction_runner_triple_top_pre_v1 import (
-            label_path, generate, verify_labels,
-        )
+        from reaction_runner_triple_top_pre_v1 import label_path, generate, verify_labels
     except ImportError as exc:
-        st.error(f"Falta el módulo de investigación triple PRE: {exc}")
-        return runner
-
+        st.error(f"Falta el detector de geometría PRE: {exc}")
+        return
     path=label_path(project)
     if not path.is_file():
-        st.info("Todavía no calculamos las etiquetas históricas. "
-                "Podés generarlas manualmente aquí o desde la terminal con "
-                "`python3 reaction_runner_triple_top_pre_v1.py --run`.")
-        if st.button("🔎 Detectar triples techos/pisos PRE",key="rdv2_triple_generate"):
-            with st.spinner("Calculando 15m históricos de todos los eventos (solo lectura)..."):
-                try:
-                    generate(project)
+        st.info('Esta versión usa etiquetas NUEVAS de geometría (V2); los 179 anteriores '
+                'no eran triples techos compactos verificados. Ejecutá '
+                '`python3 reaction_runner_triple_top_pre_v1.py --run` y `--audit`.')
+        if st.button('Detectar geometría PRE en TODAS las REACTIONs',key='rdv2_triple_generate_v2'):
+            with st.spinner('Clasificando todas las REACTIONs offline (sin usar outcomes)...'):
+                try:generate(project)
                 except Exception as exc:
-                    st.error(f"Falló la generación PRE: {exc}")
-                    return runner
+                    st.error(f'Clasificación PRE fallida: {exc}')
+                    return
             st.rerun()
-        return runner
+        return
 
     @st.cache_data(show_spinner=False,max_entries=2)
-    def _read_triple_validated(root, mtime, manifest_mtime):
+    def _read_triple_validated(root,mtime,manifest_mtime):
         return verify_labels(root)
     try:
         manifest_path=path.with_suffix('.json')
         triples=_read_triple_validated(str(project),path.stat().st_mtime_ns,
                                        manifest_path.stat().st_mtime_ns)
-        triples=triples[['event_key','pattern_pre','reason','top_bottom_1_ts',
-                         'top_bottom_2_ts','top_bottom_3_ts','level_price',
-                         'level_tolerance','third_confirmation_ts']]
-        enriched=pool.merge(triples,on='event_key',how='left',validate='one_to_one')
-        if enriched.pattern_pre.isna().any():
-            raise ValueError("Event IDs sin etiqueta triple PRE; ejecutar --run de nuevo")
+        fields=['event_key','pattern_pre','reason','top_bottom_1_ts',
+                'top_bottom_2_ts','top_bottom_3_ts','level_price','level_tolerance',
+                'third_confirmation_ts','neckline_price','valley_1_ts','valley_2_ts',
+                'valley_1_depth_atr','valley_2_depth_atr','valley_price_diff_atr']
+        base=working.merge(triples[fields],on='event_key',how='left',validate='one_to_one')
+        if base.pattern_pre.isna().any():
+            raise ValueError('Hay REACTIONs sin label PRE; regenerá la cohorte con --run')
+        # Runner classification is attached only after independent PRE tagging.
+        available=pool[['event_key','es_runner','dna_minuto','familia_adn']].copy()
+        if available.event_key.duplicated().any():
+            raise ValueError('Event IDs duplicados en evaluación runner')
+        base=base.merge(available,on='event_key',how='left',validate='one_to_one',
+                        suffixes=('','_runner'))
     except Exception as exc:
-        st.error(f"Etiquetas triple PRE inválidas o desactualizadas: {exc}")
-        st.caption("Actualizá las etiquetas desde terminal: "
-                   "`python3 reaction_runner_triple_top_pre_v1.py --run`.")
-        return runner
-
-    top=enriched.pattern_pre.isin(['TRIPLE_TOP_CONFIRMED_PRE','TRIPLE_TOP_FORMING_PRE'])
-    bottom=enriched.pattern_pre.isin(['TRIPLE_BOTTOM_CONFIRMED_PRE','TRIPLE_BOTTOM_FORMING_PRE'])
-    valid=enriched.pattern_pre.isin(['NO_PATTERN_PRE','TRIPLE_TOP_CONFIRMED_PRE',
-        'TRIPLE_TOP_FORMING_PRE','TRIPLE_BOTTOM_CONFIRMED_PRE','TRIPLE_BOTTOM_FORMING_PRE'])
-    short=enriched.side.eq('SHORT');long=enriched.side.eq('LONG')
-    hits=enriched.es_runner.astype(bool)
-    top_r=int((top&hits).sum()); bottom_r=int((bottom&hits).sum())
-    # Explicit relevant-side denominator, and unknowns never counted as negative.
-    short_run=int((valid&short&hits).sum());long_run=int((valid&long&hits).sum())
-    no_run_top=int((top&~hits).sum());no_run_short=int((valid&short&~hits).sum())
-    stats=st.columns(4,gap='small')
-    stats[0].metric('Runners SHORT · triple techo',top_r,
-                    help='Confirmado o tercer rechazo en formación, solo 15m PRE')
-    stats[1].metric('De runners SHORT con historial',
-                    f'{100*top_r/short_run:.1f}%' if short_run else '—',
-                    help=f'{top_r}/{short_run} SHORT evaluables con historial PRE')
-    stats[2].metric('Runners LONG · triple piso',bottom_r,
-                    help=f'{bottom_r}/{long_run} LONG evaluables')
-    stats[3].metric('SHORT sin run · triple techo',
-                    f'{100*no_run_top/no_run_short:.1f}%' if no_run_short else '—',
-                    help=f'{no_run_top}/{no_run_short} SHORT no-runners evaluables')
-    st.caption(f'Cobertura etiquetada para esta selección: {int(valid.sum())}/{len(enriched)} '
-               f'con histórico PRE evaluable; {len(enriched)-int(valid.sum())} sin clasificación. '
-               'Se cuentan eventos, no formaciones independientes. Es descriptivo, no validación.')
-
+        st.error(f'Etiquetas triples PRE inválidas: {exc}')
+        st.caption('Reejecutá `python3 reaction_runner_triple_top_pre_v1.py --run` '
+                   'y luego `--audit`; los labels anteriores V1 no se reutilizan.')
+        return
+    states_top=('TRIPLE_TOP_CONFIRMED_PRE','TRIPLE_TOP_FORMING_PRE')
+    states_bottom=('TRIPLE_BOTTOM_CONFIRMED_PRE','TRIPLE_BOTTOM_FORMING_PRE')
+    evaluable=('NO_PATTERN_PRE',)+states_top+states_bottom
+    valid=base.pattern_pre.isin(evaluable)
+    top=base.pattern_pre.isin(states_top)
+    bottom=base.pattern_pre.isin(states_bottom)
+    counted=base.es_runner.notna()
+    hits=base.es_runner.eq(True).fillna(False)
+    misses=base.es_runner.eq(False).fillna(False)
+    short=base.side.eq('SHORT');long=base.side.eq('LONG')
+    metrics=st.columns(4,gap='small')
+    metrics[0].metric('SHORT · triples en todas las REACTIONs',int(top.sum()),
+                      help='Incluye runner, no runner y sin outcome evaluable')
+    metrics[1].metric('SHORT · triples que fueron runners',int((top&hits).sum()),
+                      help=f'{int((top&hits).sum())}/{int((top&counted).sum())} evaluables con patrón')
+    metrics[2].metric('SHORT · triples que NO fueron runners',int((top&misses).sum()),
+                      help='Solo evaluaciones runner con cobertura; los faltantes no son pérdidas')
+    metrics[3].metric('LONG · triples pisos en todas las REACTIONs',int(bottom.sum()))
+    st.caption(f'{len(base)} REACTIONs en el universo seleccionado · '
+               f'{int(valid.sum())} con estructura PRE evaluable · '
+               f'{int((~valid).sum())} con histórico/valor desconocido · '
+               f'{int((~counted).sum())} sin desenlace runner evaluable. '
+               'Cada valor cuenta REACTIONs, no formaciones independientes.')
     options={
-        'Todos los runners': None,
-        'Triple techo SHORT · confirmado o formación':('TRIPLE_TOP_CONFIRMED_PRE','TRIPLE_TOP_FORMING_PRE'),
-        'Triple techo SHORT · confirmado':('TRIPLE_TOP_CONFIRMED_PRE',),
-        'Triple techo SHORT · tercer rechazo en formación':('TRIPLE_TOP_FORMING_PRE',),
-        'Triple piso LONG · confirmado o formación':('TRIPLE_BOTTOM_CONFIRMED_PRE','TRIPLE_BOTTOM_FORMING_PRE'),
-        'Triple piso LONG · confirmado':('TRIPLE_BOTTOM_CONFIRMED_PRE',),
-        'Triple piso LONG · tercer rechazo en formación':('TRIPLE_BOTTOM_FORMING_PRE',),
-        'Sin triple techo / piso PRE':('NO_PATTERN_PRE',),
-        'Histórico PRE desconocido':('UNKNOWN_HISTORY','UNKNOWN_PRICE'),
+        'Triple techo SHORT · confirmado o formación':states_top,
+        'Triple techo SHORT · confirmado':(states_top[0],),
+        'Triple techo SHORT · en formación':(states_top[1],),
+        'Triple piso LONG · confirmado o formación':states_bottom,
+        'Triple piso LONG · confirmado':(states_bottom[0],),
+        'Triple piso LONG · en formación':(states_bottom[1],),
+        'Todos los triples (ambas direcciones)':states_top+states_bottom,
+        'Sin patrón geométrico PRE':('NO_PATTERN_PRE',),
+        'Sin histórico/valor PRE suficiente':('UNKNOWN_HISTORY','UNKNOWN_PRICE'),
+        'Todas las REACTIONs':None,
     }
-    choice=st.selectbox('Filtrar runners por estructura 15m',list(options),
-                         key='rdv2_triple_pattern_filter')
-    runners=enriched.loc[enriched.es_runner.astype(bool)].copy()
-    if options[choice] is not None:
-        runners=runners[runners.pattern_pre.isin(options[choice])].copy()
-    st.caption(f'**{len(runners)} de {int(hits.sum())} runners** en el filtro de estructura elegido. '
-               'La clasificación runner (+2/+3/+5%, horizonte y origen) es la misma de arriba.')
-    with st.expander('Descargar runners del patrón seleccionado',expanded=False):
-        st.download_button('CSV · runners filtrados + evidencia PRE',
-            runners.to_csv(index=False).encode('utf-8-sig'),
-            file_name='runners_triple_pivot_pre_filtrados.csv',
-            mime='text/csv',key='rdv2_triple_export')
-    return runners
+    choice=st.selectbox('Filtrar TODAS las REACTIONs por geometría 15m',list(options),
+                        key='rdv2_triple_pattern_filter_v2')
+    filtered=base if options[choice] is None else base.loc[base.pattern_pre.isin(options[choice])]
+    outcome_choice=st.selectbox('Desenlace del runner en el horizonte seleccionado',
+        ['Todos (incluye sin cobertura)','Llegó al objetivo · RUNNER',
+         'No llegó al objetivo · NO RUNNER','Sin evaluación'],
+        key='rdv2_triple_outcome_filter_v2')
+    if outcome_choice.startswith('Llegó'):
+        filtered=filtered.loc[filtered.es_runner.eq(True)]
+    elif outcome_choice.startswith('No llegó'):
+        filtered=filtered.loc[filtered.es_runner.eq(False)]
+    elif outcome_choice=='Sin evaluación':
+        filtered=filtered.loc[filtered.es_runner.isna()]
+    filtered=filtered.sort_values('retest_ts',ascending=False).copy()
+    st.markdown(f'**{len(filtered)} REACTIONs** coinciden con los filtros. '
+                f'Entre ellas, **{int(filtered.es_runner.eq(True).sum())} runners**, '
+                f'**{int(filtered.es_runner.eq(False).sum())} no-runners** y '
+                f'**{int(filtered.es_runner.isna().sum())} sin evaluación** '
+                f'(objetivo +{tp}%, ventana {horizon}m).')
+    if filtered.empty:
+        st.info('Sin eventos para esta combinación de filtros.')
+        return
+    overview=filtered.head(250).copy()
+    overview['UTC']=pd.to_datetime(overview.retest_ts,unit='ms',utc=True).dt.strftime('%d/%m %H:%M')
+    overview['Desenlace']=overview.es_runner.map({True:'RUNNER',False:'NO RUNNER'}).fillna('SIN COBERTURA')
+    st.dataframe(overview[['UTC','symbol','side','pattern_pre','Desenlace','event_key']].rename(
+        columns={'symbol':'Símbolo','side':'Dirección','pattern_pre':'Geometría',
+                 'event_key':'Event ID'}),use_container_width=True,hide_index=True,height=290)
+    keys=filtered.event_key.astype(str).head(250).tolist()
+    selected=st.selectbox('Inspeccionar REACTION y desenlace',keys,
+                          key='rdv2_triple_inspect_all_v2')
+    event=filtered.loc[filtered.event_key.astype(str).eq(selected)].iloc[0]
+    is_runner=event.get('es_runner')
+    status='SIN COBERTURA' if pd.isna(is_runner) else ('RUNNER' if bool(is_runner) else 'NO RUNNER')
+    st.markdown(f"**{event['symbol']} · {event['side']} · {status}**  "
+                f"· +{tp}% en {horizon}m · {event['pattern_pre']}")
+    st.caption('Arriba: patrón PRE con picos 1/2/3 y valles A/B. '
+               'Debajo: trayectoria 1m posterior y barreras TP/SL de referencia. '
+               'MFE posterior y desenlace NO intervienen en la detección del patrón.')
+    _triple_15m_chart(project,event)
+    if not pd.isna(is_runner):
+        state=_classify(pd.DataFrame([event]),mode=mode,tp=tp,horizon=horizon).iloc[0]
+        label={'TP_FIRST':'TP antes de SL','SL_FIRST':'SL antes de TP',
+               'NO_HIT':'Ni TP ni SL','AMBIGUOUS':'TP y SL en la misma vela',
+               'INSUFFICIENT':'Cobertura insuficiente'}.get(str(state),str(state))
+        st.markdown(f'**Desenlace teórico TP +{tp}% / SL −1%:** {label}. '
+                    'Runner es MFE favorable, independiente del orden TP/SL.')
+    else:
+        st.warning('Sin cobertura runner: no contamos este evento como fallido.')
+    _signal_chart(project,event,mode=mode,tp=tp,horizon=horizon,show_sl=True)
+    with st.expander('Exportar todas las REACTIONs de esta selección',expanded=False):
+        st.download_button('CSV · geometría PRE + desenlace de cada REACTION',
+            filtered.to_csv(index=False).encode('utf-8-sig'),
+            file_name='reactions_triple_geometria_pre_v2.csv',mime='text/csv',
+            key='rdv2_triple_export_all_v2')
+    st.caption('Exploración retrospectiva, no validación prospectiva. '
+               'El 15m PRE y el gráfico POST mantienen sus ventanas temporales separadas.')
 
 
 def _read_triple_pre_candles(project, symbol, event_ts, max_bars=170):
@@ -391,6 +431,41 @@ def _triple_15m_chart(project, event):
                              line=dict(color='#17202b',width=1)),
                  name=f'{name} toque',
                  hovertemplate=f'Toque {i}: %{{x}}<br>Precio %{{y:.8f}}<extra></extra>'))
+        # The two *confirmed* opposite-side swing valleys complete M/W geometry.
+        valley_points=[]
+        inverse='low' if event['side']=='SHORT' else 'high'
+        for vid,letter in enumerate(('A','B'),1):
+            vts=event.get(f'valley_{vid}_ts')
+            if pd.isna(vts) or str(vts).strip() in ('','nan'):
+                continue
+            vopen=int(float(vts))-900_000
+            val=bars.loc[pd.to_numeric(bars.timestamp,errors='coerce').eq(vopen),inverse]
+            if val.empty:
+                st.warning(f'Valle {letter} no disponible en la ventana de gráfico')
+                continue
+            y=float(val.iloc[0])
+            valley_points.append((vopen,y))
+            f.add_trace(go.Scatter(x=[pd.to_datetime(vopen,unit='ms',utc=True)],y=[y],
+                mode='markers+text',text=[letter],textposition='bottom center',
+                marker=dict(size=12,color='#65bfff',symbol='circle'),
+                name=f'Valle {letter}',hovertemplate=f'Valle {letter}: %{{x}}<br>%{{y:.8f}}<extra></extra>'))
+        if len(peak_positions)==3 and len(valley_points)==2:
+            highs=[]
+            for vts in peak_positions:
+                hi=bars.loc[pd.to_numeric(bars.timestamp,errors='coerce').eq(vts),target]
+                if not hi.empty:highs.append(float(hi.iloc[0]))
+            if len(highs)==3:
+                zig=[(peak_positions[0],highs[0]),valley_points[0],
+                     (peak_positions[1],highs[1]),valley_points[1],
+                     (peak_positions[2],highs[2])]
+                f.add_trace(go.Scatter(x=pd.to_datetime([x for x,y in zig],unit='ms',utc=True),
+                    y=[y for x,y in zig],mode='lines',
+                    line=dict(color='#65bfff',width=2,dash='dot'),
+                    name='Geometría M/W'))
+            neckline=event.get('neckline_price')
+            if pd.notna(neckline) and str(neckline).strip() not in ('','nan'):
+                f.add_hline(y=float(neckline),line_dash='dot',line_color='#65bfff',
+                            annotation_text='Neckline PRE',annotation_position='bottom right')
         if peak_positions:
             zoom=st.checkbox('Acercar al patrón (los tres toques)',value=True,
                              key='rdv2_triple_zoom')
@@ -413,7 +488,7 @@ def _triple_15m_chart(project, event):
     st.plotly_chart(_chart_style(f,height=470),use_container_width=True,
                     config={'displaylogo':False,'scrollZoom':True})
     st.caption('Gráfico superior: únicamente velas 15m cerradas PRE. '
-               'Los diamantes 1/2/3 marcan máximos o mínimos históricos. '
+               'Los diamantes 1/2/3 son picos; A/B son valles confirmados y la línea azul muestra la M/W. '
                'Gráfico inferior: recorrido 1m POST de la REACTION; no muestra el triple.')
 
 def _render_runner_dna(project, working, *, mode, tp, horizon):
@@ -452,7 +527,9 @@ def _render_runner_dna(project, working, *, mode, tp, horizon):
     for cell,(name,value,note) in zip(cells,cards):
         cell.markdown(_metric(name,value,note),unsafe_allow_html=True)
     if not nr:
-        st.info("Ninguna señal alcanzó este objetivo durante la ventana seleccionada.")
+        st.info("Ninguna señal alcanzó este objetivo; todavía podés explorar "
+                "los triples PRE de TODAS las REACTIONs.")
+        _render_triple_runner_filter(project,working,pool,mode=mode,tp=tp,horizon=horizon)
         return
 
     traits = compare_traits(pool)
@@ -516,7 +593,7 @@ def _render_runner_dna(project, working, *, mode, tp, horizon):
                 st.dataframe(out,hide_index=True,use_container_width=True,height=280)
 
     st.markdown("#### Explorar runners concretos")
-    runner=_render_triple_runner_filter(project,pool,runner)
+    _render_triple_runner_filter(project,working,pool,mode=mode,tp=tp,horizon=horizon)
     a,b=st.columns([1.5,1],gap="small")
     family_options=["Todas las familias"]+[f for f in FAMILY_ORDER if (runner["familia_adn"]==f).any()]
     family=a.selectbox("Familia",family_options,key="rdv2_dna_family")
