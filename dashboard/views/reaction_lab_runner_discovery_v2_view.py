@@ -289,8 +289,52 @@ def _render_triple_runner_filter(project, pool, runner):
     return runners
 
 
+def _read_triple_pre_candles(project, symbol, event_ts, max_bars=170):
+    """Load archived 15m history directly, with no optional gallery dependency.
+
+    The same Full Context / HTF cache and aggregation are used by the causal
+    triple-pivot labeler. Every returned candle must have CLOSED before the
+    REACTION timestamp, so the inspector cannot accidentally draw future bars.
+    """
+    from contextlib import closing
+    import pandas as pd
+    import reaction_structural_level_atlas as atlas
+    from reaction_compression_breakout_retest_v4 import _merge_tf
+
+    project = Path(project)
+    base = project / atlas.lineage.ROOT_REL
+    ctx_path = base / atlas.lineage.CTX_NAME
+    hist_path = base / atlas.lineage.HISTORY_NAME
+    if not ctx_path.is_file():
+        raise FileNotFoundError(f"No existe el SQLite Full Context: {ctx_path}")
+    history = atlas.lineage.ro(hist_path) if hist_path.is_file() else None
+    try:
+        with closing(atlas.lineage.ro(ctx_path)) as ctx:
+            df15, _, _ = _merge_tf(ctx, history, str(symbol))
+    finally:
+        if history is not None:
+            history.close()
+
+    if df15 is None or df15.empty:
+        return pd.DataFrame(columns=['timestamp','open','high','low','close'])
+    bars = df15.reset_index()
+    needed = {'timestamp','open','high','low','close'}
+    if not needed.issubset(bars.columns):
+        raise ValueError(f"Histórico 15m sin columnas: {sorted(needed-set(bars.columns))}")
+    ts = pd.to_numeric(bars['timestamp'], errors='coerce')
+    # Strict inequality is identical to classify_pre() in the frozen detector.
+    bars = bars.loc[ts.notna() & ((ts + 900_000) < int(event_ts))].copy()
+    bars = bars.sort_values('timestamp', kind='stable').tail(int(max_bars)).reset_index(drop=True)
+    if not bars.empty:
+        if (pd.to_numeric(bars.timestamp, errors='raise')+900_000 >= int(event_ts)).any():
+            raise ValueError('Inspector PRE intentó incluir una vela futura')
+        if bars.timestamp.duplicated().any():
+            raise ValueError('Inspector PRE recibió timestamps 15m duplicados')
+    return bars
+
+
 def _triple_15m_chart(project, event):
-    """Historical inspector from existing local HTF cache; strictly PRE."""
+    """Display the three PRE contacts and common price band above the POST chart."""
     import pandas as pd
     import plotly.graph_objects as go
     import streamlit as st
@@ -299,22 +343,24 @@ def _triple_15m_chart(project, event):
                        value=True,key='rdv2_triple_show15m'):
         return
     try:
-        from dashboard.views.reaction_recovered_support_gallery_view import read_ohlc_pre
-        ctx=project/'reports/reaction_lab/reaction_full_context_v1.sqlite3'
-        cache=project/'reports/reaction_lab/reaction_full_context_history_v1.sqlite3'
+        # The cache key changes when either Full Context SQLite changes.
+        import reaction_structural_level_atlas as atlas
+        base=project/atlas.lineage.ROOT_REL
+        ctx=base/atlas.lineage.CTX_NAME
+        history=base/atlas.lineage.HISTORY_NAME
         times=(ctx.stat().st_mtime_ns if ctx.is_file() else 0,
-               cache.stat().st_mtime_ns if cache.is_file() else 0)
+               history.stat().st_mtime_ns if history.is_file() else 0)
 
         @st.cache_data(show_spinner=False,max_entries=12)
         def _cached_pre(root,symbol,ts,mtimes):
-            return read_ohlc_pre(root,symbol,'15m',ts,max_bars=170)
+            return _read_triple_pre_candles(root,symbol,ts,max_bars=170)
 
         bars=_cached_pre(str(project),str(event['symbol']),int(event['retest_ts']),times)
     except Exception as exc:
         st.warning(f'Histórico PRE 15m no disponible para este gráfico: {exc}')
         return
     if bars.empty:
-        st.info('No hay velas 15m PRE suficientes para visualizar.')
+        st.info('No hay velas 15m PRE para visualizar este evento.')
         return
     t=pd.to_datetime(bars.timestamp,unit='ms',utc=True)
     f=go.Figure(go.Candlestick(x=t,open=bars.open,high=bars.high,
@@ -324,26 +370,51 @@ def _triple_15m_chart(project, event):
     state=str(event.get('pattern_pre',''))
     if state.startswith('TRIPLE_'):
         level=float(event['level_price']);tol=float(event['level_tolerance'])
-        f.add_hrect(y0=level-tol,y1=level+tol,fillcolor='#e6ad56',opacity=.10,line_width=0)
+        f.add_hrect(y0=level-tol,y1=level+tol,fillcolor='#e6ad56',opacity=.14,line_width=0)
+        f.add_hline(y=level,line_color='#f3b950',line_dash='dash',line_width=1.4,
+                    annotation_text='Nivel triple',annotation_position='top left')
+        peak_positions=[]
         for i,name in enumerate(('Primero','Segundo','Tercero'),1):
             val=event.get(f'top_bottom_{i}_ts')
             if pd.isna(val) or str(val).strip() in ('','nan'):continue
-            stamp=pd.to_datetime(int(float(val)),unit='ms',utc=True)
-            # At candle CLOSE, corresponding candle is opened 15m earlier.
-            value=(bars.loc[bars.timestamp.eq(int(float(val))-900_000),'high' if event['side']=='SHORT' else 'low'])
-            if value.empty:continue
-            f.add_trace(go.Scatter(x=[stamp-pd.Timedelta(minutes=15)],y=[float(value.iloc[0])],
+            peak_close=int(float(val));peak_open=peak_close-900_000
+            target='high' if event['side']=='SHORT' else 'low'
+            price=bars.loc[pd.to_numeric(bars.timestamp,errors='coerce').eq(peak_open),target]
+            if price.empty:
+                st.warning(f'Toque PRE #{i} no presente en el histórico local; revisá la cobertura.')
+                continue
+            x=pd.to_datetime(peak_open,unit='ms',utc=True)
+            peak_positions.append(peak_open)
+            f.add_trace(go.Scatter(x=[x],y=[float(price.iloc[0])],
                  mode='markers+text',text=[str(i)],textposition='top center',
-                 marker=dict(size=11,color='#f7bf5f',symbol='diamond'),
-                 name=f'{name} toque'))
+                 marker=dict(size=13,color='#ffca68',symbol='diamond',
+                             line=dict(color='#17202b',width=1)),
+                 name=f'{name} toque',
+                 hovertemplate=f'Toque {i}: %{{x}}<br>Precio %{{y:.8f}}<extra></extra>'))
+        if peak_positions:
+            zoom=st.checkbox('Acercar al patrón (los tres toques)',value=True,
+                             key='rdv2_triple_zoom')
+            if zoom:
+                xmin=max(int(bars.timestamp.min()), min(peak_positions)-8*900_000)
+                xmax=int(event['retest_ts'])
+                f.update_xaxes(range=[pd.to_datetime(xmin,unit='ms',utc=True),
+                                     pd.to_datetime(xmax,unit='ms',utc=True)])
+        st.caption(f"**Patrón PRE:** {state} · Nivel {level:.8g} "
+                   f"(tolerancia ±{tol:.6g}) · "
+                   f"{len(peak_positions)}/3 toques visibles. "
+                   "CONFIRMED = tercer swing 3×3 confirmado; "
+                   "FORMING = tercer rechazo aún sin confirmación 3×3. "
+                   "No exige ruptura de neckline.")
+    else:
+        st.caption(f'Clasificación PRE: {state}; este evento no tiene triple techo/piso etiquetado.')
     f.update_layout(height=470,xaxis_rangeslider_visible=False,
-        title=f"{event['symbol']} · {state or 'sin etiqueta'} · 170×15m PRE",
+        title=f"{event['symbol']} · {state or 'sin etiqueta'} · 15m PRE",
         margin=dict(l=6,r=8,t=45,b=8),legend=dict(orientation='h',y=-.13))
     st.plotly_chart(_chart_style(f,height=470),use_container_width=True,
                     config={'displaylogo':False,'scrollZoom':True})
-    st.caption('Solamente velas cerradas antes del timestamp de REACTION. '
-               'Los 3 diamantes son los toques PRE; la franja naranja es la tolerancia. '
-               'No se muestran velas POST en esta figura.')
+    st.caption('Gráfico superior: únicamente velas 15m cerradas PRE. '
+               'Los diamantes 1/2/3 marcan máximos o mínimos históricos. '
+               'Gráfico inferior: recorrido 1m POST de la REACTION; no muestra el triple.')
 
 def _render_runner_dna(project, working, *, mode, tp, horizon):
     """Simple descriptive DNA: hit target regardless of any SL or fill."""
