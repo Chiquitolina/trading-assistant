@@ -14,8 +14,9 @@ import numpy as np
 DEPTH_LEVELS = (0.5, 1.0, 1.5, 2.0, 3.0)
 MODES = ("DEPTH_NEXT_OPEN", "RECOVER_50", "RECLAIM_PIVOT")
 HORIZONS = (60, 180, 360)
-TP_LEVELS = (1.0, 2.0)
-SL_PCT = 1.0
+TP_LEVELS = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
+SL_LEVELS = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0)
+SL_PCT = 1.0  # Backward-compatible baseline of the original V1 engine
 SCAN_MINUTES = 360
 
 
@@ -69,6 +70,77 @@ def _execution_result(ts, highs, lows, closes, segment_end, start, side, entry, 
     if end < start + horizon - 1:
         return "CENSORED", end - start + 1
     return "NO_HIT", horizon
+
+
+def _first_barrier_hits(highs, lows, segment_end, start, side, entry):
+    """Compact, causal TP/SL first-hit timings after an executable next OPEN.
+
+    Collects all thresholds in one pass over up to 360 contiguous 1m candles.
+    A negative/missing hit index means the barrier was not observed; it does
+    NOT imply a complete no-hit path. That distinction uses observed_bars.
+    Indices are zero-based from the entry candle (both orders can hit at zero).
+    """
+    tp_hits = {f"{tp:.1f}": None for tp in TP_LEVELS}
+    sl_hits = {f"{sl:.1f}": None for sl in SL_LEVELS}
+    if side not in ("LONG", "SHORT") or not math.isfinite(entry) or entry <= 0:
+        return {"tp": tp_hits, "sl": sl_hits, "observed_bars": 0}
+    end = min(int(segment_end[start]), len(highs) - 1, start + max(HORIZONS) - 1)
+    tp_prices = {key: (entry * (1 + float(key) / 100.0) if side == "LONG" else entry * (1 - float(key) / 100.0)) for key in tp_hits}
+    sl_prices = {key: (entry * (1 - float(key) / 100.0) if side == "LONG" else entry * (1 + float(key) / 100.0)) for key in sl_hits}
+    for i in range(start, end + 1):
+        hi, lo = float(highs[i]), float(lows[i])
+        for key, price in tp_prices.items():
+            if tp_hits[key] is None and ((hi >= price) if side == "LONG" else (lo <= price)):
+                tp_hits[key] = i - start
+        for key, price in sl_prices.items():
+            if sl_hits[key] is None and ((lo <= price) if side == "LONG" else (hi >= price)):
+                sl_hits[key] = i - start
+        if all(hit is not None for hit in tp_hits.values()) and all(hit is not None for hit in sl_hits.values()):
+            break
+    return {"tp": tp_hits, "sl": sl_hits, "observed_bars": end - start + 1}
+
+
+def _outcome_from_first_hits(first_hits, tp, sl, horizon):
+    """Order-aware resolution; ties inside one 1m bar are SL_AMBIGUOUS."""
+    max_bars = int(first_hits.get("observed_bars", 0))
+    tp_i = (first_hits.get("tp") or {}).get(f"{float(tp):.1f}")
+    sl_i = (first_hits.get("sl") or {}).get(f"{float(sl):.1f}")
+    tp_i = tp_i if tp_i is not None and tp_i < horizon else None
+    sl_i = sl_i if sl_i is not None and sl_i < horizon else None
+    if tp_i is not None and sl_i is not None:
+        if tp_i == sl_i:
+            return "SL_AMBIGUOUS", tp_i + 1
+        if tp_i < sl_i:
+            return "TP_FIRST", tp_i + 1
+        return "SL_FIRST", sl_i + 1
+    if tp_i is not None:
+        return "TP_FIRST", tp_i + 1
+    if sl_i is not None:
+        return "SL_FIRST", sl_i + 1
+    return ("NO_HIT", horizon) if max_bars >= horizon else ("CENSORED", max_bars)
+
+
+def _get_entry_outcome(detail, tp, sl, horizon):
+    """Returns a status without treating missing historical data as NO_TRIGGER."""
+    if not detail:
+        return "DATA_UNAVAILABLE", 0
+    if detail.get("entry_ts") is None:
+        outcome = detail.get("entry_failure_status")
+        if not outcome:
+            baseline = (detail.get("outcomes") or {}).get(f"tp1_sl1_{int(horizon)}m") or {}
+            outcome = baseline.get("status")
+        if outcome in ("NO_TRIGGER", "TRIGGER_CENSORED", "ENTRY_CENSORED"):
+            return outcome, 0
+        return "DATA_UNAVAILABLE", 0
+    hits = detail.get("barrier_first_hits")
+    if hits:
+        return _outcome_from_first_hits(hits, tp, sl, horizon)
+    # Migration safety for an old in-memory V1 grid (rare after Streamlit rerun).
+    if float(sl) == SL_PCT and float(tp) in (1.0, 2.0):
+        old = (detail.get("outcomes") or {}).get(f"tp{float(tp):.0f}_sl1_{int(horizon)}m") or {}
+        if old.get("status"):
+            return old["status"], int(old.get("observed_bars", 0))
+    return "DATA_UNAVAILABLE", 0
 
 
 def _is_depth(side, pivot, hi, lo, threshold):
@@ -188,6 +260,8 @@ def attach_fail_touch_metrics(row, forward_cache):
                 "entry_price": float(opens[entry_i]) if entry_i is not None else None,
                 "entry_delay_min": ((int(ts[entry_i]) - touch_ts) / 60000) if entry_i is not None else None,
                 "outcomes": {},
+                "barrier_first_hits": _first_barrier_hits(highs, lows, seg_end, entry_i, side, float(opens[entry_i])) if entry_i is not None else None,
+                "entry_failure_status": None,
             }
             for horizon in HORIZONS:
                 for tp in TP_LEVELS:
@@ -200,30 +274,41 @@ def attach_fail_touch_metrics(row, forward_cache):
                             label = "NO_TRIGGER"
                         bars = 0
                     else:
-                        label, bars = _execution_result(ts, highs, lows, closes, seg_end, entry_i, side, float(opens[entry_i]), tp, horizon)
-                    record["outcomes"][f"tp{tp:.0f}_sl1_{horizon}m"] = {"status": label, "observed_bars": bars}
+                        label, bars = _outcome_from_first_hits(record["barrier_first_hits"], tp, SL_PCT, horizon)
+                    if entry_i is None:
+                        record["entry_failure_status"] = label
+                    # Preserve original V1 keys for consumers using TP1/TP2, SL1.
+                    if tp in (1.0, 2.0):
+                        record["outcomes"][f"tp{tp:.0f}_sl1_{horizon}m"] = {"status": label, "observed_bars": bars}
             row["ftr_grid"][key] = record
     return row
 
 
-def summarize_failure_entries(rows, depth, mode, tp, horizon):
-    """Summary includes NO_ENTRY and CENSORED denominators."""
+def summarize_failure_entries(rows, depth, mode, tp, horizon, sl=1.0):
+    """Independent TP/SL threshold comparison for a fixed causal entry rule."""
     key = f"{float(depth):.1f}|{mode}"
-    label = f"tp{int(tp)}_sl1_{int(horizon)}m"
-    counters = {s: 0 for s in ("TP_FIRST", "SL_FIRST", "SL_AMBIGUOUS", "NO_HIT", "CENSORED", "NO_TRIGGER", "TRIGGER_CENSORED", "ENTRY_CENSORED")}
+    counters = {s: 0 for s in (
+        "TP_FIRST", "SL_FIRST", "SL_AMBIGUOUS", "NO_HIT", "CENSORED",
+        "NO_TRIGGER", "TRIGGER_CENSORED", "ENTRY_CENSORED", "DATA_UNAVAILABLE"
+    )}
     for row in rows:
-        grid = row.get("ftr_grid") or {}
-        detail = grid.get(key) or {}
-        outcome = (detail.get("outcomes") or {}).get(label) or {}
-        counters[outcome.get("status", "ENTRY_CENSORED")] += 1
+        detail = (row.get("ftr_grid") or {}).get(key)
+        label, _ = _get_entry_outcome(detail, tp, sl, int(horizon))
+        counters[label] += 1
     total = sum(counters.values())
     resolved = counters["TP_FIRST"] + counters["SL_FIRST"] + counters["SL_AMBIGUOUS"]
+    losers = counters["SL_FIRST"] + counters["SL_AMBIGUOUS"]
+    entries = total - counters["NO_TRIGGER"] - counters["TRIGGER_CENSORED"] - counters["ENTRY_CENSORED"] - counters["DATA_UNAVAILABLE"]
+    gross_resolved = (counters["TP_FIRST"] * float(tp) - losers * float(sl)) / resolved if resolved else float("nan")
     return {
         "N failed": total,
         "Depth %": depth,
         "Entry": mode,
         "TP %": tp,
+        "SL %": sl,
         "Horizon min": horizon,
+        "N entries": entries,
+        "N resolved": resolved,
         "TP first": counters["TP_FIRST"],
         "SL first": counters["SL_FIRST"],
         "Same bar TP+SL → SL": counters["SL_AMBIGUOUS"],
@@ -232,10 +317,39 @@ def summarize_failure_entries(rows, depth, mode, tp, horizon):
         "No trigger (complete 360m)": counters["NO_TRIGGER"],
         "Trigger censored": counters["TRIGGER_CENSORED"],
         "Entry censored": counters["ENTRY_CENSORED"],
+        "Data unavailable": counters["DATA_UNAVAILABLE"],
         "No entry total": counters["NO_TRIGGER"] + counters["TRIGGER_CENSORED"] + counters["ENTRY_CENSORED"],
         "TP / resolved %": round(100.0 * counters["TP_FIRST"] / resolved, 2) if resolved else float("nan"),
+        "TP / entries %": round(100.0 * counters["TP_FIRST"] / entries, 2) if entries else float("nan"),
         "TP / all fails %": round(100.0 * counters["TP_FIRST"] / total, 2) if total else float("nan"),
+        "Gross avg per resolved % (no fees)": round(gross_resolved, 3) if resolved else float("nan"),
     }
+
+
+def build_tp_sl_matrix(rows, depth, mode, horizon):
+    """Three companion 8x6 grids, same active depth/mode/horizon and universe.
+
+    Matrices include TP-first share among resolved, gross resolved-only average
+    gain in price %, and resolution N. No-hit, censored and no-entry cases
+    remain visible in the separate coverage table.
+    """
+    rate, expectancy, counts, coverage = [], [], [], []
+    for tp in TP_LEVELS:
+        r = {"TP (%)": tp}
+        e = {"TP (%)": tp}
+        n = {"TP (%)": tp}
+        for sl in SL_LEVELS:
+            cell = summarize_failure_entries(rows, depth, mode, tp, horizon, sl=sl)
+            col = f"SL {sl:g}%"
+            r[col] = cell["TP / resolved %"]
+            e[col] = cell["Gross avg per resolved % (no fees)"]
+            n[col] = cell["N resolved"]
+            coverage.append(cell)
+        rate.append(r)
+        expectancy.append(e)
+        counts.append(n)
+    return {"tp_first_pct": rate, "gross_resolved_pct": expectancy,
+            "n_resolved": counts, "coverage": coverage}
 
 
 
@@ -331,11 +445,12 @@ def render_legacy_fail_touch_analyzer(view, chart_provider=None):
     side = st.selectbox("Dirección · Fail Touch", ["ALL", "LONG", "SHORT"], key="legacy_ftr_side")
     if side != "ALL":
         failures = failures.loc[failures["signal"].eq(side)].copy()
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     depth = col1.selectbox("Perforación mínima (%)", DEPTH_LEVELS, index=2, key="legacy_ftr_depth")
-    mode = col2.selectbox("Entrada hipotética", MODES, index=1, key="legacy_ftr_mode")
-    tp = col3.selectbox("TP (%)", TP_LEVELS, index=1, key="legacy_ftr_tp")
-    horizon = col4.selectbox("Horizonte (min)", HORIZONS, index=1, key="legacy_ftr_horizon")
+    mode = col2.selectbox("Entrada hipotética", MODES, index=0, key="legacy_ftr_mode")
+    tp = col3.selectbox("TP (%)", TP_LEVELS, index=TP_LEVELS.index(2.0), key="legacy_ftr_tp")
+    sl = col4.selectbox("SL (%)", SL_LEVELS, index=SL_LEVELS.index(1.0), key="legacy_ftr_sl")
+    horizon = col5.selectbox("Horizonte (min)", HORIZONS, index=1, key="legacy_ftr_horizon")
 
     geom = failures[[c for c in (
         "symbol", "signal", "detector", "retest_time", "swing_price", "ftr_touch_penetration_pct",
@@ -410,30 +525,50 @@ def render_legacy_fail_touch_analyzer(view, chart_provider=None):
             st.dataframe(pd.DataFrame(report), hide_index=True, use_container_width=True)
 
     st.markdown("#### Profundidad → entrada → TP/SL")
-    summary = summarize_failure_entries(failures.to_dict("records"), depth, mode, tp, horizon)
+    filtered_rows = failures.to_dict("records")
+    summary = summarize_failure_entries(filtered_rows, depth, mode, tp, horizon, sl=sl)
     st.dataframe(pd.DataFrame([summary]), hide_index=True, use_container_width=True)
     st.caption("NO_TRIGGER solo si se observó la ventana completa de búsqueda (360m). "
                "TRIGGER_CENSORED y ENTRY_CENSORED señalan datos insuficientes, no señales negativas. "
                "CENSORED tras entrar no es NO_HIT. TP+SL en la misma 1m cuenta como pérdida ambigua. "
                "Compará las tasas sobre resueltos y sobre TODOS los fallos.")
+    st.markdown("#### Matriz TP / SL · dinámica según filtros")
+    st.caption(
+        f"{side} · profundidad mínima {depth:g}% · entrada {mode} · horizonte {horizon}m · "
+        f"{len(failures)} TOUCH_FAILED en el universo. Cada celda usa la misma entrada causal, "
+        "cambiando solo los niveles TP y SL. Cambiar profundidad, entrada, horizonte o "
+        "dirección recalcula las 48 combinaciones."
+    )
+    matrix = build_tp_sl_matrix(filtered_rows, depth, mode, horizon)
+    st.markdown("**TP-first (% sobre operaciones resueltas)**")
+    st.dataframe(pd.DataFrame(matrix["tp_first_pct"]).round(2), hide_index=True, use_container_width=True)
+    st.markdown("**Resultado bruto medio por operación resuelta (%)**")
+    st.dataframe(pd.DataFrame(matrix["gross_resolved_pct"]).round(3), hide_index=True, use_container_width=True)
+    with st.expander("Cobertura y denominadores de la matriz (N resueltos + detalle)", expanded=False):
+        st.dataframe(pd.DataFrame(matrix["n_resolved"]), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(matrix["coverage"]), hide_index=True, use_container_width=True)
+        st.download_button("Exportar matriz TP/SL (CSV)",
+                           pd.DataFrame(matrix["coverage"]).to_csv(index=False).encode(),
+                           "legacy_failed_touch_tp_sl_matrix_v1_2.csv", "text/csv", key="legacy_ftr_export_matrix")
+    st.caption("El resultado bruto excluye comisiones/slippage y operaciones NO_HIT, censuradas y sin entrada; "
+               "no es la rentabilidad de una cartera. Misma vela TP+SL = SL_AMBIGUOUS, contado conservadoramente como pérdida.")
     if st.checkbox("Ver matriz de todas las profundidades y entradas", value=False, key="legacy_ftr_all_grid"):
-        matrix = [summarize_failure_entries(failures.to_dict("records"), d, m, tp, horizon) for d in DEPTH_LEVELS for m in MODES]
-        st.dataframe(pd.DataFrame(matrix), hide_index=True, use_container_width=True)
+        compare = [summarize_failure_entries(filtered_rows, d, m, tp, horizon, sl=sl) for d in DEPTH_LEVELS for m in MODES]
+        st.dataframe(pd.DataFrame(compare), hide_index=True, use_container_width=True)
 
     # Individual inspections: explicit first-touch data and entry vs status;
     # original Legacy 15m inspector remains immediately below this section.
     table = []
     key = f"{float(depth):.1f}|{mode}"
-    outcome_key = f"tp{int(tp)}_sl1_{int(horizon)}m"
     for _, event in failures.iterrows():
         record = (event.get("ftr_grid") or {}).get(key, {})
-        status = (record.get("outcomes") or {}).get(outcome_key, {}).get("status", "ENTRY_CENSORED")
+        status, _ = _get_entry_outcome(record, tp, sl, horizon)
         table.append({
             "Symbol": event.get("symbol"), "Side": event.get("signal"), "Detector": event.get("detector"),
             "First touch": event.get("retest_time"), "Touch penetration %": event.get("ftr_touch_penetration_pct"),
             "Touch wick % range": event.get("ftr_touch_wick_share"), "Max depth 180m %": event.get("ftr_max_depth_180m_pct"),
             "Entry time (UTC ms)": record.get("entry_ts"), "Entry price": record.get("entry_price"),
-            "Outcome": status,
+            "TP (%)": tp, "SL (%)": sl, "Outcome": status,
         })
     st.markdown("#### Casos individuales · incluye fallos reales")
     st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
