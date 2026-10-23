@@ -238,6 +238,65 @@ def summarize_failure_entries(rows, depth, mode, tp, horizon):
     }
 
 
+
+def summarize_failed_touch_geometry(failures):
+    """Aggregate 1m geometry and *complete* 180m paths, by direction.
+
+    Uses only the provided TOUCH_FAILED population; no implicit extrapolation
+    from incomplete post-touch paths. Missing/non-finite metrics are omitted
+    from their own denominators, not from the event count.
+    """
+    import pandas as pd
+
+    if failures is None:
+        failures = pd.DataFrame()
+    failed = failures.copy()
+    if "status" in failed.columns:
+        failed = failed.loc[failed["status"].astype(str).eq("TOUCH_FAILED")].copy()
+    else:
+        failed = failed.iloc[0:0].copy()
+
+    def _numeric(frame, column):
+        if column not in frame.columns:
+            return pd.Series(float("nan"), index=frame.index, dtype="float64")
+        values = pd.to_numeric(frame[column], errors="coerce")
+        return values.replace([float("inf"), float("-inf")], float("nan"))
+
+    def _completed(frame):
+        if "ftr_complete_180m" not in frame.columns:
+            return pd.Series(False, index=frame.index, dtype="bool")
+        # The producer writes actual booleans, but tolerate CSV string forms.
+        return frame["ftr_complete_180m"].map(lambda value: (
+            value is True or str(value).strip().lower() in ("true", "1")
+        )).fillna(False).astype(bool)
+
+    groups = (("ALL", failed),)
+    if "signal" in failed.columns:
+        groups += tuple((side, failed.loc[failed["signal"].astype(str).str.upper().eq(side)]) for side in ("LONG", "SHORT"))
+    else:
+        groups += (("LONG", failed.iloc[0:0]), ("SHORT", failed.iloc[0:0]))
+
+    out = []
+    for side, group in groups:
+        initial = _numeric(group, "ftr_touch_penetration_pct").dropna()
+        wick = _numeric(group, "ftr_touch_wick_share").dropna()
+        completed = _completed(group)
+        max_depth = _numeric(group, "ftr_max_depth_180m_pct").loc[completed].dropna()
+        out.append({
+            "Dirección": side,
+            "N failed": int(len(group)),
+            "N perforación 1m": int(len(initial)),
+            "Avg Perforation 1m (%)": float(initial.mean()) if len(initial) else float("nan"),
+            "Median Perforation 1m (%)": float(initial.median()) if len(initial) else float("nan"),
+            "N 180m completos": int(completed.sum()),
+            "N profundidad válida 180m": int(len(max_depth)),
+            "Avg Max Perforation 180m (%)": float(max_depth.mean()) if len(max_depth) else float("nan"),
+            "N wick 1m": int(len(wick)),
+            "Avg Wick 1m (% rango)": float(wick.mean()) if len(wick) else float("nan"),
+        })
+    return out
+
+
 def render_legacy_fail_touch_analyzer(view, chart_provider=None):
     """Legacy V1 dashboard section; no network, no journal or LIVE changes."""
     import pandas as pd
@@ -268,6 +327,7 @@ def render_legacy_fail_touch_analyzer(view, chart_provider=None):
         st.warning("Faltan campos Fail Touch V1. Recargá Legacy después de subir el módulo y app.py.")
         return
 
+    all_failures = failures.copy()
     side = st.selectbox("Dirección · Fail Touch", ["ALL", "LONG", "SHORT"], key="legacy_ftr_side")
     if side != "ALL":
         failures = failures.loc[failures["signal"].eq(side)].copy()
@@ -291,11 +351,36 @@ def render_legacy_fail_touch_analyzer(view, chart_provider=None):
 
     valid = pd.to_numeric(failures["ftr_touch_penetration_pct"], errors="coerce")
     wick = pd.to_numeric(failures["ftr_touch_wick_share"], errors="coerce")
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Perforación mediana 1m", f"{valid.median():.2f}%" if valid.notna().any() else "—")
-    metric_cols[1].metric("Mecha mediana (% rango)", f"{wick.median():.1f}%" if wick.notna().any() else "—")
+    metric_cols = st.columns(2)
+    metric_cols[0].metric("Mecha mediana (% rango)", f"{wick.median():.1f}%" if wick.notna().any() else "—")
     recovered = failures.get("failure_recovery_status", pd.Series("", index=failures.index)).fillna("").eq("RECOVERED")
-    metric_cols[2].metric("Reclaim observado 180m", f"{int(recovered.sum())}/{len(failures)}")
+    metric_cols[1].metric("Reclaim observado 180m", f"{int(recovered.sum())}/{len(failures)}")
+
+    st.markdown("#### Avg Perforation y mechas · 1m / 180m")
+    # Current direction cards match the selected Legacy Fail Touch filter;
+    # the table retains ALL / LONG / SHORT for side-by-side comparison.
+    geometry_summary = summarize_failed_touch_geometry(all_failures)
+    selected_geometry = next(item for item in geometry_summary if item["Dirección"] == side)
+    def _format_pct(value, digits=2):
+        return f"{value:.{digits}f}%" if math.isfinite(value) else "—"
+
+    avg_cols = st.columns(4)
+    avg_cols[0].metric("Avg Perforation 1m", _format_pct(selected_geometry["Avg Perforation 1m (%)"]))
+    avg_cols[1].metric("Median Perforation 1m", _format_pct(selected_geometry["Median Perforation 1m (%)"]))
+    avg_cols[2].metric("Avg Max Perforation 180m", _format_pct(selected_geometry["Avg Max Perforation 180m (%)"]))
+    avg_cols[3].metric("Avg Wick 1m (% rango)", _format_pct(selected_geometry["Avg Wick 1m (% rango)"], 1))
+    st.caption(
+        f"Dirección: {side} · Perforación inicial: "
+        f"{selected_geometry['N perforación 1m']}/{selected_geometry['N failed']} con dato válido · "
+        f"Profundidad máxima a 180m: {selected_geometry['N profundidad válida 180m']}/"
+        f"{selected_geometry['N failed']} con cobertura completa y valor válido · "
+        f"Mecha 1m: {selected_geometry['N wick 1m']}/{selected_geometry['N failed']} con dato válido. "
+        "La profundidad máxima es un dato POST descriptivo, no una señal disponible al entrar."
+    )
+    summary_df = pd.DataFrame(geometry_summary)
+    for col in ("Avg Perforation 1m (%)", "Median Perforation 1m (%)", "Avg Max Perforation 180m (%)", "Avg Wick 1m (% rango)"):
+        summary_df[col] = summary_df[col].round(3)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     st.markdown("#### Barrida inicial y mechas — grupos predefinidos")
     bins_p = [0.0, 0.25, 0.50, 1.0, 2.0, 3.0, 5.0, float("inf")]
