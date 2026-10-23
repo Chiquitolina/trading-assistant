@@ -29,6 +29,12 @@ from concurrent.futures import ThreadPoolExecutor
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(BASE_DIR))
 
+# Legacy-only research. No Continuous V1, journal, strategy or LIVE changes.
+from dashboard.views.legacy_fail_touch_analyzer_view import (
+    attach_fail_touch_metrics as _legacy_attach_fail_touch_metrics,
+    render_legacy_fail_touch_analyzer as _legacy_render_fail_touch_analyzer,
+)
+
 from dashboard.services.candidate_regime_scan_optimizer import (
     PreparedOneSlot,
     scanner_fingerprint,
@@ -11380,6 +11386,7 @@ def build_confirmed_swing_retests_from_confirmation_study(
                 retest,
                 forward_cache,
             )
+            retest = _legacy_attach_fail_touch_metrics(retest, forward_cache)
             rows.append(retest)
 
     if not rows:
@@ -11574,6 +11581,7 @@ def scan_confirmed_swing_retests_all_symbols(
                     retest,
                     forward_cache,
                 )
+                retest = _legacy_attach_fail_touch_metrics(retest, forward_cache)
                 rows.append(retest)
 
     if not rows:
@@ -67062,6 +67070,7 @@ def render_confirmed_swing_retest_scanner(
     render_confirmed_swing_window_summary(view)
     render_confirmed_swing_reaction_overview(view)
     render_confirmed_swing_path_order_analysis(view)
+    _legacy_render_fail_touch_analyzer(view, chart_provider=load_volume_exhaustion_research_candles)
     render_confirmed_swing_reaction_geometry_mfe(view)
     render_confirmed_swing_volume_mfe_analysis(view)
     render_confirmed_swing_reaction_run_driver_lab(view)
