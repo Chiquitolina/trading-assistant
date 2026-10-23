@@ -24,7 +24,8 @@ import pandas as pd
 import reaction_structural_level_atlas as atlas_v1
 import reaction_compression_breakout_retest_v4 as v4
 
-VERSION = 'persistent-horizontal-pre-v1.0'
+VERSION = 'persistent-horizontal-pre-v1.0'  # preserve v1 run-folder token for shard repair
+AUDIT_RULE = 'strict_response_close_before_retest_v1.1'
 ROOT_REL = Path('reports/reaction_lab/reaction_persistent_horizontal_v1')
 TF = {'15m': 15*60000, '30m': 30*60000}
 WINDOW = {'15m': 160, '30m': 80}  # 40h PRE in each timeframe; frozen pilot
@@ -125,7 +126,10 @@ def candidate_zones(event,tf,frame):
                 atr=atlas_v1.true_range_at(closed,p['confirm_i'])
                 if atr is None:continue
                 proof=response_from_pivot(closed,p,next_i,{**z,'step':step},atr)
-                if proof and proof['response_closed_ts'] is not None:
+                # The auditor requires proof strictly earlier than the REACTION open.
+                # A HTF bar closing on that exact boundary cannot qualify.
+                if (proof and proof['response_closed_ts'] is not None
+                        and int(proof['response_closed_ts']) < int(event['retest_ts'])):
                     qualifying.append((p,proof))
             if len(qualifying)<MIN_INDEPENDENT_RESPONSES:continue
             earliest=qualifying[0][0]['pivot_i']
@@ -260,6 +264,41 @@ def _symbol_paths(out,symbol):
     tag=_sym_key(symbol)
     return out/'shards'/f'{tag}.events.csv',out/'shards'/f'{tag}.levels.csv',out/'shards'/f'{tag}.json'
 
+def _bad_zone_reason(z, allowed_event_keys=None):
+    """Same causal invariant for the per-symbol resume and global audit paths."""
+    try:
+        if allowed_event_keys is not None and z['event_key'] not in allowed_event_keys:
+            return 'event_key not in selected symbol cohort'
+        event_ts = int(z['retest_ts'])
+        if int(z['formation_closed_ts']) >= event_ts:
+            return 'zone formed at/after REACTION'
+        if int(z['confirmed_responses']) < MIN_INDEPENDENT_RESPONSES:
+            return 'fewer than 2 qualified historical responses'
+        times = [int(t) for t in z['response_timestamps'].split(';') if t]
+        if len(times) != int(z['confirmed_responses']):
+            return 'response timestamp count differs from confirmed_responses'
+        if any(t >= event_ts for t in times):
+            return 'historical response closed at/after REACTION'
+        if z['source_coverage'] != 'COMPLETE':
+            return 'incomplete coverage in qualified level'
+    except (TypeError, ValueError, KeyError) as exc:
+        return f'invalid qualified level fields: {exc}'
+    return None
+
+
+def _bad_shard_reason(path, expected):
+    """Inspect only cached CSV; never access outcomes or external services."""
+    try:
+        with path.open(newline='', encoding='utf-8') as f:
+            for z in csv.DictReader(f):
+                problem = _bad_zone_reason(z, set(expected))
+                if problem:
+                    return f"zone={z.get('zone_id','?')} event={z.get('event_key','?')}: {problem}"
+    except (OSError, ValueError, KeyError) as exc:
+        return f'unreadable zone shard: {exc}'
+    return None
+
+
 def run(root,cohort,max_events,min_free_gb=2.0):
     events,token,out=_setup(root,cohort,max_events)
     if shutil.disk_usage(root).free/1024**3<min_free_gb:
@@ -283,7 +322,13 @@ def run(root,cohort,max_events,min_free_gb=2.0):
                 if m.is_file() and a.is_file() and b.is_file():
                     prior=json.loads(m.read_text())
                     if prior.get('event_keys')==keys and prior.get('events_sha256')==digest(a) and prior.get('levels_sha256')==digest(b):
-                        counters['resumed_symbols']+=1;done+=1;continue
+                        # v1.0 previously admitted an HTF response exactly on
+                        # REACTION boundary while the auditor rejected it. Reuse
+                        # every valid shard and recompute only affected symbols.
+                        if _bad_shard_reason(b,keys) is None:
+                            counters['resumed_symbols']+=1;done+=1;continue
+                        counters['invalid_shards_repaired']+=1
+                        print(f'REPAIR_SHARD {symbol}: {_bad_shard_reason(b,keys)}',flush=True)
                 df15,df30,source30=v4._merge_tf(ctx,hist,symbol)
                 frames={'15m':df15.reset_index(),'30m':df30.reset_index()}
                 symbol_events=[];symbol_levels=[]
@@ -293,6 +338,11 @@ def run(root,cohort,max_events,min_free_gb=2.0):
                         rows,c=candidate_zones(e,tf,frames[tf]);tf_rows[tf]=rows;cov[tf]=c
                         symbol_levels.extend(rows)
                     symbol_events.append(classify(e,tf_rows,cov))
+                # Do not overwrite an old shard with another invalid proof.
+                for z in symbol_levels:
+                    why = _bad_zone_reason(z,set(keys))
+                    if why:
+                        raise RuntimeError(f'Generated invalid level for {symbol}: {why}')
                 _atomic_csv(a,symbol_events,EVENT_COLS)
                 _atomic_csv(b,symbol_levels,ZONE_COLS)
                 _atomic_json(m,dict(symbol=symbol,event_keys=keys,events_sha256=digest(a),
@@ -331,11 +381,11 @@ def audit(root,cohort,max_events):
         if len(rs)!=len(items) or [r['event_key'] for r in rs]!=expected:
             raise RuntimeError(f'Shard events missing/duplicated: {symbol}')
         with b.open(newline='') as f:zs=list(csv.DictReader(f))
-        if any(z['event_key'] not in set(expected) or int(z['formation_closed_ts'])>=int(z['retest_ts']) or
-               int(z['confirmed_responses'])<MIN_INDEPENDENT_RESPONSES or
-               any(int(t)>=int(z['retest_ts']) for t in z['response_timestamps'].split(';') if t) or
-               z['source_coverage']!='COMPLETE' for z in zs):
-            raise RuntimeError(f'Invalid causal persistent zones: {symbol}')
+        for z in zs:
+            problem = _bad_zone_reason(z,set(expected))
+            if problem:
+                raise RuntimeError(f'Invalid causal persistent zones: {symbol}: '
+                                   f"zone={z['zone_id']} event={z['event_key']}: {problem}")
         for r in rs:
             if (r['group_pre']==GROUP_NEAR) != (r['near_pre']=='1'):
                 if r['group_pre']!=GROUP_UNKNOWN:raise RuntimeError(f'Group mismatch: {symbol}')
@@ -353,6 +403,7 @@ def audit(root,cohort,max_events):
     # provides ground truth PRE labels; statistical outcome join is next stage.
     result=dict(success=True,version=VERSION,events=len(events),symbols=checked,
                 persistent_candidate_zones=zone_count,groups=counts,coverage=cov,
+                audit_rule=AUDIT_RULE,
                 no_outcome_access=True,run_folder=str(out),
                 outputs_sha256={'event_labels.csv':digest(combined_events),
                                 'candidate_levels.csv':digest(combined_zones)})

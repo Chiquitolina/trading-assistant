@@ -107,6 +107,69 @@ class CausalLevels(unittest.TestCase):
         self.assertEqual(result['group_pre'],m.GROUP_FAR)
         self.assertEqual(result['chosen_zone_id'],'')
 
+    def test_equal_reaction_boundary_is_not_a_historical_response(self):
+        df=synthetic()
+        e=event(df)
+        # Construct 2 old historical pivots but make the second response
+        # appear ONLY at the exact REACTION open, which audit rejects.
+        step=m.TF['15m']
+        closed,_=m.coverage_slice(df,'15m',e['retest_ts'])
+        pivots=[dict(kind='LOW',pivot_i=i,confirm_i=i+3,price=99.,
+                     confirm_ts=int(closed.timestamp.iloc[i+3])+step,
+                     pivot_ts=int(closed.timestamp.iloc[i])) for i in (12,45)]
+        zone=dict(origin='LOW',low=98.5,high=99.5,center=99.,
+                  formation_closed_ts=int(closed.timestamp.iloc[48])+step)
+        def proof(_frame,p,_next,z,atr):
+            return {'response_atr':1., 'response_closed_ts':(
+                e['retest_ts'] if p['pivot_i']==45 else e['retest_ts']-step)}
+        with mock.patch.object(m.atlas_v1,'pivots_confirmed',return_value=pivots), \
+             mock.patch.object(m.atlas_v1,'frozen_zones',return_value=[zone]), \
+             mock.patch.object(m.atlas_v1,'true_range_at',return_value=1.), \
+             mock.patch.object(m,'response_from_pivot',side_effect=proof):
+            levels,cov=m.candidate_zones(e,'15m',df)
+        self.assertEqual(cov,'COMPLETE')
+        self.assertFalse(levels)
+
+    def test_invalid_completed_shard_is_repaired_without_full_rerun(self):
+        import sqlite3,csv,json
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            out=root/'reports/reaction_lab/reaction_persistent_horizontal_v1/runs/test'
+            df=synthetic(n=260)
+            e=event(df)
+            setup=([e],{'source_sha256':'toy','version':m.VERSION},out)
+            def fake_merge(ctx,hist,symbol):
+                return df.set_index('timestamp'),synthetic('30m',180).set_index('timestamp'),'NATIVE_30M'
+            def fake_ro(path):return sqlite3.connect(':memory:')
+            with mock.patch.object(m,'_setup',return_value=setup), \
+                 mock.patch.object(m.v4,'_merge_tf',side_effect=fake_merge) as merge, \
+                 mock.patch.object(m.atlas_v1.lineage,'ro',side_effect=fake_ro):
+                first=m.run(root,'all-live',0,min_free_gb=0)
+                self.assertTrue(first['success'])
+                a,b,meta=m._symbol_paths(out,e['symbol'])
+                with b.open(newline='') as f: records=list(csv.DictReader(f))
+                self.assertTrue(records)
+                # Imitate a past shard with valid checksums but a response at
+                # the REACTION open -- only this symbol should be recomputed.
+                proof_times=records[0]['response_timestamps'].split(';')
+                self.assertGreaterEqual(len(proof_times),2)
+                proof_times[-1]=str(e['retest_ts'])
+                records[0]['response_timestamps']=';'.join(proof_times)
+                with b.open('w',newline='') as f:
+                    writer=csv.DictWriter(f,fieldnames=m.ZONE_COLS)
+                    writer.writeheader();writer.writerows(records)
+                state=json.loads(meta.read_text())
+                state['levels_sha256']=m.digest(b)
+                meta.write_text(json.dumps(state))
+                self.assertIn('at/after REACTION', m._bad_shard_reason(b,[e['event_key']]))
+                fixed=m.run(root,'all-live',0,min_free_gb=0)
+                self.assertTrue(fixed['success'])
+                self.assertEqual(merge.call_count,2)
+                self.assertIsNone(m._bad_shard_reason(b,[e['event_key']]))
+                again=m.run(root,'all-live',0,min_free_gb=0)
+                self.assertTrue(again['success'])
+                self.assertEqual(merge.call_count,2)
+
     def test_resume_audit_without_outcomes(self):
         import sqlite3
         with tempfile.TemporaryDirectory() as folder:
