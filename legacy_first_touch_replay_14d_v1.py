@@ -106,7 +106,10 @@ def normalized_symbols(root,args):
         vals=[p.name.upper() for p in d.iterdir() if p.is_dir()]
     if not vals:raise ValueError('Empty symbol universe')
     if len(vals)!=len(set(vals)):raise ValueError('Duplicate symbols in universe')
-    if any(re.fullmatch('[A-Z0-9]{2,24}',s) is None for s in vals):
+    # Binance USD-M also lists symbols with CJK/Han characters. Keep those
+    # original symbols while rejecting path separators, punctuation and traversal.
+    # Preserve the existing ASCII validation for all other symbols.
+    if any(re.fullmatch(r'[A-Z0-9\u3400-\u9FFF]{2,40}',s) is None for s in vals):
         raise ValueError('Invalid symbol in universe')
     vals=sorted(vals)
     if not args.symbols and not args.symbols_file and len(vals)!=290:

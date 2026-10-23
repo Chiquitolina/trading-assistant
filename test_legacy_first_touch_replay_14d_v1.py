@@ -39,6 +39,33 @@ class Tests(unittest.TestCase):
             Args.symbols='AAAUSDT,AAAUSDT'
             with self.assertRaisesRegex(ValueError,'Duplicate'):normalized_symbols(base,Args)
 
+    def test_unicode_binance_symbols_are_preserved(self):
+        # Reproduce the user's exact 290-symbol directory universe.
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root = base / 'reports/candidate_long_horizon/candle_cache/15m'
+            root.mkdir(parents=True)
+            symbols = [f'TEST{i:03d}USDT' for i in range(288)] + [
+                '币安人生USDT', '我踏马来了USDT',
+            ]
+            for symbol in symbols:
+                (root / symbol).mkdir()
+            class Args: symbols = ''; symbols_file = None
+            result = normalized_symbols(base, Args)
+            self.assertEqual(len(result), 290)
+            self.assertEqual(set(result), set(symbols))
+            self.assertIn('币安人生USDT', result)
+            self.assertIn('我踏马来了USDT', result)
+
+    def test_reject_symbol_path_injection(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            class Args: symbols_file = None; symbols = 'BTCUSDT,../EVILUSDT'
+            with self.assertRaisesRegex(ValueError, 'Invalid symbol'):
+                normalized_symbols(base, Args)
+            Args.symbols = 'BTCUSDT,币安人生USDT'
+            self.assertEqual(normalized_symbols(base, Args), ['BTCUSDT', '币安人生USDT'])
+
     def test_forward_cache_cannot_bridge_gap(self):
         one=pd.DataFrame({'timestamp':[0,ONE,3*ONE,4*ONE],
             'open':[1.]*4,'high':[2.]*4,'low':[.5]*4,'close':[1.]*4})
