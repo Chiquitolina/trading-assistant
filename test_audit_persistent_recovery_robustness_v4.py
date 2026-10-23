@@ -193,6 +193,32 @@ class WithinStrataTests(unittest.TestCase):
         self.assertEqual(got['strata_used'],2)
         self.assertEqual(got['within_strata_delta_pp'],100.)
         self.assertEqual(got['positive_strata'],2)
+        self.assertIs(type(got['positive_strata']), int)
+        self.assertIs(type(got['negative_strata']), int)
+
+class JsonSerializationRegressionTests(unittest.TestCase):
+    def test_numpy_counts_and_nested_structures_save_as_real_json_numbers(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'report.json'
+            payload={'comparison':{'within_day':{'positive_strata':np.int64(4),
+                'negative_strata':np.int64(2), 'confidence':np.float64(1.25),
+                'enabled':np.bool_(True), 'counts':np.array([1,2,3],dtype=np.int64)}}}
+            mod.write_json(p,payload)
+            loaded=json.loads(p.read_text())
+            row=loaded['comparison']['within_day']
+            self.assertEqual(row['positive_strata'],4)
+            self.assertIs(type(row['positive_strata']),int)
+            self.assertEqual(row['counts'],[1,2,3])
+            self.assertIs(row['enabled'],True)
+            self.assertEqual(row['confidence'],1.25)
+
+    def test_nonfinite_metrics_rejected_no_partial_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'report.json'
+            with self.assertRaises(ValueError):
+                mod.write_json(p,{'invalid':np.float64(float('nan'))})
+            self.assertFalse(p.exists())
+
 
 class FrozenSourcesTests(unittest.TestCase):
     def test_read_inputs_matches_frozen_v3_and_refuses_mutation(self):

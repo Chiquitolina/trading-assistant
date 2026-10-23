@@ -53,12 +53,21 @@ def write_csv(path,df):
         if os.path.exists(tmp):os.remove(tmp)
 
 
+def _json_default(value):
+    """Preserve NumPy result values without stringifying numbers or hiding NaN."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError(f'Not JSON serializable: {type(value).__name__}')
+
+
 def write_json(path,x):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     fd,tmp=tempfile.mkstemp(prefix='.recovery_v4_',suffix='.json',dir=path.parent)
     try:
         with os.fdopen(fd,'w',encoding='utf8') as f:
-            json.dump(x,f,indent=2,sort_keys=True,allow_nan=False)
+            json.dump(x,f,indent=2,sort_keys=True,allow_nan=False,default=_json_default)
             f.flush();os.fsync(f.fileno())
         os.replace(tmp,path)
     finally:
@@ -329,8 +338,8 @@ def within_strata(data, column, h=180, a='RECOVERED_3PLUS', b='DEFENDED_3PLUS', 
     avg=sum(s['difference_pp']*s['weight'] for s in summary)/sum(s['weight'] for s in summary)
     return dict(strata_used=len(summary),within_strata_delta_pp=round(avg,3),
                 min_resolved_each=min_resolved,
-                positive_strata=sum(s['difference_pp']>0 for s in summary),
-                negative_strata=sum(s['difference_pp']<0 for s in summary),
+                positive_strata=int(sum(s['difference_pp']>0 for s in summary)),
+                negative_strata=int(sum(s['difference_pp']<0 for s in summary)),
                 details=summary)
 
 
@@ -408,6 +417,9 @@ def report(run,ft_path,rounds=1000):
                 within_day=within_strata(known,'day_utc',h,b=cmp),
                 within_symbol=within_strata(known,'symbol_pre',h,b=cmp))
             r['comparison'][key][f'RECOVERED_3PLUS_vs_{cmp}']=core
+    # Convert nested NumPy scalars before both persistence AND console JSON output.
+    # Keep allow_nan=False: invalid/missing statistics must not be silently saved.
+    r=json.loads(json.dumps(r,allow_nan=False,default=_json_default))
     report_path=out/'robustness_report.json';write_json(report_path,r)
     daily_rows=[]
     for h,items in r['daily'].items():
