@@ -179,6 +179,172 @@ def _signal_chart(project, event, *, mode, tp, horizon, show_sl=True):
 
 
 
+
+def _render_triple_runner_filter(project, pool, runner):
+    """PRE triple-top/bottom labels, calculated independently of runner outcomes.
+
+    Called within ADN del Runner, immediately before the existing runner table.
+    Other DNA stats/families and Runner Discovery classification stay unchanged.
+    """
+    import pandas as pd
+    import streamlit as st
+
+    st.markdown("##### ⛰️ Triple techo / triple piso · estructura 15m PRE")
+    st.caption("En este estudio CONFIRMADO significa tercer swing 3×3 confirmado antes de la REACTION; "
+               "no exige ruptura de neckline. FORMACIÓN indica tercer rechazo observado, "
+               "sin confirmación 3×3 todavía.")
+    st.caption("Swings 3×3 con tres rechazos independientes antes de la REACTION. "
+               "El tercer intento puede estar confirmado o todavía en formación "
+               "con rechazo observado. Sin mirar los resultados del runner.")
+    try:
+        from reaction_runner_triple_top_pre_v1 import (
+            label_path, generate, verify_labels,
+        )
+    except ImportError as exc:
+        st.error(f"Falta el módulo de investigación triple PRE: {exc}")
+        return runner
+
+    path=label_path(project)
+    if not path.is_file():
+        st.info("Todavía no calculamos las etiquetas históricas. "
+                "Podés generarlas manualmente aquí o desde la terminal con "
+                "`python3 reaction_runner_triple_top_pre_v1.py --run`.")
+        if st.button("🔎 Detectar triples techos/pisos PRE",key="rdv2_triple_generate"):
+            with st.spinner("Calculando 15m históricos de todos los eventos (solo lectura)..."):
+                try:
+                    generate(project)
+                except Exception as exc:
+                    st.error(f"Falló la generación PRE: {exc}")
+                    return runner
+            st.rerun()
+        return runner
+
+    @st.cache_data(show_spinner=False,max_entries=2)
+    def _read_triple_validated(root, mtime, manifest_mtime):
+        return verify_labels(root)
+    try:
+        manifest_path=path.with_suffix('.json')
+        triples=_read_triple_validated(str(project),path.stat().st_mtime_ns,
+                                       manifest_path.stat().st_mtime_ns)
+        triples=triples[['event_key','pattern_pre','reason','top_bottom_1_ts',
+                         'top_bottom_2_ts','top_bottom_3_ts','level_price',
+                         'level_tolerance','third_confirmation_ts']]
+        enriched=pool.merge(triples,on='event_key',how='left',validate='one_to_one')
+        if enriched.pattern_pre.isna().any():
+            raise ValueError("Event IDs sin etiqueta triple PRE; ejecutar --run de nuevo")
+    except Exception as exc:
+        st.error(f"Etiquetas triple PRE inválidas o desactualizadas: {exc}")
+        st.caption("Actualizá las etiquetas desde terminal: "
+                   "`python3 reaction_runner_triple_top_pre_v1.py --run`.")
+        return runner
+
+    top=enriched.pattern_pre.isin(['TRIPLE_TOP_CONFIRMED_PRE','TRIPLE_TOP_FORMING_PRE'])
+    bottom=enriched.pattern_pre.isin(['TRIPLE_BOTTOM_CONFIRMED_PRE','TRIPLE_BOTTOM_FORMING_PRE'])
+    valid=enriched.pattern_pre.isin(['NO_PATTERN_PRE','TRIPLE_TOP_CONFIRMED_PRE',
+        'TRIPLE_TOP_FORMING_PRE','TRIPLE_BOTTOM_CONFIRMED_PRE','TRIPLE_BOTTOM_FORMING_PRE'])
+    short=enriched.side.eq('SHORT');long=enriched.side.eq('LONG')
+    hits=enriched.es_runner.astype(bool)
+    top_r=int((top&hits).sum()); bottom_r=int((bottom&hits).sum())
+    # Explicit relevant-side denominator, and unknowns never counted as negative.
+    short_run=int((valid&short&hits).sum());long_run=int((valid&long&hits).sum())
+    no_run_top=int((top&~hits).sum());no_run_short=int((valid&short&~hits).sum())
+    stats=st.columns(4,gap='small')
+    stats[0].metric('Runners SHORT · triple techo',top_r,
+                    help='Confirmado o tercer rechazo en formación, solo 15m PRE')
+    stats[1].metric('De runners SHORT con historial',
+                    f'{100*top_r/short_run:.1f}%' if short_run else '—',
+                    help=f'{top_r}/{short_run} SHORT evaluables con historial PRE')
+    stats[2].metric('Runners LONG · triple piso',bottom_r,
+                    help=f'{bottom_r}/{long_run} LONG evaluables')
+    stats[3].metric('SHORT sin run · triple techo',
+                    f'{100*no_run_top/no_run_short:.1f}%' if no_run_short else '—',
+                    help=f'{no_run_top}/{no_run_short} SHORT no-runners evaluables')
+    st.caption(f'Cobertura etiquetada para esta selección: {int(valid.sum())}/{len(enriched)} '
+               f'con histórico PRE evaluable; {len(enriched)-int(valid.sum())} sin clasificación. '
+               'Se cuentan eventos, no formaciones independientes. Es descriptivo, no validación.')
+
+    options={
+        'Todos los runners': None,
+        'Triple techo SHORT · confirmado o formación':('TRIPLE_TOP_CONFIRMED_PRE','TRIPLE_TOP_FORMING_PRE'),
+        'Triple techo SHORT · confirmado':('TRIPLE_TOP_CONFIRMED_PRE',),
+        'Triple techo SHORT · tercer rechazo en formación':('TRIPLE_TOP_FORMING_PRE',),
+        'Triple piso LONG · confirmado o formación':('TRIPLE_BOTTOM_CONFIRMED_PRE','TRIPLE_BOTTOM_FORMING_PRE'),
+        'Triple piso LONG · confirmado':('TRIPLE_BOTTOM_CONFIRMED_PRE',),
+        'Triple piso LONG · tercer rechazo en formación':('TRIPLE_BOTTOM_FORMING_PRE',),
+        'Sin triple techo / piso PRE':('NO_PATTERN_PRE',),
+        'Histórico PRE desconocido':('UNKNOWN_HISTORY','UNKNOWN_PRICE'),
+    }
+    choice=st.selectbox('Filtrar runners por estructura 15m',list(options),
+                         key='rdv2_triple_pattern_filter')
+    runners=enriched.loc[enriched.es_runner.astype(bool)].copy()
+    if options[choice] is not None:
+        runners=runners[runners.pattern_pre.isin(options[choice])].copy()
+    st.caption(f'**{len(runners)} de {int(hits.sum())} runners** en el filtro de estructura elegido. '
+               'La clasificación runner (+2/+3/+5%, horizonte y origen) es la misma de arriba.')
+    with st.expander('Descargar runners del patrón seleccionado',expanded=False):
+        st.download_button('CSV · runners filtrados + evidencia PRE',
+            runners.to_csv(index=False).encode('utf-8-sig'),
+            file_name='runners_triple_pivot_pre_filtrados.csv',
+            mime='text/csv',key='rdv2_triple_export')
+    return runners
+
+
+def _triple_15m_chart(project, event):
+    """Historical inspector from existing local HTF cache; strictly PRE."""
+    import pandas as pd
+    import plotly.graph_objects as go
+    import streamlit as st
+
+    if not st.checkbox('Mostrar 170 velas 15m anteriores a la REACTION',
+                       value=True,key='rdv2_triple_show15m'):
+        return
+    try:
+        from dashboard.views.reaction_recovered_support_gallery_view import read_ohlc_pre
+        ctx=project/'reports/reaction_lab/reaction_full_context_v1.sqlite3'
+        cache=project/'reports/reaction_lab/reaction_full_context_history_v1.sqlite3'
+        times=(ctx.stat().st_mtime_ns if ctx.is_file() else 0,
+               cache.stat().st_mtime_ns if cache.is_file() else 0)
+
+        @st.cache_data(show_spinner=False,max_entries=12)
+        def _cached_pre(root,symbol,ts,mtimes):
+            return read_ohlc_pre(root,symbol,'15m',ts,max_bars=170)
+
+        bars=_cached_pre(str(project),str(event['symbol']),int(event['retest_ts']),times)
+    except Exception as exc:
+        st.warning(f'Histórico PRE 15m no disponible para este gráfico: {exc}')
+        return
+    if bars.empty:
+        st.info('No hay velas 15m PRE suficientes para visualizar.')
+        return
+    t=pd.to_datetime(bars.timestamp,unit='ms',utc=True)
+    f=go.Figure(go.Candlestick(x=t,open=bars.open,high=bars.high,
+        low=bars.low,close=bars.close,
+        increasing_line_color='#20b99a',decreasing_line_color='#ec777c',
+        name='15m PRE'))
+    state=str(event.get('pattern_pre',''))
+    if state.startswith('TRIPLE_'):
+        level=float(event['level_price']);tol=float(event['level_tolerance'])
+        f.add_hrect(y0=level-tol,y1=level+tol,fillcolor='#e6ad56',opacity=.10,line_width=0)
+        for i,name in enumerate(('Primero','Segundo','Tercero'),1):
+            val=event.get(f'top_bottom_{i}_ts')
+            if pd.isna(val) or str(val).strip() in ('','nan'):continue
+            stamp=pd.to_datetime(int(float(val)),unit='ms',utc=True)
+            # At candle CLOSE, corresponding candle is opened 15m earlier.
+            value=(bars.loc[bars.timestamp.eq(int(float(val))-900_000),'high' if event['side']=='SHORT' else 'low'])
+            if value.empty:continue
+            f.add_trace(go.Scatter(x=[stamp-pd.Timedelta(minutes=15)],y=[float(value.iloc[0])],
+                 mode='markers+text',text=[str(i)],textposition='top center',
+                 marker=dict(size=11,color='#f7bf5f',symbol='diamond'),
+                 name=f'{name} toque'))
+    f.update_layout(height=470,xaxis_rangeslider_visible=False,
+        title=f"{event['symbol']} · {state or 'sin etiqueta'} · 170×15m PRE",
+        margin=dict(l=6,r=8,t=45,b=8),legend=dict(orientation='h',y=-.13))
+    st.plotly_chart(_chart_style(f,height=470),use_container_width=True,
+                    config={'displaylogo':False,'scrollZoom':True})
+    st.caption('Solamente velas cerradas antes del timestamp de REACTION. '
+               'Los 3 diamantes son los toques PRE; la franja naranja es la tolerancia. '
+               'No se muestran velas POST en esta figura.')
+
 def _render_runner_dna(project, working, *, mode, tp, horizon):
     """Simple descriptive DNA: hit target regardless of any SL or fill."""
     import pandas as pd
@@ -279,6 +445,7 @@ def _render_runner_dna(project, working, *, mode, tp, horizon):
                 st.dataframe(out,hide_index=True,use_container_width=True,height=280)
 
     st.markdown("#### Explorar runners concretos")
+    runner=_render_triple_runner_filter(project,pool,runner)
     a,b=st.columns([1.5,1],gap="small")
     family_options=["Todas las familias"]+[f for f in FAMILY_ORDER if (runner["familia_adn"]==f).any()]
     family=a.selectbox("Familia",family_options,key="rdv2_dna_family")
@@ -305,6 +472,7 @@ def _render_runner_dna(project, working, *, mode, tp, horizon):
             key=st.selectbox("Evento",choices,key="rdv2_dna_event")
             row=events.loc[events["event_key"].eq(key)].iloc[0]
             st.caption(f"{row['symbol']} · {row['side']} · +{tp}% en {int(row['dna_minuto'])} min · {row['familia_adn']}")
+            _triple_15m_chart(project,row)
             _signal_chart(project,row,mode=mode,tp=tp,horizon=horizon,show_sl=False)
     with st.expander("Exportar este estudio",expanded=False):
         st.download_button("CSV · todas las señales y su familia",pool.to_csv(index=False).encode("utf-8-sig"),
