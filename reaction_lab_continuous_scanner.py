@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Continuous Redis-only 15m/3x3 REACTION scanner, independent of Streamlit.
+"""Continuous Redis-only 15m/3x3 first-touch scanner, independent of Streamlit.
 
 Canonical detection rules are extracted from dashboard/app.py at startup (AST),
 not reimplemented. The persisted journal contains ONLY causal fields, never
@@ -8,6 +8,7 @@ forward-derived MFE/outcome metrics. No Binance REST, orders or legacy CSV write
 from __future__ import annotations
 import argparse
 import ast
+from collections import Counter
 import fcntl
 import hashlib
 import json
@@ -19,6 +20,8 @@ import signal
 import sqlite3
 import sys
 import time
+
+import reaction_lab_first_touches_v1 as first_touches
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -70,7 +73,7 @@ LOG = logging.getLogger('reaction-lab-scanner')
 def compile_canonical_scanner(app_path: Path, loader):
     """Compile ONLY named function ASTs, never execute Streamlit top-level code.
 
-    The two optional POST-retest analysis attachments are skipped; they do not
+    The optional POST-retest analysis attachments are skipped; they do not
     influence whether an Event ID exists, but can access future post-retest bars.
     Confirmation, departure and first retest logic are unchanged.
     """
@@ -97,7 +100,8 @@ def compile_canonical_scanner(app_path: Path, loader):
                         and isinstance(node.value.func,ast.Name)
                         and node.value.func.id in (
                             '_attach_confirmed_swing_reaction_run',
-                            '_attach_confirmed_swing_order_recovery_analysis')):
+                            '_attach_confirmed_swing_order_recovery_analysis',
+                            '_legacy_attach_fail_touch_metrics')):
                         # identity/retest fields remain those of original scanner
                         return ast.copy_location(ast.Pass(), node)
                     return self.generic_visit(node)
@@ -212,7 +216,7 @@ def save_cycle(con, events, now_ms, elapsed_start, symbol_count, counts, fingerp
 
 
 def scan_once(project, redis_client, scan, fingerprint, db, symbols, dry=False,
-              min_free_mb=1024):
+              min_free_mb=1024, first_touches_db=None):
     from dashboard.services.geometry_scanner_data_service import GeometryScannerDataService
     import pandas as pd
     from engine.live.data.redis_market_data_protocol import history_key
@@ -241,20 +245,40 @@ def scan_once(project, redis_client, scan, fingerprint, db, symbols, dry=False,
                max_retest_age_minutes=4320)
     now=int(time.time()*1000)
     events=normalize_reactions(frame,now)
+    touches=first_touches.normalize_first_touches(frame,now,CAUSAL_FIELDS,coerce_jsonable)
     if not dry and read_ok[0]==0:
         raise RuntimeError('No closed 1m histories available; refusing empty scan commit')
     if dry:
-        return {'mode':'DRY','events_seen':len(events),'sample_event_keys':list(events)[:5],
+        return {'mode':'DRY','events_seen':len(events),'first_touches_seen':len(touches),
+                'first_touch_statuses':dict(Counter(x['status'] for x in touches.values())),
+                'sample_event_keys':list(events)[:5],
                 'symbols':len(symbols),'redis_1m_ok':read_ok[0],
                 'redis_15m_ok':read_ok[1],'last_1m_ts':latest,
                 'duration_seconds':round((now-start)/1000,2),'source_hash':fingerprint}
-    space=shutil.disk_usage(db.parent if db.parent.exists() else project).free/(1024**2)
-    if space<min_free_mb:raise RuntimeError('Disk free MB %.0f less than %d'%(space,min_free_mb))
+    first_db=(first_touches_db or db.parent/'scanner_first_touches_v1.sqlite3').resolve()
+    if first_db == db.resolve():
+        raise ValueError('First-touch journal must not overwrite legacy REACTION journal')
+    for path in (db,first_db):
+        space=shutil.disk_usage(path.parent if path.parent.exists() else project).free/(1024**2)
+        if space<min_free_mb:
+            raise RuntimeError('Disk free MB %.0f less than %d'%(space,min_free_mb))
+    # Persist ALL first touches first. The two journals are idempotent, so if
+    # the process dies between commits, the next cycle safely catches up.
+    touch_con=first_touches.db_open(first_db)
+    try:
+        touch_report=first_touches.save_cycle(touch_con,touches,now,start,fingerprint)
+        first_total=touch_con.execute('SELECT COUNT(*) FROM first_touches').fetchone()[0]
+    finally:touch_con.close()
     con=db_open(db)
     try:
         added=save_cycle(con,events,now,start,len(symbols),read_ok,fingerprint,latest)
         total=con.execute('SELECT COUNT(*) FROM events').fetchone()[0]
         return {'events_seen':len(events),'new_events':added,'total_events':total,
+                'first_touches_seen':touch_report['detected'],
+                'new_first_touches':touch_report['new'],
+                'first_touch_statuses':touch_report['status_counts'],
+                'first_touch_conflicts':touch_report['classification_conflicts'],
+                'total_first_touches':first_total,'first_touches_db':str(first_db),
                 'symbols_requested':len(symbols),'redis_1m_ok':read_ok[0],
                 'redis_15m_ok':read_ok[1],'last_1m_ts':latest,
                 'latest_lag_seconds':round((now-(latest+60_000))/1000,2) if latest else None,
@@ -281,6 +305,8 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--project',type=Path,default=Path.cwd())
     p.add_argument('--db',type=Path,default=None)
+    p.add_argument('--first-touches-db',type=Path,default=None,
+                   help='Separate SQLite journal for all first touches, including failed/indecisive')
     p.add_argument('--symbols-file',type=Path,default=None,
                    help='Optional frozen symbol subset for piloting; normal mode uses current research universe')
     mode=p.add_mutually_exclusive_group()
@@ -294,9 +320,15 @@ def main(argv=None):
     args=p.parse_args(argv)
     project=args.project.resolve()
     db=(args.db or project/'reports/reaction_lab/scanner_events_v1.sqlite3').resolve()
-    if db.suffix not in ('.db','.sqlite3'):p.error('SQLite database path required')
+    first_db=(args.first_touches_db or first_touches.default_db(project)).resolve()
+    if db.suffix not in ('.db','.sqlite3') or first_db.suffix not in ('.db','.sqlite3'):
+        p.error('SQLite database path required')
+    if first_db == db:
+        p.error('First-touches database MUST differ from legacy scanner journal')
     if args.status:
-        print(json.dumps(status(db),indent=2,ensure_ascii=False));return 0
+        report=status(db)
+        report['first_touches']=first_touches.status(first_db)
+        print(json.dumps(report,indent=2,ensure_ascii=False));return 0
     # loading app AST is read-only. --check checks same canonical functions and symbol universe.
     # Redis credentials follow project configuration; never print them.
     sys.path.insert(0,str(project))
@@ -309,7 +341,8 @@ def main(argv=None):
     if not symbols:raise RuntimeError('Empty symbols list')
     scan,fingerprint=compile_canonical_scanner(project/'dashboard/app.py',lambda **kw:None)
     print('MODE:', 'LOOP' if args.loop else 'SCAN-ONCE' if args.scan_once else 'DRY-SCAN' if args.dry_scan else 'CHECK')
-    print('CANONICAL APP SCAN:', fingerprint, 'SYMBOLS:',len(symbols),'DB:',db)
+    print('CANONICAL APP SCAN:', fingerprint, 'SYMBOLS:',len(symbols),'DB:',db,
+          'FIRST TOUCHES DB:',first_db)
     if not args.scan_once and not args.loop and not args.dry_scan:
         print('CHECK OK: no file or Redis mutations; run --scan-once after review')
         return 0
@@ -335,7 +368,7 @@ def main(argv=None):
             next_due=time.monotonic()+max(1,args.poll_seconds)
             try:
                 report=scan_once(project,client,scan,fingerprint,db,symbols,
-                                 min_free_mb=args.min_free_mb)
+                                 min_free_mb=args.min_free_mb,first_touches_db=first_db)
                 print(json.dumps(report,ensure_ascii=False),flush=True)
                 if (report['redis_1m_ok']<len(symbols)*0.95 or
                     report['redis_15m_ok']<len(symbols)*0.95 or
