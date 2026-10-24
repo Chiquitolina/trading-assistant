@@ -93,6 +93,25 @@ class WebsocketReadLoopGuardTests(unittest.TestCase):
             generation=generation,
         )
 
+    def test_queue_size_passed_to_threaded_manager(self):
+        self.ws.twm = None
+        with patch('time.sleep', return_value=None), redirect_stdout(io.StringIO()) as out:
+            self.ws._connect()
+        self.assertEqual(self.ws.twm.kwargs['max_queue_size'], 2048)
+        self.assertIn('max_queue_size=2048', out.getvalue())
+
+    def test_queue_size_is_configurable_and_bounded(self):
+        ws = self.WSClient(
+            on_message=Mock(), timeframes=['1m'], symbols=['BTCUSDT'],
+            max_queue_size=512, enable_coverage_audit=False,
+        )
+        self.assertEqual(ws.max_queue_size, 512)
+        bounded = self.WSClient(
+            on_message=Mock(), timeframes=['1m'], symbols=['BTCUSDT'],
+            max_queue_size=20, enable_coverage_audit=False,
+        )
+        self.assertEqual(bounded.max_queue_size, 100)
+
     def test_first_error_stops_only_failed_listener(self):
         with redirect_stdout(io.StringIO()) as out:
             self.send_error()

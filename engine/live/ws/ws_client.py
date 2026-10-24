@@ -45,6 +45,7 @@ class WSClient:
         reconnect_delay_floor=30,
         reconnect_delay_cap=120,
         enable_coverage_audit=True,
+        max_queue_size=2048,
     ):
 
         self.on_message = on_message
@@ -66,6 +67,10 @@ class WSClient:
             int(reconnect_delay_cap),
         )
         self.enable_coverage_audit = bool(enable_coverage_audit)
+        # python-binance v1.0.37 defaults to just 100 per socket; with
+        # 240 kline streams per multiplex group this can overflow in bursts.
+        # Bounded buffering is a cushion, not a replacement for fast callbacks.
+        self.max_queue_size = max(100, int(max_queue_size))
 
 
 
@@ -498,12 +503,17 @@ class WSClient:
 
             self.twm = ThreadedWebsocketManager(
 
-                loop=ws_loop
+                loop=ws_loop,
+                max_queue_size=self.max_queue_size,
 
             )
 
 
 
+            print(
+                f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
+                f"WS internal max_queue_size={self.max_queue_size}"
+            )
             self.twm.start()
 
 
