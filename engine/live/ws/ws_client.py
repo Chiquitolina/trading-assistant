@@ -114,6 +114,14 @@ class WSClient:
 
         self._group_socket_keys = {}
 
+        # Stop a failed multiplex listener immediately. In python-binance
+        # 1.0.37, ThreadedApiManager.start_listener() retries recv() even
+        # after ReconnectingWebsocket._read_loop has ended. That can produce
+        # thousands of ReadLoopClosed callbacks before the supervisor restarts
+        # the manager. Keep one terminal error per group per WS generation.
+        self._failed_socket_groups = set()
+        self._failed_socket_lock = threading.Lock()
+
         self._last_health_log = 0.0
 
 
@@ -437,6 +445,8 @@ class WSClient:
         self._group_symbols.clear()
 
         self._group_socket_keys.clear()
+        with self._failed_socket_lock:
+            self._failed_socket_groups.clear()
 
 
 
@@ -677,14 +687,19 @@ class WSClient:
 
 
 
-            self._connected_at = time.time()
-            self.is_connected = True
-
-
-
-            self.retries = 0
-
-            self._is_reconnecting = False
+            # An error may have arrived after a group produced its first
+            # message and before all groups passed startup validation.
+            # Never declare READY or clear the reconnect flag in that case.
+            with self._failed_socket_lock:
+                if self._failed_socket_groups:
+                    raise RuntimeError(
+                        "WS initialization failed: terminated groups="
+                        f"{sorted(self._failed_socket_groups)}"
+                    )
+                self._connected_at = time.time()
+                self.is_connected = True
+                self.retries = 0
+                self._is_reconnecting = False
 
 
 
@@ -1101,35 +1116,52 @@ class WSClient:
                 return
 
             if isinstance(msg, dict) and msg.get("e") == "error":
-                now = time.time()
-                signature = (
-                    str(msg.get("type") or "error"),
-                    str(msg.get("m") or ""),
-                )
-                should_log = (
-                    signature != self._last_error_signature
-                    or now - self._last_error_log_at >= 5.0
-                )
+                # An error on one group makes the current multiplex manager
+                # unfit for this service; the existing supervisor still
+                # handles the full reconnect. Do not let the dead group loop
+                # on recv() while waiting for that reconnect.
+                if not self.running:
+                    return
 
-                if should_log:
-                    suppressed = self._suppressed_error_count
-                    suffix = (
-                        f" suppressed={suppressed}"
-                        if suppressed
-                        else ""
-                    )
-                    print(
-                        f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
-                        f"⚠️ WS error: {msg}{suffix}"
-                    )
-                    self._last_error_signature = signature
-                    self._last_error_log_at = now
-                    self._suppressed_error_count = 0
-                else:
-                    self._suppressed_error_count += 1
+                if group_id is not None:
+                    with self._failed_socket_lock:
+                        if group_id in self._failed_socket_groups:
+                            return
+                        self._failed_socket_groups.add(group_id)
+
+                error_type = str(msg.get("type") or "error")
+                error_message = str(msg.get("m") or "")
+                print(
+                    f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
+                    f"⚠️ WS group error generation={generation} "
+                    f"group={group_id} type={error_type} "
+                    f"message={error_message}"
+                )
 
                 self.is_connected = False
                 self._is_reconnecting = True
+
+                # python-binance 1.0.37 public API: stopping the individual
+                # socket flips ThreadedApiManager._socket_running[path] to
+                # False, allowing start_listener() to exit on the next turn.
+                # NEVER stop()/join() the entire TWM inside this callback:
+                # the callback runs on its own asyncio event-loop thread.
+                twm = self.twm
+                socket_key = self._group_socket_keys.get(group_id)
+                if twm is not None and socket_key:
+                    try:
+                        twm.stop_socket(socket_key)
+                        print(
+                            f"\033[94m[WS CLIENT:{self.client_name}]\033[0m "
+                            f"🛑 Failed WS group listener stopped "
+                            f"group={group_id} generation={generation}"
+                        )
+                    except Exception as e:
+                        # Supervisor will still stop the whole manager.
+                        print(
+                            f"\033[91m[WS CLIENT:{self.client_name}]\033[0m "
+                            f"❌ stop_socket failed group={group_id}: {e}"
+                        )
                 return
 
 
