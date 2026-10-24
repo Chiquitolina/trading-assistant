@@ -8519,6 +8519,7 @@ DASHBOARD_SECTIONS = {
     "swing_sweep_reclaim": "🧹 Swing Sweep → Reclaim",
     "geometry_scanner": "📐 Geometry Scanner",
     "compression_scanner": "🗜️ Compression Scanner",
+    "horizontal_breakout_lab": "🧱 Horizontal Breakout Lab",
     "btc_correlation": "₿ BTC Correlation",
     "btc_alignment": "🧭 BTC Alignment Edge",
     "mfe_mae": "📐 MFE / MAE",
@@ -8558,6 +8559,7 @@ if (
     df_raw.empty
     and selected_section not in {
         "compression_scanner",
+        "horizontal_breakout_lab",
         "geometry_scanner",
         "volume_exhaustion",
         "micro_flow",
@@ -86313,6 +86315,12 @@ if selected_section == "reaction_swing_lab":
                 render_volume_exhaustion_outcome_research(
                     events=events,
                 )
+
+
+if selected_section == "horizontal_breakout_lab":
+    # Separate offline research; no import, start or mutation of LIVE workers.
+    from dashboard.views.horizontal_breakout_lab_view import render_horizontal_breakout_lab
+    render_horizontal_breakout_lab(BASE_DIR)
 
 
 if selected_section == "compression_scanner":
