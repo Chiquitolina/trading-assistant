@@ -84821,6 +84821,24 @@ if selected_section == "reaction_swing_lab":
             )
             render_competition_dashboard(BASE_DIR)
 
+        # Read-only ALL-first-touch journal: separate from the REACTION-only
+        # scanner_events_v1.sqlite3 consumed by Candidate and Auto Paths.
+        # Present under Continuous Journal / Retests, never inside Legacy.
+        if (
+            cohort_mode in ("Continuous V1", "Todos")
+            and lab_mode in ("📡 REACTION journal", "🔁 REACTION / Retests")
+        ):
+            from dashboard.views.reaction_lab_first_touches_view import (
+                render_first_touches_journal,
+            )
+            render_first_touches_journal(
+                BASE_DIR,
+                symbol_universe=structural_symbols,
+                candles_reader=load_volume_exhaustion_research_candles,
+                timezone=TZ,
+            )
+            st.divider()
+
         # Continuous always reads the same persisted Event IDs in EVERY view.
         # Legacy engines are intentionally unchanged and never run in Continuous.
         if lab_mode not in ("🔬 Retest Quality Lab", "🏃 Runner Discovery", "⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition") and cohort_mode in ("Continuous V1", "Todos"):
