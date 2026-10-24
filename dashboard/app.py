@@ -66942,6 +66942,18 @@ def render_confirmed_swing_retest_inspector(
             config={"displaylogo": False, "scrollZoom": True},
         )
 
+        # Legacy only: descriptive first-touch adverse-move timeline (1m).
+        # Continuous V1 supplies an archived 15m provider and is unchanged.
+        if candles_provider is None:
+            from dashboard.views.legacy_retest_adverse_tracker_view import (
+                render_legacy_retest_adverse_tracker,
+            )
+            render_legacy_retest_adverse_tracker(
+                selected_retest,
+                candles_reader=load_volume_exhaustion_research_candles,
+                ui_key_prefix=ui_key_prefix,
+            )
+
     details = {
         "symbol": selected_retest.get("symbol"),
         "signal": selected_retest.get("signal"),
