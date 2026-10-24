@@ -26,6 +26,8 @@ EXPECTED_ENGINE = 'cdea32676d0d0bc08ed060ba25d08b7e7b52df115cca9892948ff6464155d
 EXPECTED_CORE = '9b772a362cc55c61c3e552ca313e910a36228cbdda1b5ee0dde7661684fb350f'
 EXPECTED_COLLECTOR = '583d8896254c7c41d191e2fc8babf0dc1021e3df53d9e38f8664ce613bb07f7a'
 VERSION = 'horizontal-breakout-frozen-validation-v1.3.0'
+# Administrative availability amendment: no change to the frozen cohort, rules or outcome metrics.
+UNAVAILABLE = {'PEPEUSDT': 'Binance USD-M /fapi/v1/klines returned HTTP 400 for frozen symbol; 1000PEPEUSDT is already in discovery cohort and MUST NOT replace it.'}
 START = '2026-10-08'
 END = '2026-10-20'
 TAIL_HOURS = 48
@@ -108,6 +110,82 @@ def run_tag(index):
     return f'frozen_v13_b{index:02d}'
 
 
+def eligible_batch(index):
+    """Frozen membership stays unchanged. Only externally unavailable symbols are censored."""
+    declared = batches()[index-1]
+    if (BASE / 'availability_amendment.json').is_file():
+        return tuple(x for x in declared if x not in UNAVAILABLE)
+    return declared
+
+
+def amendment_record():
+    return {
+        'type': 'ADMINISTRATIVE_SYMBOL_UNAVAILABLE',
+        'original_frozen_cohort_size': len(COHORT),
+        'included_symbols': [s for s in COHORT if s not in UNAVAILABLE],
+        'unavailable_symbols': UNAVAILABLE,
+        'reason': 'External symbol availability failure before outcome analysis; no substitutions or rule changes.',
+        'original_freeze_manifest_sha256': sha(BASE/'freeze_manifest.json'),
+    }
+
+
+def verified_amendment():
+    p = BASE/'availability_amendment.json'
+    if not p.is_file():
+        raise RuntimeError('First run --record-unavailable before retrying; original 40-symbol freeze stays intact.')
+    if json.loads(p.read_text(encoding='utf-8')) != amendment_record():
+        raise RuntimeError('AVAILABILITY_AMENDMENT_MISMATCH: refusing to proceed')
+    return json.loads(p.read_text(encoding='utf-8'))
+
+
+def record_unavailable():
+    # No outcome report may exist at the time the availability exclusion is registered.
+    if (BASE/'validation_report.json').exists() or (BASE/'dataset_seal.json').exists():
+        raise RuntimeError('AMENDMENT_AFTER_VALIDATION_NOT_ALLOWED')
+    if set(UNAVAILABLE) - set(COHORT) or set(UNAVAILABLE) & set(DISCOVERY):
+        raise RuntimeError('UNEXPECTED_EXCLUSION')
+    orig = BASE/'freeze_manifest.json'
+    if not orig.exists():
+        raise RuntimeError('FROZEN_MANIFEST_MISSING')
+    p=BASE/'availability_amendment.json'
+    record=amendment_record()
+    if p.exists():
+        if json.loads(p.read_text(encoding='utf-8')) != record:
+            raise RuntimeError('EXISTING_AMENDMENT_CHANGED')
+        print('AMENDMENT_ALREADY_EXISTS',p,flush=True)
+        return
+    store(p,record)
+    print('AVAILABILITY_AMENDMENT_RECORDED',json.dumps({'unavailable':list(UNAVAILABLE),'eligible':len(record['included_symbols']),'original_cohort':len(COHORT)}),flush=True)
+
+
+def validate_recovered_batch(index):
+    """Audit the complete, already-downloaded survivors of batch 6 without editing failed files."""
+    import horizontal_breakout_native_candles_pilot_v1 as collector
+    if index!=6 or set(batches()[index-1]) & set(UNAVAILABLE) != set(UNAVAILABLE):
+        raise RuntimeError('UNEXPECTED_RECOVERY_BATCH')
+    d=batch_dir(index)
+    config=json.loads((d/'dataset_config.json').read_text(encoding='utf-8'))
+    if config.get('symbols') != list(batches()[index-1]) or config.get('start')!=START or config.get('end')!=END:
+        raise RuntimeError('BATCH_06_ORIGINAL_DOWNLOAD_CONFIG_CHANGED')
+    failed=json.loads((d/'native_audit.json').read_text(encoding='utf-8'))
+    errors=failed.get('errors',[])
+    if len(errors)!=1 or errors[0].get('symbol')!='PEPEUSDT' or errors[0].get('timeframe')!='30m' or '400' not in str(errors[0].get('error','')):
+        raise RuntimeError('BATCH_06_FAILURE_EVIDENCE_CHANGED')
+    for sym in eligible_batch(index):
+        for tf in ('30m','1m'):
+            f=d/f'{sym}_{tf}.csv'
+            mp=f.with_suffix('.meta.json')
+            if not f.is_file() or not mp.is_file():raise RuntimeError('MISSING_RECOVERED_FILE: '+str(f))
+            meta=json.loads(mp.read_text(encoding='utf-8'))
+            if meta.get('symbol')!=sym or meta.get('timeframe')!=tf or meta.get('sha256')!=sha(f):
+                raise RuntimeError('RECOVERED_META_INVALID: '+str(f))
+            start=collector.parse_date(START)
+            end=collector.parse_date(END)+(TAIL_HOURS*60*60*1000 if tf=='1m' else 0)
+            interval=collector.ONE if tf=='1m' else collector.THIRTY
+            collector.validate_csv(f,start,end,interval)
+    print('RECOVERED_BATCH_06',len(eligible_batch(index)),'symbols, 8 files verified; PEPEUSDT explicitly unavailable',flush=True)
+
+
 def expected_manifest():
     return {'version':VERSION, 'holdout_type':'UNSEEN_SYMBOLS_SHARED_DATES',
             'note':'Same market dates as pilot; NOT independent temporal validation.',
@@ -158,7 +236,7 @@ def seal_data(write=False):
     """Re-check every native file and compare to immutable SHA256 dataset seal."""
     hashes={}
     for idx,syms in enumerate(batches(),1):
-        for symbol in syms:
+        for symbol in eligible_batch(idx):
             for tf in ('1m','30m'):
                 f=batch_dir(idx)/f'{symbol}_{tf}.csv'
                 meta=f.with_suffix('.meta.json')
@@ -173,7 +251,7 @@ def seal_data(write=False):
     elif write:
         store(p,hashes)
     else:
-        raise RuntimeError('First execute --audit-data to seal the 80 verified candle files.')
+        raise RuntimeError('First execute --audit-data to seal the eligible native candle files.')
     print('DATASET_VERIFIED',len(hashes),'native CSVs; sealed',p)
     return hashes
 
@@ -183,7 +261,7 @@ def batch_run_dir(index):
     import horizontal_breakout_lifecycle_v12 as v12
     from argparse import Namespace
     a=Namespace(root=ROOT,candles_dir=batch_dir(index),max_symbols=0,
-                symbols=','.join(batches()[index-1]),run_tag=run_tag(index))
+                symbols=','.join(eligible_batch(index)),run_tag=run_tag(index))
     p,manifest=v12.fingerprint(a,v12.LifecycleConfig())
     if json.loads(json.dumps(manifest['settings']))!=FROZEN_SETTINGS:
         raise RuntimeError('V1.2 SETTINGS NO LONGER FROZEN')
@@ -196,10 +274,10 @@ def verify_audits():
     for idx,syms in enumerate(batches(),1):
         out=batch_run_dir(idx)
         rep,_,_,_,_=v12.run_audit(out)
-        if not rep['success'] or rep['expected_symbols']!=len(syms) or rep['completed_symbols']!=len(syms):
+        if not rep['success'] or rep['expected_symbols']!=len(eligible_batch(idx)) or rep['completed_symbols']!=len(eligible_batch(idx)):
             raise RuntimeError(f'BATCH_{idx:02d}_AUDIT_FAILED: {rep}')
         source=json.loads((out/'source_snapshot.json').read_text(encoding='utf-8'))
-        if len(source)!=len(syms)*2:raise RuntimeError(f'BAD_INPUT_SNAPSHOT_BATCH_{idx:02d}')
+        if len(source)!=len(eligible_batch(idx))*2:raise RuntimeError(f'BAD_INPUT_SNAPSHOT_BATCH_{idx:02d}')
         rows.append((out,rep))
     return rows
 
@@ -227,7 +305,7 @@ def combine():
     if len(d)!=len(att) or len(d)!=len(oc) or (d['_merge']!='both').any():
         raise RuntimeError('ATTEMPT_OUTCOME_MISMATCH')
     d=d.drop(columns=['_merge'])
-    if not set(d.symbol).issubset(COHORT) or set(d.symbol)&set(DISCOVERY):
+    if not set(d.symbol).issubset(COHORT) or set(d.symbol)&set(DISCOVERY) or set(d.symbol)&set(UNAVAILABLE):
         raise RuntimeError('CONTAMINATION_OF_HOLDOUT')
     d=d.sort_values(['level_id','signal_closed_ts','attempt_id']).copy()
     d['first_on_level']=~d.duplicated('level_id')
@@ -279,12 +357,14 @@ def report():
         per_symbol.append(analyze_group(g,group)|{'symbol':sym})
     result={'version':VERSION,'audit_success':True, 'study_type':'SYMBOL_HOLDOUT_ONLY',
             'shared_dates_with_discovery':True,'frozen_primary':PRIMARY,
-            'expected_symbols':len(COHORT),'symbols_with_attempts':int(d.symbol.nunique()),
+            'expected_symbols':len(COHORT),'eligible_symbols':len([sym for sym in COHORT if sym not in UNAVAILABLE]),
+            'unavailable_symbols':UNAVAILABLE,'symbols_with_attempts':int(d.symbol.nunique()),
             'total_levels':len(levels),'total_attempts':len(d),'first_attempts':len(first),
             'primary_first_attempt_by_level':primary,
             'secondary_all_attempts':secondary,
             'per_symbol_first_attempt':per_symbol,
-            'limits':['not temporal OOS','same macro regime as discovery','cross-symbol dependency',
+            'availability_amendment_sha256':sha(BASE/'availability_amendment.json') if (BASE/'availability_amendment.json').exists() else None,
+            'limits':['frozen cohort 40; one symbol unavailable, 39 assessed, no replacement', 'not temporal OOS','same macro regime as discovery','cross-symbol dependency',
                       'independent theoretical trades; simultaneous slots and slippage omitted',
                       'Wilson interval describes sampled hit rate, not strategy profitability']}
     store(BASE/'validation_report.json',result)
@@ -298,35 +378,45 @@ def report():
 def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
     exclusive=ap.add_mutually_exclusive_group(required=True)
-    for option in ('freeze','plan','fetch','audit-data','run','audit'):
+    for option in ('freeze','record-unavailable','plan','fetch','audit-data','run','audit'):
         exclusive.add_argument('--'+option,action='store_true')
     a=ap.parse_args(argv)
     if a.freeze:
         freeze();return 0
     locked()
+    if a.record_unavailable:
+        record_unavailable(); return 0
+    verified_amendment()
     if a.plan:
         print(json.dumps({'mode':'PLAN','type':'SYMBOL_HOLDOUT_SHARED_DATES',
-                          'symbols':len(COHORT),'batches':len(batches()),
+                          'symbols':len(COHORT),'eligible_symbols':len([sym for sym in COHORT if sym not in UNAVAILABLE]),
+                          'unavailable_symbols':list(UNAVAILABLE),'batches':len(batches()),
                           'dates_utc':[START,END],'post_tail_hours':TAIL_HOURS,
                           'principal':PRIMARY,'destination':str(BASE)},indent=2,ensure_ascii=False))
         for i,syms in enumerate(batches(),1):
-            print(f'BATCH {i:02d}: {", ".join(syms)}')
-        print('DATA_VOLUME: 40 symbols x 20,160 1m bars + 576 30m bars; ~880 public API calls.')
+            print(f'BATCH {i:02d}: {", ".join(eligible_batch(i))}'+(' [1 UNAVAILABLE]' if len(syms)!=len(eligible_batch(i)) else ''))
+        print('DATA_VOLUME: 39 eligible of 40 frozen symbols; 78 native files. Previous downloads are cached.')
         return 0
     if a.fetch:
         for i,syms in enumerate(batches(),1):
+            if i==6:
+                validate_recovered_batch(i)
+                continue
             call(COLLECTOR,'--run',*collector_args(i,syms))
         print('FETCH_COMPLETE: next use --audit-data')
         return 0
     if a.audit_data:
         for i,syms in enumerate(batches(),1):
+            if i==6:
+                validate_recovered_batch(i)
+                continue
             call(COLLECTOR,'--audit',*collector_args(i,syms))
         seal_data(write=True)
         return 0
     seal_data(write=False)
     if a.run:
         for i,syms in enumerate(batches(),1):
-            run=['--candles-dir',str(batch_dir(i)), '--symbols',','.join(syms),
+            run=['--candles-dir',str(batch_dir(i)), '--symbols',','.join(eligible_batch(i)),
                  '--run-tag',run_tag(i)]
             call(ENGINE,'--run',*run)
             call(ENGINE,'--audit',*run)
