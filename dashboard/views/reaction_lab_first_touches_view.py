@@ -235,7 +235,7 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
                    "El journal conserva la clasificación original.")
     st.caption(f"Live observed: {summary['live']} · Resto: recuperados de ventana. "
                "Los contadores son de eventos únicos guardados, no de scans. "
-               "La base guarda datos causales, NO los recorridos futuros 1m.")
+               "El journal causal y los recorridos posteriores 1m viven en SQLite independientes.")
 
     a, b, c, d = st.columns([1.5, 1.4, 1, 1.5])
     with a:
@@ -258,6 +258,18 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
     symbol = None if selected_symbol == "ALL" else selected_symbol
     side = None if selected_side == "ALL" else selected_side
     origin = None if selected_origin == "ALL" else selected_origin
+
+    # Forward metrics are read from a separate immutable 1m path collector.
+    # Original causal first-touch SQLite and Legacy views remain untouched.
+    from dashboard.views.reaction_lab_first_touch_metrics_view import (
+        render_overview as render_first_touch_metrics_overview,
+        enrich_page as first_touch_metrics_page,
+        render_touch as render_first_touch_metrics_detail,
+    )
+    metrics_selection = render_first_touch_metrics_overview(
+        project, db, symbols=symbol_universe, status=status,
+        side=side, symbol=symbol, origin=origin,
+    )
     try:
         # First query obtains the current filtered cardinality to bound pages.
         total, _ = get_page(db, status=status, symbol=symbol, side=side, origin=origin,
@@ -284,6 +296,18 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
         df["known_ts"], unit="ms", utc=True).dt.tz_convert(timezone))
     display_cols = ["retest_ARG", "symbol", "side", "status", "timeframe",
                     "detector", "observation_type", "confirmado_ARG", "touch_key"]
+    if metrics_selection:
+        metric_mode, metric_horizon = metrics_selection
+        try:
+            df = first_touch_metrics_page(project, db, rows, metric_mode, metric_horizon)
+            df.insert(0, "retest_ARG", pd.to_datetime(
+                df["retest_ts"], unit="ms", utc=True).dt.tz_convert(timezone))
+            df.insert(1, "confirmado_ARG", pd.to_datetime(
+                df["known_ts"], unit="ms", utc=True).dt.tz_convert(timezone))
+            display_cols += ["bars_1m", "path_state", "MFE_pct", "MAE_pct", "Return_pct"]
+            display_cols += ["TP_SL"]
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            st.warning(f"La tabla individual no pudo consultar los recorridos 1m: {exc}")
     st.dataframe(df[display_cols], use_container_width=True, hide_index=True,
                  key="continuous_first_touch_table_v1")
     st.download_button("⬇ Exportar página (CSV)",
@@ -305,6 +329,10 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
     if not touch:
         st.warning("El evento seleccionado ya no existe en la base.")
         return
+    if metrics_selection:
+        render_first_touch_metrics_detail(
+            project, db, chosen, metrics_selection[0], metrics_selection[1], touch
+        )
     with st.expander("Identidad causal y campos registrados", expanded=False):
         st.json(touch)
         st.caption("Registro congelado al primer guardado, sin reconstrucciones futuras.")
@@ -337,7 +365,8 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
                                 key="continuous_first_touch_1m_chart_v1",
                                 config={"displaylogo": False, "scrollZoom": True})
             else:
-                st.info("No hay velas 1m retenidas para este evento. Continuous "
-                        "aún no archiva el seguimiento posterior de FAILED e INDECISIVE.")
+                st.info("Este gráfico de Redis no tiene velas 1m para el evento. "
+                        "Si el colector ya archivó su trayectoria posterior, usá "
+                        "'Ver velas 1m guardadas de este evento' en el bloque MFE/MAE.")
         except Exception as exc:
             st.warning(f"No se pudieron consultar las velas 1m: {exc}")
