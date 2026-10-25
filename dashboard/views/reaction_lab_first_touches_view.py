@@ -295,6 +295,14 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
             except Exception as exc:
                 st.warning(f"FAILED Second Break Lab V4 no disponible: {exc}")
 
+    if status in (None, "TOUCH_FAILED"):
+        with st.expander("🧭 FAILED Early Behavior V5 · primeros 1/2/3/5m después del segundo quiebre", expanded=False):
+            try:
+                from dashboard.views.reaction_lab_failed_early_behavior_view_v5 import render_failed_early_behavior_panel
+                render_failed_early_behavior_panel(project, symbol=symbol, side=side, origin=origin)
+            except Exception as exc:
+                st.warning(f"FAILED Early Behavior Lab V5 no disponible: {exc}")
+
     try:
         # First query obtains the current filtered cardinality to bound pages.
         total, _ = get_page(db, status=status, symbol=symbol, side=side, origin=origin,
