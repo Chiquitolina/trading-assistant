@@ -303,6 +303,14 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
             except Exception as exc:
                 st.warning(f"FAILED Early Behavior Lab V5 no disponible: {exc}")
 
+    if status in (None, "TOUCH_FAILED"):
+        with st.expander("🔬 FAILED Path Geometry Audit V6 · ¿nuevo mínimo o simple oscilación?", expanded=False):
+            try:
+                from dashboard.views.reaction_lab_failed_path_audit_view_v6 import render_failed_path_audit_v6
+                render_failed_path_audit_v6(project, symbol=symbol, side=side, origin=origin)
+            except Exception as exc:
+                st.warning(f"FAILED Path Geometry V6 no disponible: {exc}")
+
     try:
         # First query obtains the current filtered cardinality to bound pages.
         total, _ = get_page(db, status=status, symbol=symbol, side=side, origin=origin,
