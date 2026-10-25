@@ -270,6 +270,15 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
         project, db, symbols=symbol_universe, status=status,
         side=side, symbol=symbol, origin=origin,
     )
+    # Independent descriptive research: never changes the classifier or trading.
+    if status in (None, "TOUCH_FAILED"):
+        with st.expander("🔬 FAILED Behavior Lab V2 · impulso, retroceso y Market Flow", expanded=False):
+            try:
+                from dashboard.views.reaction_lab_failed_behavior_view_v2 import render_failed_behavior_panel
+                render_failed_behavior_panel(project, symbol=symbol, side=side, origin=origin)
+            except Exception as exc:
+                st.warning(f"FAILED Behavior Lab V2 no disponible: {exc}")
+
     try:
         # First query obtains the current filtered cardinality to bound pages.
         total, _ = get_page(db, status=status, symbol=symbol, side=side, origin=origin,
