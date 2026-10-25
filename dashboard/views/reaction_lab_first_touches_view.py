@@ -279,6 +279,14 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
             except Exception as exc:
                 st.warning(f"FAILED Behavior Lab V2 no disponible: {exc}")
 
+    if status in (None, "TOUCH_FAILED"):
+        with st.expander("📐 FAILED Geometry Lab V3 · cronología desde el retroceso", expanded=False):
+            try:
+                from dashboard.views.reaction_lab_failed_geometry_view_v3 import render_failed_geometry_panel
+                render_failed_geometry_panel(project, symbol=symbol, side=side, origin=origin)
+            except Exception as exc:
+                st.warning(f"FAILED Geometry Lab V3 no disponible: {exc}")
+
     try:
         # First query obtains the current filtered cardinality to bound pages.
         total, _ = get_page(db, status=status, symbol=symbol, side=side, origin=origin,
