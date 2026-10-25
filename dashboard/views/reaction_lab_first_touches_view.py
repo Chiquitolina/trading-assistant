@@ -287,6 +287,14 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
             except Exception as exc:
                 st.warning(f"FAILED Geometry Lab V3 no disponible: {exc}")
 
+    if status in (None, "TOUCH_FAILED"):
+        with st.expander("🔎 FAILED Second Break Lab V4 · continuación después del segundo quiebre", expanded=False):
+            try:
+                from dashboard.views.reaction_lab_failed_second_break_view_v4 import render_failed_second_break_panel
+                render_failed_second_break_panel(project, symbol=symbol, side=side, origin=origin)
+            except Exception as exc:
+                st.warning(f"FAILED Second Break Lab V4 no disponible: {exc}")
+
     try:
         # First query obtains the current filtered cardinality to bound pages.
         total, _ = get_page(db, status=status, symbol=symbol, side=side, origin=origin,
@@ -325,6 +333,19 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
             display_cols += ["TP_SL"]
         except (sqlite3.Error, OSError, ValueError) as exc:
             st.warning(f"La tabla individual no pudo consultar los recorridos 1m: {exc}")
+    # Historical market-flow join for EVERY first touch (REACTION/FAILED/INDECISIVE).
+    # Uses snapshots archived and observed before first-touch close, never
+    # today's Redis snapshot or a retroactive mutation of the journal.
+    try:
+        from dashboard.views.reaction_lab_flow_asof_view import enrich_first_touch_page
+        df, flow_state, flow_count = enrich_first_touch_page(project, df)
+        display_cols += ["return_rank_4h_pct", "volume_rank_4h_pct",
+                         "relative_volume_4h", "flow_group", "primary_sector"]
+        st.caption(f"Market Flow histórico causal de esta página: {flow_count}/{len(rows)} eventos "
+                   f"({flow_state}). Sin snapshot anterior disponible = datos vacíos; "
+                   "los rankings ACTUALES nunca se asignan al pasado.")
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        st.warning(f"No se pudo leer el archivo histórico Market Flow (solo lectura): {exc}")
     st.dataframe(df[display_cols], use_container_width=True, hide_index=True,
                  key="continuous_first_touch_table_v1")
     st.download_button("⬇ Exportar página (CSV)",
@@ -350,6 +371,23 @@ def render_first_touches_journal(project: Path, *, symbol_universe,
         render_first_touch_metrics_detail(
             project, db, chosen, metrics_selection[0], metrics_selection[1], touch
         )
+    # Show as-of information independently of the immutable causal touch row.
+    try:
+        from dashboard.views.reaction_lab_flow_asof_view import get_market_flow_asof
+        flow_one, _ = get_market_flow_asof(project, [{
+            "touch_key": chosen, "symbol": touch["symbol"],
+            "retest_ts": touch["retest_timestamp"]
+        }])
+        with st.expander("Market Flow 4h histórico de este primer retesteo", expanded=False):
+            if chosen in flow_one:
+                st.json(flow_one[chosen])
+                st.caption("Snapshot disponible antes del cierre del first touch; "
+                           "contexto histórico de mercado, no campo registrado por el detector.")
+            else:
+                st.info("Sin Market Flow 4h causal archivado para este evento. "
+                        "Puede ser anterior al inicio del archivador.")
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        st.warning(f"Market Flow histórico no disponible: {exc}")
     with st.expander("Identidad causal y campos registrados", expanded=False):
         st.json(touch)
         st.caption("Registro congelado al primer guardado, sin reconstrucciones futuras.")
