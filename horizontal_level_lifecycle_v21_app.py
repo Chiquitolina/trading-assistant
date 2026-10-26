@@ -412,6 +412,9 @@ def render_hll_v21(root):
                            file_name=f'{sym}_{selected}_events.csv',mime='text/csv')
     st.info('FASE GEOMÉTRICA: sin TP/SL, sin 1m, sin PnL. Una defensa se confirma '
             'solo después del TEST; los TEST_TIMEOUT y las censuras no son pérdidas.')
+    from horizontal_level_cross_research_v22_view import render_horizontal_cross_v22
+    render_horizontal_cross_v22(root,run)
+
 
 
 if __name__=='__main__':
