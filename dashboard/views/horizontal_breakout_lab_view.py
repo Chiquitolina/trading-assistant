@@ -13,6 +13,7 @@ from horizontal_breakout_lab import Archive, REL, TP_PCTS, HORIZONS, TF, M, utc
 from horizontal_breakout_inspector_v11 import (ceiling_origin, display_state,
     trigger_inspection, confirmation_post)
 from dashboard.views.horizontal_breakout_lifecycle_v12_view import render_v12
+from horizontal_level_lifecycle_v21_app import render_hll_v21
 
 
 def _read(path):
@@ -185,7 +186,7 @@ def render_horizontal_breakout_lab(root):
         box.metric(label,value)
     st.caption(f"Fuente: {cfg.get('source_type','?')} · Confirmación: {cfg.get('settings',{}).get('trigger','?')} · Ventanas: {cfg.get('settings',{}).get('windows','?')}")
     st.info('Sin datos 1m suficientes = CENSORED/NO_FILL, nunca SL. No inferir rendimiento de mercado sin cobertura completa, costos, control temporal y validación fuera de muestra.')
-    tabs=st.tabs(['🧱 Todas las bases','🚀 Rupturas y resultados','📊 Factores','🔎 Inspector 30m / 1m','📋 Cobertura y metodología','🧭 V1.2 · Ciclo y fuerza'])
+    tabs=st.tabs(['🧱 Todas las bases','🚀 Rupturas y resultados','📊 Factores','🔎 Inspector 30m / 1m','📋 Cobertura y metodología','🧭 V1.2 · Ciclo y fuerza','🧱 V2.1 · Niveles y defensas'])
     with tabs[0]:
         if setups.empty:
             st.info('No se formaron bases verificables con esta cobertura o configuración.')
@@ -338,3 +339,5 @@ def render_horizontal_breakout_lab(root):
 
     with tabs[5]:
         render_v12(root)
+    with tabs[6]:
+        render_hll_v21(root)
