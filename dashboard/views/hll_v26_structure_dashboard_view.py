@@ -222,6 +222,14 @@ La etiqueta POST solo se conoce cuando termina de confirmarse. **Nunca debe util
     sel = _subset(df, category=category, symbol=symbol, pressure=pressure,
                   touch_min=trange[0], touch_max=trange[1], min_volume=min_volume,
                   min_rejections=int(min_rejections))
+    if category == '5 · Resistencia → soporte (POST)':
+        flip_class = st.selectbox('Estado del flip',
+            ['Todos los flips confirmados', 'Sostenido 4 velas', 'Confirmado y perdido'],
+            key='hll26_flip_class')
+        if flip_class == 'Sostenido 4 velas':
+            sel = sel[sel.status.eq('FLIP_SUSTAINED_4B')]
+        elif flip_class == 'Confirmado y perdido':
+            sel = sel[sel.status.eq('FLIP_CONFIRMED_LATER_LOST')]
     st.caption(f"{len(sel):,} intentos con estos filtros · los episodios pueden compartir símbolo, nivel o trayectoria".replace(",", "."))
     if sel.empty:
         st.info("No hay intentos que cumplan estos filtros.")

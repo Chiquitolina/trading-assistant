@@ -129,10 +129,13 @@ def render_horizontal_breakout_lab(root):
         box.metric(label,value)
     st.caption(f"Fuente: {cfg.get('source_type','?')} · Confirmación: {cfg.get('settings',{}).get('trigger','?')} · Ventanas: {cfg.get('settings',{}).get('windows','?')}")
     st.info('Sin datos 1m suficientes = CENSORED/NO_FILL, nunca SL. No inferir rendimiento de mercado sin cobertura completa, costos, control temporal y validación fuera de muestra.')
-    tabs=st.tabs(['🧱 Todas las bases', '🚀 Rupturas y resultados', '📊 Factores', '🔎 Inspector 30m / 1m', '📋 Cobertura y metodología', '🧬 Estructuras V2.6'])
+    tabs=st.tabs(['🧱 Todas las bases', '🚀 Rupturas y resultados', '📊 Factores', '🔎 Inspector 30m / 1m', '📋 Cobertura y metodología', '🧬 Estructuras V2.6', '🎯 Flip LONG V2.7'])
     with tabs[5]:
         from dashboard.views.hll_v26_structure_dashboard_view import render_hll_v26_structure_dashboard
         render_hll_v26_structure_dashboard(root)
+    with tabs[6]:
+        from dashboard.views.hll_v27_flip_dashboard_view import render_hll_v27_flip_dashboard
+        render_hll_v27_flip_dashboard(root)
     with tabs[0]:
         if setups.empty:
             st.info('No se formaron bases verificables con esta cobertura o configuración.')
