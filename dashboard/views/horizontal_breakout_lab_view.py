@@ -10,10 +10,6 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from horizontal_breakout_lab import Archive, REL, TP_PCTS, HORIZONS, TF, M, utc
-from horizontal_breakout_inspector_v11 import (ceiling_origin, display_state,
-    trigger_inspection, confirmation_post)
-from dashboard.views.horizontal_breakout_lifecycle_v12_view import render_v12
-from horizontal_level_lifecycle_v21_app import render_hll_v21
 
 
 def _read(path):
@@ -59,104 +55,51 @@ def _histogram_outcomes(result, factor, col):
     return agg
 
 
-def _utc_x(timestamp_ms):
-    return pd.Timestamp(int(timestamp_ms), unit='ms', tz='UTC')
-
-
-def _chart(pre, minute, row, view_mode, pre_bars, trigger, margin_pct):
-    """Strict time cutoffs: PRE <= freeze; TRIGGER <= event; POST may extend."""
-    freeze = int(row.formation_closed_ts)
-    event = int(row.breakout_ts) if pd.notna(row.get('breakout_ts')) else None
-    origin = ceiling_origin(row, pre)
-    left = freeze - pre_bars * TF
-    if view_mode == 'PRE' or event is None:
-        latest = freeze
-    elif view_mode == 'TRIGGER':
-        latest = event
-    else:
-        latest = event + 48 * 60 * M
-    # A 30m candle is only drawable when it was CLOSED by the chosen cutoff.
-    c = pre[(pre.timestamp >= left) & (pre.timestamp + TF <= latest)].copy()
+def _chart(pre,minute,row,show_future):
+    freeze=int(row.formation_closed_ts)
+    break_ts=int(row.breakout_ts) if pd.notna(row.get('breakout_ts')) else None
+    earliest=freeze-80*TF
+    latest=freeze+(48*60*M if show_future else 0)
+    c=pre[(pre.timestamp>=earliest)&(pre.timestamp<latest)].copy()
     if c.empty:
-        st.warning('No hay velas 30m cerradas dentro de la ventana de este evento.')
+        st.warning('No hay velas 30m dentro de la ventana de este evento.')
         return
-    x = pd.to_datetime(c.timestamp, unit='ms', utc=True)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.035,
-                        row_heights=[.78,.22])
-    fig.add_trace(go.Candlestick(x=x, open=c.open, high=c.high, low=c.low,
-                   close=c.close, name='30m OHLC', increasing_line_color='#13a68b',
-                   decreasing_line_color='#d55a5a', increasing_fillcolor='#13a68b',
-                   decreasing_fillcolor='#d55a5a'), row=1,col=1)
-    fig.add_trace(go.Bar(x=x, y=c.volume, name='Volumen 30m',
-                  marker_color='#6b849d', opacity=.7), row=2,col=1)
-    level = float(row.level)
-    zlo, zhi = float(row.zone_low), float(row.zone_high)
-    # During the forming window, the line is shown as a RECONSTRUCTION.
-    # It did not exist as a frozen observable level until formation_closed_ts.
-    window_start = max(left, origin['start_ts'])
-    right = latest if view_mode != 'POST' else min(latest, int(c.timestamp.max())+TF)
-    if right > window_start:
-        fig.add_shape(type='rect',x0=_utc_x(window_start),x1=_utc_x(right),
-                      y0=zlo,y1=zhi,xref='x',yref='y',
-                      fillcolor='rgba(220,165,76,.11)',line_width=0,row=1,col=1)
-    if freeze > window_start:
-        fig.add_trace(go.Scatter(x=[_utc_x(window_start),_utc_x(freeze)],
-                      y=[level,level],mode='lines',name='Origen reconstruido (no conocido aún)',
-                      line=dict(color='#9b793c',width=1.5,dash='dot')),
-                      row=1,col=1)
-    if right > freeze:
-        fig.add_trace(go.Scatter(x=[_utc_x(freeze),_utc_x(right)],
-                      y=[level,level],mode='lines',name='Techo congelado observable',
-                      line=dict(color='#dca54c',width=2,dash='dash'),
-                      hovertemplate='Nivel congelado: %{y:.8f}<extra></extra>'),row=1,col=1)
-    start = origin['start_ts']
-    if start >= left and start <= latest:
-        fig.add_vline(x=_utc_x(start),line_dash='dot',line_color='#a16c3b',row=1,col=1)
-    if freeze >= left and freeze <= latest:
-        fig.add_vline(x=_utc_x(freeze),line_dash='dot',line_color='#7c8ca9',row=1,col=1)
-    touch_times = {x['open_ts']:x['number'] for x in origin['touches']}
-    hits = c[c.timestamp.isin(touch_times)]
-    if not hits.empty:
-        fig.add_trace(go.Scatter(x=pd.to_datetime(hits.timestamp,unit='ms',utc=True),
-                      y=hits.high, mode='markers+text',
-                      text=['#'+str(touch_times[int(t)]) for t in hits.timestamp],
-                      textposition='top center',textfont=dict(color='#e9b75c',size=10),
-                      marker=dict(color='#dca54c',size=10,symbol='circle-open',line=dict(width=2)),
-                      name='Visitas PRE'), row=1,col=1)
-    if event is not None and view_mode != 'PRE':
-        # For 1m trigger, the 30m candle containing the trigger is NOT displayed
-        # until it has actually closed; use the independent 1m detail instead.
-        fig.add_vline(x=_utc_x(event),line_color='#13a68b',line_dash='dot',
-                      line_width=2,row=1,col=1)
-        threshold = level*(1+margin_pct/100)
-        fig.add_trace(go.Scatter(x=[_utc_x(max(left,freeze)),_utc_x(event)],
-                      y=[threshold,threshold],mode='lines',name='Umbral primer cierre',
-                      line=dict(color='#60b5e5',dash='dot',width=1.2)),row=1,col=1)
-    fig.update_layout(height=560,showlegend=True,margin=dict(l=12,r=12,t=22,b=10),
+    x=pd.to_datetime(c.timestamp,unit='ms',utc=True)
+    fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=.035,row_heights=[.78,.22])
+    fig.add_trace(go.Candlestick(x=x,open=c.open,high=c.high,low=c.low,close=c.close,
+                                 name='30m OHLC',increasing_line_color='#13a68b',
+                                 decreasing_line_color='#d55a5a',increasing_fillcolor='#13a68b',
+                                 decreasing_fillcolor='#d55a5a'),row=1,col=1)
+    fig.add_trace(go.Bar(x=x,y=c.volume,name='Volumen 30m',marker_color='#6b849d',opacity=.7),row=2,col=1)
+    level=float(row.level)
+    zlo,zhi=float(row.zone_low),float(row.zone_high)
+    fig.add_hrect(y0=zlo,y1=zhi,fillcolor='#dca54c',opacity=.12,line_width=0,row=1,col=1)
+    fig.add_hline(y=level,line_color='#dca54c',line_dash='dash',annotation_text='Techo PRE',row=1,col=1)
+    fig.add_vline(x=pd.Timestamp(freeze,unit='ms',tz='UTC'),line_dash='dot',line_color='#7c8ca9',row=1,col=1)
+    try:
+        times=__import__('json').loads(row.touch_open_timestamps)
+        touch=c[c.timestamp.isin(times)]
+        if len(touch):
+            fig.add_trace(go.Scatter(x=pd.to_datetime(touch.timestamp,unit='ms',utc=True),
+                y=touch.high,mode='markers',marker=dict(color='#dca54c',size=10,symbol='circle-open',line=dict(width=2)),
+                name='Toques PRE'),row=1,col=1)
+    except (ValueError,TypeError):pass
+    if break_ts is not None and show_future:
+        fig.add_vline(x=pd.Timestamp(break_ts,unit='ms',tz='UTC'),line_color='#18a07a',line_width=2,row=1,col=1)
+    fig.update_layout(height=530,showlegend=True,margin=dict(l=12,r=12,t=18,b=10),
                       xaxis_rangeslider_visible=False)
     st.plotly_chart(fig,use_container_width=True)
-    visible_pre = c[c.timestamp < freeze]
-    if len(visible_pre) < pre_bars:
-        st.caption(f'Contexto PRE disponible: {len(visible_pre)} de {pre_bars} velas solicitadas; '
-                   'la falta de velas antiguas no se rellena artificialmente.')
-    if event is not None and view_mode != 'PRE' and not minute.empty:
-        # Display only candles with a CLOSED minute at the selected cutoff.
-        detail_start = max(freeze-90*M,event-90*M)
-        detail_end = event if view_mode=='TRIGGER' else event+360*M
-        sub = minute[(minute.timestamp>=detail_start) & (minute.timestamp+M<=detail_end)]
+    if break_ts is not None and show_future and not minute.empty:
+        sub=minute[(minute.timestamp>=break_ts-30*M)&(minute.timestamp<break_ts+360*M)]
         if not sub.empty:
-            st.caption('Detalle 1m: línea verde = cierre que activó el cruce. '
-                       'La entrada simulada solo puede ocurrir desde la siguiente apertura disponible.')
-            p = go.Figure(go.Candlestick(x=pd.to_datetime(sub.timestamp,unit='ms',utc=True),
+            st.caption('Detalle 1m: el triángulo/entrada solo es operable a partir de la apertura posterior a la confirmación.')
+            p=go.Figure(go.Candlestick(x=pd.to_datetime(sub.timestamp,unit='ms',utc=True),
                          open=sub.open,high=sub.high,low=sub.low,close=sub.close,
                          increasing_line_color='#13a68b',decreasing_line_color='#d55a5a'))
             p.add_hline(y=level,line_dash='dash',line_color='#dca54c')
-            p.add_hline(y=level*(1+margin_pct/100),line_dash='dot',line_color='#60b5e5')
-            p.add_vline(x=_utc_x(event),line_dash='dot',line_color='#18a07a')
-            p.update_layout(height=340,xaxis_rangeslider_visible=False,
-                            margin=dict(l=12,r=12,t=12,b=12))
+            p.add_vline(x=pd.Timestamp(break_ts,unit='ms',tz='UTC'),line_dash='dot',line_color='#18a07a')
+            p.update_layout(height=335,xaxis_rangeslider_visible=False,margin=dict(l=12,r=12,t=12,b=12))
             st.plotly_chart(p,use_container_width=True)
-
 
 
 def render_horizontal_breakout_lab(root):
@@ -186,18 +129,19 @@ def render_horizontal_breakout_lab(root):
         box.metric(label,value)
     st.caption(f"Fuente: {cfg.get('source_type','?')} · Confirmación: {cfg.get('settings',{}).get('trigger','?')} · Ventanas: {cfg.get('settings',{}).get('windows','?')}")
     st.info('Sin datos 1m suficientes = CENSORED/NO_FILL, nunca SL. No inferir rendimiento de mercado sin cobertura completa, costos, control temporal y validación fuera de muestra.')
-    tabs=st.tabs(['🧱 Todas las bases','🚀 Rupturas y resultados','📊 Factores','🔎 Inspector 30m / 1m','📋 Cobertura y metodología','🧭 V1.2 · Ciclo y fuerza','🧱 V2.1 · Niveles y defensas'])
+    tabs=st.tabs(['🧱 Todas las bases', '🚀 Rupturas y resultados', '📊 Factores', '🔎 Inspector 30m / 1m', '📋 Cobertura y metodología', '🧬 Estructuras V2.6'])
+    with tabs[5]:
+        from dashboard.views.hll_v26_structure_dashboard_view import render_hll_v26_structure_dashboard
+        render_hll_v26_structure_dashboard(root)
     with tabs[0]:
         if setups.empty:
             st.info('No se formaron bases verificables con esta cobertura o configuración.')
         else:
             states=sorted(setups.end_state.dropna().unique())
-            wanted=st.multiselect('Estados de las bases',states,default=states,
-                                  format_func=display_state,key='hb_states')
-            filtered=setups[setups.end_state.isin(wanted)].copy()
-            filtered['estado_visible']=filtered.end_state.map(display_state)
+            wanted=st.multiselect('Estados de las bases',states,default=states,key='hb_states')
+            filtered=setups[setups.end_state.isin(wanted)]
             fields=[x for x in ['symbol','formation_time_utc','window','touch_count','level','base_height_pct',
-                                'pressure_higher_lows_pct','volume_pre_recent_ratio','estado_visible','source_30m'] if x in filtered]
+                                'pressure_higher_lows_pct','volume_pre_recent_ratio','end_state','source_30m'] if x in filtered]
             st.dataframe(filtered[fields],use_container_width=True,hide_index=True,height=350)
             st.download_button('⬇️ Todas las bases (CSV)',setups.to_csv(index=False).encode(),
                                file_name='horizontal_breakout_setups.csv',mime='text/csv',key='hb_download_setups')
@@ -252,92 +196,30 @@ def render_horizontal_breakout_lab(root):
         if setups.empty:
             st.info('No hay eventos para inspeccionar.')
         else:
-            st.caption('PRE = ciego, hasta la formación. CRUCE = incluye únicamente la vela que '
-                       'disparó la señal. POST = habilita el desenlace y la confirmación posterior.')
-            view_choice=st.radio('Mostrar en gráfico',
-                ['Hasta el cruce','Solo PRE (ciego)','POST (desenlace)'],horizontal=True,
-                key='hb_v11_mode')
-            mode={'Hasta el cruce':'TRIGGER','Solo PRE (ciego)':'PRE',
-                  'POST (desenlace)':'POST'}[view_choice]
-            pre_bars=st.select_slider('Velas 30m anteriores visibles',
-                       options=[60,90,120,180,240],value=120,key='hb_v11_pre_bars')
+            # Show both failed and successful setups, without outcome-based preselection.
             table=setups.sort_values('formation_closed_ts',ascending=False)
             symbols=sorted(table.symbol.dropna().unique())
             sym=st.selectbox('Símbolo',symbols,key='hb_symbol')
             sel=table[table.symbol==sym].head(250)
             keys=list(sel.setup_id)
             chosen=st.selectbox('Estructura',keys,format_func=lambda k:(
-                f"{sel[sel.setup_id==k].iloc[0].formation_time_utc} · "
-                f"{display_state(sel[sel.setup_id==k].iloc[0].end_state) if mode != 'PRE' else 'FORMED_PRE'} · "
+                f"{sel[sel.setup_id==k].iloc[0].formation_time_utc} · {sel[sel.setup_id==k].iloc[0].end_state} · "
                 f"{int(sel[sel.setup_id==k].iloc[0].touch_count)} contactos"),key='hb_event')
             row=sel[sel.setup_id==chosen].iloc[0]
-            event=breakouts[breakouts.setup_id==chosen] if not breakouts.empty else pd.DataFrame()
-            trigger=cfg.get('settings',{}).get('trigger','30m')
-            margin=float(cfg.get('settings',{}).get('margin_pct',.1))
-            basic={'Formación PRE (UTC)':row.formation_time_utc,
-                   'Nivel congelado':float(row.level), 'Zona inferior':float(row.zone_low),
-                   'Zona superior':float(row.zone_high), 'Visitas PRE':int(row.touch_count),
-                   'ATR PRE':float(row.atr_pre), 'Estado observable':(
-                        'FORMED_PRE' if mode=='PRE' else display_state(row.end_state))}
-            st.json(basic)
+            show_future=st.checkbox('Mostrar desenlace posterior (POST)',value=False,key='hb_post')
+            st.write({'Formación PRE (UTC)':row.formation_time_utc,'Nivel congelado':float(row.level),
+                      'Toques':int(row.touch_count),'ATR PRE':float(row.atr_pre),'Estado':row.end_state})
+            if show_future:
+                r=outcomes[outcomes.setup_id==chosen] if not outcomes.empty else pd.DataFrame()
+                if not r.empty:st.dataframe(r,hide_index=True,use_container_width=True)
             try:
                 with st.spinner('Leyendo gráfico desde archivo histórico (solo lectura)…'):
                     thirty,minute=_chart_source(str(root),cfg.get('candles_dir'),sym)
-                info=ceiling_origin(row,thirty)
-                with st.expander('Origen de la línea amarilla y detalle de toques',expanded=True):
-                    st.write(f"**Ventana de origen:** {info['start_utc']} → "
-                             f"{info['freeze_utc']} ({info['window']} velas 30m).")
-                    st.write('El techo congelado es la mediana de los máximos del cluster '
-                             'dentro de la tolerancia ATR, **no** la media de dos círculos. '
-                             'Los números representan visitas independientes seleccionadas '
-                             'por el detector.')
-                    st.write(f"Tolerancia de zona: ± {float(row.tolerance_price):.8f} "
-                             f"({float(row.atr_pre):.8f} ATR PRE).")
-                    if not info['complete_window']:
-                        st.warning('La ventana completa de formación NO está disponible en '
-                                   'la fuente de gráfico actual. Revisar corrida/cobertura.')
-                    st.dataframe(pd.DataFrame(info['touches']).rename(columns={
-                        'number':'Visita','utc':'Apertura UTC','high':'Máximo de esa vela'}).drop(
-                        columns=['open_ts'],errors='ignore'),hide_index=True,use_container_width=True)
-                if mode!='PRE' and not event.empty:
-                    trigger_info=trigger_inspection(thirty,minute,row,trigger=trigger,margin_pct=margin)
-                    if trigger_info['status']=='CLOSE_ABOVE_LEVEL':
-                        st.info(f"**CLOSE_ABOVE_LEVEL:** primer cierre {trigger} en "
-                                f"{utc(int(row.breakout_ts))}. "
-                                f"Cierre={trigger_info['trigger_close']:.8f}, "
-                                f"umbral={trigger_info['threshold']:.8f} "
-                                f"(techo +{margin:.2f}%). Esto todavía NO significa ruptura sostenida.")
-                    else:
-                        st.warning(f"No se pudo verificar el cruce en la fuente OHLCV "
-                                   f"que usa el gráfico: {trigger_info['status']}. "
-                                   'No modificar el evento histórico sin auditar la fuente.')
-                if mode=='POST' and not event.empty:
-                    diagnostic=confirmation_post(thirty,row)
-                    if diagnostic['status']=='BREAKOUT_CONFIRMED_POST':
-                        st.success('**BREAKOUT_CONFIRMED (POST):** dos cierres consecutivos '
-                                   'de velas 30m completamente cerradas por encima del techo '
-                                   'de la zona congelada. '
-                                   f"Confirmado en {utc(diagnostic['confirmed_at_ts'])}.")
-                    elif diagnostic['status']=='NOT_CONFIRMED_IN_4_BARS':
-                        st.warning('**Sin confirmación sostenida:** no hubo dos cierres '
-                                   'consecutivos arriba de la zona dentro de las siguientes '
-                                   'cuatro velas 30m. No equivale por sí solo a SL.')
-                    else:
-                        st.warning('**Confirmación indeterminada:** faltan velas POST '
-                                   'continuas para aplicar la regla.')
-                    r=outcomes[outcomes.setup_id==chosen] if not outcomes.empty else pd.DataFrame()
-                    if not r.empty:st.dataframe(r,hide_index=True,use_container_width=True)
-                _chart(thirty,minute,row,mode,pre_bars,trigger,margin)
+                _chart(thirty,minute,row,show_future)
             except Exception as exc:
-                st.error(f'No se pudo mostrar el inspector de {sym}: {exc}')
+                st.error(f'No se pudo cargar OHLCV de {sym}: {exc}')
     with tabs[4]:
         st.json({k:v for k,v in audit.items() if k not in ('run_manifest',)})
         st.markdown('**Reglas congeladas:** cada estructura utiliza velas 30m cerradas, con al menos dos visitas independientes a un techo local. Los precios de nivel y tolerancias quedan inmóviles después de la formación. El trigger se confirma con cierre 30m o 1m, y la entrada simulada es la apertura de la siguiente vela 1m.')
-        st.markdown('**V1.1 visual:** en corridas existentes BREAKOUT se presenta como CLOSE_ABOVE_LEVEL. BREAKOUT_CONFIRMED es solo un diagnóstico POST (dos cierres 30m consecutivos por encima de la zona dentro de cuatro velas posteriores); no altera setups/outcomes ni opera en LIVE.')
         st.markdown('**Limitaciones:** la detección 30m puede perder rupturas intrabar, 1m histórico puede estar incompleto y las fuentes agregadas de 15m se declaran PROXY. No se interpretan paths censurados como SL. No se usan REACTIONs en la detección.')
         st.code('python3 horizontal_breakout_lab.py --plan --max-symbols 5\npython3 -u horizontal_breakout_lab.py --run --max-symbols 5\npython3 horizontal_breakout_lab.py --audit --max-symbols 5')
-
-    with tabs[5]:
-        render_v12(root)
-    with tabs[6]:
-        render_hll_v21(root)
