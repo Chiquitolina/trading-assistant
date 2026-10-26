@@ -93,6 +93,20 @@ class LevelLifecycleV21(unittest.TestCase):
         self.assertTrue(all(x['observed_closed_ts']>first for x in events))
         self.assertEqual(report['status'],'COMPLETE')
 
+    def test_zone_quality_uses_correct_percent_units(self):
+        """A zone's width_pct must equal (high-low)/center * 100 once."""
+        f, _, _, report = scan_symbol('DEMO', bars(), Config(wide_zone_pct=2.0))
+        self.assertTrue(f)
+        expected = [
+            100.0 * (level['zone_high'] - level['zone_low']) / level['center'] > 2.0
+            for level in f
+        ]
+        observed = [level['quality_flag'] == 'WIDE_ZONE_REVIEW' for level in f]
+        self.assertEqual(observed, expected)
+        self.assertEqual(report['wide_zones'], sum(expected))
+        # This ordinary synthetic zone is < 2% wide and should not be flagged.
+        self.assertIn(False, expected)
+
     def test_wide_zone_is_quality_flag_not_selected_by_pnl(self):
         f,_,_,r=scan_symbol('DEMO',bars(),Config(wide_zone_pct=.001))
         self.assertTrue(f)

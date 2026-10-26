@@ -275,7 +275,7 @@ def scan_symbol(symbol, thirty, cfg=Config(), source='UNKNOWN'):
                         level_id = _hash(VERSION,symbol,origin,
                                          int(seg.timestamp.iloc[p['j']]),
                                          int(seg.timestamp.iloc[j]))
-                        pct = 200*halfwidth/center*100
+                        pct = 200*halfwidth/center  # zone width / center, expressed as percent
                         quality = 'WIDE_ZONE_REVIEW' if pct>cfg.wide_zone_pct else 'STANDARD_WIDTH'
                         wide_zones += int(quality=='WIDE_ZONE_REVIEW')
                         lv = dict(level_id=level_id,symbol=symbol,origin=origin,
