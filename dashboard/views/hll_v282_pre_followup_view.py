@@ -369,6 +369,41 @@ def render_hll_v282_pre_followup(root,blind=True):
                            'comparación retrospectiva, no tasa de éxito ni prueba externa.')
                 st.dataframe(pairs.head(250),hide_index=True,use_container_width=True)
     st.caption(f'{len(sel)} intentos originales V2.6 en esta selección; PRE se mantiene fijo. Cambiar el desenlace no reclasifica los intentos.')
+    # V2.9.4: Count attempts with independently verified entry OPENs.
+    # Same attempt with multiple routes counts ONCE in 'Con entrada'.
+    entry_catalogue = None
+    if not blind:
+        try:
+            from dashboard.views.hll_v294_entry_matrix import (
+                load_catalogue_for_view, summarize_coverage, LABELS,
+                aggregate_selection_matrix, episode_grid, matrix_table,
+            )
+            entry_catalogue = load_catalogue_for_view(root,folder,df.symbol.unique())
+            coverage = summarize_coverage(sel,entry_catalogue)
+            st.markdown('**Cobertura de entradas confirmadas — selección actual**')
+            cells=st.columns(4)
+            for c,(label,value) in zip(cells,[
+                ('Intentos PRE',coverage['total']),
+                ('Con entrada verificada',coverage['with_entry']),
+                ('Sin entrada verificada',coverage['without_entry']),
+                ('Señal sin OPEN verificable',coverage['confirmed_unverified']),
+            ]):
+                c.metric(label,value)
+            st.caption(f"{coverage['no_signal']} intentos sin confirmación de ruta. "
+                       'Cada intento se cuenta una sola vez, incluso cuando tiene varias entradas. '
+                       'Una confirmación sin OPEN verificable NO cuenta como entrada.')
+            st.dataframe(pd.DataFrame([{
+                'Ruta':LABELS[key],
+                'Señales confirmadas':coverage[key]['signal'],
+                'Entradas verificadas':coverage[key]['verified'],
+                'Señales sin OPEN':coverage[key]['unverified'],
+            } for key in ('FLIP_1M','V29_CONTINUATION_30M','V29_RECLAIM_30M')]),
+                hide_index=True,use_container_width=True)
+            if not (root/V29_EVENTS).is_file():
+                st.warning('No se encontró el CSV V2.9: los conteos de continuación/reclaim están incompletos.')
+        except (ValueError,KeyError,OSError,TypeError) as exc:
+            st.error(f'No se pudieron verificar las entradas de toda la selección: {exc}')
+            entry_catalogue=None
     if not blind:
         counts=sel.post_outcome.value_counts()
         slots=st.columns(4)
@@ -459,8 +494,21 @@ def render_hll_v282_pre_followup(root,blind=True):
                 minute_dir=(root / 'reports/horizontal_level_cross_research_v22/extended_1m_core15_v25'),
                 include_breakout_reference=True,
             )
+            if entry_catalogue is not None:
+                from dashboard.views.hll_v294_entry_matrix import reconcile_entries_with_catalogue
+                evidence=entry_catalogue.loc[
+                    entry_catalogue.attempt_id.eq(str(row.attempt_id))]
+                allowed=set(evidence.loc[evidence.status.eq('ENTRY_VERIFIED'),'route'])
+                # Never let a weaker historical summary create an unverified
+                # entry: the exact-source catalogue must validate it first.
+                all_entry_anchors=[e for e in all_entry_anchors
+                    if e['key']=='BREAKOUT_30M' or e['key'] in allowed]
+                all_entry_anchors=reconcile_entries_with_catalogue(all_entry_anchors,evidence)
+            # BREAKOUT_30M is a price reference, NEVER a confirmed trade entry.
+            # It cannot enable either TP/SL guides or a first-touch matrix.
             references = {e['key']: dict(label=e['label'], price=e['price'],
-                                         entry_ts=e['entry_ts']) for e in all_entry_anchors}
+                                         entry_ts=e['entry_ts']) for e in all_entry_anchors
+                          if e['key'] != 'BREAKOUT_30M'}
             st.markdown('**Entradas de referencia realmente observadas (no órdenes ejecutadas)**')
             show_entries = st.checkbox('Marcar entradas de flip / continuación / reclaim en el gráfico',
                                        value=True, key='hll293_show_entry_markers')
@@ -500,8 +548,8 @@ def render_hll_v282_pre_followup(root,blind=True):
                                'Los resultados TP/SL requieren comprobar qué barrera se toca primero en 1m '
                                'y descontar comisiones/slippage.')
                 else:
-                    st.warning('No hay OPEN posterior verificable para dibujar los porcentajes; '
-                               'no se inventa precio de entrada.')
+                    st.info('Este intento no tiene ninguna entrada confirmada con OPEN verificable. '
+                            'No se dibujan TP/SL. El CROSS_UP es solo una referencia, no una operación.')
         # Independently render ALL confirmed entry paths. A signal's confirmation
         # marker and its next-open reference are different events.
         if show_post and not blind and show_entries:
@@ -543,6 +591,77 @@ def render_hll_v282_pre_followup(root,blind=True):
                     'Precio de entrada observado': e['price'],
                     'Precio base seleccionado para guías': e['key']==reference_key,
                 } for e in entry_markers]), use_container_width=True, hide_index=True)
+        # Independent first-touch outcome grid for actual confirmed entries only.
+        # Requires complete 1m chronology until the first hit; same-minute TP+SL is ambiguous.
+        if show_post and not blind and references:
+            from dashboard.views.hll_v294_entry_matrix import (
+                read_minute_window, evaluate_grid, matrix_table,
+            )
+            st.markdown('#### Matriz TP/SL 1%–5% · primera llegada real en 1m')
+            st.caption('Cada celda simula una entrada LONG con OPEN verificado: '
+                       'TP +1% a +5% y SL −1% a −5%. '
+                       'Sin comisión, deslizamiento ni financiación; no es PnL.')
+            route_for_matrix=st.selectbox('Ruta para evaluar',list(references),
+                format_func=lambda key:references[key]['label'],
+                key='hll294_matrix_route')
+            hmin=st.selectbox('Horizonte después de la entrada',[120,720,2880],
+                format_func=lambda h:f'{h//60} horas',index=1,key='hll294_matrix_horizon')
+            ref=references[route_for_matrix]
+            minpath=root/'reports/horizontal_level_cross_research_v22/extended_1m_core15_v25'/f'{row.symbol}_1m.csv'
+            matrix_results,state_1m=episode_grid(
+                minpath,int(ref['entry_ts']),float(ref['price']),hmin)
+            grid=matrix_table(matrix_results)
+            grid.index=[f'SL −{i}%' for i in grid.index]
+            grid.columns=[f'TP +{i}%' for i in grid.columns]
+            st.dataframe(grid,use_container_width=True)
+            mcounts=matrix_results.result.value_counts().to_dict()
+            st.caption(f'Cobertura hasta el primer hueco: {state_1m} · '
+                       f' TP primero: {mcounts.get("TP_FIRST",0)} · '
+                       f'SL primero: {mcounts.get("SL_FIRST",0)} · '
+                       f'Ambiguos en misma vela 1m: {mcounts.get("AMBIGUOUS_1M",0)} · '
+                       f'Sin toque: {mcounts.get("TIMEOUT",0)}. '
+                       'Las filas/columnas son escenarios alternativos, no 25 operaciones independientes.')
+            with st.expander('Detalle de las 25 combinaciones'):
+                st.dataframe(matrix_results,hide_index=True,use_container_width=True)
+        elif show_post and not blind:
+            st.caption('Matriz TP/SL no disponible: no existe ninguna entrada confirmada '
+                       'con OPEN verificable en este episodio.')
+        # Optional aggregation across selected original attempt IDs; do not mix routes.
+        if show_post and not blind and entry_catalogue is not None:
+            with st.expander('Matriz estadística sobre la selección actual (solo entradas verificadas)'):
+                st.caption('La matriz agrupa episodios de la selección actual, no solamente el gráfico abierto. '
+                           'Para no multiplicar los intentos, elegí UNA ruta de confirmación. '
+                           'Varios intentos pueden compartir el mismo nivel: no son observaciones independientes.')
+                chosen_route=st.selectbox('Ruta agregada',
+                    ['FLIP_1M','V29_CONTINUATION_30M','V29_RECLAIM_30M'],
+                    format_func=lambda k:LABELS[k],key='hll294_aggregate_route')
+                agg_h=st.selectbox('Horizonte agregado',[120,720,2880],
+                    format_func=lambda h:f'{h//60} horas',index=1,key='hll294_aggregate_horizon')
+                chosen=entry_catalogue[entry_catalogue.attempt_id.isin(sel.attempt_id) &
+                                       entry_catalogue.route.eq(chosen_route) &
+                                       entry_catalogue.status.eq('ENTRY_VERIFIED')]
+                st.caption(f'{len(chosen)} entradas verificadas de esta ruta entre {len(sel)} intentos filtrados.')
+                if st.button('Calcular matriz de los intentos seleccionados',key='hll294_calc_selection'):
+                    result=aggregate_selection_matrix(chosen,
+                        root/'reports/horizontal_level_cross_research_v22/extended_1m_core15_v25',agg_h)
+                    st.session_state['hll294_last_matrix']={
+                        'signature':(tuple(sorted(chosen.attempt_id.astype(str))),chosen_route,agg_h),
+                        'table':result,
+                    }
+                store=st.session_state.get('hll294_last_matrix')
+                if store and store['signature']==(tuple(sorted(chosen.attempt_id.astype(str))),chosen_route,agg_h):
+                    summary=store['table']
+                    piv=summary.pivot(index='sl_pct',columns='tp_pct',values='tp_first_rate_pct')
+                    piv.index=[f'SL −{i}%' for i in piv.index]
+                    piv.columns=[f'TP +{i}%' for i in piv.columns]
+                    st.caption('Cada celda: % TP primero entre TP/SL/TIMEOUT con resultado observable. '
+                               'Se EXCLUYEN ambiguos y censurados; no es win rate ni rentabilidad.')
+                    st.dataframe(piv,use_container_width=True)
+                    st.dataframe(summary,hide_index=True,use_container_width=True)
+                    st.download_button('Descargar matriz TP/SL (CSV)',
+                        summary.to_csv(index=False).encode('utf-8'),
+                        file_name='hll_v294_matrix_tp_sl.csv',mime='text/csv',
+                        key='hll294_download_matrix')
         if show_post:
             seen=int(((bars.timestamp>=int(row.breakout_closed_ts)) &
                      (bars.timestamp < int(row.breakout_closed_ts)+int(post_bars)*TF)).sum())
