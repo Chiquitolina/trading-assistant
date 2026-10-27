@@ -119,6 +119,7 @@ def render_hll_v28_structure_dashboard(root):
     cols[1].metric('Símbolos',confirms.symbol.nunique())
     cols[2].metric('Con Higher Lows PRE',int(confirms.pre24_hl_last3.eq(1).sum()))
     cols[3].metric('Con Higher Lows al FLIP',int(confirms.signal24_hl_last3.eq(1).sum()))
+    st.caption('Las métricas V2.8 de arriba cuentan SOLO los FLIP_CONFIRMED (muestra condicionada). El inspector V2.8.2, si está disponible, incluye TODOS los intentos PRE de V2.6.')
     st.caption('Un valor UNKNOWN significa que faltan 3 pivotes confirmados o contexto completo; no equivale a NO.')
     st.warning('Las agrupaciones son exploratorias. Ago–sep y octubre pertenecen a un período YA inspeccionado; octubre no es una validación fuera de muestra. ' 
                'Las señales comparten símbolos, zonas y condiciones del mercado.')
@@ -159,6 +160,11 @@ def render_hll_v28_structure_dashboard(root):
             cw=pd.read_csv(p)
             st.dataframe(cw[cw.factor.eq(factor)&cw.horizon_min.eq(horizon)].head(200),
                          hide_index=True,use_container_width=True)
+    # V2.8.2: prefer a full, frozen PRE cohort over the conditioned V2.8.1 flips-only inspector.
+    # Does not alter LIVE nor the V2.8/V2.8.1 result files.
+    from dashboard.views.hll_v282_pre_followup_view import render_hll_v282_pre_followup
+    if render_hll_v282_pre_followup(root, blind=blind):
+        return
     st.markdown('#### Inspector de estructura por episodio')
     pattern_runs=root/PATTERN_RUNS
     available_patterns=sorted([p for p in pattern_runs.iterdir() if (p/'taxonomy_entries.csv').is_file() and (p/'manifest.json').is_file()],
@@ -267,7 +273,7 @@ def render_hll_v28_structure_dashboard(root):
            'breakout_to_signal_center_crossings','retest_low_below_zone_high_atr',
            'defense_close_above_zone_high_atr','signal_distance_from_zone_low_atr',
            'breakout_volume_ratio','next_resistance_at_breakout_atr']
-    st.dataframe(pd.DataFrame([{'variable':k,'valor':row[k]} for k in known_fields]),hide_index=True,use_container_width=True)
+    st.dataframe(pd.DataFrame([{'variable':k,'valor':row[k] if k in row.index else 'NO DISPONIBLE'} for k in known_fields]),hide_index=True,use_container_width=True)
     if post:
         perf=evaluations[evaluations.attempt_id.eq(row.attempt_id)].copy()
         st.markdown('**Resultados V2.7 de este intento, solo después de revelar POST**')
