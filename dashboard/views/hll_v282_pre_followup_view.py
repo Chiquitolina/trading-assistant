@@ -401,6 +401,7 @@ def render_hll_v282_pre_followup(root,blind=True):
         st.caption('Marcas puntuales: triángulo azul = breakout; círculo amarillo = retest; rombo verde = flip; X roja = fallo. Son símbolos, NO mechas.')
     # Overlay exists only after a separately-run V2.9 offline analysis.
     continuation=[]
+    continuation_all=[]
     if (root/V29_EVENTS).is_file():
         try:
             v29=load_v29_events(root/V29_EVENTS)
@@ -412,8 +413,12 @@ def render_hll_v282_pre_followup(root,blind=True):
                 b29.metric('Recuperaciones V2.9 (selección)',int(((matching.branch=='RECLAIM_CONTINUATION') & (matching.status=='CONFIRMED')).sum()))
             show_v29=st.checkbox('Mostrar señales de continuación y reclaim V2.9 (experimental)',
                                  value=False,disabled=blind or not show_post,key='hll29_show_continuation')
-            if show_v29 and show_post and not blind:
-                continuation=v29.loc[v29.attempt_id.eq(str(row.attempt_id))].to_dict('records')
+            # Always keep the event clocks for actual entry markers, even when
+            # the separate V2.9 *signal* markers are hidden.
+            if show_post and not blind:
+                continuation_all=v29.loc[v29.attempt_id.eq(str(row.attempt_id))].to_dict('records')
+                if show_v29:
+                    continuation=continuation_all
         except (ValueError,KeyError,OSError) as ex:
             st.warning(f'No se pudo cargar V2.9: {ex}')
     p=root/CANDLES/f'{row.symbol}_30m.csv'
@@ -422,13 +427,106 @@ def render_hll_v282_pre_followup(root,blind=True):
         return True
     try:
         bars=pd.read_csv(p,usecols=['timestamp','open','high','low','close']).sort_values('timestamp').reset_index(drop=True)
+        # Visual guides are strictly POST and independent of the frozen PRE labels.
+        # The actual reference OPEN is selected explicitly; never infer an entry
+        # from the zone or the signal-close price.
+        from dashboard.views.hll_v292_percent_guides import overlay_visual_levels
+        from dashboard.views.hll_v293_entry_markers import (
+            get_entries, overlay_entry_markers,
+        )
+        plot_levels = False
+        chosen_reference = None
+        reference_key = None
+        entry_markers = []
+        show_entries = False
+        include_breakout_reference = False
+        all_entry_anchors = []
+        references = {}
+        if show_post and not blind:
+            survival_row = (v292_survival.loc[
+                v292_survival.attempt_id.astype(str).eq(str(row.attempt_id))]
+                if has_v292 else None)
+            all_entry_anchors = get_entries(
+                row, bars, survival_row, continuation_all,
+                minute_dir=(root / 'reports/horizontal_level_cross_research_v22/extended_1m_core15_v25'),
+                include_breakout_reference=True,
+            )
+            references = {e['key']: dict(label=e['label'], price=e['price'],
+                                         entry_ts=e['entry_ts']) for e in all_entry_anchors}
+            st.markdown('**Entradas de referencia realmente observadas (no órdenes ejecutadas)**')
+            show_entries = st.checkbox('Marcar entradas de flip / continuación / reclaim en el gráfico',
+                                       value=True, key='hll293_show_entry_markers')
+            include_breakout_reference = st.checkbox('Agregar también OPEN posterior al CROSS_UP original (solo comparativa)',
+                                       value=False, disabled=not show_entries,
+                                       key='hll293_show_breakout_reference')
+            st.markdown('**Guías TP/SL porcentuales — escenario LONG (solo visual)**')
+            plot_levels = st.checkbox('Mostrar niveles punteados +1% a +5% / −1% a −5%',
+                                      value=True, key='hll293_show_percent_levels')
+            if plot_levels:
+                if references:
+                    if pd.notna(row.get('flip_confirmed_closed_ts')) and 'FLIP_1M' not in references:
+                        st.caption('Sin OPEN de 1m observado para el reloj del flip; '
+                                   'no se infiere entrada ni se usa el cierre de la señal.')
+                    default = ('FLIP_1M' if 'FLIP_1M' in references else
+                               'V29_CONTINUATION_30M' if 'V29_CONTINUATION_30M' in references else
+                               next(iter(references)))
+                    reference_key = st.selectbox('Precio base de los porcentajes',
+                           list(references), index=list(references).index(default),
+                           format_func=lambda k: references[k]['label'],
+                           key='hll293_reference')
+                    chosen_reference = references[reference_key]
+                    max_pct = st.select_slider('Mostrar niveles hasta',
+                            options=[1,2,3,4,5], value=5, key='hll293_max_pct')
+                    lcol,rcol = st.columns(2)
+                    with lcol:
+                        show_tp = st.checkbox('Positivos: TP +%',value=True,key='hll293_tp')
+                    with rcol:
+                        show_sl = st.checkbox('Negativos: SL −%',value=True,key='hll293_sl')
+                    if show_tp or show_sl:
+                        chosen_reference = dict(chosen_reference, max_pct=max_pct,
+                                                show_tp=show_tp, show_sl=show_sl)
+                    else:
+                        chosen_reference = None
+                    st.caption('Son referencias de precio, no órdenes ni ganancias. '
+                               'El OPEN posterior se conoce recién al comenzar esa vela. '
+                               'Los resultados TP/SL requieren comprobar qué barrera se toca primero en 1m '
+                               'y descontar comisiones/slippage.')
+                else:
+                    st.warning('No hay OPEN posterior verificable para dibujar los porcentajes; '
+                               'no se inventa precio de entrada.')
+        # Independently render ALL confirmed entry paths. A signal's confirmation
+        # marker and its next-open reference are different events.
+        if show_post and not blind and show_entries:
+            entry_markers = [e for e in all_entry_anchors
+                             if include_breakout_reference or e['key'] != 'BREAKOUT_30M']
+            if not entry_markers:
+                st.info('Ninguna ruta tiene todavía un OPEN de entrada verificable para este episodio.')
         fig=make_chart(row,bars,window,show_post,show_flip_pivots,continuation,post_bars)
+        if chosen_reference is not None:
+            fig=overlay_visual_levels(fig, chosen_reference,
+                max_pct=chosen_reference['max_pct'],
+                include_tp=chosen_reference['show_tp'],include_sl=chosen_reference['show_sl'])
+        if show_entries:
+            fig = overlay_entry_markers(fig, entry_markers, selected_reference=reference_key)
         if has_v292:
             local=v292_contacts[(v292_contacts.attempt_id.astype(str)==str(row.attempt_id)) &
                                (v292_contacts.window==window)]
             overlay_physical_clusters(fig,row,bars,window)
             overlay_pre_contacts(fig,local,int(row.pre_closed_ts))
         st.plotly_chart(fig,use_container_width=True,key='hll282_chart')
+        if show_entries:
+            st.caption('Las entradas son escenarios LONG medidos en el OPEN observado posterior a una confirmación: '
+                       'flip V2.6 (+1m), continuación/reclaim V2.9 (siguiente 30m). '
+                       'La referencia del breakout sin confirmación se presenta aparte. '
+                       'No son órdenes ejecutadas ni resultados de TP/SL.')
+            if entry_markers:
+                st.dataframe(pd.DataFrame([{
+                    'Ruta': e['short'],
+                    'Confirmada UTC': _date(e['known_ts']).strftime('%Y-%m-%d %H:%M'),
+                    'OPEN referencia UTC': _date(e['entry_ts']).strftime('%Y-%m-%d %H:%M'),
+                    'Precio de entrada observado': e['price'],
+                    'Precio base seleccionado para guías': e['key']==reference_key,
+                } for e in entry_markers]), use_container_width=True, hide_index=True)
         if show_post:
             seen=int(((bars.timestamp>=int(row.breakout_closed_ts)) &
                      (bars.timestamp < int(row.breakout_closed_ts)+int(post_bars)*TF)).sum())
