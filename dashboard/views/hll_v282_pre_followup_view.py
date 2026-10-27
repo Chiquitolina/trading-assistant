@@ -279,6 +279,22 @@ def render_hll_v282_pre_followup(root,blind=True):
     except (OSError,ValueError,KeyError) as ex:
         st.error(f'V2.8.2 incompleto: {ex}')
         return True
+    # V2.9.2 is read-only and optional, and NEVER joins outcomes into PRE classification.
+    has_v292=False;v292_contacts=None;v292_survival=None
+    try:
+        from dashboard.views.hll_v292_inspector_overlay import (
+            V292, LABELS, read_v292, overlay_pre_contacts, overlay_physical_clusters,
+        )
+    except ModuleNotFoundError:
+        V292=None
+    if V292 is not None and (root/V292/'mechanism_attempts.csv').is_file():
+        try:
+            extras,v292_contacts,v292_survival=read_v292(folder/'pre_cohort.csv',root/V292,df)
+            df=df.merge(extras,on='attempt_id',how='left',validate='one_to_one')
+            has_v292=True
+        except (ValueError,KeyError,OSError) as ex:
+            st.error(f'V2.9.2 incompatible: {ex}')
+            st.stop()
     has_v291=False
     try:
         audit=load_v291_audit(folder/'pre_cohort.csv',root/V291_AUDIT,df)
@@ -316,6 +332,38 @@ def render_hll_v282_pre_followup(root,blind=True):
             format_func=lambda x:'Todos los desenlaces' if x=='TODOS' else STATES[x],key='hll282_state')
     class_field=(f'pre_pattern_v291_{window}' if revised else f'pre_pattern_{window}')
     sel=filtered(df,window,pattern,symbol,state,pattern_field=class_field)
+    if has_v292:
+        mechanism=st.selectbox('Mecanismo PRE V2.9.2',
+            ['TODOS']+sorted(df[f'mechanism_{window}'].dropna().astype(str).unique().tolist()),
+            format_func=lambda m: 'Todos los mecanismos' if m=='TODOS' else LABELS.get(m,m),
+            key='hll292_mechanism')
+        if mechanism!='TODOS':sel=sel[sel[f'mechanism_{window}'].eq(mechanism)]
+        st.caption('Mecanismo PRE descriptivo: no utiliza desenlace POST. '
+                   'Contacto V2.6 independiente ≠ cualquier vela que cruza la zona.')
+        with st.expander('Comparación descriptiva V2.9.2 por mecanismo',expanded=False):
+            summary_path=root/V292/'mechanism_summary.csv'
+            if blind:
+                pre_summary=(df.groupby(f'mechanism_{window}',dropna=False)
+                      .agg(N_PRE=('attempt_id','size'),simbolos=('symbol','nunique'),
+                           niveles=('level_id','nunique')).reset_index())
+                st.dataframe(pre_summary,hide_index=True,use_container_width=True)
+                st.caption('Auditoría ciega: solo cantidades PRE. No se muestran resultados POST.')
+            elif summary_path.is_file():
+                grouped=pd.read_csv(summary_path)
+                scope=st.radio('Unidad de comparación',['FIRST_PER_LEVEL','ALL'],horizontal=True,
+                               key='hll292_summary_scope')
+                st.dataframe(grouped[(grouped.window==window)&(grouped.scope==scope)],
+                             use_container_width=True,hide_index=True)
+                st.caption('Un flip confirmado es un evento V2.6, no una operación rentable. '
+                           'Las tasas son descriptivas y los niveles/símbolos están correlacionados.')
+            pair_path=root/V292/'matched_controls_post.csv'
+            if not blind and pair_path.is_file():
+                pairs=pd.read_csv(pair_path)
+                if pattern!='TODAS':pairs=pairs[pairs.pre_class.eq(pattern)]
+                if mechanism!='TODOS':pairs=pairs[pairs.case_mechanism.eq(mechanism)]
+                st.caption(f'{len(pairs)} pares caso-control: mismo mes y clase PRE; '
+                           'comparación retrospectiva, no tasa de éxito ni prueba externa.')
+                st.dataframe(pairs.head(250),hide_index=True,use_container_width=True)
     st.caption(f'{len(sel)} intentos originales V2.6 en esta selección; PRE se mantiene fijo. Cambiar el desenlace no reclasifica los intentos.')
     if not blind:
         counts=sel.post_outcome.value_counts()
@@ -326,6 +374,9 @@ def render_hll_v282_pre_followup(root,blind=True):
              ('No resuelto',int(counts.get('INDETERMINADO',0)))]):
             slots[ix].metric(label,n)
         st.caption('"Sin flip" significa solo dentro del seguimiento definido en V2.6; no implica que nunca haya confirmado. Censurados y no resueltos se mantienen separados.')
+        if state!='TODOS':
+            st.caption('Atención: esta selección ya está filtrada por el desenlace. '
+                       'Los cuatro contadores NO representan tasas de conversión del universo PRE.')
     if sel.empty:
         st.info('No hay casos bajo esos filtros.')
         return True
@@ -372,6 +423,11 @@ def render_hll_v282_pre_followup(root,blind=True):
     try:
         bars=pd.read_csv(p,usecols=['timestamp','open','high','low','close']).sort_values('timestamp').reset_index(drop=True)
         fig=make_chart(row,bars,window,show_post,show_flip_pivots,continuation,post_bars)
+        if has_v292:
+            local=v292_contacts[(v292_contacts.attempt_id.astype(str)==str(row.attempt_id)) &
+                               (v292_contacts.window==window)]
+            overlay_physical_clusters(fig,row,bars,window)
+            overlay_pre_contacts(fig,local,int(row.pre_closed_ts))
         st.plotly_chart(fig,use_container_width=True,key='hll282_chart')
         if show_post:
             seen=int(((bars.timestamp>=int(row.breakout_closed_ts)) &
@@ -395,6 +451,45 @@ def render_hll_v282_pre_followup(root,blind=True):
                 'Conocido UTC':_date(p['time']).strftime('%Y-%m-%d %H:%M'),
                 'Cierre 30m':p['close']} for p in points]),
                 use_container_width=True,hide_index=True)
+    if has_v292:
+        st.markdown('**Diagnóstico PRE V2.9.2 — contactos e integridad**')
+        st.caption(f"Mecanismo: **{LABELS.get(row[f'mechanism_{window}'],row[f'mechanism_{window}'])}** · "
+            f"Tests independientes V2.6: **{int(row[f'touch_v26_independent_{window}'])}** · "
+            f"Grupos de velas que solapan la zona: **{int(row[f'physical_overlap_clusters_{window}'])}**. "
+            'Los tests se numeran en el gráfico; sus resoluciones futuras se ocultan al corte PRE.')
+        cols=['confirmed_pivots','median_pivot_gap_bars','pivot_slope_atr_per_bar',
+              'progress_low_atr','close_efficiency','early_drawdown_atr',
+              'late_recovery_atr','pullback_depth_ratio']
+        st.dataframe(pd.DataFrame([{'Factor PRE':c,'Valor':row.get(f'{c}_{window}')} for c in cols]),
+                     use_container_width=True,hide_index=True)
+        if blind:
+            st.caption('Revisión geométrica ciega: registrar calidad SIN conocer el resultado posterior.')
+            if 'hll292_reviews' not in st.session_state:
+                st.session_state['hll292_reviews']={}
+            key=f'{row.attempt_id}:{window}'
+            grades=['PENDIENTE','CORRECTA','DUDOSA','INCORRECTA']
+            current=st.session_state['hll292_reviews'].get(key,{}).get('calidad','PENDIENTE')
+            grade=st.radio('Clasificación visual del episodio PRE',grades,
+                          index=grades.index(current) if current in grades else 0,
+                          horizontal=True,key='hll292_grade_'+str(row.attempt_id)+str(window))
+            notes=st.text_input('Observación PRE (sin ver desenlace)',
+                          value=st.session_state['hll292_reviews'].get(key,{}).get('nota',''),
+                          key='hll292_note_'+str(row.attempt_id)+str(window))
+            st.session_state['hll292_reviews'][key]=dict(attempt_id=str(row.attempt_id),
+                          ventana_30m=int(window),calidad=grade,nota=notes)
+            manual=pd.DataFrame(list(st.session_state['hll292_reviews'].values()))
+            st.download_button('Descargar revisiones ciegas (CSV)',
+                  manual.to_csv(index=False).encode('utf-8'),
+                  file_name='hll292_revisiones_ciegas.csv',mime='text/csv',key='hll292_download')
+        elif show_post:
+            h=v292_survival[v292_survival.attempt_id.astype(str)==str(row.attempt_id)]
+            if not h.empty:
+                st.markdown('**Supervivencia después del flip — 1m**')
+                st.dataframe(h[['horizon_min','path_state','entry_open','mfe_pct','mae_pct',
+                    'close_return_pct','survived_without_close_loss','first_close_loss_ts',
+                    'first_reclaim_ts','time_to_max_min']],hide_index=True,use_container_width=True)
+                st.caption('Entrada de referencia: OPEN de 1m posterior a un minuto tras el cierre de FLIP; '
+                    'MFE/MAE informativos, no PnL. Si falta cualquier minuto del horizonte, las métricas quedan vacías.')
     old_label=PATTERNS.get(row[f'pre_pattern_{window}'],'Sin clasificación')
     current_label=PATTERNS.get(row[class_field],'Sin clasificación')
     st.info(f'Original PRE V2.8.2: **{old_label}**. '
