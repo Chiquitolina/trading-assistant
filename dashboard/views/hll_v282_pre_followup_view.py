@@ -591,16 +591,26 @@ def render_hll_v282_pre_followup(root,blind=True):
                     'Precio de entrada observado': e['price'],
                     'Precio base seleccionado para guías': e['key']==reference_key,
                 } for e in entry_markers]), use_container_width=True, hide_index=True)
-        # Independent first-touch outcome grid for actual confirmed entries only.
-        # Requires complete 1m chronology until the first hit; same-minute TP+SL is ambiguous.
+        # HLL V2.9.5: strictly verified entries, per-route net exploratory grid.
+        # CROSS_UP alone stays a reference; it never activates a TP/SL grid.
+        if show_post and not blind:
+            st.markdown('**Costes de investigación LONG (estimaciones, no tarifas verificadas)**')
+            fee_col, slip_col = st.columns(2)
+            with fee_col:
+                fee_pct = st.number_input('Comisión total ida y vuelta (%)',
+                    min_value=0.0,max_value=1.0,value=0.10,step=0.01,
+                    key='hll295_fee_roundtrip')
+            with slip_col:
+                slippage_pct = st.number_input('Deslizamiento total ida y vuelta (%)',
+                    min_value=0.0,max_value=1.0,value=0.0,step=0.01,
+                    key='hll295_slippage_roundtrip')
+            st.caption('Las tasas son hipótesis configurables en puntos porcentuales sobre la entrada. '
+                'No incluyen funding ni ejecución real de Binance. Las barreras se consideran '
+                'ejecutadas al precio teórico: un gap o deslizamiento real puede empeorar el resultado.')
         if show_post and not blind and references:
-            from dashboard.views.hll_v294_entry_matrix import (
-                read_minute_window, evaluate_grid, matrix_table,
-            )
-            st.markdown('#### Matriz TP/SL 1%–5% · primera llegada real en 1m')
-            st.caption('Cada celda simula una entrada LONG con OPEN verificado: '
-                       'TP +1% a +5% y SL −1% a −5%. '
-                       'Sin comisión, deslizamiento ni financiación; no es PnL.')
+            from dashboard.views.hll_v294_entry_matrix import read_minute_window, matrix_table
+            from dashboard.views.hll_v295_net_matrix import first_touch_net
+            st.markdown('#### Matriz TP/SL +1%…+5% / −1%…−5% · primera llegada en 1m')
             route_for_matrix=st.selectbox('Ruta para evaluar',list(references),
                 format_func=lambda key:references[key]['label'],
                 key='hll294_matrix_route')
@@ -608,60 +618,115 @@ def render_hll_v282_pre_followup(root,blind=True):
                 format_func=lambda h:f'{h//60} horas',index=1,key='hll294_matrix_horizon')
             ref=references[route_for_matrix]
             minpath=root/'reports/horizontal_level_cross_research_v22/extended_1m_core15_v25'/f'{row.symbol}_1m.csv'
-            matrix_results,state_1m=episode_grid(
-                minpath,int(ref['entry_ts']),float(ref['price']),hmin)
+            window_1m,state_1m=read_minute_window(minpath,int(ref['entry_ts']),hmin)
+            if not window_1m.empty:
+                actual_open=float(window_1m.open.iloc[0])
+                if abs(actual_open-float(ref['price']))>max(1e-10,abs(actual_open)*1e-7):
+                    raise ValueError('Diferencia entre OPEN verificado y vela inicial 1m')
+            matrix_results=first_touch_net(window_1m,float(ref['price']),state_1m,
+                int(ref['entry_ts']),float(fee_pct),float(slippage_pct))
             grid=matrix_table(matrix_results)
             grid.index=[f'SL −{i}%' for i in grid.index]
             grid.columns=[f'TP +{i}%' for i in grid.columns]
             st.dataframe(grid,use_container_width=True)
             mcounts=matrix_results.result.value_counts().to_dict()
-            st.caption(f'Cobertura hasta el primer hueco: {state_1m} · '
-                       f' TP primero: {mcounts.get("TP_FIRST",0)} · '
-                       f'SL primero: {mcounts.get("SL_FIRST",0)} · '
-                       f'Ambiguos en misma vela 1m: {mcounts.get("AMBIGUOUS_1M",0)} · '
-                       f'Sin toque: {mcounts.get("TIMEOUT",0)}. '
-                       'Las filas/columnas son escenarios alternativos, no 25 operaciones independientes.')
-            with st.expander('Detalle de las 25 combinaciones'):
+            st.caption(f'Cobertura: {state_1m} · TP primero: {mcounts.get("TP_FIRST",0)} · '
+                f'SL primero: {mcounts.get("SL_FIRST",0)} · '
+                f'Ambiguos: {mcounts.get("AMBIGUOUS_1M",0)} · '
+                f'TIMEOUT: {mcounts.get("TIMEOUT",0)}. '
+                'Primer toque expresado por minuto UTC; el segundo exacto dentro de esa vela se desconoce.')
+            with st.expander('Detalle de primeras llegadas, minutos y retornos netos estimados'):
                 st.dataframe(matrix_results,hide_index=True,use_container_width=True)
+                st.download_button('Exportar las 25 combinaciones de este episodio',
+                    matrix_results.to_csv(index=False).encode('utf-8'),
+                    file_name='hll_v295_episodio_matrix.csv',mime='text/csv',
+                    key='hll295_episode_download')
         elif show_post and not blind:
-            st.caption('Matriz TP/SL no disponible: no existe ninguna entrada confirmada '
-                       'con OPEN verificable en este episodio.')
-        # Optional aggregation across selected original attempt IDs; do not mix routes.
+            st.caption('Matriz TP/SL no disponible: no existe entrada confirmada con OPEN '
+                       'verificable en este episodio.')
+        # Aggregate comparisons. One route is one distinct research clock; a
+        # multi-route attempt is not an independent second market observation.
         if show_post and not blind and entry_catalogue is not None:
             with st.expander('Matriz estadística sobre la selección actual (solo entradas verificadas)'):
-                st.caption('La matriz agrupa episodios de la selección actual, no solamente el gráfico abierto. '
-                           'Para no multiplicar los intentos, elegí UNA ruta de confirmación. '
-                           'Varios intentos pueden compartir el mismo nivel: no son observaciones independientes.')
-                chosen_route=st.selectbox('Ruta agregada',
-                    ['FLIP_1M','V29_CONTINUATION_30M','V29_RECLAIM_30M'],
-                    format_func=lambda k:LABELS[k],key='hll294_aggregate_route')
+                st.caption('V2.9.5: expectativa neta estimada con 25 configuraciones por ruta. '
+                    'Se evalúa la misma cohorte para cada ruta, pero una misma estructura puede '
+                    'confirmar más de una ruta. Nunca se suman esos registros como trades independientes.')
+                from dashboard.views.hll_v295_net_matrix import (
+                    aggregate_net_matrix, first_attempt_ids,
+                )
+                compare_routes=st.selectbox('Rutas para el análisis',
+                    ['TODAS','FLIP_1M','V29_CONTINUATION_30M','V29_RECLAIM_30M'],
+                    format_func=lambda k:('Comparar las tres rutas' if k=='TODAS' else LABELS[k]),
+                    key='hll295_route')
                 agg_h=st.selectbox('Horizonte agregado',[120,720,2880],
-                    format_func=lambda h:f'{h//60} horas',index=1,key='hll294_aggregate_horizon')
-                chosen=entry_catalogue[entry_catalogue.attempt_id.isin(sel.attempt_id) &
-                                       entry_catalogue.route.eq(chosen_route) &
-                                       entry_catalogue.status.eq('ENTRY_VERIFIED')]
-                st.caption(f'{len(chosen)} entradas verificadas de esta ruta entre {len(sel)} intentos filtrados.')
-                if st.button('Calcular matriz de los intentos seleccionados',key='hll294_calc_selection'):
-                    result=aggregate_selection_matrix(chosen,
-                        root/'reports/horizontal_level_cross_research_v22/extended_1m_core15_v25',agg_h)
-                    st.session_state['hll294_last_matrix']={
-                        'signature':(tuple(sorted(chosen.attempt_id.astype(str))),chosen_route,agg_h),
-                        'table':result,
-                    }
-                store=st.session_state.get('hll294_last_matrix')
-                if store and store['signature']==(tuple(sorted(chosen.attempt_id.astype(str))),chosen_route,agg_h):
+                    format_func=lambda h:f'{h//60} horas',index=1,key='hll295_aggregate_horizon')
+                unit=st.radio('Unidad de comparación',
+                    ['FIRST_PER_LEVEL','ALL'],
+                    format_func=lambda k:('Primer intento original por símbolo y nivel' if k=='FIRST_PER_LEVEL'
+                                           else 'Todos los intentos; hay repetición de niveles'),
+                    key='hll295_unit',horizontal=True)
+                selected_ids=set(sel.attempt_id.astype(str))
+                if unit=='FIRST_PER_LEVEL':
+                    selected_ids &= first_attempt_ids(df)
+                chosen=entry_catalogue[
+                    entry_catalogue.attempt_id.isin(selected_ids) &
+                    entry_catalogue.status.eq('ENTRY_VERIFIED') &
+                    (entry_catalogue.route.isin(['FLIP_1M','V29_CONTINUATION_30M','V29_RECLAIM_30M'])
+                     if compare_routes=='TODAS' else entry_catalogue.route.eq(compare_routes))
+                ]
+                counts_by_route=chosen.route.value_counts()
+                st.caption(f'{len(selected_ids)} intentos PRE seleccionados bajo la unidad elegida; '
+                    f'entradas verificadas por ruta: '
+                    f'flip {int(counts_by_route.get("FLIP_1M",0))}, '
+                    f'continuación {int(counts_by_route.get("V29_CONTINUATION_30M",0))}, '
+                    f'reclaim {int(counts_by_route.get("V29_RECLAIM_30M",0))}. '
+                    'Sin señal ni OPEN quedan fuera de la simulación, no del recuento anterior.')
+                root_m=root/'reports/horizontal_level_cross_research_v22/extended_1m_core15_v25'
+                # Time/price + file fingerprints prevent stale cached results in session.
+                source_signature=tuple(sorted((str(f),f.stat().st_size,f.stat().st_mtime_ns)
+                    for f in [root_m/f'{sym}_1m.csv' for sym in chosen.symbol.unique()] if f.is_file()))
+                signature=(tuple(sorted((str(e.attempt_id),str(e.route),int(e.entry_ts),float(e.entry_price))
+                    for e in chosen.itertuples(index=False))),compare_routes,unit,agg_h,
+                    float(fee_pct),float(slippage_pct),source_signature)
+                if st.button('Calcular matriz neta de los intentos seleccionados',
+                             key='hll295_calc_selection'):
+                    with st.spinner('Calculando primeras llegadas sobre históricos 1m...'):
+                        result=aggregate_net_matrix(chosen,root_m,agg_h,
+                            commission_roundtrip_pct=float(fee_pct),
+                            slippage_roundtrip_pct=float(slippage_pct))
+                    st.session_state['hll295_last_matrix']={
+                        'signature':signature,'table':result}
+                store=st.session_state.get('hll295_last_matrix')
+                if store and store['signature']==signature:
                     summary=store['table']
-                    piv=summary.pivot(index='sl_pct',columns='tp_pct',values='tp_first_rate_pct')
-                    piv.index=[f'SL −{i}%' for i in piv.index]
-                    piv.columns=[f'TP +{i}%' for i in piv.columns]
-                    st.caption('Cada celda: % TP primero entre TP/SL/TIMEOUT con resultado observable. '
-                               'Se EXCLUYEN ambiguos y censurados; no es win rate ni rentabilidad.')
-                    st.dataframe(piv,use_container_width=True)
-                    st.dataframe(summary,hide_index=True,use_container_width=True)
-                    st.download_button('Descargar matriz TP/SL (CSV)',
-                        summary.to_csv(index=False).encode('utf-8'),
-                        file_name='hll_v294_matrix_tp_sl.csv',mime='text/csv',
-                        key='hll294_download_matrix')
+                    if summary.empty:
+                        st.info('No hay entradas verificadas en esta selección/ruta.')
+                    else:
+                        st.caption('Media neta = promedio de TP, SL y TIMEOUT con resultado observable; '
+                            'excluye casos ambiguos y censurados. TIMEOUT usa cierre real al final del horizonte. '
+                            'No es rendimiento de una cartera: no considera simultaneidad ni capacidad de ejecución.')
+                        for rt in summary.route.unique():
+                            part=summary.loc[summary.route.eq(rt)]
+                            st.markdown(f'**{LABELS[rt]} — {int(part.entries.iloc[0])} entradas**')
+                            net_grid=part.pivot(index='sl_pct',columns='tp_pct',values='net_mean_pct')
+                            net_grid.index=[f'SL −{i}%' for i in net_grid.index]
+                            net_grid.columns=[f'TP +{i}%' for i in net_grid.columns]
+                            st.dataframe(net_grid,use_container_width=True)
+                        st.markdown('**Tabla completa: cobertura, primera llegada, tiempos y retorno neto**')
+                        st.dataframe(summary,hide_index=True,use_container_width=True)
+                        st.download_button('Descargar matriz V2.9.5 (CSV)',
+                            summary.to_csv(index=False).encode('utf-8'),
+                            file_name='hll_v295_matriz_neta.csv',mime='text/csv',
+                            key='hll295_download_matrix')
+                        # Optional V2.9.4 descriptive comparison, no cost adjustment.
+                        if st.checkbox('Mostrar también la matriz bruta V2.9.4 (TP-first, no rentabilidad)',
+                                       value=False,key='hll295_legacy_compare'):
+                            from dashboard.views.hll_v294_entry_matrix import aggregate_selection_matrix
+                            legacy=aggregate_selection_matrix(chosen,root_m,agg_h)
+                            st.dataframe(legacy,hide_index=True,use_container_width=True)
+                        st.warning('Resultados exploratorios, no una optimización validada. '
+                            'No seleccionar el mejor TP/SL de la misma muestra sin un test futuro independiente; '
+                            'si la cobertura difiere entre celdas o rutas, las medias no son directamente comparables.')
         if show_post:
             seen=int(((bars.timestamp>=int(row.breakout_closed_ts)) &
                      (bars.timestamp < int(row.breakout_closed_ts)+int(post_bars)*TF)).sum())
