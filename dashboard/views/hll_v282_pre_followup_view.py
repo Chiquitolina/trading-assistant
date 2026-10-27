@@ -4,6 +4,7 @@ Standalone block imported by the existing V2.8 Streamlit view. No trading code.
 """
 from __future__ import annotations
 import json
+import hashlib
 from pathlib import Path
 import pandas as pd
 
@@ -11,6 +12,7 @@ TF=1_800_000
 RUNS=Path('reports/horizontal_level_structure_quality_v282/runs')
 CANDLES=Path('reports/horizontal_level_lifecycle_v21/candles_aug20_oct25_core15_btc')
 V29_EVENTS=Path('reports/horizontal_level_continuation_v29/runs/core15_continuation_v29/continuation_events.csv')
+V291_AUDIT=Path('reports/horizontal_level_structure_integrity_v291/runs/core15_trendline_v291')
 PATTERNS={
     'ASCENDING_CLEAN':'A · Mínimos ascendentes limpios',
     'ASCENDING_CHOPPY':'B · Mínimos ascendentes con cruces desordenados',
@@ -20,6 +22,7 @@ PATTERNS={
     'DESCENDING_LOW_SEQUENCE':'F · Mínimos descendentes',
     'OTHER':'G · Mixta / otra estructura',
     'UNKNOWN':'Sin contexto suficiente',
+    'ASCENDING_TREND_BROKEN':'H · Tendencia ascendente rota (PRE)',
 }
 STATES={
     'FLIP_CONFIRMADO':'Flip confirmado',
@@ -47,8 +50,10 @@ def load_cohort(folder):
     return df
 
 
-def filtered(df, window, pattern='TODAS', symbol='Todos', state='TODOS'):
-    field=f'pre_pattern_{int(window)}'
+def filtered(df, window, pattern='TODAS', symbol='Todos', state='TODOS', pattern_field=None):
+    field=pattern_field or f'pre_pattern_{int(window)}'
+    if field not in df.columns:
+        raise ValueError('Clasificación ausente: '+field)
     choices=df.copy()
     if pattern!='TODAS':choices=choices[choices[field].eq(pattern)]
     if symbol!='Todos':choices=choices[choices.symbol.eq(symbol)]
@@ -118,7 +123,25 @@ def load_v29_events(path):
     return events
 
 
-def make_chart(row,bars,window,show_post=False,show_flip_pivots=False,continuation_events=None):
+def load_v291_audit(cohort_path, folder, cohort):
+    """Optional PRE-only integrity layer; fail visibly if a different cohort was used."""
+    source=folder/'integrity_audit.csv'
+    if not source.is_file():
+        return None
+    manifest=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
+    original_hash=hashlib.sha256(cohort_path.read_bytes()).hexdigest()
+    if original_hash != manifest.get('original_sha256'):
+        raise ValueError('Auditoría V2.9.1 generada sobre otro archivo PRE')
+    audit=pd.read_csv(source,low_memory=False)
+    required={'attempt_id'}|{f'pre_pattern_v291_{w}' for w in (24,48,96)}
+    if required-set(audit) or audit.attempt_id.isna().any() or audit.attempt_id.duplicated().any():
+        raise ValueError('Auditoría V2.9.1 incompleta / con IDs duplicados')
+    if set(audit.attempt_id)!=set(cohort.attempt_id) or len(audit)!=len(cohort):
+        raise ValueError('Auditoría V2.9.1 y V2.8.2 tienen universos distintos')
+    return audit
+
+
+def make_chart(row,bars,window,show_post=False,show_flip_pivots=False,continuation_events=None,post_bars=96):
     import plotly.graph_objects as go
     pre=int(row.pre_closed_ts)
     breakout=int(row.breakout_closed_ts)
@@ -131,7 +154,11 @@ def make_chart(row,bars,window,show_post=False,show_flip_pivots=False,continuati
     # Extend chart farther than the first few post-breakout bars, without altering status.
     if str(row.v26_status)=='DIRECT_NO_RETEST_24B':
         last_event=max(last_event,breakout+26*TF)
-    end=pre if not show_post else last_event+12*TF
+    if post_bars not in (24,48,96,160,240):
+        raise ValueError("Ventana POST inválida")
+    # A minimum of POST bars after breakout, even if no flip/retest event exists.
+    # Never fabricate missing candles: actual coverage remains limited by CSV.
+    end=pre if not show_post else max(last_event+12*TF, breakout+int(post_bars)*TF)
     start=pre-(int(window)+8)*TF
     visible=bars.loc[(bars.timestamp>=start)&(bars.timestamp+TF<=end)].copy()
     if visible.empty:raise ValueError('No hay velas 30m para PRE/POST')
@@ -161,6 +188,30 @@ def make_chart(row,bars,window,show_post=False,show_flip_pivots=False,continuati
             name='Mínimos confirmados en PRE',
             text=[f"Confirmado: {_date(p['known_closed_ts'])}" for p in pivots],
             hovertemplate='%{text}<br>Precio: %{y}<extra></extra>'))
+    # V2.9.1: trendline built from three 2x2 CONFIRMED pivot lows at PRE.
+    # Historical original V2.8.2 classification remains immutable.
+    first=_clock(row.get(f'trendline{window}_anchor_first_ts'))
+    last=_clock(row.get(f'trendline{window}_anchor_last_ts'))
+    lp_first=row.get(f'trendline{window}_line_price_first')
+    lp_pre=row.get(f'trendline{window}_line_price_at_pre')
+    if (first is not None and last is not None and pd.notna(lp_first) and
+            pd.notna(lp_pre) and first<pre):
+        fig.add_trace(go.Scatter(
+            x=[_date(first),_date(pre-TF)],
+            y=[float(lp_first),float(lp_pre)], mode='lines',
+            line=dict(color='#f8a83a',width=2,dash='dash'),
+            name='Directriz PRE (3 pivotes confirmados)',
+            hovertemplate='Directriz investigada: %{y:.8f}<extra></extra>'))
+        broken=_clock(row.get(f'trendline{window}_broken_closed_ts'))
+        if broken is not None and broken<=pre:
+            b=bars.loc[bars.timestamp.eq(broken-TF)]
+            if len(b)==1:
+                fig.add_trace(go.Scatter(
+                    x=[_date(broken-TF)],y=[float(b.close.iloc[0])],mode='markers',
+                    marker=dict(size=14,color='#f26d74',symbol='x',line=dict(width=2)),
+                    name='Directriz rota en PRE (2 cierres)',
+                    text=[f'Ruptura conocida: {_date(broken)}'],
+                    hovertemplate='%{text}<br>Cierre: %{y}<extra></extra>'))
     # The ONLY full-height vertical line is the neutral PRE freeze boundary.
     fig.add_vline(x=_date(pre),line_color='#9aa6b7',line_dash='dash',line_width=1.2)
     if show_post:
@@ -209,7 +260,7 @@ def make_chart(row,bars,window,show_post=False,show_flip_pivots=False,continuati
                   y=[float(p['low']) for p in fp],mode='markers',
                   marker=dict(color='#57a4f5',size=8,symbol='circle-open'),
                   name='Pivotes conocidos al FLIP (solo POST)'))
-    fig.update_layout(height=540,xaxis_rangeslider_visible=False,
+    fig.update_layout(height=630,xaxis_rangeslider_visible=False,
         margin=dict(l=12,r=10,t=22,b=15),xaxis_title='UTC',yaxis_title='Precio',showlegend=True)
     return fig
 
@@ -228,10 +279,32 @@ def render_hll_v282_pre_followup(root,blind=True):
     except (OSError,ValueError,KeyError) as ex:
         st.error(f'V2.8.2 incompleto: {ex}')
         return True
+    has_v291=False
+    try:
+        audit=load_v291_audit(folder/'pre_cohort.csv',root/V291_AUDIT,df)
+        if audit is not None:
+            df=df.merge(audit,on='attempt_id',how='left',validate='one_to_one')
+            has_v291=True
+    except (ValueError,KeyError,OSError) as ex:
+        st.error(f'La auditoría V2.9.1 no coincide con el PRE original: {ex}')
+        st.stop()
+    if has_v291:
+        taxonomy=st.radio('Clasificación morfológica',
+            ['V2.9.1 · Integridad de la directriz PRE','V2.8.2 · Original, sin cambios'],
+            horizontal=True,key='hll291_taxonomy')
+        revised=taxonomy.startswith('V2.9.1')
+        st.caption('V2.9.1 comprueba si una directriz de tres pivotes confirmados se rompió '
+                   'por dos cierres consecutivos al menos 0,35 ATR por debajo. '
+                   'Es una hipótesis geométrica auditable, no una señal de entrada.')
+    else:
+        revised=False
+        st.caption('Auditoría de directriz V2.9.1 todavía no ejecutada. '
+                   'Se mantienen las etiquetas originales V2.8.2.')
     a,b,c=st.columns([1,2,1.5])
     with a:window=st.selectbox('Ventana 30m',[24,48,96],index=1,key='hll282_window')
     with b:
-        pattern=st.selectbox('Tipo de estructura original PRE',['TODAS']+list(PATTERNS),
+        pattern_choices=[k for k in PATTERNS if revised or k!='ASCENDING_TREND_BROKEN']
+        pattern=st.selectbox('Tipo de estructura PRE',['TODAS']+pattern_choices,
             format_func=lambda x: 'Todas las estructuras PRE' if x=='TODAS' else PATTERNS[x],key='hll282_pattern')
     with c:
         symbol=st.selectbox('Símbolo',['Todos']+sorted(df.symbol.unique().tolist()),key='hll282_symbol')
@@ -241,7 +314,8 @@ def render_hll_v282_pre_followup(root,blind=True):
     else:
         state=st.selectbox('Desenlace posterior',['TODOS']+list(STATES),
             format_func=lambda x:'Todos los desenlaces' if x=='TODOS' else STATES[x],key='hll282_state')
-    sel=filtered(df,window,pattern,symbol,state)
+    class_field=(f'pre_pattern_v291_{window}' if revised else f'pre_pattern_{window}')
+    sel=filtered(df,window,pattern,symbol,state,pattern_field=class_field)
     st.caption(f'{len(sel)} intentos originales V2.6 en esta selección; PRE se mantiene fijo. Cambiar el desenlace no reclasifica los intentos.')
     if not blind:
         counts=sel.post_outcome.value_counts()
@@ -263,6 +337,8 @@ def render_hll_v282_pre_followup(root,blind=True):
     row=sel.iloc[idx]
     show_post=st.checkbox('Mostrar en el mismo gráfico breakout, retest y desenlace POST',
         value=not blind,disabled=blind,key='hll282_show_post')
+    post_bars=st.selectbox('Velas POST de 30m después del breakout',
+        [24,48,96,160,240],index=2,disabled=not show_post,key='hll291_post_bars')
     show_flip_pivots=st.checkbox('Agregar pivotes conocidos recién al confirmar el flip',
         value=False,disabled=not show_post,key='hll282_flip_pivots')
     if not blind:
@@ -295,8 +371,13 @@ def render_hll_v282_pre_followup(root,blind=True):
         return True
     try:
         bars=pd.read_csv(p,usecols=['timestamp','open','high','low','close']).sort_values('timestamp').reset_index(drop=True)
-        fig=make_chart(row,bars,window,show_post,show_flip_pivots,continuation)
+        fig=make_chart(row,bars,window,show_post,show_flip_pivots,continuation,post_bars)
         st.plotly_chart(fig,use_container_width=True,key='hll282_chart')
+        if show_post:
+            seen=int(((bars.timestamp>=int(row.breakout_closed_ts)) &
+                     (bars.timestamp < int(row.breakout_closed_ts)+int(post_bars)*TF)).sum())
+            if seen<post_bars:
+                st.warning(f'Histórico POST incompleto: hay {seen} de {post_bars} velas pedidas. No se inventan velas faltantes.')
     except (OSError,ValueError,KeyError,TypeError) as ex:
         st.error(f'No se pudo mostrar el gráfico PRE → POST: {ex}')
         return True
@@ -314,8 +395,17 @@ def render_hll_v282_pre_followup(root,blind=True):
                 'Conocido UTC':_date(p['time']).strftime('%Y-%m-%d %H:%M'),
                 'Cierre 30m':p['close']} for p in points]),
                 use_container_width=True,hide_index=True)
-    st.info(f'Estructura original PRE: **{PATTERNS.get(row[f"pre_pattern_{window}"])}**. '
-            'Permanece en este grupo incluso cuando cambia su forma después.')
+    old_label=PATTERNS.get(row[f'pre_pattern_{window}'],'Sin clasificación')
+    current_label=PATTERNS.get(row[class_field],'Sin clasificación')
+    st.info(f'Original PRE V2.8.2: **{old_label}**. '
+            f'Clasificación mostrada: **{current_label}**. '
+            'Ambas se fijan antes del breakout; el desenlace POST nunca reclasifica.')
+    if has_v291 and bool(row.get(f'trendline{window}_broken',False)):
+        when=_clock(row.get(f'trendline{window}_broken_closed_ts'))
+        if when is not None:
+            st.warning(f'Directriz alcista comprometida antes del breakout: '
+                       f'ruptura conocida desde {_date(when).strftime("%Y-%m-%d %H:%M UTC")}. '
+                       'Dos cierres bajo la línea, con margen de 0,35 ATR. Revisar visualmente el trazo.')
     if show_post:
         st.markdown(f'**Desenlace V2.6:** {STATES[row.post_outcome]} · `{row.v26_status}`')
         if row.post_outcome=='FLIP_CONFIRMADO':
