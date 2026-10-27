@@ -10,6 +10,7 @@ import pandas as pd
 TF=1_800_000
 RUNS=Path('reports/horizontal_level_structure_quality_v282/runs')
 CANDLES=Path('reports/horizontal_level_lifecycle_v21/candles_aug20_oct25_core15_btc')
+V29_EVENTS=Path('reports/horizontal_level_continuation_v29/runs/core15_continuation_v29/continuation_events.csv')
 PATTERNS={
     'ASCENDING_CLEAN':'A · Mínimos ascendentes limpios',
     'ASCENDING_CHOPPY':'B · Mínimos ascendentes con cruces desordenados',
@@ -65,25 +66,80 @@ def _date(ms):
     return pd.Timestamp(int(ms),unit='ms',tz='UTC')
 
 
-def make_chart(row,bars,window,show_post=False,show_flip_pivots=False):
+
+def _validate_visible_ohlc(frame):
+    """Raise on malformed OHLC, rather than rendering an invented long wick."""
+    import numpy as np
+    required=('timestamp','open','high','low','close')
+    if set(required)-set(frame):
+        raise ValueError('Faltan columnas OHLC para graficar')
+    vals=frame[list(required[1:])].apply(pd.to_numeric,errors='coerce')
+    if not np.isfinite(vals.to_numpy()).all():
+        raise ValueError('OHLC incompleto o no finito en el episodio')
+    invalid=(vals.high<vals[['open','close','low']].max(axis=1)) | (vals.low>vals[['open','close','high']].min(axis=1)) | (vals.low<=0)
+    if invalid.any():
+        ts=frame.loc[invalid,'timestamp'].iloc[0]
+        raise ValueError(f'OHLC inconsistente en vela con timestamp {int(ts)}; revisar CSV histórico')
+    if frame.timestamp.duplicated().any():
+        raise ValueError('Velas 30m duplicadas en episodio')
+
+
+def episode_markers(row, bars, show_post):
+    """Time-anchored marker data; no full-height lines that resemble wicks."""
+    if not show_post:return []
+    events=[('Breakout CROSS_UP','breakout_closed_ts','triangle-up','#459df5'),
+            ('Contacto retest','retest_closed_ts','circle-open','#f0bd5e'),
+            ('FLIP confirmado','flip_confirmed_closed_ts','diamond','#16c48a'),
+            ('Nivel perdido / intento fallido','failed_closed_ts','x','#f26872')]
+    out=[]
+    for label,field,symbol,color in events:
+        clock=_clock(row.get(field))
+        if clock is None:continue
+        target=bars.loc[bars.timestamp.eq(clock-TF)]
+        if len(target)!=1:
+            raise ValueError(f'{label}: falta vela cerrada en {_date(clock)}')
+        candle=target.iloc[0]
+        out.append(dict(label=label,time=clock,open_ts=int(candle.timestamp),
+                        close=float(candle.close),low=float(candle.low),high=float(candle.high),
+                        symbol=symbol,color=color))
+    return out
+
+
+def load_v29_events(path):
+    """Optional exploratory overlay, keyed exclusively by the frozen attempt ID."""
+    events=pd.read_csv(path,low_memory=False)
+    required={'attempt_id','branch','status','confirmed_ts','signal_close','signal_open_ts'}
+    if required-set(events):
+        raise ValueError('V2.9 sin columnas: '+', '.join(sorted(required-set(events))))
+    if events[['attempt_id','branch']].duplicated().any() or events.attempt_id.isna().any():
+        raise ValueError('V2.9 con IDs repetidos o vacíos')
+    if events.loc[events.status.eq('CONFIRMED'),'confirmed_ts'].isna().any():
+        raise ValueError('V2.9 confirmado sin hora conocida')
+    return events
+
+
+def make_chart(row,bars,window,show_post=False,show_flip_pivots=False,continuation_events=None):
     import plotly.graph_objects as go
     pre=int(row.pre_closed_ts)
     breakout=int(row.breakout_closed_ts)
     flip=_clock(row.flip_confirmed_closed_ts)
     retest=_clock(row.retest_closed_ts)
     failed=_clock(row.failed_closed_ts)
-    end=pre if not show_post else max([breakout]+[v for v in [flip,retest,failed] if v is not None])
-    # After the final classified event show a few more CLOSED 30m bars.
-    end+=0 if not show_post else 12*TF
+    extra_clocks=[_clock(e.get('confirmed_ts')) for e in (continuation_events or []) if e.get('status')=='CONFIRMED']
+    last_event=max([breakout]+[v for v in [flip,retest,failed]+extra_clocks if v is not None])
+    # DIRECT_NO_RETEST_24B cannot be established until 24 retest candles have elapsed.
+    # Extend chart farther than the first few post-breakout bars, without altering status.
+    if str(row.v26_status)=='DIRECT_NO_RETEST_24B':
+        last_event=max(last_event,breakout+26*TF)
+    end=pre if not show_post else last_event+12*TF
     start=pre-(int(window)+8)*TF
     visible=bars.loc[(bars.timestamp>=start)&(bars.timestamp+TF<=end)].copy()
     if visible.empty:raise ValueError('No hay velas 30m para PRE/POST')
     if not bars.timestamp.eq(pre-TF).any():
         raise ValueError('Falta vela al corte PRE')
-    if show_post and flip is not None and not bars.timestamp.eq(flip-TF).any():
-        raise ValueError('Falta vela del cierre que confirmó el flip')
-    x=pd.to_datetime(visible.timestamp,unit='ms',utc=True)
+    _validate_visible_ohlc(visible)
     fig=go.Figure()
+    x=pd.to_datetime(visible.timestamp,unit='ms',utc=True)
     fig.add_trace(go.Candlestick(x=x,open=visible.open,high=visible.high,
                                  low=visible.low,close=visible.close,name='Velas 30m',
                                  increasing_line_color='#17a883',decreasing_line_color='#d75f69',
@@ -92,7 +148,6 @@ def make_chart(row,bars,window,show_post=False,show_flip_pivots=False):
     fig.add_hrect(y0=lo,y1=hi,fillcolor='#d5a352',opacity=.17,line_width=0)
     fig.add_hline(y=lo,line_color='#bc9553',line_dash='dot')
     fig.add_hline(y=hi,line_color='#bc9553',line_dash='dash')
-    # Pivots are always *original PRE pivots*, even after showing future candles.
     pivot_field=f'pre{window}_pivot_lows_json'
     raw=row.get(pivot_field,'[]')
     pivots=json.loads(raw) if isinstance(raw,str) and raw else []
@@ -106,24 +161,45 @@ def make_chart(row,bars,window,show_post=False,show_flip_pivots=False):
             name='Mínimos confirmados en PRE',
             text=[f"Confirmado: {_date(p['known_closed_ts'])}" for p in pivots],
             hovertemplate='%{text}<br>Precio: %{y}<extra></extra>'))
-    # PRE cutoff is always visible without revealing future outcome.
-    fig.add_vline(x=_date(pre),line_color='#9aa6b7',line_dash='dash',line_width=1.4)
+    # The ONLY full-height vertical line is the neutral PRE freeze boundary.
+    fig.add_vline(x=_date(pre),line_color='#9aa6b7',line_dash='dash',line_width=1.2)
     if show_post:
         fig.add_vrect(x0=_date(breakout-TF),x1=_date(end),
                       fillcolor='#2b9c90',opacity=.04,line_width=0)
-        fig.add_vline(x=_date(breakout),line_color='#4297ef',line_dash='dot',line_width=1.6)
-        if retest is not None:
-            fig.add_vline(x=_date(retest),line_color='#f0bd5e',line_dash='dot',line_width=1.5)
-        if flip is not None:
-            close=bars.loc[bars.timestamp.eq(flip-TF),'close'].iloc[0]
-            fig.add_trace(go.Scatter(x=[_date(flip-TF)],y=[float(close)],mode='markers',
-                marker=dict(color='#10c48c',size=13,symbol='diamond',line=dict(width=1,color='#ffffff')),
-                name='FLIP confirmado al cierre',
-                text=[str(_date(flip))],hovertemplate='Flip conocido al cierre: %{text}<extra></extra>'))
-            fig.add_vline(x=_date(flip),line_color='#10c48c',line_width=2)
-        if failed is not None:
-            # A flip can confirm AND be lost later: draw both, not just the first.
-            fig.add_vline(x=_date(failed),line_color='#e46069',line_width=2)
+        for ev in episode_markers(row,bars,True):
+            fig.add_trace(go.Scatter(x=[_date(ev['open_ts'])],y=[ev['close']],
+                mode='markers',name=ev['label'],
+                marker=dict(color=ev['color'],size=12,symbol=ev['symbol'],line=dict(width=1,color='#ffffff')),
+                text=[f"{ev['label']} conocido al cierre {_date(ev['time'])}"],
+                hovertemplate='%{text}<br>Cierre: %{y}<extra></extra>'))
+        # New, independent V2.9 tracks. Their confirmation marks NEVER replace
+        # or relabel the original V2.6 RETEST / FLIP outcomes.
+        for ev in continuation_events or []:
+            if ev.get('status')!='CONFIRMED':
+                continue
+            t=_clock(ev.get('confirmed_ts'))
+            anchor=_clock(ev.get('signal_open_ts'))
+            if t is None or anchor!=t-TF:
+                raise ValueError('V2.9: timestamp inconsistente')
+            candle=bars.loc[bars.timestamp.eq(anchor)]
+            if len(candle)!=1:
+                raise ValueError('V2.9: falta vela de confirmación')
+            price=float(ev['signal_close'])
+            if abs(float(candle.close.iloc[0])-price)>max(abs(price)*1e-7,1e-10):
+                raise ValueError('V2.9: precio de señal no coincide con OHLC')
+            reclaim=ev['branch']=='RECLAIM_CONTINUATION'
+            contacted=bool(ev.get('contact_before_confirmation',False))
+            label=('Reclaim confirmado V2.9' if reclaim else
+                   'Continuación V2.9 (tras contacto)' if contacted else
+                   'Continuación V2.9 (sin contacto)')
+            fig.add_trace(go.Scatter(x=[_date(anchor)],y=[price],mode='markers',
+                name=label,
+                marker=dict(size=14,symbol='star' if reclaim else 'triangle-up',
+                            color='#ad80ef' if reclaim else '#4ac7f5',
+                            line=dict(width=1,color='#ffffff')),
+                hovertemplate=(label+
+                   ' confirmado V2.9 al cierre '+str(_date(t))+
+                   '<br>Precio de señal: %{y}<extra></extra>')))
         if show_flip_pivots and flip is not None:
             field=f'flip{window}_pivot_lows_json'
             raw_flip=row.get(field,'[]'); fp=json.loads(raw_flip) if isinstance(raw_flip,str) else []
@@ -189,17 +265,55 @@ def render_hll_v282_pre_followup(root,blind=True):
         value=not blind,disabled=blind,key='hll282_show_post')
     show_flip_pivots=st.checkbox('Agregar pivotes conocidos recién al confirmar el flip',
         value=False,disabled=not show_post,key='hll282_flip_pivots')
+    if not blind:
+        st.markdown(f'**Este intento:** `{row.v26_status}` · **{STATES[row.post_outcome]}**')
+        if row.v26_status=='DIRECT_NO_RETEST_24B':
+            st.caption('Ruptura directa: el precio no volvió a tocar la zona durante las 24 barras estudiadas. Puede subir mucho sin cumplir un flip por retest.')
+        elif row.v26_status in ('FAILED_BREAKOUT','RETEST_FAILED','ACCEPTED_THEN_FAILED_NO_CONTACT'):
+            st.caption('Este intento se cerró como fallido en V2.6. Un ascenso posterior de precio no modifica retrospectivamente este evento.')
+        st.caption('Marcas puntuales: triángulo azul = breakout; círculo amarillo = retest; rombo verde = flip; X roja = fallo. Son símbolos, NO mechas.')
+    # Overlay exists only after a separately-run V2.9 offline analysis.
+    continuation=[]
+    if (root/V29_EVENTS).is_file():
+        try:
+            v29=load_v29_events(root/V29_EVENTS)
+            if not blind:
+                st.caption('V2.9 experimental: continuación del breakout (con o sin contacto previo) y recuperación posterior a fallo. Mantiene intactos los flips V2.6.')
+                a29,b29=st.columns(2)
+                matching=v29[v29.attempt_id.isin(sel.attempt_id)]
+                a29.metric('Continuaciones V2.9 (selección)',int(((matching.branch=='BREAKOUT_CONTINUATION') & (matching.status=='CONFIRMED')).sum()))
+                b29.metric('Recuperaciones V2.9 (selección)',int(((matching.branch=='RECLAIM_CONTINUATION') & (matching.status=='CONFIRMED')).sum()))
+            show_v29=st.checkbox('Mostrar señales de continuación y reclaim V2.9 (experimental)',
+                                 value=False,disabled=blind or not show_post,key='hll29_show_continuation')
+            if show_v29 and show_post and not blind:
+                continuation=v29.loc[v29.attempt_id.eq(str(row.attempt_id))].to_dict('records')
+        except (ValueError,KeyError,OSError) as ex:
+            st.warning(f'No se pudo cargar V2.9: {ex}')
     p=root/CANDLES/f'{row.symbol}_30m.csv'
     if not p.is_file():
         st.warning(f'Faltan velas originales: {p}')
         return True
     try:
         bars=pd.read_csv(p,usecols=['timestamp','open','high','low','close']).sort_values('timestamp').reset_index(drop=True)
-        fig=make_chart(row,bars,window,show_post,show_flip_pivots)
+        fig=make_chart(row,bars,window,show_post,show_flip_pivots,continuation)
         st.plotly_chart(fig,use_container_width=True,key='hll282_chart')
     except (OSError,ValueError,KeyError,TypeError) as ex:
         st.error(f'No se pudo mostrar el gráfico PRE → POST: {ex}')
         return True
+    if show_post:
+        if continuation:
+            st.dataframe(pd.DataFrame([{'Ruta V2.9':e['branch'],
+                'Estado':e['status'],
+                'Contacto previo':e.get('contact_before_confirmation',False),
+                'Conocido UTC':str(_date(e['confirmed_ts'])) if _clock(e.get('confirmed_ts')) else 'No confirmó',
+                'Señal al cierre':e.get('signal_close')} for e in continuation]),
+                hide_index=True,use_container_width=True)
+        points=episode_markers(row,bars,True)
+        if points:
+            st.dataframe(pd.DataFrame([{'Evento':p['label'],
+                'Conocido UTC':_date(p['time']).strftime('%Y-%m-%d %H:%M'),
+                'Cierre 30m':p['close']} for p in points]),
+                use_container_width=True,hide_index=True)
     st.info(f'Estructura original PRE: **{PATTERNS.get(row[f"pre_pattern_{window}"])}**. '
             'Permanece en este grupo incluso cuando cambia su forma después.')
     if show_post:
