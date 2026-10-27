@@ -68,6 +68,40 @@ def _read_observed_1m_open(filename: str, entry_ts: int, size_bytes: int, mtime_
     return found
 
 
+def _verified_v29_reference(event, bars):
+    """Anchor a CONFIRMED V2.9 event to its actual next 30m OPEN.
+
+    The frozen V2.9 CSV already stores next_open_ts/next_open. Use those
+    fields to detect schema / time mismatches rather than silently discarding
+    a genuinely confirmed continuation. The observed 30m candle must agree.
+    """
+    closed_ts = _ms(event.get('confirmed_ts'))
+    if closed_ts is None:
+        raise ValueError('V2.9 confirmado sin confirmed_ts')
+    stored_ts = _ms(event.get('next_open_ts'))
+    if stored_ts is not None and stored_ts != closed_ts:
+        raise ValueError('V2.9: next_open_ts no coincide con confirmed_ts')
+    if not {'timestamp', 'open'}.issubset(bars.columns):
+        raise ValueError('Histórico 30m sin timestamp/open')
+    matches = bars.loc[bars.timestamp.eq(closed_ts)]
+    if len(matches) != 1:
+        raise ValueError(f'V2.9 confirmado pero OPEN 30m no verificable en {closed_ts}: {len(matches)} velas')
+    observed = matches.iloc[0].open
+    if not _valid_price(observed):
+        raise ValueError('V2.9 confirmado con OPEN 30m inválido')
+    stored = event.get('next_open')
+    if _valid_price(stored):
+        if abs(float(observed)-float(stored)) > max(1e-10, abs(float(stored))*1e-7):
+            raise ValueError(f'V2.9: next_open del CSV {stored} != OPEN OHLC {observed}')
+    elif stored is not None and not pd.isna(stored):
+        raise ValueError('V2.9: next_open registrado no es un precio válido')
+    branch = str(event.get('branch','')).strip()
+    return dict(label=('Continuación V2.9 · OPEN siguiente 30m'
+                       if branch == 'BREAKOUT_CONTINUATION'
+                       else 'Reclaim V2.9 · OPEN siguiente 30m'),
+                price=float(observed), entry_ts=closed_ts)
+
+
 def get_entries(row, bars, survival_rows=None, continuation_events=None,
                 minute_dir=None, include_breakout_reference=False):
     """All available entry anchors, keyed by path, independent of guide selection.
@@ -77,6 +111,28 @@ def get_entries(row, bars, survival_rows=None, continuation_events=None,
     marker, never an invented price. No mock executed fills are implied.
     """
     refs = available_reference_entries(row, bars, survival_rows, continuation_events)
+    # Resolve confirmed paths against both the frozen V2.9 event and actual
+    # next OPEN. A valid CONFIRMED signal should never disappear silently.
+    expected_branches = {
+        'BREAKOUT_CONTINUATION': 'V29_CONTINUATION_30M',
+        'RECLAIM_CONTINUATION': 'V29_RECLAIM_30M',
+    }
+    confirmed_events = []
+    for ev in continuation_events or []:
+        branch = str(ev.get('branch','')).strip()
+        status = str(ev.get('status','')).strip()
+        if branch not in expected_branches or status != 'CONFIRMED':
+            continue
+        confirmed_events.append(ev)
+        key = expected_branches[branch]
+        evidence = _verified_v29_reference(ev, bars)
+        if key in refs and (refs[key]['entry_ts'] != evidence['entry_ts'] or
+                            abs(float(refs[key]['price'])-evidence['price']) >
+                            max(1e-10,evidence['price']*1e-7)):
+            raise ValueError(f'Entrada {key} no coincide entre helpers visuales')
+        refs[key] = evidence
+    if len(set(str(ev.get('branch')).strip() for ev in confirmed_events)) != len(confirmed_events):
+        raise ValueError('V2.9: múltiples confirmaciones para una misma ruta')
     flip = _ms(row.get('flip_confirmed_closed_ts'))
     # If the 120m path is censored, a real entry candle can still be present.
     # A direct archive lookup is allowed, but it does NOT make path COMPLETE_1M.

@@ -116,6 +116,10 @@ def load_v29_events(path):
     required={'attempt_id','branch','status','confirmed_ts','signal_close','signal_open_ts'}
     if required-set(events):
         raise ValueError('V2.9 sin columnas: '+', '.join(sorted(required-set(events))))
+    if events.attempt_id.isna().any():
+        raise ValueError('V2.9 contiene IDs nulos')
+    for field in ('attempt_id','branch','status'):
+        events[field] = events[field].astype(str).str.strip()
     if events[['attempt_id','branch']].duplicated().any() or events.attempt_id.isna().any():
         raise ValueError('V2.9 con IDs repetidos o vacíos')
     if events.loc[events.status.eq('CONFIRMED'),'confirmed_ts'].isna().any():
@@ -416,7 +420,11 @@ def render_hll_v282_pre_followup(root,blind=True):
             # Always keep the event clocks for actual entry markers, even when
             # the separate V2.9 *signal* markers are hidden.
             if show_post and not blind:
-                continuation_all=v29.loc[v29.attempt_id.eq(str(row.attempt_id))].to_dict('records')
+                selected_id=str(row.attempt_id).strip()
+                continuation_all=v29.loc[v29.attempt_id.eq(selected_id)].to_dict('records')
+                if not continuation_all:
+                    st.warning(f'V2.9 no encontró eventos para el ID exacto {selected_id}; '
+                               f'CSV: {root/V29_EVENTS}. No equivale a no tener señal.')
                 if show_v29:
                     continuation=continuation_all
         except (ValueError,KeyError,OSError) as ex:
@@ -500,7 +508,15 @@ def render_hll_v282_pre_followup(root,blind=True):
             entry_markers = [e for e in all_entry_anchors
                              if include_breakout_reference or e['key'] != 'BREAKOUT_30M']
             if not entry_markers:
-                st.info('Ninguna ruta tiene todavía un OPEN de entrada verificable para este episodio.')
+                confirmed_v29=[ev for ev in continuation_all if
+                    str(ev.get('status','')).strip()=='CONFIRMED' and
+                    str(ev.get('branch','')).strip() in
+                    ('BREAKOUT_CONTINUATION','RECLAIM_CONTINUATION')]
+                if confirmed_v29:
+                    st.error('Hay V2.9 CONFIRMED para este intento, pero no se pudo dibujar '
+                             'su entrada. Revisar integridad de los datos y compatibilidad del inspector.')
+                else:
+                    st.info('Ninguna ruta tiene todavía un OPEN de entrada verificable para este episodio.')
         fig=make_chart(row,bars,window,show_post,show_flip_pivots,continuation,post_bars)
         if chosen_reference is not None:
             fig=overlay_visual_levels(fig, chosen_reference,

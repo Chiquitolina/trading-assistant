@@ -59,7 +59,47 @@ class EntryMarkersTests(unittest.TestCase):
         bars=bars[bars.timestamp.ne(28*TF)]
         events=[dict(branch='BREAKOUT_CONTINUATION',status='CONFIRMED',confirmed_ts=28*TF,
                      signal_open_ts=27*TF,signal_close=128)]
-        self.assertEqual(get_entries(row,bars,None,events),[])
+        with self.assertRaisesRegex(ValueError, 'OPEN 30m no verificable'):
+            get_entries(row,bars,None,events)
+
+    def test_real_pepe_v29_observed_next_open_is_marked(self):
+        # Real timestamps and OPEN supplied by the VPS for attempt 62eaa5f6...
+        confirmed=1792744200000   # 2026-10-23 08:30 UTC
+        bars=pd.DataFrame([
+            dict(timestamp=confirmed-TF,open=.004620,high=.00490,
+                 low=.00459,close=.00472),
+            dict(timestamp=confirmed,open=.004741,high=.004969,
+                 low=.004717,close=.004893),
+        ])
+        row=pd.Series(dict(attempt_id='62eaa5f6a6777ccf116a7d84',
+                           symbol='1000PEPEUSDT',breakout_closed_ts=confirmed-TF,
+                           flip_confirmed_closed_ts=float('nan')))
+        ev=dict(attempt_id=row.attempt_id,branch='BREAKOUT_CONTINUATION',
+                status='CONFIRMED',confirmed_ts=float(confirmed),
+                signal_open_ts=confirmed-TF,signal_close=.00472,
+                next_open_ts=float(confirmed),next_open=.004741)
+        e=get_entries(row,bars,None,[ev])
+        self.assertEqual(len(e),1)
+        self.assertEqual(e[0]['key'],'V29_CONTINUATION_30M')
+        self.assertEqual(e[0]['entry_ts'],confirmed)
+        self.assertEqual(e[0]['price'],.004741)
+        f=overlay_entry_markers(go.Figure(),e)
+        self.assertEqual(float(f.data[0].y[0]),.004741)
+
+    def test_frozen_next_open_conflict_is_reported(self):
+        confirmed=1792744200000
+        bars=pd.DataFrame([dict(timestamp=confirmed-TF,open=.0046,high=.0048,
+                                low=.0045,close=.0047),
+                           dict(timestamp=confirmed,open=.004741,high=.004969,
+                                low=.004717,close=.004893)])
+        row=pd.Series(dict(attempt_id='A',symbol='TESTUSDT',
+                           breakout_closed_ts=confirmed-TF,
+                           flip_confirmed_closed_ts=float('nan')))
+        ev=dict(branch='BREAKOUT_CONTINUATION',status='CONFIRMED',
+                confirmed_ts=confirmed,signal_open_ts=confirmed-TF,
+                signal_close=.0047,next_open_ts=confirmed,next_open=.0049)
+        with self.assertRaisesRegex(ValueError, 'next_open del CSV'):
+            get_entries(row,bars,None,[ev])
 
     def test_flip_can_mark_observed_open_despite_later_gap(self):
         row,bars=fixture()
