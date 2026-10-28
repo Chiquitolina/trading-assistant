@@ -292,6 +292,11 @@ def entry_batch(group,start,source,scope):
     mech=mech[mech.symbol.isin(group)].copy()
     v29=v29[v29.origin_symbol.isin(group)].copy()
     selected,coverage,entries=build_entries(pre,mech,v29,CANDLES,OUT/'minutes',scope='ALL_ATTEMPTS')
+    # Signals remain verified against frozen 30m sources. For simulation only,
+    # reconcile exact-timestamp execution OPEN to the observed 1m archive and
+    # retain every source mismatch in a separate audit artifact.
+    from dashboard.views.hll_v301_entry_open_reconcile import reconcile_verified_opens
+    entries,open_audit=reconcile_verified_opens(entries,OUT/'minutes')
     if entries.empty:
         detail=pd.DataFrame()
     else:
@@ -308,12 +313,15 @@ def entry_batch(group,start,source,scope):
         raise ValueError('Entry scenario cardinality or IDs invalid')
     folder=dataset_batch_folder('entries_batches',start,group,scope)
     protected_write_batch(folder,{'original_attempts.csv':selected,'attempt_route_coverage.csv':coverage,
-                                  'entry_events.csv':entries,'entry_scenarios_25.csv':detail},
+                                  'entry_events.csv':entries,'entry_scenarios_25.csv':detail,
+                                  'entry_open_discrepancies.csv':open_audit},
                           {'symbols':group,'scope':scope,'source':source,'n_attempts':len(selected),'n_entries':len(entries),
                            'n_scenarios':len(detail),'v29_hash':digest(V29/'continuation_events.csv'),
-                           'mechanism_hash':digest(MECH/'mechanism_attempts.csv'),'status':'COMPLETE'})
+                           'mechanism_hash':digest(MECH/'mechanism_attempts.csv'),
+                           'entry_open_policy':'30m_signal_exact_1m_execution',
+                           'n_open_discrepancies':len(open_audit),'status':'COMPLETE'})
     print('HLL_V301_ENTRIES_BATCH_DONE',json.dumps({'folder':str(folder),'scope':scope,'attempts':len(selected),
-                                                    'entries':len(entries),'scenarios':len(detail)},ensure_ascii=False),flush=True)
+        'entries':len(entries),'scenarios':len(detail),'open_discrepancies':len(open_audit)},ensure_ascii=False),flush=True)
 
 
 def finalize_entries(symbols,source,scope):
@@ -324,6 +332,18 @@ def finalize_entries(symbols,source,scope):
         raise ValueError('V29 or mechanisms changed across entry batches')
     if any((lambda m:m.get('n_scenarios')!=75*m.get('n_entries'))(json.loads((b/'metadata.json').read_text())) for b in batches):
         raise ValueError('Incomplete 25 x 3 scenarios in a batch')
+    # Old completed batches were produced with a stricter equality assertion
+    # and have no sidecar. This allows an exact resume without rewriting them.
+    from dashboard.views.hll_v301_entry_open_reconcile import AUDIT_COLUMNS
+    for b in batches:
+        md=json.loads((b/'metadata.json').read_text())
+        sidecar=b/'entry_open_discrepancies.csv'
+        if sidecar.is_file():
+            count=len(pd.read_csv(sidecar,usecols=['entry_id']))
+            if count != md.get('n_open_discrepancies'):
+                raise ValueError(f'Invalid OPEN source audit count: {b}')
+        elif md.get('entry_open_policy')=='30m_signal_exact_1m_execution':
+            raise ValueError(f'Missing OPEN source audit: {b}')
     dest=OUT/f'entries_{scope}'
     if dest.exists():raise FileExistsError(dest)
     dest.parent.mkdir(parents=True,exist_ok=True)
@@ -331,6 +351,12 @@ def finalize_entries(symbols,source,scope):
     try:
         for name in ['original_attempts.csv','attempt_route_coverage.csv','entry_events.csv','entry_scenarios_25.csv']:
             combine_csvs([b/name for b in batches],tmp/name)
+        audit_paths=[b/'entry_open_discrepancies.csv' for b in batches
+                     if (b/'entry_open_discrepancies.csv').is_file()]
+        if audit_paths:
+            combine_csvs(audit_paths,tmp/'entry_open_discrepancies.csv')
+        else:
+            pd.DataFrame(columns=AUDIT_COLUMNS).to_csv(tmp/'entry_open_discrepancies.csv',index=False)
         # Keep detail as a file, not millions of DataFrame rows in memory.
         acc=defaultdict(lambda:[0,0,0,0,0,0,0.0,0.0])
         dimensions=['route','pre_pattern','mechanism_pre_48','universe_group','horizon_min','tp_pct','sl_pct','entry_month']
@@ -356,6 +382,9 @@ def finalize_entries(symbols,source,scope):
         (tmp/'manifest.json').write_text(json.dumps({'version':'HLL_V301_FULL290_ENTRIES','scope':scope,'source':source,
          'symbols':len(symbols),'entries':n_entries,'scenario_rows':n_scenarios,
          'horizons_min':[120,720,2880],'commission_roundtrip_pct':.10,'slippage_pct':0,
+         'entry_open_policy':'30m_signal_exact_1m_execution',
+         'entry_open_discrepancies':sum(int(json.loads((b/'metadata.json').read_text()).get('n_open_discrepancies',0)) for b in batches),
+         'entry_open_audit':'entry_open_discrepancies.csv',
          'limitations':['Threshold fills theoretical, no funding or order book costs',
                         'Multiple routes/levels dependent, no simultaneous portfolio',
                         'Historical cross-sectional replication, not prospective validation']},indent=2,ensure_ascii=False),encoding='utf-8')
