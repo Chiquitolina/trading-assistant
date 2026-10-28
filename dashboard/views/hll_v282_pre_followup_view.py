@@ -283,6 +283,9 @@ def render_hll_v282_pre_followup(root,blind=True):
     except (OSError,ValueError,KeyError) as ex:
         st.error(f'V2.8.2 incompleto: {ex}')
         return True
+    if folder.name == 'sep290_pre_all_frozen_v282':
+        from dashboard.views.hll_v301_full_inspector import render_full290
+        return render_full290(root,folder,df,blind)
     # V2.9.2 is read-only and optional, and NEVER joins outcomes into PRE classification.
     has_v292=False;v292_contacts=None;v292_survival=None
     try:
