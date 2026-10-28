@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import pandas as pd
 from dashboard.views.hll_v282_pre_followup_view import make_chart, PATTERNS, STATES
-from dashboard.views.hll_v301_full290 import PRE,CANDLES,V291,V29,MECH,OUT,digest
+from dashboard.views.hll_v301_full290 import PRE,CANDLES,V291,V29,MECH,OUT,digest,minute_status
 
 
 def verify_artifacts(pre_path:Path):
@@ -513,7 +513,9 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
                             'La estructura y las entradas de 30m ya se pueden inspeccionar.')
                 elif st.button('Calcular las 25 combinaciones para esta entrada',key='hll301_eval_individual'):
                     try:
-                        from dashboard.views.hll_v301_full290 import minute_status,digest,PRE
+                        # PRE, digest y minute_status se importan a nivel módulo.
+                        # Importarlos aquí haría que Python considere digest una variable
+                        # local y provocaría UnboundLocalError en el inventario inicial.
                         source={'pre_sha256':digest(root/PRE)}
                         if minute_status(str(r.symbol),source)!='FULL':
                             raise ValueError('El histórico 1m no tiene manifiesto completo y compatible')
