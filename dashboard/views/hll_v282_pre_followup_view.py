@@ -727,6 +727,10 @@ def render_hll_v282_pre_followup(root,blind=True):
                         st.warning('Resultados exploratorios, no una optimización validada. '
                             'No seleccionar el mejor TP/SL de la misma muestra sin un test futuro independiente; '
                             'si la cobertura difiere entre celdas o rutas, las medias no son directamente comparables.')
+        # Offline V2.9.6: show individual scenario rows only if its frozen run exists.
+        if show_post and not blind:
+            from dashboard.views.hll_v296_audit_view import render_v296_audit
+            render_v296_audit(root,sel)
         if show_post:
             seen=int(((bars.timestamp>=int(row.breakout_closed_ts)) &
                      (bars.timestamp < int(row.breakout_closed_ts)+int(post_bars)*TF)).sum())
