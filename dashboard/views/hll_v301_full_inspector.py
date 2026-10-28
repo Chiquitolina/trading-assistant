@@ -64,6 +64,76 @@ def _episode_entries(symbol,attempt,scope):
     except (OSError,ValueError,pd.errors.EmptyDataError):return None,None
 
 
+
+def visual_entries_for_episode(row, bars:pd.DataFrame, events:list, minute_dir:Path):
+    """Same V2.9.3 markers used by the original inspector, NEVER from CROSS_UP.
+
+    A 30m confirmed continuation/reclaim is verified against its next 30m OHLC.
+    The flip requires an observed next 1m OPEN. No backfilled/fake entry.
+    """
+    from dashboard.views.hll_v293_entry_markers import get_entries
+    anchors=get_entries(row,bars,None,events,minute_dir=minute_dir,
+                        include_breakout_reference=True)
+    active=[e for e in anchors if e['key']!='BREAKOUT_30M']
+    keys=[e['key'] for e in active]
+    if len(keys)!=len(set(keys)):
+        raise ValueError('Entrada repetida por ruta en un intento')
+    return active, [e for e in anchors if e['key']=='BREAKOUT_30M']
+
+
+def evaluate_local_25(path:Path, reference:dict, horizon_min:int,
+                      fee_pct:float=.1,slippage_pct:float=0.0)->pd.DataFrame:
+    """Read true 1m for one verified route, with strict OPEN/clock validation."""
+    from dashboard.views.hll_v294_entry_matrix import read_minute_window
+    from dashboard.views.hll_v295_net_matrix import first_touch_net
+    if horizon_min not in (120,720,2880):raise ValueError('Horizonte inválido')
+    entry_ts=int(reference['entry_ts']);entry_price=float(reference['price'])
+    bars,state=read_minute_window(Path(path),entry_ts,horizon_min)
+    if not bars.empty:
+        observed=float(bars.open.iloc[0])
+        if abs(observed-entry_price)>max(1e-10,entry_price*1e-7):
+            raise ValueError('El OPEN 1m no coincide con la entrada verificada')
+    out=first_touch_net(bars,entry_price,state,entry_ts,fee_pct,slippage_pct)
+    out['path_state']=state
+    return out
+
+
+def render_matrix_25(st,detail:pd.DataFrame,subtitle:str):
+    """Both first-touch (TP/SL) and net grids, always preserving censored rows."""
+    from dashboard.views.hll_v294_entry_matrix import matrix_table
+    if detail is None or detail.empty:
+        st.info('No hay evaluación individual para este episodio.');return
+    required={'tp_pct','sl_pct','result','net_pct'}
+    if missing:=required-set(detail):
+        st.error(f'Matriz sin campos: {sorted(missing)}');return
+    if detail.duplicated(['sl_pct','tp_pct']).any() or len(detail)!=25:
+        st.error('La matriz no contiene exactamente 25 escenarios únicos');return
+    st.markdown(f'**{subtitle}**')
+    st.caption('Primera barrera tocada en 1m; TP/SL en la misma vela = ambiguo. '
+               'TIMEOUT al cierre del horizonte completo; censuras sin PnL imputado.')
+    st.markdown('**Matriz de desenlaces — TP / SL / TIMEOUT / CENSURA**')
+    st.dataframe(matrix_table(detail),use_container_width=True)
+    st.markdown('**Matriz de retornos netos estimados (%)**')
+    g=detail.pivot(index='sl_pct',columns='tp_pct',values='net_pct').reindex(index=range(1,6),columns=range(1,6))
+    g.index=[f'SL −{i}%' for i in range(1,6)]
+    g.columns=[f'TP +{i}%' for i in range(1,6)]
+    st.dataframe(g,use_container_width=True)
+    cols=['tp_pct','sl_pct','result','path_state','net_pct','first_hit_min','first_hit_minute_utc']
+    st.dataframe(detail[[c for c in cols if c in detail]],hide_index=True,use_container_width=True)
+    st.download_button('Exportar las 25 combinaciones de este episodio',detail.to_csv(index=False).encode('utf-8'),
+        file_name='hll_290_episodio_matriz_tp_sl.csv',mime='text/csv',key='hll301_individual_export')
+
+
+def _visible_summary_rows(summary:pd.DataFrame,window:int,pat:str,mechanism:str,
+                          ready_mechanisms:bool)->pd.DataFrame:
+    """Only filter summary by dimensions explicitly present in the frozen grouping."""
+    s=summary[summary.pre_window.eq(window)]
+    if pat!='TODAS':s=s[s.pre_pattern.eq(pat)]
+    if ready_mechanisms and mechanism!='TODOS':
+        if window!=48:raise ValueError('Resumen agregado solo tiene mecanismo PRE 48')
+        s=s[s.mechanism_pre_48.eq(mechanism)]
+    return s
+
 def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
     import streamlit as st
     from dashboard.views.hll_v282_pre_followup_view import _date
@@ -142,11 +212,20 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
         with st.expander('Comparar estructuras, mecanismos y rutas',expanded=True):
             keys=[field]
             if ready['V292']:keys.append(f'mechanism_{window}')
-            grp=sel.groupby(keys,dropna=False).agg(intentos=('attempt_id','size'),simbolos=('symbol','nunique'),
-                flips=('post_outcome',lambda x:int(x.eq('FLIP_CONFIRMADO').sum())))
-            st.dataframe(grp.reset_index().sort_values('intentos',ascending=False).head(200),use_container_width=True,hide_index=True)
-            if ready['V29']:
-                st.caption('Las continuaciones/reclaims se muestran en los contadores superiores según la selección.')
+            grouped=sel.copy()
+            grouped['_flip_yes']=grouped.post_outcome.eq('FLIP_CONFIRMADO').astype(int)
+            grouped['_cont_yes']=(grouped.continuation_status.eq('CONFIRMED').astype(int)
+                                  if ready['V29'] else 0)
+            grouped['_reclaim_yes']=(grouped.reclaim_status.eq('CONFIRMED').astype(int)
+                                     if ready['V29'] else 0)
+            grp=grouped.groupby(keys,dropna=False).agg(intentos=('attempt_id','size'),
+                simbolos=('symbol','nunique'),flips=('_flip_yes','sum'),
+                continuaciones=('_cont_yes','sum'),reclaims=('_reclaim_yes','sum'))
+            st.dataframe(grp.reset_index().sort_values('intentos',ascending=False).head(200),
+                         use_container_width=True,hide_index=True)
+            st.download_button('Exportar comparativa estructural filtrada',
+                grp.reset_index().to_csv(index=False).encode('utf-8'),
+                file_name='hll_290_estructuras_mecanismos_rutas.csv',mime='text/csv',key='hll301_structure_export')
     if sel.empty:st.info('No hay eventos bajo estos filtros.');return True
     sel=sel.sort_values('breakout_closed_ts',ascending=False)
     chosen=sel.head(1200).copy()
@@ -158,12 +237,55 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
     st.markdown(f"**{r.symbol} · {PATTERNS.get(r[field],str(r[field]))}** · `{r.v26_status}`")
     post=st.checkbox('Dibujar desenlaces y rutas POST',value=not blind,disabled=blind,key='hll301_show_post')
     post_n=st.selectbox('Velas 30m POST',[24,48,96,160,240],index=3,key='hll301_post_n')
+    show_flip_pivots=st.checkbox('Mostrar pivotes conocidos al confirmar el flip',value=False,
+         disabled=blind or not post,key='hll301_flip_pivots')
     path=root/CANDLES/f'{r.symbol}_30m.csv'
     if not path.is_file():st.warning(f'No hay archivo de velas {path}');return True
     bars=pd.read_csv(path,usecols=['timestamp','open','high','low','close'],float_precision='round_trip')
+    bars=bars.sort_values('timestamp').reset_index(drop=True)
     events=ev.loc[ev.attempt_id.eq(str(eid))].to_dict('records') if ready['V29'] and post else []
+    # Full 15-symbol inspector's original entry/guide controls are also available
+    # for sep290. All three confirmed routes use the same underlying helpers.
+    st.markdown('#### Entradas observadas y guías TP/SL en el gráfico')
+    display_entries=st.checkbox('Marcar OPEN de flip / continuación / reclaim',value=True,
+         disabled=blind or not post,key='hll301_show_entries')
+    display_breakout=st.checkbox('Mostrar también OPEN del CROSS_UP (solo referencia, no entrada)',
+         value=False,disabled=blind or not post or not display_entries,key='hll301_breakout_reference')
+    display_guides=st.checkbox('Líneas TP +1% a +5% / SL −1% a −5%',value=True,
+         disabled=blind or not post,key='hll301_tp_sl_guides')
+    anchors=[];breakout_refs=[];selected_reference=None;ref_key=None
+    if post and not blind:
+        try:
+            anchors,breakout_refs=visual_entries_for_episode(r,bars,events,root/OUT/'minutes')
+        except (OSError,ValueError,KeyError,TypeError) as ex:
+            st.error(f'Entrada confirmada sin OPEN compatible: {ex}. No se dibujan TP/SL no verificados.')
+        if anchors:
+            st.caption(f'{len(anchors)} ruta(s) con OPEN observado en este intento; la ruptura original no cuenta como entrada.')
+            if display_guides:
+                options={x['key']:x for x in anchors}
+                preference=['FLIP_1M','V29_CONTINUATION_30M','V29_RECLAIM_30M']
+                default=next((x for x in preference if x in options),next(iter(options)))
+                ref_key=st.selectbox('Entrada de referencia para las líneas TP/SL',list(options),
+                    index=list(options).index(default),
+                    format_func=lambda x:options[x]['label'],key='hll301_guide_reference')
+                selected_reference=options[ref_key]
+                max_pct=st.select_slider('Mostrar líneas hasta ±',options=[1,2,3,4,5],value=5,key='hll301_guide_pct')
+                ca,cb=st.columns(2)
+                with ca:show_tp=st.checkbox('Líneas TP +%',value=True,key='hll301_guide_tp')
+                with cb:show_sl=st.checkbox('Líneas SL −%',value=True,key='hll301_guide_sl')
+        else:
+            st.info('Este episodio aún no tiene OPEN de entrada confirmado y verificable. '
+                    'No se dibujan TP/SL; CROSS_UP por sí solo no es una operación.')
     try:
-        fig=make_chart(r,bars,window,post,False,events,post_n)
+        fig=make_chart(r,bars,window,post,show_flip_pivots,events,post_n)
+        if selected_reference is not None and (show_tp or show_sl):
+            from dashboard.views.hll_v292_percent_guides import overlay_visual_levels
+            fig=overlay_visual_levels(fig,selected_reference,max_pct=max_pct,
+                                      include_tp=show_tp,include_sl=show_sl)
+        if display_entries and post and not blind:
+            from dashboard.views.hll_v293_entry_markers import overlay_entry_markers
+            fig=overlay_entry_markers(fig,anchors+(breakout_refs if display_breakout else []),
+                                      selected_reference=ref_key)
         if ready['V292']:
             touch_path=root/MECH/'pre_contacts.csv'
             contacts=read_cached_csv(touch_path,touch_path.stat().st_mtime_ns)
@@ -174,48 +296,106 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
         st.plotly_chart(fig,use_container_width=True,key='hll301_chart')
     except (ValueError,KeyError,TypeError,OSError) as e:
         st.error(f'No se pudo graficar esta estructura: {e}');return True
+    if anchors:
+        st.dataframe(pd.DataFrame([{'Ruta':x['short'],'Entrada UTC':_date(x['entry_ts']).strftime('%Y-%m-%d %H:%M'),
+              'OPEN observado':x['price'],'Nivel base de guías':x['key']==ref_key} for x in anchors]),
+              hide_index=True,use_container_width=True)
     if post and events:
-        st.dataframe(pd.DataFrame(events)[['branch','status','confirmed_ts','next_open','displacement_atr']],hide_index=True,use_container_width=True)
+        with st.expander('Detalles V2.9 · continuación y reclaim (sin filtrar por resultado)',expanded=False):
+            st.dataframe(pd.DataFrame(events)[['branch','status','confirmed_ts','next_open','displacement_atr']],
+                         hide_index=True,use_container_width=True)
     if not blind:
-        results=OUT/'entries_FIRST_PER_LEVEL'/'manifest.json'
-        st.markdown('#### Entradas verificadas y resultados TP/SL')
+        st.markdown('#### Matriz TP/SL 1%–5% · primer toque real en 1m')
         scope='FIRST_PER_LEVEL' if unit=='FIRST_PER_LEVEL' else 'ALL'
         ent,scens=_episode_entries(str(r.symbol),str(eid),scope)
-        if ent is None:
-            st.caption('La evaluación de 1m para esta unidad todavía está pendiente. No se inventan entradas ni TP/SL.')
-        elif ent.empty:st.caption('Este episodio no generó entradas verificadas en las tres rutas.')
+        available={x['key']:x for x in anchors}
+        if ent is not None and not ent.empty:
+            st.caption('Evaluación histórica de la corrida integral V3.0.1: solo entradas verificadas.')
+            view_cols=[c for c in ['route','entry_utc','entry_price','entry_id'] if c in ent]
+            st.dataframe(ent[view_cols],hide_index=True,use_container_width=True)
+        if available:
+            route_sel=st.selectbox('Ruta de entrada para la matriz',list(available),
+                       format_func=lambda k:available[k]['description'],key='hll301_matrix_route')
+            horizon=st.selectbox('Horizonte después de la entrada',[120,720,2880],
+                       format_func=lambda h:f'{h//60} horas',index=1,key='hll301_horizon')
+            st.markdown('**Costes estimados para evaluación individual**')
+            ca,cb=st.columns(2)
+            with ca:fee_pct=st.number_input('Comisión total (%)',min_value=0.,max_value=5.,value=.1,step=.05,key='hll301_fee')
+            with cb:slippage_pct=st.number_input('Deslizamiento total (%)',min_value=0.,max_value=5.,value=0.,step=.05,key='hll301_slip')
+            chosen=available[route_sel]
+            # Prefer previously computed scenarios only when they match frozen
+            # costs. For different costs, recalculate from verified 1m OHLC.
+            already=(scens.loc[scens.horizon_min.eq(horizon)&scens.route.eq(route_sel)].copy()
+                     if scens is not None and not scens.empty else pd.DataFrame())
+            if not already.empty and fee_pct==.1 and slippage_pct==0.:
+                render_matrix_25(st,already,f'{chosen["description"]} · {horizon//60} horas')
+            else:
+                minute_path=root/OUT/'minutes'/f'{r.symbol}_1m.csv'
+                if not minute_path.is_file():
+                    st.info('Matriz individual pendiente: faltan las velas completas de 1m de este símbolo. '
+                            'La estructura y las entradas de 30m ya se pueden inspeccionar.')
+                elif st.button('Calcular las 25 combinaciones para esta entrada',key='hll301_eval_individual'):
+                    try:
+                        from dashboard.views.hll_v301_full290 import minute_status,digest,PRE
+                        source={'pre_sha256':digest(root/PRE)}
+                        if minute_status(str(r.symbol),source)!='FULL':
+                            raise ValueError('El histórico 1m no tiene manifiesto completo y compatible')
+                        result=evaluate_local_25(minute_path,chosen,horizon,float(fee_pct),float(slippage_pct))
+                        render_matrix_25(st,result,f'{chosen["description"]} · {horizon//60} horas')
+                    except (ValueError,OSError,KeyError) as ex:
+                        st.error(f'No se calculó la matriz: {ex}')
         else:
-            st.dataframe(ent[['route','entry_utc','entry_price','entry_id']],hide_index=True,use_container_width=True)
-            if scens is not None and not scens.empty:
-                horizon=st.selectbox('Horizonte de la matriz',[120,720,2880],index=1,key='hll301_horizon')
-                route=st.selectbox('Ruta de la matriz',sorted(scens.route.unique()),key='hll301_matrix_route')
-                part=scens.loc[scens.horizon_min.eq(horizon)&scens.route.eq(route)]
-                if not part.empty:
-                    g=part.pivot(index='sl_pct',columns='tp_pct',values='net_pct')
-                    g.index=[f'SL −{int(i)}%' for i in g.index]
-                    g.columns=[f'TP +{int(i)}%' for i in g.columns]
-                    st.dataframe(g,use_container_width=True)
-                    st.dataframe(part[['tp_pct','sl_pct','result','path_state','net_pct','minutes_to_exit']],
-                        hide_index=True,use_container_width=True)
-        matrix=OUT/f'entries_{scope}'/'matrix_by_route_pattern_month.csv'
-        if matrix.is_file():
-            with st.expander('Matriz agregada · todas las estructuras, flip, continuación y reclaim',expanded=False):
-                sm=pd.read_csv(matrix)
-                sm=sm[sm.pre_window.eq(window)]
-                if pat!='TODAS':sm=sm[sm.pre_pattern.eq(pat)]
-                if ready['V292'] and mech_name!='TODOS':sm=sm[sm.mechanism_pre_48.eq(mech_name)]
-                col1,col2,col3=st.columns(3)
-                with col1:comparison=st.selectbox('Grupo de símbolos',['AMBOS','ORIGINAL_15','ADDITIONAL_275'],key='hll301_cmp_group')
-                with col2:month=st.selectbox('Mes',['TODOS']+sorted(sm.entry_month.dropna().astype(str).unique()),key='hll301_cmp_month')
-                with col3:hh=st.selectbox('Horizonte',[120,720,2880],index=1,key='hll301_cmp_h')
-                if comparison!='AMBOS':sm=sm[sm.universe_group.eq(comparison)]
+            st.info('Matriz individual pendiente: ninguna ruta tiene OPEN verificable en este episodio.')
+        st.markdown('#### Matriz estadística agregada · todas las estructuras y rutas')
+        matrix=root/OUT/f'entries_{scope}'/'matrix_by_route_pattern_month.csv'
+        if not matrix.is_file():
+            st.info('La matriz agregada todavía no fue evaluada para los 290. '
+                    'Primero deben completarse los históricos 1m, V2.9.2, las entradas y su finalización. '
+                    'No se utilizan resultados del core15 para simular los 290.')
+        else:
+            with st.expander('Comparación agregada: Flip / Continuación / Reclaim · TP/SL 1–5%',expanded=True):
+                sm=read_cached_csv(matrix,matrix.stat().st_mtime_ns)
+                if ready['V292'] and mech_name!='TODOS' and window!=48:
+                    st.warning('La agregación por mecanismo está congelada a PRE48. '
+                               'Elegí ventana 48 para filtrar por mecanismo.')
+                sm=_visible_summary_rows(sm,window,pat,mech_name if window==48 else 'TODOS',ready['V292'])
+                c1,c2,c3=st.columns(3)
+                with c1:
+                    group=st.selectbox('Grupo',['AMBOS','ORIGINAL_15','ADDITIONAL_275'],key='hll301_cmp_group')
+                with c2:
+                    month=st.selectbox('Mes',['TODOS']+sorted(sm.entry_month.dropna().astype(str).unique()),key='hll301_cmp_month')
+                with c3:
+                    hh=st.selectbox('Horizonte',[120,720,2880],index=1,
+                        format_func=lambda h:f'{h//60} horas',key='hll301_cmp_h')
+                if group!='AMBOS':sm=sm[sm.universe_group.eq(group)]
                 if month!='TODOS':sm=sm[sm.entry_month.astype(str).eq(month)]
                 sm=sm[sm.horizon_min.eq(hh)]
-                st.caption('Resultados netos teóricos: TP/SL ±1–5%, desagregados por ruta, mes, grupo y mecanismo PRE de 48 velas. '
-                           'La matriz no suma operaciones independientes de una misma ruptura.')
-                if sm.empty:st.info('Sin resultados en la selección.')
+                st.caption('Matriz preagregada por clasificación PRE, mecanismo 48, ruta, mes y grupo. '
+                    'Los filtros de símbolo individual, desenlace POST y etiqueta de continuidad NO aplican '
+                    'a estos totales; no se muestra como si siguiera esa selección. '
+                    'Coste congelado: comisión 0,10%, deslizamiento 0%. No es un portfolio.')
+                if sm.empty:
+                    st.info('Sin resultados bajo esos criterios.')
                 else:
-                    st.dataframe(sm.sort_values(['route','tp_pct','sl_pct']).head(3000),hide_index=True,use_container_width=True)
-                    st.download_button('Exportar matriz filtrada',sm.to_csv(index=False),
-                           file_name=f'hll_290_matrix_{scope}.csv',mime='text/csv',key='hll301_csv')
+                    for route_name,part in sm.groupby('route'):
+                        st.markdown(f'**{route_name}**')
+                        # Aggregate month and PRE-mechanism cells with proper known denominators.
+                        work=part.assign(weighted_net=part.mean_net_known_pct.mul(part.known))
+                        agg=work.groupby(['sl_pct','tp_pct'],as_index=False).agg(
+                            entries=('entries','sum'),known=('known','sum'),
+                            tp_first=('tp_first','sum'),sl_first=('sl_first','sum'),
+                            timeout=('timeout','sum'),ambiguous=('ambiguous','sum'),
+                            censored=('censored','sum'),weighted_net=('weighted_net','sum'))
+                        agg['net_mean_pct']=agg.weighted_net.div(agg.known.replace(0,float('nan')))
+                        agg=agg.drop(columns=['weighted_net'])
+                        g=agg.pivot(index='sl_pct',columns='tp_pct',values='net_mean_pct').reindex(index=range(1,6),columns=range(1,6))
+                        g.index=[f'SL −{i}%' for i in range(1,6)]
+                        g.columns=[f'TP +{i}%' for i in range(1,6)]
+                        st.dataframe(g,use_container_width=True)
+                        with st.expander(f'Detalle: cobertura y desenlaces de {route_name}',expanded=False):
+                            st.dataframe(agg,hide_index=True,use_container_width=True)
+                    st.download_button('Exportar matriz agregada filtrada',sm.to_csv(index=False).encode('utf-8'),
+                       file_name=f'hll_290_aggregate_{scope}.csv',mime='text/csv',key='hll301_csv')
+                    st.warning('Exploratorio: no optimizar TP/SL retrospectivamente ni tratar niveles correlacionados '
+                               'como operaciones independientes.')
     return True

@@ -98,7 +98,22 @@ def _plot_episode(row,bars,show_future,lookback=48,pivot_field=None):
 def render_hll_v28_structure_dashboard(root):
     import streamlit as st
     root=Path(root)
-    st.markdown('### 🧱 Calidad estructural · V2.8')
+    integral=root/'reports/horizontal_level_structure_quality_v282/runs/sep290_pre_all_frozen_v282/pre_cohort.csv'
+    if integral.is_file():
+        st.markdown('### 🧱 Horizontal Level Lab · Inspector unificado')
+        mode=st.radio('Universo del inspector',
+            ['290 símbolos · análisis integral','15 símbolos · histórico V2.8'],
+            horizontal=True,key='hll_unified_universe')
+        if mode=='290 símbolos · análisis integral':
+            st.caption('Corrida congelada de 290 símbolos; todas las estructuras PRE, flip, '
+                       'continuación, reclaim y, cuando haya datos 1m, matrices TP/SL. '
+                       'Los resultados históricos de 15 símbolos no se mezclan con los nuevos.')
+            blind=st.checkbox('Auditoría ciega: ocultar resultados POST',value=False,
+                              key='hll_unified_blind')
+            from dashboard.views.hll_v282_pre_followup_view import render_hll_v282_pre_followup
+            render_hll_v282_pre_followup(root,blind=blind)
+            return
+    st.markdown('### 🧱 Calidad estructural · V2.8 (histórico 15 símbolos)')
     st.caption('30m causal: mínimos ascendentes confirmados, calidad del retest y cruces de zona. ' 
                'Compara resultados de V2.7 sin recalcularlos ni modificar LIVE.')
     parent=root/RUNS
