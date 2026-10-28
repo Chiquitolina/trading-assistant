@@ -124,6 +124,113 @@ def render_matrix_25(st,detail:pd.DataFrame,subtitle:str):
         file_name='hll_290_episodio_matriz_tp_sl.csv',mime='text/csv',key='hll301_individual_export')
 
 
+def audit_entry_evidence(pre:pd.DataFrame, v29:pd.DataFrame, candles_dir:Path,
+                         minute_dir:Path|None=None, source_sha:str|None=None)->pd.DataFrame:
+    """Read-only entry inventory, one row per PRE attempt.
+
+    V29 entries require actual 30m next OPEN + matching signal candle.
+    FLIP_1M entries require a full, provenance-matched V301 1m archive;
+    a confirmed flip without that archive is PENDING, never NO_SIGNAL.
+    Note: not a PnL/continuity estimate for the trade's future path.
+    """
+    import numpy as np
+    from dashboard.views.hll_v301_full290 import minute_status
+    cols=['attempt_id','symbol','post_outcome','flip_confirmed_closed_ts']
+    if missing:=set(cols)-set(pre):raise ValueError('PRE sin columnas '+str(missing))
+    if pre.attempt_id.isna().any() or pre.attempt_id.duplicated().any():
+        raise ValueError('PRE con attempt_id duplicado')
+    items=pre[cols].copy()
+    items['attempt_id']=items.attempt_id.astype(str)
+    items['flip_signal']=(items.post_outcome.eq('FLIP_CONFIRMADO') &
+        pd.to_numeric(items.flip_confirmed_closed_ts,errors='coerce').notna())
+    items['flip_open']=False
+    items['continuation_signal']=False
+    items['continuation_open']=False
+    items['reclaim_signal']=False
+    items['reclaim_open']=False
+    items['bad_30m_open']=False
+
+    if not v29.empty:
+        need={'attempt_id','branch','status','confirmed_ts','signal_open_ts','signal_close','next_open_ts','next_open'}
+        if missing:=need-set(v29):raise ValueError('V29 sin columnas '+str(missing))
+        if v29.duplicated(['attempt_id','branch']).any():raise ValueError('V29 con rutas duplicadas')
+        events=v29.loc[v29.status.eq('CONFIRMED') & v29.branch.isin(
+             ['BREAKOUT_CONTINUATION','RECLAIM_CONTINUATION'])].copy()
+        if not set(events.attempt_id.astype(str)).issubset(set(items.attempt_id)):
+            raise ValueError('Evento V29 fuera del universo PRE')
+        events=events.merge(items[['attempt_id','symbol']],on='attempt_id',how='left',validate='many_to_one')
+        events['confirmed_clock']=pd.to_numeric(events.confirmed_ts,errors='coerce')
+        events['signal_clock']=pd.to_numeric(events.signal_open_ts,errors='coerce')
+        events['next_clock']=pd.to_numeric(events.next_open_ts,errors='coerce')
+        events['saved_next_open']=pd.to_numeric(events.next_open,errors='coerce')
+        events['saved_signal_close']=pd.to_numeric(events.signal_close,errors='coerce')
+        events['observed_open']=np.nan
+        events['observed_signal_close']=np.nan
+        for symbol, idx in events.groupby('symbol',sort=False).groups.items():
+            f=Path(candles_dir)/f'{symbol}_30m.csv'
+            if not f.is_file():continue
+            b=pd.read_csv(f,usecols=['timestamp','open','close'],float_precision='round_trip')
+            b['timestamp']=pd.to_numeric(b.timestamp,errors='raise').astype('int64')
+            if b.timestamp.duplicated().any():raise ValueError(f'Duplicación de velas 30m: {symbol}')
+            op=b.set_index('timestamp').open
+            cl=b.set_index('timestamp').close
+            events.loc[idx,'observed_open']=events.loc[idx,'confirmed_clock'].map(op)
+            events.loc[idx,'observed_signal_close']=events.loc[idx,'signal_clock'].map(cl)
+        valid=(events.confirmed_clock.notna() & events.signal_clock.notna() &
+               events.observed_open.gt(0) & events.observed_signal_close.gt(0) &
+               events.confirmed_clock.eq(events.signal_clock+1800000) &
+               (events.next_clock.isna()|events.next_clock.eq(events.confirmed_clock)) &
+               (events.saved_next_open.isna() |
+                  (events.saved_next_open.sub(events.observed_open).abs() <=
+                   np.maximum(1e-10,events.observed_open.abs()*1e-7))) &
+               events.saved_signal_close.gt(0) &
+               (events.saved_signal_close.sub(events.observed_signal_close).abs() <=
+                np.maximum(1e-10,events.observed_signal_close.abs()*1e-7)))
+        events['verified']=valid.fillna(False)
+        for branch,prefix in [('BREAKOUT_CONTINUATION','continuation'),('RECLAIM_CONTINUATION','reclaim')]:
+            q=events.loc[events.branch.eq(branch),['attempt_id','verified']]
+            items[f'{prefix}_signal']=items.attempt_id.isin(q.attempt_id)
+            items[f'{prefix}_open']=items.attempt_id.isin(q.loc[q.verified,'attempt_id'])
+        bad=set(events.loc[~events.verified,'attempt_id'])
+        items['bad_30m_open']=items.attempt_id.isin(bad)
+
+    # Only genuine V301 files, not the sparse V300 ASCENDING_CLEAN cohort;
+    # otherwise the counts would mix two different universes.
+    if minute_dir is not None and source_sha:
+        flip_needed=items.loc[items.flip_signal & ~(
+            items.continuation_open|items.reclaim_open)]
+        if not flip_needed.empty:
+            for sym,g in flip_needed.groupby('symbol',sort=False):
+                f=Path(minute_dir)/f'{sym}_1m.csv'
+                if not f.is_file():continue
+                # Source hash, full length and byte hash must match the current 290 run.
+                if minute_status(sym,{'pre_sha256':source_sha})!='FULL':continue
+                # Read each symbol once, not once per flip; no fabricated candle.
+                observed=pd.read_csv(f,usecols=['timestamp','open'],float_precision='round_trip')
+                observed['timestamp']=pd.to_numeric(observed.timestamp,errors='raise').astype('int64')
+                if observed.timestamp.duplicated().any() or not observed.timestamp.is_monotonic_increasing:
+                    raise ValueError(f'Histórico 1m duplicado/desordenado: {sym}')
+                prices=observed.set_index('timestamp').open
+                stamps=pd.to_numeric(g.flip_confirmed_closed_ts,errors='raise').astype('int64')+60000
+                opens=stamps.map(prices)
+                valid=opens.notna() & np.isfinite(opens) & opens.gt(0)
+                items.loc[g.index,'flip_open']=valid.to_numpy()
+
+    has_open=(items.flip_open | items.continuation_open | items.reclaim_open)
+    has_signal=(items.flip_signal | items.continuation_signal | items.reclaim_signal)
+    pending_flip=items.flip_signal & ~items.flip_open
+    items['entry_status']='SIN_SENAL_CONFIRMADA'
+    items.loc[has_signal,'entry_status']='SENAL_SIN_OPEN_VERIFICADO'
+    items.loc[pending_flip & ~has_open,'entry_status']='FLIP_PENDIENTE_1M'
+    items.loc[has_open,'entry_status']='CON_ENTRADA_VERIFICADA'
+    items['entry_reason']='Ninguna ruta confirmó según las reglas congeladas'
+    items.loc[has_signal,'entry_reason']='Hay señal confirmada; revisar disponibilidad/compatibilidad del OPEN'
+    items.loc[pending_flip & ~has_open,'entry_reason']='Flip confirmado; falta verificar OPEN 1m en la corrida integral'
+    items.loc[items.bad_30m_open & ~has_open,'entry_reason']='V29 confirmó, pero el OPEN o cierre 30m no coincide con OHLC'
+    items.loc[has_open,'entry_reason']='Al menos una ruta con OPEN histórico verificado'
+    return items.drop(columns=['symbol','post_outcome','flip_confirmed_closed_ts'])
+
+
 def _visible_summary_rows(summary:pd.DataFrame,window:int,pat:str,mechanism:str,
                           ready_mechanisms:bool)->pd.DataFrame:
     """Only filter summary by dimensions explicitly present in the frozen grouping."""
@@ -170,6 +277,24 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
         fields=['attempt_id']+[f'mechanism_{w}' for w in (24,48,96)]
         pre=pre.merge(mech[fields],on='attempt_id',how='left',validate='one_to_one')
     else:st.info('V2.9.2 de los 290 pendiente: categorías V2.8.2, velas y rutas siguen disponibles.')
+    # Single frozen-cohort inventory. A 30m confirmation is not automatically
+    # a verified entry, and unavailable 1m is not a detector failure.
+    @st.cache_data(show_spinner='Auditando los OPEN disponibles del universo 290…',max_entries=2)
+    def cached_entry_evidence(pre_file,ev_file,candles,minute_files,sha,
+                              pre_mtime,ev_mtime,minute_mtime):
+        q=pd.read_csv(pre_file,usecols=['attempt_id','symbol','post_outcome','flip_confirmed_closed_ts'],low_memory=False)
+        v=pd.read_csv(ev_file,low_memory=False) if ev_file else pd.DataFrame()
+        return audit_entry_evidence(q,v,Path(candles),Path(minute_files),sha)
+    ev_path=(root/V29/'continuation_events.csv') if ready['V29'] else None
+    minutes_path=root/OUT/'minutes'
+    src_path=folder/'pre_cohort.csv'
+    evidence=cached_entry_evidence(str(src_path),str(ev_path) if ev_path else None,
+        str(root/CANDLES),str(minutes_path),digest(src_path),src_path.stat().st_mtime_ns,
+        ev_path.stat().st_mtime_ns if ev_path else -1,
+        minutes_path.stat().st_mtime_ns if minutes_path.is_dir() else -1)
+    if len(evidence)!=len(pre) or evidence.attempt_id.duplicated().any():
+        st.error('El inventario de entradas no tiene cardinalidad PRE correcta');return True
+    pre=pre.merge(evidence,on='attempt_id',how='left',validate='one_to_one')
     selection,other=st.columns([1,1])
     with selection:
         unit=st.radio('Unidad',['TODOS','FIRST_PER_LEVEL'],horizontal=True,key='hll301_unit')
@@ -202,6 +327,42 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
         if route=='FLIP':sel=sel[sel.post_outcome.eq('FLIP_CONFIRMADO')]
         elif route=='CONT_CONFIRMADA':sel=sel[sel.continuation_status.eq('CONFIRMED')]
         elif route=='RECLAIM_CONFIRMADO':sel=sel[sel.reclaim_status.eq('CONFIRMED')]
+    if not blind:
+        count_base=sel.copy()
+        has_entry=count_base.entry_status.eq('CON_ENTRADA_VERIFICADA')
+        with_entry=int(has_entry.sum())
+        without_entry=len(count_base)-with_entry
+        a,b,c,d=st.columns(4)
+        a.metric('Con entrada verificada',with_entry)
+        b.metric('Sin entrada verificada',without_entry)
+        c.metric('Sin señal confirmada',int(count_base.entry_status.eq('SIN_SENAL_CONFIRMADA').sum()))
+        d.metric('Flip pendiente 1m',int(count_base.entry_status.eq('FLIP_PENDIENTE_1M').sum()))
+        st.caption('Sin entrada verificada incluye tanto episodios sin señal como señales cuyo OPEN todavía '
+                   'no se pudo comprobar. La falta de 1m NO demuestra que el detector haya fallado. '
+                   'Cada intento se cuenta una sola vez aunque tenga varias rutas.')
+        filt=st.selectbox('Auditar episodios por entrada',
+            ['TODOS','CON_ENTRADA_VERIFICADA','SIN_ENTRADA_VERIFICADA',
+             'SIN_SENAL_CONFIRMADA','FLIP_PENDIENTE_1M','SENAL_SIN_OPEN_VERIFICADO'],
+            format_func=lambda x:{'TODOS':'Todos los intentos',
+             'CON_ENTRADA_VERIFICADA':'Solo con entrada verificada',
+             'SIN_ENTRADA_VERIFICADA':'Solo sin entrada verificada (incluye pendientes)',
+             'SIN_SENAL_CONFIRMADA':'Sin ninguna ruta confirmada',
+             'FLIP_PENDIENTE_1M':'Flip confirmado con OPEN 1m pendiente',
+             'SENAL_SIN_OPEN_VERIFICADO':'Otras señales confirmadas sin OPEN verificable'}.get(x,x),
+            key='hll301_entry_audit_filter')
+        if filt=='SIN_ENTRADA_VERIFICADA':sel=sel[~has_entry]
+        elif filt!='TODOS':sel=sel[sel.entry_status.eq(filt)]
+        with st.expander('Auditoría de entradas · motivos y CSV',expanded=False):
+            reasons=count_base.groupby(['entry_status','entry_reason'],dropna=False).agg(
+                intentos=('attempt_id','size'),simbolos=('symbol','nunique')).reset_index()
+            st.dataframe(reasons,hide_index=True,use_container_width=True)
+            export_cols=['attempt_id','symbol','breakout_closed_ts',field,'v26_status',
+                'post_outcome','continuation_status','reclaim_status','entry_status','entry_reason',
+                'flip_open','continuation_open','reclaim_open']
+            st.download_button('Exportar inventario de entradas y ausencias',
+                count_base[[c for c in export_cols if c in count_base]].to_csv(index=False).encode('utf-8'),
+                file_name='hll_290_auditoria_entradas_unificada.csv',mime='text/csv',
+                key='hll301_entry_audit_export')
     st.caption(f'Intentos en la selección: {len(sel):,} · símbolos: {sel.symbol.nunique()}'.replace(',','.'))
     if not blind:
         cells=st.columns(4)
@@ -235,6 +396,14 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
     eid=st.selectbox('Episodio para inspección',chosen.attempt_id.tolist(),format_func=lambda x:episode_labels.get(x,x),key='hll301_episode')
     r=chosen.loc[chosen.attempt_id.eq(eid)].iloc[0]
     st.markdown(f"**{r.symbol} · {PATTERNS.get(r[field],str(r[field]))}** · `{r.v26_status}`")
+    if not blind:
+        st.markdown('**Diagnóstico de entrada de este intento**')
+        st.write({'Estado':r.entry_status,'Motivo':r.entry_reason,
+                 'Flip':r.post_outcome,
+                 'Continuación V2.9':r.get('continuation_status','NO_EVALUADA'),
+                 'Reclaim V2.9':r.get('reclaim_status','NO_EVALUADA')})
+        st.caption('El detector solo puede utilizar información disponible al confirmar cada ruta. '
+                   'Una subida posterior en el gráfico no confirma retrospectivamente una entrada.')
     post=st.checkbox('Dibujar desenlaces y rutas POST',value=not blind,disabled=blind,key='hll301_show_post')
     post_n=st.selectbox('Velas 30m POST',[24,48,96,160,240],index=3,key='hll301_post_n')
     show_flip_pivots=st.checkbox('Mostrar pivotes conocidos al confirmar el flip',value=False,
@@ -243,6 +412,14 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
     if not path.is_file():st.warning(f'No hay archivo de velas {path}');return True
     bars=pd.read_csv(path,usecols=['timestamp','open','high','low','close'],float_precision='round_trip')
     bars=bars.sort_values('timestamp').reset_index(drop=True)
+    if post:
+        actual=int((bars.timestamp.ge(int(r.breakout_closed_ts)) &
+                    bars.timestamp.lt(int(r.breakout_closed_ts)+int(post_n)*1800000)).sum())
+        st.caption(f'Cobertura del gráfico: {actual}/{post_n} velas POST de 30m disponibles. '
+                   'El PnL utiliza recorridos independientes de 1m, no el número visible de velas 30m.')
+        if actual<post_n:
+            st.warning('El gráfico POST termina antes de la ventana visual solicitada. '
+                       'Eso no equivale a una trayectoria de 1m completa o incompleta.')
     events=ev.loc[ev.attempt_id.eq(str(eid))].to_dict('records') if ready['V29'] and post else []
     # Full 15-symbol inspector's original entry/guide controls are also available
     # for sep290. All three confirmed routes use the same underlying helpers.

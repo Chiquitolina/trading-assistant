@@ -76,3 +76,37 @@ class UnifiedV301(unittest.TestCase):
         with self.assertRaises(ValueError):_visible_summary_rows(src,24,'TODAS','A',True)
 
 if __name__=='__main__':unittest.main()
+
+class UnifiedEntryInventory(unittest.TestCase):
+    def setUp(self):
+        self.t=1800000000000
+        self.pre=pd.DataFrame([
+            dict(attempt_id='a',symbol='AAAUSDT',post_outcome='SIN_FLIP_EN_VENTANA',flip_confirmed_closed_ts=float('nan')),
+            dict(attempt_id='b',symbol='AAAUSDT',post_outcome='FLIP_CONFIRMADO',flip_confirmed_closed_ts=self.t),
+            dict(attempt_id='c',symbol='AAAUSDT',post_outcome='SIN_FLIP_EN_VENTANA',flip_confirmed_closed_ts=float('nan')),
+            dict(attempt_id='d',symbol='AAAUSDT',post_outcome='SIN_FLIP_EN_VENTANA',flip_confirmed_closed_ts=float('nan')),
+        ])
+        self.events=pd.DataFrame([
+            dict(attempt_id='a',branch='BREAKOUT_CONTINUATION',status='CONFIRMED',
+                 confirmed_ts=self.t+TF,signal_open_ts=self.t,signal_close=1.01,
+                 next_open_ts=self.t+TF,next_open=1.01),
+            dict(attempt_id='d',branch='RECLAIM_CONTINUATION',status='CONFIRMED',
+                 confirmed_ts=self.t+TF,signal_open_ts=self.t,signal_close=1.01,
+                 next_open_ts=self.t+TF,next_open=.95),
+        ])
+    def test_verified_30m_pending_flip_no_signal_and_bad(self):
+        from dashboard.views.hll_v301_full_inspector import audit_entry_evidence
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)
+            pd.DataFrame([dict(timestamp=self.t,open=1.0,close=1.01),
+                          dict(timestamp=self.t+TF,open=1.01,close=1.02)]).to_csv(p/'AAAUSDT_30m.csv',index=False)
+            out=audit_entry_evidence(self.pre,self.events,p)
+        statuses=out.set_index('attempt_id').entry_status.to_dict()
+        self.assertEqual(statuses,{'a':'CON_ENTRADA_VERIFICADA','b':'FLIP_PENDIENTE_1M',
+                                   'c':'SIN_SENAL_CONFIRMADA','d':'SENAL_SIN_OPEN_VERIFICADO'})
+        self.assertTrue(out.loc[out.attempt_id.eq('d'),'bad_30m_open'].iloc[0])
+    def test_mismatched_v29_route_ids_blocks(self):
+        from dashboard.views.hll_v301_full_inspector import audit_entry_evidence
+        e=self.events.copy();e.loc[0,'attempt_id']='not_original'
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(ValueError):audit_entry_evidence(self.pre,e,Path(td))
