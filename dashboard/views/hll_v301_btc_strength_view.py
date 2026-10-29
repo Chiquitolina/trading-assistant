@@ -5,6 +5,7 @@ import pandas as pd
 
 
 def render_btc_strength_panel(root):
+    render_btc_dependency_mtf_panel(root)
     import streamlit as st
     import plotly.express as px
     root=Path(root)
@@ -83,3 +84,81 @@ def render_btc_strength_panel(root):
         st.download_button('Exportar comparación filtrada (CSV)',
                            data=s.to_csv(index=False),mime='text/csv',
                            file_name=f'hll_btc_strength_{scope}.csv',key='hll_btc_export')
+
+
+
+def render_btc_dependency_mtf_panel(root):
+    """Original BTC Dependency Classification, computed causally on 5 timeframes."""
+    import streamlit as st
+    root = Path(root)
+    from dashboard.views.hll_v301_btc_dependency_mtf import BASE, FRAMES
+    scope = st.session_state.get('hll_btc_scope', 'FIRST_PER_LEVEL')
+    folder = root / BASE / f'btc_dependency_mtf_{scope}'
+    with st.expander('₿ BTC Dependency Classification · 5m / 15m / 30m / 1h / 4h', expanded=False):
+        st.caption('Mismas categorías y umbrales que la pestaña BTC Correlation. '
+                   'Capturas históricas LONG antes de la entrada HLL, sin lookahead ni filtros operativos. '
+                   '5m/15m vienen de velas 1m reales; 1h/4h de velas 30m completas.')
+        path = folder / 'paired_results.csv'
+        if not path.is_file():
+            st.info('Falta el análisis multitemporal. Ejecutá --plan y luego --run en hll_v301_btc_dependency_mtf.py. '
+                    'No se modifica el BTC Correlation original.')
+            return
+        @st.cache_data(show_spinner=False, max_entries=3)
+        def load(file,mtime):
+            return pd.read_csv(file,low_memory=False)
+        d = load(str(path),path.stat().st_mtime_ns)
+        a,b,c=st.columns(3)
+        with a:tf=st.selectbox('Timeframe BTC dependency',list(FRAMES),index=4,key='hll_btc_dep_tf')
+        with b:case=st.selectbox('Salida TP/SL',['5_5_48h','5_5_12h','2_2_48h','2_2_12h'],key='hll_btc_dep_case')
+        with c:universe=st.selectbox('Universo',['ADDITIONAL_275','ORIGINAL_15','AMBOS'],key='hll_btc_dep_universe')
+        c1,c2,c3=st.columns(3)
+        with c1:month=st.selectbox('Mes',['TODOS']+sorted(d.entry_month.dropna().astype(str).unique()),key='hll_btc_dep_month')
+        with c2:route=st.selectbox('Ruta',['TODAS']+sorted(d.route.dropna().unique()),key='hll_btc_dep_route')
+        with c3:pattern=st.selectbox('Estructura PRE 48',['TODAS']+sorted(d.pre_pattern_48.dropna().unique()),key='hll_btc_dep_pattern')
+        s=d.loc[d.case.eq(case)].copy()
+        if universe!='AMBOS':s=s.loc[s.universe_group.eq(universe)]
+        if month!='TODOS':s=s.loc[s.entry_month.eq(month)]
+        if route!='TODAS':s=s.loc[s.route.eq(route)]
+        if pattern!='TODAS':s=s.loc[s.pre_pattern_48.eq(pattern)]
+        status=f'btc_status_{tf}'
+        dep=f'btc_dependency_{tf}'
+        residual=f'btc_residual_pct_{tf}'
+        corr=f'btc_corr_{tf}'
+        known=s.loc[s.result.isin(['TP_FIRST','SL_FIRST','TIMEOUT'])].copy()
+        available=known.loc[known[status].eq('AVAILABLE')].copy()
+        m1,m2,m3=st.columns(3)
+        m1.metric('Entradas',len(s))
+        m2.metric('Contexto disponible',len(available))
+        m3.metric('Neto base comparable',f'{available.net_pct.mean():+.4f}%' if len(available) else '—')
+        st.caption('La base se calcula solo sobre operaciones con contexto disponible en el timeframe seleccionado. '
+                   'Celdas con poco N, semanas concentradas y combinaciones múltiples son exploratorias.')
+        if available.empty:
+            st.warning('Sin contexto completo para el timeframe seleccionado.')
+            return
+        g=available.groupby(dep,dropna=False).agg(
+            entradas=('entry_id','size'),simbolos=('symbol','nunique'),
+            neto_medio_pct=('net_pct','mean'),tp=('result',lambda x:int(x.eq('TP_FIRST').sum())),
+            sl=('result',lambda x:int(x.eq('SL_FIRST').sum())),
+            timeout=('result',lambda x:int(x.eq('TIMEOUT').sum())),
+            corr_media=(corr,'mean'),residual_medio_pct=(residual,'mean')
+        ).reset_index().rename(columns={dep:'btc_dependency'})
+        g['delta_vs_base_pp']=g.neto_medio_pct-available.net_pct.mean()
+        min_n=st.slider('Mínimo de entradas por clasificación',1,250,30,key='hll_btc_dep_min_n')
+        shown=g[g.entradas>=min_n].sort_values('neto_medio_pct',ascending=False)
+        if shown.empty:
+            st.info('Ninguna clasificación alcanza el mínimo seleccionado.')
+            return
+        st.dataframe(shown.round(4),use_container_width=True,hide_index=True)
+        st.markdown('**Estabilidad por mes (misma clasificación y timeframe)**')
+        stability=available.groupby(['entry_month',dep],dropna=False).agg(
+            entradas=('entry_id','size'),neto_medio_pct=('net_pct','mean'),
+            simbolos=('symbol','nunique')).reset_index().rename(columns={dep:'btc_dependency'})
+        st.dataframe(stability[stability.entradas>=min_n].round(4),use_container_width=True,hide_index=True)
+        if st.checkbox('Ver entradas con clasificaciones originales',value=False,key='hll_btc_dep_rows'):
+            columns=['entry_id','entry_utc','symbol','route','pre_pattern_48',dep,corr,
+                     f'btc_beta_{tf}',f'btc_r2_{tf}',residual,'result','net_pct']
+            st.dataframe(s[[x for x in columns if x in s]].head(1000).round(5),
+                         use_container_width=True,hide_index=True)
+        st.download_button('Exportar BTC dependency multitemporal',data=available.to_csv(index=False),
+                           mime='text/csv',file_name=f'hll_btc_dependency_{scope}_{tf}_{case}.csv',
+                           key='hll_btc_dep_export')
