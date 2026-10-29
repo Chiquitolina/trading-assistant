@@ -254,6 +254,9 @@ def render_full290(root:Path,folder:Path,pre:pd.DataFrame,blind:bool=False):
     st.caption('Universo V2.8.2 congelado: 55.717 intentos · 290 símbolos. '
        'Datos PRE sin modificar; POST, continuación y reclaim se agregan por attempt_id. '
        'Las tasas operativas son descriptivas, no una cartera ejecutada.')
+    if not blind:
+        from dashboard.views.hll_v301_btc_strength_view import render_btc_strength_panel
+        render_btc_strength_panel(root)
     try:
         ready=verify_artifacts(folder/'pre_cohort.csv')
     except (ValueError,OSError) as e:
