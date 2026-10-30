@@ -10,6 +10,7 @@ from plotly.subplots import make_subplots
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
 import requests
 import redis
