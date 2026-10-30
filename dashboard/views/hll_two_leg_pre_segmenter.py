@@ -24,7 +24,7 @@ TF = 1_800_000
 AUDIT = Path('reports/horizontal_level_relaxed_hl_sequence/core15_initial_line_new_hl/sequence_pre.csv')
 COHORT = Path('reports/horizontal_level_structure_quality_v282/runs/core15_pre_all_v282/pre_cohort.csv')
 CANDLES = Path('reports/horizontal_level_lifecycle_v21/candles_aug20_oct25_core15_btc')
-OUTPUT = Path('reports/horizontal_level_second_ascent_pre/core15_two_leg_v1')
+OUTPUT = Path('reports/horizontal_level_second_ascent_pre/core15_two_leg_v11')
 SEED = 'd169b99bd00b4a7a21bd5dcb'
 # Visual annotations are exploratory, not ground truth. Some reflect assistant
 # assessments of screenshots rather than explicit user acceptance.
@@ -160,7 +160,12 @@ def select_candidates(a, c):
 
 
 def segment_one(row, bars):
-    """Return diagnostics and confirmed extrema. No positive label is assigned."""
+    """Return PRE diagnostics and extrema, with explicit unresolved-phase flags.
+
+    A higher low need NOT be the absolute correction trough. A missing first
+    rise within the selected 96-bar window is censored, not a negative label.
+    Neither situation is proof of a complete two-leg geometry.
+    """
     pre, broken, hl_open, hl_known = (int(row[k]) for k in [
         'pre_closed_ts','initial_break_closed_ts','new_hl_open_ts','new_hl_known_closed_ts'])
     first, third, anchor_known = (int(row[k]) for k in [
@@ -193,20 +198,35 @@ def segment_one(row, bars):
         raise ValueError('FIRST_LEG_TOO_SHORT')
     p1 = prior.loc[prior.high.idxmax()]
     peak1_ts, peak1 = int(p1.timestamp), float(p1.high)
-    if peak1_ts <= first:
-        raise ValueError('NO_FIRST_RISE_WITHIN_PRE')
+    first_rise_visible = bool(peak1_ts > first and peak1 > anchor_low + atr*.1)
     first_peak_confirmed = any(p['open_ts'] == peak1_ts for p in highs)
 
-    # Actual correction: first peak bar -> the new HL formation bar.
+    # PRE-descriptive correction, starting AFTER the largest preceding high.
+    # An audited NEW HL may be higher than an earlier, deeper correction low;
+    # this is a potentially relevant staircase, not a reason to drop the case.
     correction = x[(x.timestamp > peak1_ts) & (x.timestamp <= hl_open)]
     if correction.empty:
         raise ValueError('NO_SEPARATING_CORRECTION')
-    lowest_correction = float(correction.low.min())
-    # New HL formed at hl_open and ONLY becomes known at hl_known.
-    if abs(lowest_correction-hl_low) > max(atr*1e-7, hl_low*1e-10):
-        raise ValueError('NEW_HL_NOT_CORRECTION_TROUGH')
-    old_rise = (peak1-anchor_low)/atr
+    trough_bar = correction.loc[correction.low.idxmin()]
+    trough_ts = int(trough_bar.timestamp)
+    trough_low = float(trough_bar.low)
+    gap_atr = max(0., (hl_low - trough_low)/atr)
+    earlier_lower_trough = bool(trough_ts < hl_open and gap_atr > 1e-7)
+    trough_pivot = next((p for p in lows
+                         if p['open_ts'] == trough_ts and
+                         np.isclose(p['low'], trough_low, rtol=1e-6, atol=0)), None)
+    if not first_rise_visible and earlier_lower_trough:
+        phase_status = 'FIRST_RISE_UNRESOLVED_AND_EARLIER_LOWER_TROUGH'
+    elif not first_rise_visible:
+        phase_status = 'FIRST_RISE_UNRESOLVED'
+    elif earlier_lower_trough:
+        phase_status = 'EARLIER_LOWER_CORRECTION_TROUGH'
+    else:
+        phase_status = 'AUDIT_HL_IS_CORRECTION_TROUGH'
+    # NaN means the first rise is NOT established by this window.
+    old_rise = (peak1-anchor_low)/atr if first_rise_visible else np.nan
     correction_depth = (peak1-hl_low)/atr
+    correction_true_depth = (peak1-trough_low)/atr
 
     # Second leg: the low at hl_open is the anchor. Market readings start at
     # hl_known; prices prior to this may describe geometry but cannot be used
@@ -244,8 +264,14 @@ def segment_one(row, bars):
         dict(kind='FIRST_PEAK',open_ts=peak1_ts,
              known_closed_ts=next((p['known_closed_ts'] for p in highs if p['open_ts']==peak1_ts),None),
              price=peak1,confirmed_pre=first_peak_confirmed),
+        dict(kind='CORRECTION_BAR_TROUGH',open_ts=trough_ts,
+             known_closed_ts=(trough_pivot['known_closed_ts'] if trough_pivot else None),
+             price=trough_low,confirmed_pre=bool(trough_pivot),
+             bar_closed_ts=trough_ts+TF,
+             note='bar-extremum known at PRE; pivot only when confirmed'),
         dict(kind='CORRECTION_HL',open_ts=hl_open,known_closed_ts=hl_known,
-             price=hl_low,confirmed_pre=True),
+             price=hl_low,confirmed_pre=True,
+             note='audited new HL; not necessarily lowest correction bar'),
         dict(kind='SECOND_PEAK',open_ts=peak2_ts,
              known_closed_ts=next((p['known_closed_ts'] for p in highs if p['open_ts']==peak2_ts),None),
              price=peak2,confirmed_pre=any(p['open_ts']==peak2_ts for p in highs)),
@@ -256,14 +282,24 @@ def segment_one(row, bars):
     # Diagnostic features deliberately do not assert a positive structure.
     features = {
         'break_at_hl_open':broken==hl_open,
+        'phase_status':phase_status,
+        'first_rise_visible_in_pre_window':first_rise_visible,
         'first_peak_confirmed_pre':first_peak_confirmed,
-        'first_rise_atr':round(old_rise,4),
-        'first_rise_bars':int((peak1_ts-first)/TF),
+        'first_rise_atr':round(old_rise,4) if first_rise_visible else np.nan,
+        'first_rise_bars':int((peak1_ts-first)/TF) if first_rise_visible else np.nan,
+        'correction_bar_trough_open_ts':trough_ts,
+        'correction_bar_trough_price':trough_low,
+        'correction_bar_trough_pivot_confirmed_pre':bool(trough_pivot),
+        'correction_trough_before_audit_hl':earlier_lower_trough,
+        'audit_hl_above_correction_trough_atr':round(gap_atr,4),
+        'correction_trough_to_audit_hl_bars':int((hl_open-trough_ts)/TF),
+        'correction_true_depth_atr':round(correction_true_depth,4),
         'first_peak_to_hl_bars':int((hl_open-peak1_ts)/TF),
         'correction_atr':round(correction_depth,4),
         'correction_vs_first_pct':round(100*correction_depth/old_rise,2) if old_rise>0 else np.nan,
         'second_known_bars':len(second),
         'second_peak_atr':round(peak2_progress,4),
+        'second_peak_from_true_correction_trough_atr':round((peak2-trough_low)/atr,4),
         'second_pre_atr':round((last_close-hl_low)/atr,4),
         'second_vs_first_peak_atr':round((peak2-peak1)/atr,4),
         'second_peak_confirmed_pre':any(p['open_ts']==peak2_ts for p in highs),
@@ -377,21 +413,27 @@ def main(argv=None):
             ('two_leg_20261030|'+s).encode()).hexdigest())
         blind=blind.sort_values('blind_key').head(15)[[
             'symbol','attempt_id','pre_closed_ts','pre_utc','original_pre_pattern',
-            'first_rise_atr','correction_atr','second_hl_up_steps',
+            'phase_status','first_rise_atr','correction_atr',
+            'audit_hl_above_correction_trough_atr','second_hl_up_steps',
             'second_pre_atr','second_retention_pct','second_peak_efficiency_closes']].copy()
         blind['visual_review']='PENDIENTE'
         blind['observaciones']=''
         report=dict(**plan,analyzed=len(df),excluded=len(exclusions),
+                    phase_status_counts=df.phase_status.value_counts().to_dict(),
                     labels=df.visual_label.value_counts().to_dict(),
                     audit_sha256=hashfile(args.audit),cohort_sha256=hashfile(args.cohort),
                     warning=('Group A is conditional on known breakout attempts. '
                       'No inference about frequency before breakout or P(breakout|two-leg). '
                       'No PnL, outcomes, or POST used. Segments are descriptive as of PRE; '
-                      'their extrema are not early-entry signals. Visual labels are exploratory.'))
+                      'their extrema are not early-entry signals. Visual labels are exploratory. '
+                      'First rise may be censored; earlier correction trough may be '
+                      'below the audited HL. Neither status proves full two-leg structure.'))
         dest.parent.mkdir(parents=True,exist_ok=True)
         tmp=Path(tempfile.mkdtemp(prefix='.two-leg-',dir=dest.parent))
         try:
             df.to_csv(tmp/'segments_pre.csv',index=False)
+            df[df.phase_status.ne('AUDIT_HL_IS_CORRECTION_TROUGH')].to_csv(
+                tmp/'phase_flags_pre.csv',index=False)
             ev.to_csv(tmp/'segment_pivots_pre.csv',index=False)
             ex.to_csv(tmp/'exclusions.csv',index=False)
             summary.to_csv(tmp/'visual_comparison_pre.csv',index=False)
@@ -406,14 +448,18 @@ def main(argv=None):
         print('HLL_TWO_LEG_DONE',json.dumps(dict(analyzed=len(df),excluded=len(ex),
             by_label=df.visual_label.value_counts().to_dict(),output=str(dest)),
             ensure_ascii=False),flush=True)
+        print('\n=== ESTADOS DE SEGMENTACION PRE ===')
+        print(df.phase_status.value_counts().to_string())
         print('\n=== ETIQUETADOS ===')
-        cols=['symbol','attempt_id','visual_label','first_rise_atr','correction_atr',
-              'second_hl_up_steps','second_hl_down_steps','second_peak_atr',
-              'second_pre_atr','second_retention_pct','second_peak_efficiency_closes']
+        cols=['symbol','attempt_id','visual_label','phase_status',
+              'first_rise_atr','audit_hl_above_correction_trough_atr',
+              'correction_atr','second_hl_up_steps','second_hl_down_steps',
+              'second_peak_atr','second_pre_atr','second_retention_pct',
+              'second_peak_efficiency_closes']
         print(df[df.visual_label!='SIN_REVISAR'][cols].to_string(index=False))
         print('\n=== MEDIANAS EXPLORATORIAS ===')
         print(summary.to_string(index=False))
-        print('\n=== INCIDENCIAS ===')
+        print('\n=== INCIDENCIAS (SOLO ERRORES REALES) ===')
         print(ex.to_string(index=False))
         return 0
     except (FileNotFoundError,ValueError,KeyError,TypeError) as exc:

@@ -104,11 +104,51 @@ class TwoLegCausalTests(unittest.TestCase):
         self.assertLess(events['FIRST_PEAK']['open_ts'],events['CORRECTION_HL']['open_ts'])
         self.assertGreater(f['correction_atr'],0)
 
-    def test_deeper_correction_invalidates_hl_as_trough(self):
+    def test_earlier_deeper_trough_is_a_flag_not_an_exclusion(self):
         row,bars=example()
         bars.loc[22,'low']=103.
-        with self.assertRaisesRegex(ValueError,'NEW_HL_NOT_CORRECTION_TROUGH'):
-            segment_one(row,bars)
+        f,ex=segment_one(row,bars)
+        self.assertEqual(f['phase_status'],'EARLIER_LOWER_CORRECTION_TROUGH')
+        self.assertTrue(f['correction_trough_before_audit_hl'])
+        self.assertAlmostEqual(f['audit_hl_above_correction_trough_atr'],1.)
+        self.assertFalse(f['correction_bar_trough_pivot_confirmed_pre'])
+        troughs=[v for v in ex if v['kind']=='CORRECTION_BAR_TROUGH']
+        self.assertEqual(troughs[0]['open_ts'],22*TF)
+        self.assertFalse(troughs[0]['confirmed_pre'])
+
+    def test_unresolved_first_rise_is_censored_not_excluded(self):
+        row,bars=example()
+        bars.loc[5,'high']=120.  # Max is exactly on starting low anchor.
+        for j in (10,15):
+            bars.loc[j,'low']=105.
+        pivots=json.loads(row['pre96_pivot_lows_json'])
+        for p in pivots:
+            if p['open_ts'] in (10*TF,15*TF):
+                p['low']=105.
+        row['pre96_pivot_lows_json']=json.dumps(pivots)
+        f,ex=segment_one(row,bars)
+        self.assertFalse(f['first_rise_visible_in_pre_window'])
+        self.assertEqual(f['phase_status'],'FIRST_RISE_UNRESOLVED')
+        self.assertTrue(np.isnan(f['first_rise_atr']))
+        self.assertTrue(np.isnan(f['first_rise_bars']))
+        self.assertEqual(len([v for v in ex if v['kind']=='CORRECTION_HL']),1)
+
+    def test_combined_missing_first_rise_and_earlier_trough(self):
+        row,bars=example()
+        bars.loc[5,'high']=120.
+        bars.loc[22,'low']=103.
+        f,_=segment_one(row,bars)
+        self.assertEqual(
+            f['phase_status'], 'FIRST_RISE_UNRESOLVED_AND_EARLIER_LOWER_TROUGH')
+        self.assertFalse(f['first_rise_visible_in_pre_window'])
+        self.assertTrue(f['correction_trough_before_audit_hl'])
+
+    def test_existing_strict_case_has_no_phase_warning(self):
+        row,bars=example()
+        f,_=segment_one(row,bars)
+        self.assertEqual(f['phase_status'],'AUDIT_HL_IS_CORRECTION_TROUGH')
+        self.assertTrue(f['first_rise_visible_in_pre_window'])
+        self.assertEqual(f['audit_hl_above_correction_trough_atr'],0)
 
     def test_peak_high_confirmed_pre_flag(self):
         row,bars=example()
