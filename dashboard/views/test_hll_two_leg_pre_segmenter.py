@@ -8,10 +8,10 @@ import pandas as pd
 
 try:
     from .hll_two_leg_pre_segmenter import (TF, prefix_candles, confirmed_pivot_highs,
-         segment_one, select_candidates, SEED)
+         segment_one, select_candidates, topology_audit_one, SEED)
 except ImportError:
     from hll_two_leg_pre_segmenter import (TF, prefix_candles, confirmed_pivot_highs,
-         segment_one, select_candidates, SEED)
+         segment_one, select_candidates, topology_audit_one, SEED)
 
 
 def example():
@@ -187,6 +187,58 @@ class TwoLegCausalTests(unittest.TestCase):
         sub=prefix_candles(bars,96*TF)
         self.assertEqual(int(sub.timestamp.iloc[-1]),95*TF)
 
+
+    def test_topology_no_post_leak(self):
+        row,bars=example()
+        f,ext=segment_one(row,bars)
+        top,pivs=topology_audit_one(row,bars,f,ext)
+        future=bars.copy()
+        future=pd.concat([future,pd.DataFrame(dict(timestamp=np.arange(96,140)*TF,
+            open=100000.,high=200000.,low=100.,close=150000.))],ignore_index=True)
+        f2,ext2=segment_one(row,future)
+        top2,pivs2=topology_audit_one(row,future,f2,ext2)
+        self.assertEqual(top,top2)
+        self.assertEqual(pivs,pivs2)
+        self.assertTrue(all(v['known_closed_ts']<=row['pre_closed_ts'] for v in pivs))
+
+    def test_topology_first_peak_unconfirmed_has_confirmed_alternative(self):
+        row,bars=example()
+        bars.loc[23,'high']=118.
+        bars.loc[25,'high']=119. # Prevent 23 being confirmed by two right candles.
+        f,ext=segment_one(row,bars)
+        top,pivs=topology_audit_one(row,bars,f,ext)
+        self.assertFalse(top['first_peak_confirmed_by_hl_known'])
+        self.assertGreaterEqual(top['confirmed_first_peak_candidates'],1)
+        self.assertEqual(top['best_confirmed_first_peak_open_ts'],19*TF)
+        self.assertIn('FIRST_PEAK_NOT_CONFIRMED_BY_HL',top['topology_flags'])
+        self.assertTrue(all(v['known_closed_ts']<=row['pre_closed_ts'] for v in pivs))
+
+    def test_topology_distinguishes_broken_hl_and_true_trough(self):
+        row,bars=example()
+        # A prior deeper correction valley, then an audited higher HL.
+        bars.loc[22,'low']=103.
+        # One later pivot low below the audited HL, but above the deep valley.
+        bars.loc[36,'low']=103.5
+        pivs=json.loads(row['pre96_pivot_lows_json'])
+        for p in pivs:
+            if p['open_ts']==36*TF:
+                p['low']=103.5
+        row['pre96_pivot_lows_json']=json.dumps(pivs)
+        f,ext=segment_one(row,bars)
+        top,_=topology_audit_one(row,bars,f,ext)
+        self.assertEqual(top['after_audit_hl_pivots_below_hl'],1)
+        self.assertEqual(top['after_audit_hl_pivots_below_true_trough'],0)
+        self.assertIn('AUDIT_HL_PIVOT_UNDERCUT',top['topology_flags'])
+        self.assertNotIn('CORRECTION_TROUGH_PIVOT_UNDERCUT',top['topology_flags'])
+
+    def test_topology_near_peak_does_not_exclude_good_sequence(self):
+        row,bars=example()
+        bars.loc[23,'high']=118.
+        bars.loc[25,'high']=119.
+        f,ext=segment_one(row,bars)
+        top,_=topology_audit_one(row,bars,f,ext)
+        self.assertIn('FIRST_PEAK_NEAR_HL',top['topology_flags'])
+        self.assertGreaterEqual(top['confirmed_ladder_lows_from_true_trough'],1)
 
 if __name__=='__main__':
     unittest.main(verbosity=2)

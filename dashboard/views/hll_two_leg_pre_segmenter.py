@@ -24,7 +24,7 @@ TF = 1_800_000
 AUDIT = Path('reports/horizontal_level_relaxed_hl_sequence/core15_initial_line_new_hl/sequence_pre.csv')
 COHORT = Path('reports/horizontal_level_structure_quality_v282/runs/core15_pre_all_v282/pre_cohort.csv')
 CANDLES = Path('reports/horizontal_level_lifecycle_v21/candles_aug20_oct25_core15_btc')
-OUTPUT = Path('reports/horizontal_level_second_ascent_pre/core15_two_leg_v11')
+OUTPUT = Path('reports/horizontal_level_second_ascent_pre/core15_two_leg_v12')
 SEED = 'd169b99bd00b4a7a21bd5dcb'
 # Visual annotations are exploratory, not ground truth. Some reflect assistant
 # assessments of screenshots rather than explicit user acceptance.
@@ -322,6 +322,114 @@ def segment_one(row, bars):
     return features, phase_extrema
 
 
+
+def topology_audit_one(row, bars, features, extrema):
+    """Supplementary geometry, not a classifier or trade-time signal.
+
+    Uses only <= PRE confirmed pivots. A retrospective PRE peak need not have
+    been known at its OPEN; `known_closed_ts` retains the actual knowledge time.
+    Existing V1.1 metrics and segment statuses are intentionally unchanged.
+    """
+    pre=int(row['pre_closed_ts']); known=int(row['new_hl_known_closed_ts'])
+    first=int(row['anchor_first_ts']); hl_open=int(row['new_hl_open_ts'])
+    atr=float(row['atr_pre']); hl_low=float(row['new_hl_low'])
+    x=prefix_candles(bars,pre)
+    highs=confirmed_pivot_highs(x,pre)
+    lows=load_known_lows(row['pre96_pivot_lows_json'],pre,pre-96*TF)
+    ev={e['kind']:e for e in extrema if e['kind']!='SECOND_PIVOT_LOW'}
+    p1=ev['FIRST_PEAK']; trough=ev['CORRECTION_BAR_TROUGH']
+    tr_ts=int(trough['open_ts']); tr_price=float(trough['price'])
+    p1_ts=int(p1['open_ts'])
+    # Confirmed alternatives to the retrospectively selected first maximum.
+    # Not silently substituted for the original first rise.
+    options=[h for h in highs if first < h['open_ts'] < hl_open
+             and h['known_closed_ts']<=known]
+    alt=max(options,key=lambda h:(h['high'],-h['open_ts'])) if options else None
+    chosen_peak_confirmed_by_hl=bool(any(
+        h['open_ts']==p1_ts and h['known_closed_ts']<=known for h in highs))
+    # Recovery ladder anchored at the earliest confirmed correction trough,
+    # not automatically the auditor's selected, potentially higher, HL.
+    after=[v for v in lows if tr_ts<=v['open_ts']<pre]
+    if not any(v['open_ts']==tr_ts and abs(v['low']-tr_price)<=1e-6*tr_price for v in after):
+        # The trough may be a bar extremum rather than a 2x2 pivot; retain
+        # its distinct status. No fabricated confirmed pivot is introduced.
+        ladder=[dict(open_ts=tr_ts,known_closed_ts=None,low=tr_price)] + after
+        tr_confirmed=False
+    else:
+        ladder=after
+        tr_confirmed=True
+    ladder=sorted(ladder,key=lambda v:v['open_ts'])
+    # Sorting includes only knowable PRE pivots; pairwise ladder steps are
+    # descriptive of the fully observed PRE prefix, never early-entry signals.
+    dd=np.diff([v['low'] for v in ladder])/atr
+    up=int((dd>=.1).sum()); down=int((dd<=-.1).sum()); run=best=0
+    for d in dd:
+        run=run+1 if d>=.1 else 0
+        best=max(best,run)
+    second_lows=[v for v in lows if v['open_ts']>hl_open]
+    after_known=x[(x.timestamp>=known)&(x.timestamp+TF<=pre)]
+    below_hl=sum(v['low']<hl_low-.1*atr for v in second_lows)
+    below_trough=sum(v['low']<tr_price-.1*atr for v in second_lows)
+    # Distinguish validated pivot lows from intrabar lows: both PRE-only.
+    min_second_bar_low=float(after_known.low.min()) if len(after_known) else np.nan
+    second_highs=[h for h in highs if h['open_ts']>tr_ts and h['open_ts']<pre]
+    hh=np.diff([h['high'] for h in second_highs])/atr
+    flags=[]
+    if not features['first_rise_visible_in_pre_window']:
+        flags.append('FIRST_RISE_UNRESOLVED')
+    if not chosen_peak_confirmed_by_hl:
+        flags.append('FIRST_PEAK_NOT_CONFIRMED_BY_HL')
+    if features['first_peak_to_hl_bars']<=3:
+        flags.append('FIRST_PEAK_NEAR_HL')
+    if not tr_confirmed:
+        flags.append('TROUGH_NOT_CONFIRMED_PIVOT')
+    if below_hl:
+        flags.append('AUDIT_HL_PIVOT_UNDERCUT')
+    if below_trough:
+        flags.append('CORRECTION_TROUGH_PIVOT_UNDERCUT')
+    if np.isfinite(min_second_bar_low) and min_second_bar_low<tr_price-.1*atr:
+        flags.append('CORRECTION_TROUGH_BAR_UNDERCUT')
+    f=dict(
+        topology_flags='|'.join(flags) if flags else 'NONE',
+        first_peak_confirmed_by_hl_known=chosen_peak_confirmed_by_hl,
+        confirmed_first_peak_candidates=len(options),
+        best_confirmed_first_peak_open_ts=alt['open_ts'] if alt else np.nan,
+        best_confirmed_first_peak_known_ts=alt['known_closed_ts'] if alt else np.nan,
+        best_confirmed_first_peak_price=alt['high'] if alt else np.nan,
+        original_peak_minus_best_confirmed_atr=round(
+            (float(p1['price'])-alt['high'])/atr,4) if alt else np.nan,
+        true_correction_trough_confirmed=tr_confirmed,
+        confirmed_ladder_lows_from_true_trough=len(ladder)-(0 if tr_confirmed else 1),
+        ladder_up_steps_from_true_trough=up,
+        ladder_down_steps_from_true_trough=down,
+        ladder_max_up_streak=best,
+        after_audit_hl_pivots_below_hl=below_hl,
+        after_audit_hl_pivots_below_true_trough=below_trough,
+        after_hl_min_bar_vs_true_trough_atr=round((min_second_bar_low-tr_price)/atr,4),
+        confirmed_highs_since_true_trough=len(second_highs),
+        confirmed_higher_high_steps_since_trough=int((hh>=.1).sum()),
+        confirmed_lower_high_steps_since_trough=int((hh<=-.1).sum()),
+    )
+    # Full confirmed pivot export with original phase context, no POST.
+    high_rows=[dict(kind='HIGH_2X2',open_ts=h['open_ts'],
+                    known_closed_ts=h['known_closed_ts'],price=h['high'],
+                    phase=('PRE_FIRST_ANCHOR' if h['open_ts']<first else
+                           'FIRST_LEG' if h['open_ts']<=p1_ts else
+                           'BETWEEN_FIRST_PEAK_AND_TROUGH' if h['open_ts']<=tr_ts else
+                           'TROUGH_TO_AUDIT_HL' if h['open_ts']<=hl_open else
+                           'SECOND_PHASE')) for h in highs]
+    low_rows=[dict(kind='LOW_CONFIRMED_PRE',open_ts=v['open_ts'],
+                   known_closed_ts=v['known_closed_ts'],price=v['low'],
+                   phase=('PRE_FIRST_ANCHOR' if v['open_ts']<first else
+                          'FIRST_LEG' if v['open_ts']<=p1_ts else
+                          'BETWEEN_FIRST_PEAK_AND_TROUGH' if v['open_ts']<=tr_ts else
+                          'TROUGH_TO_AUDIT_HL' if v['open_ts']<=hl_open else
+                          'SECOND_PHASE')) for v in lows]
+    for v in high_rows+low_rows:
+        if not (v['open_ts']<pre and v['known_closed_ts']<=pre):
+            raise AssertionError('POST_LEAK_IN_TOPOLOGY')
+    return f,high_rows+low_rows
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
@@ -366,7 +474,7 @@ def main(argv=None):
         if shutil.disk_usage(Path.cwd()).free < 100*1024**2:
             raise ValueError('DISK_FREE_BELOW_100MB')
         cache = {}
-        results=[]; extrema=[]; exclusions=[]
+        results=[]; extrema=[]; topology=[]; full_pivots=[]; exclusions=[]
         for r in q.to_dict('records'):
             sym = str(r['symbol'])
             if sym not in cache:
@@ -385,8 +493,15 @@ def main(argv=None):
                         new_hl_known_closed_ts=int(r['new_hl_known_closed_ts']))
             try:
                 f, ext = segment_one(r,cache[sym])
+                topo, all_pivots = topology_audit_one(r,cache[sym],f,ext)
                 data.update(coverage='COMPLETE',**f)
                 results.append(data)
+                topology.append(dict(attempt_id=r['attempt_id'],symbol=sym,
+                                     pre_closed_ts=r['pre_closed_ts'],
+                                     visual_label=data['visual_label'],**topo))
+                for p in all_pivots:
+                    full_pivots.append(dict(attempt_id=r['attempt_id'],
+                                             symbol=sym,pre_closed_ts=r['pre_closed_ts'],**p))
                 for p in ext:
                     extrema.append(dict(attempt_id=r['attempt_id'],symbol=sym,
                                         pre_closed_ts=r['pre_closed_ts'],**p))
@@ -398,6 +513,10 @@ def main(argv=None):
         df=pd.DataFrame(results)
         ex=pd.DataFrame(exclusions,columns=['symbol','attempt_id','reason'])
         ev=pd.DataFrame(extrema)
+        topology_df=pd.DataFrame(topology)
+        allp_df=pd.DataFrame(full_pivots)
+        if not topology_df.attempt_id.is_unique:
+            raise ValueError('DUPLICATED_TOPOLOGY_ATTEMPT')
         features = ['first_rise_atr','correction_atr','first_peak_to_hl_bars',
                     'second_known_bars','second_hl_up_steps','second_hl_down_steps',
                     'second_peak_atr','second_pre_atr','second_retention_pct',
@@ -419,6 +538,10 @@ def main(argv=None):
         blind['visual_review']='PENDIENTE'
         blind['observaciones']=''
         report=dict(**plan,analyzed=len(df),excluded=len(exclusions),
+                    topology_first_peak_confirmed_by_hl=int(topology_df.first_peak_confirmed_by_hl_known.sum()),
+                    topology_audit_hl_pivot_undercut=int((topology_df.after_audit_hl_pivots_below_hl>0).sum()),
+                    topology_initial_correction_pivot_undercut=int((topology_df.after_audit_hl_pivots_below_true_trough>0).sum()),
+                    topology_note='Descriptive PRE phase diagnostics only; no positive classification.',
                     phase_status_counts=df.phase_status.value_counts().to_dict(),
                     labels=df.visual_label.value_counts().to_dict(),
                     audit_sha256=hashfile(args.audit),cohort_sha256=hashfile(args.cohort),
@@ -435,6 +558,8 @@ def main(argv=None):
             df[df.phase_status.ne('AUDIT_HL_IS_CORRECTION_TROUGH')].to_csv(
                 tmp/'phase_flags_pre.csv',index=False)
             ev.to_csv(tmp/'segment_pivots_pre.csv',index=False)
+            topology_df.to_csv(tmp/'topology_pre.csv',index=False)
+            allp_df.to_csv(tmp/'all_confirmed_pivots_pre.csv',index=False)
             ex.to_csv(tmp/'exclusions.csv',index=False)
             summary.to_csv(tmp/'visual_comparison_pre.csv',index=False)
             blind.to_csv(tmp/'blind_review_pre.csv',index=False)
@@ -459,6 +584,16 @@ def main(argv=None):
         print(df[df.visual_label!='SIN_REVISAR'][cols].to_string(index=False))
         print('\n=== MEDIANAS EXPLORATORIAS ===')
         print(summary.to_string(index=False))
+        print('\n=== TOPOLOGIA: AUDITORIA ===')
+        print('Primer pico confirmado al conocer HL:',int(topology_df.first_peak_confirmed_by_hl_known.sum()),'/',len(topology_df))
+        print('Pivotes bajos que perforan el HL auditado:',int((topology_df.after_audit_hl_pivots_below_hl>0).sum()))
+        print('Pivotes bajos que perforan el valle real:',int((topology_df.after_audit_hl_pivots_below_true_trough>0).sum()))
+        print('Banderas en casos etiquetados:')
+        print(topology_df[topology_df.visual_label.ne('SIN_REVISAR')][
+            ['symbol','attempt_id','visual_label','topology_flags',
+             'ladder_up_steps_from_true_trough',
+             'ladder_down_steps_from_true_trough',
+             'confirmed_higher_high_steps_since_trough']].to_string(index=False))
         print('\n=== INCIDENCIAS (SOLO ERRORES REALES) ===')
         print(ex.to_string(index=False))
         return 0
