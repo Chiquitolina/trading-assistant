@@ -25,6 +25,7 @@ CANDLES_REL = Path("reports/horizontal_level_lifecycle_v21/candles_aug20_oct25_c
 FAMILY_REL = Path("reports/horizontal_level_second_ascent_pre/core15_pre_family_interpreter_v1")
 FAMILY_FILE = "families_pre.csv"
 FAMILY_MANIFEST = "manifest.json"
+AUDIT_REL = Path("reports/horizontal_level_second_ascent_pre/core15_pre_family_audit_v1")
 FAMILY_SOURCES = {
     "summary": REL / "phase_summary_pre.csv",
     "pivots": REL / "phase_confirmed_pivots_pre.csv",
@@ -154,6 +155,105 @@ def validate_family_export(families: pd.DataFrame, summary: pd.DataFrame,
                         h.update(part)
                 if h.hexdigest() != expected:
                     raise ValueError(f"Fuente PRE modificada desde la ejecución: {name}")
+
+
+
+def validate_audit_export(audit: pd.DataFrame, families: pd.DataFrame,
+                          *, root: Path, manifest: dict) -> None:
+    """Only display a current 50-row PRE audit of the same frozen families."""
+    needed = {"attempt_id", "symbol", "level_id", "pre_closed_ts", "family_1p0",
+              "family_0p5", "family_1p5", "review_visual", "review_provenance",
+              "intercontact_direction_48", "scales_agree", "audit_flags", "audit_priority"}
+    if not needed.issubset(audit.columns) or len(audit) != 50 or audit.attempt_id.duplicated().any():
+        raise ValueError("Matriz de auditoría incompleta, IDs duplicados o columnas ausentes")
+    if not (manifest.get("inputs_are_pre_only") is True and manifest.get("reads_post") is False
+            and manifest.get("reads_visual_for_family") is False and manifest.get("modifies_live") is False):
+        raise ValueError("La auditoría no certifica aislamiento PRE")
+    originals = {
+        "families": root / FAMILY_REL / FAMILY_FILE,
+        "family_manifest": root / FAMILY_REL / FAMILY_MANIFEST,
+        "resistance": root / FAMILY_SOURCES["resistance"],
+        "ohlc": root / FAMILY_SOURCES["ohlc"],
+    }
+    for name, path in originals.items():
+        h = hashlib.sha256()
+        if not path.is_file():
+            raise ValueError(f"Falta fuente original para auditoría: {name}")
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                h.update(chunk)
+        if h.hexdigest() != manifest.get("source_sha256", {}).get(name):
+            raise ValueError(f"Auditoría desactualizada o fuente cambiada: {name}")
+    lookup = families.copy()
+    lookup["scale_atr"] = pd.to_numeric(lookup.scale_atr, errors="raise")
+    lookup = lookup.loc[lookup.scale_atr.eq(1.0),
+                        ["attempt_id", "symbol", "level_id", "pre_closed_ts", "family_candidate"]]
+    if len(lookup) != 50 or lookup.attempt_id.duplicated().any():
+        raise ValueError("No hay exactamente 50 familias a 1 ATR")
+    actual = audit[["attempt_id", "symbol", "level_id", "pre_closed_ts", "family_1p0"]].copy()
+    both = actual.merge(lookup, on="attempt_id", how="outer", indicator=True,
+                        suffixes=("_audit", "_family"), validate="one_to_one")
+    if not both._merge.eq("both").all() or len(both) != 50:
+        raise ValueError("Auditoría y familias no cubren los mismos 50 IDs")
+    for name in ("symbol", "level_id"):
+        if not both[f"{name}_audit"].astype(str).eq(both[f"{name}_family"].astype(str)).all():
+            raise ValueError(f"Auditoría y familias tienen {name} diferente")
+    if not pd.to_numeric(both.pre_closed_ts_audit).eq(pd.to_numeric(both.pre_closed_ts_family)).all():
+        raise ValueError("Auditoría y familias tienen corte PRE diferente")
+    if not both.family_1p0.eq(both.family_candidate).all():
+        raise ValueError("Familia auditada no coincide con snapshot congelado")
+
+
+def render_audit_matrix(root: Path, read_cached, family_export: pd.DataFrame) -> None:
+    """Optional audit section within this same HLL inspector, no new Streamlit app."""
+    import streamlit as st
+    path = root / AUDIT_REL / "audit_matrix_pre.csv"
+    manifest_path = root / AUDIT_REL / "manifest.json"
+    with st.expander("🔎 Auditoría de los 50 · matriz y contraejemplos PRE", expanded=False):
+        if not (path.is_file() and manifest_path.is_file()):
+            st.info("Para generar la auditoría: `python3 hll_pre_family_audit_v1.py --plan` "
+                    "y después `python3 hll_pre_family_audit_v1.py --run`. "
+                    "No modifica las familias existentes.")
+            return
+        try:
+            audit = read_cached(str(path), path.stat().st_mtime_ns)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            validate_audit_export(audit, family_export, root=root, manifest=manifest)
+        except (OSError, KeyError, ValueError, TypeError, pd.errors.ParserError) as exc:
+            st.warning(f"Auditoría no disponible: {exc}")
+            return
+        c1,c2,c3,c4=st.columns(4)
+        inter = audit.intercontact_direction_48.value_counts()
+        c1.metric("Intercontact SUBE", int(inter.get("SUBE",0)))
+        c2.metric("Intercontact BAJA", int(inter.get("BAJA",0)))
+        c3.metric("Sin datos", int(inter.get("SIN_DATOS",0)))
+        c4.metric("Escalas coinciden", int(pd.to_numeric(audit.scales_agree).sum()))
+        st.caption("50 intentos; 17 referencias visuales de origen diverso (incluye juicios del asistente). "
+                   "No es un clasificador bueno/malo y no evalúa rentabilidad. "
+                   "La ventana PRE48 ya fue inspeccionada, no es holdout.")
+        filter_mode=st.selectbox("Subconjunto de auditoría",
+            ["Todos los 50", "Prioridad de revisión", "Sin evaluación visual",
+             "Intercontact sin datos", "Escalas inestables"], key="hll_pre_audit_subset")
+        selection=audit.copy()
+        if filter_mode=="Prioridad de revisión":
+            selection=selection.loc[selection.audit_priority.eq("REVISAR")]
+        elif filter_mode=="Sin evaluación visual":
+            selection=selection.loc[selection.review_visual.eq("SIN_EVALUACION")]
+        elif filter_mode=="Intercontact sin datos":
+            selection=selection.loc[selection.intercontact_direction_48.eq("SIN_DATOS")]
+        elif filter_mode=="Escalas inestables":
+            selection=selection.loc[pd.to_numeric(selection.scales_agree).eq(0)]
+        st.caption(f"{len(selection)} intentos en este subconjunto. Los filtros son solo navegación visual.")
+        shown=["symbol", "attempt_id", "review_visual", "review_provenance",
+               "family_1p0", "low_progression_1atr", "high_progression_1atr",
+               "intercontact_direction_48", "intercontact_delta_48_atr",
+               "net_return_pre48_pct", "scales_agree", "audit_flags"]
+        st.dataframe(selection[shown], hide_index=True, use_container_width=True, height=380)
+        st.download_button("Exportar matriz completa de los 50 (CSV)",
+            audit.to_csv(index=False).encode("utf-8"),
+            file_name="hll_audit_matrix_pre_50.csv", mime="text/csv",key="hll_pre_audit_csv")
+        st.caption("Los casos SIN_EVALUACION no son negativos. No se usa POST, "
+                   "ni las etiquetas visuales para generar las familias.")
 
 
 def family_brief(record) -> str:
@@ -467,6 +567,7 @@ def render_hll_phase_batch(root) -> None:
                 st.dataframe(subset_fam[["symbol","attempt_id","family_candidate",
                     "terminal_phase","confirmed_low_progression","confirmed_high_progression",
                     "intercontact_trough_direction_48"]],hide_index=True,use_container_width=True)
+            render_audit_matrix(root, read_cached, family_export)
         if group == ALL:
             metadata = data["summary"].loc[data["summary"].scale_atr.eq(1.0)]
             symbols = sorted(metadata.symbol.unique())

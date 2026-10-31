@@ -278,3 +278,32 @@ class PhaseBatchViewTests(unittest.TestCase):
         self.assertEqual(df.attempt_id.nunique(), 50)
 
 if __name__ == '__main__':unittest.main()
+
+class AuditMatrixValidationTests(unittest.TestCase):
+    def test_audit_missing_rows_rejected_before_file_access(self):
+        from dashboard.views.hll_phase_batch_view import validate_audit_export
+        frame=pd.DataFrame([{'attempt_id':'one'}])
+        with self.assertRaisesRegex(ValueError,'incompleta'):
+            validate_audit_export(frame,pd.DataFrame(),root=Path('.'),manifest={})
+
+    def test_audit_manifest_guard_before_file_access(self):
+        from dashboard.views.hll_phase_batch_view import validate_audit_export
+        needed=['attempt_id','symbol','level_id','pre_closed_ts','family_1p0','family_0p5',
+                'family_1p5','review_visual','review_provenance','intercontact_direction_48',
+                'scales_agree','audit_flags','audit_priority']
+        frame=pd.DataFrame([{x:'test' for x in needed} for _ in range(50)])
+        frame['attempt_id']=[str(i) for i in range(50)]
+        with self.assertRaisesRegex(ValueError,'aislamiento PRE'):
+            validate_audit_export(frame,pd.DataFrame(),root=Path('.'),
+                manifest={'inputs_are_pre_only':True,'reads_post':True,
+                          'reads_visual_for_family':False,'modifies_live':False})
+
+    def test_real_audit_export_validates_if_local_available(self):
+        from dashboard.views.hll_phase_batch_view import validate_audit_export
+        root=Path(__file__).resolve().parents[2]
+        f=root/'reports/horizontal_level_second_ascent_pre/core15_pre_family_interpreter_v1/families_pre.csv'
+        m=root/'reports/horizontal_level_second_ascent_pre/core15_pre_family_audit_v1/audit_matrix_pre.csv'
+        j=m.with_name('manifest.json')
+        if not (f.is_file() and m.is_file() and j.is_file()):self.skipTest('Requiere reportes auditoría en VPS')
+        validate_audit_export(pd.read_csv(m),pd.read_csv(f),root=root,
+                              manifest=__import__('json').loads(j.read_text()))
