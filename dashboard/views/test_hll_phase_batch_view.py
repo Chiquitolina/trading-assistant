@@ -9,7 +9,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from dashboard.views.hll_phase_batch_view import (
     TANDAS, _at_scale, valid_legs, valid_pivots, validate_closed_bars,
-    validate_sources, build_phase_chart, TF_MS,
+    validate_sources, validate_family_export, family_brief, build_phase_chart, TF_MS,
+    display_chart_window, _origin_vs_resistance, PRE_VISUAL_OPTIONS, POST_VISUAL_OPTIONS,
 )
 
 PRE = 1787400000000
@@ -85,6 +86,85 @@ class PhaseBatchViewTests(unittest.TestCase):
         self.assertEqual(len(q),1)
         self.assertEqual(q.iloc[0].status,'PROVISIONAL')
 
+    def test_visual_selector_options(self):
+        self.assertEqual(PRE_VISUAL_OPTIONS, (48, 96, 144, 192, 288, 384))
+        self.assertEqual(POST_VISUAL_OPTIONS, (12, 24, 48, 72, 96))
+        self.assertEqual(96 * TF_MS, 48 * 60 * 60 * 1000)
+
+    def test_visual_pre_48_and_384_use_same_cutoff(self):
+        source = bars(n=450, future=110)
+        short, ms = display_chart_window(source, PRE, pre_bars=48)
+        long, ml = display_chart_window(source, PRE, pre_bars=384)
+        self.assertEqual(len(short),48)
+        self.assertEqual(len(long),384)
+        self.assertEqual(ms['pre_shown'],48)
+        self.assertEqual(ml['pre_shown'],384)
+        self.assertEqual(int(short.timestamp.iloc[-1])+TF_MS,PRE)
+        self.assertEqual(int(long.timestamp.iloc[-1])+TF_MS,PRE)
+
+    def test_visual_pre_larger_than_history_is_explicit_partial(self):
+        source = bars(n=120)
+        shown, info = display_chart_window(source, PRE, pre_bars=384)
+        self.assertEqual(len(shown),120)
+        self.assertEqual(info['pre_requested'],384)
+        self.assertEqual(info['pre_shown'],120)
+
+    def test_post_48_hours_exact_and_core_unchanged(self):
+        source = bars(n=400, future=120)
+        baseline, b = display_chart_window(source, PRE, pre_bars=96)
+        with_post, p = display_chart_window(source, PRE, pre_bars=96, show_post=True, post_bars=96)
+        self.assertEqual(b['post_shown'],0)
+        self.assertEqual(p['post_shown'],96)
+        self.assertEqual(p['post_requested'],96)
+        pd.testing.assert_frame_equal(baseline.reset_index(drop=True),with_post.iloc[:96].reset_index(drop=True))
+        self.assertEqual(int(with_post.timestamp.iloc[96]),PRE)
+        self.assertEqual(int(with_post.timestamp.iloc[-1]),PRE+95*TF_MS)
+
+    def test_hidden_post_is_future_invariant_all_display_windows(self):
+        base=bars(n=450)
+        extended=bars(n=450, future=110)
+        for lookback in PRE_VISUAL_OPTIONS:
+            d1,_=display_chart_window(base,PRE,pre_bars=lookback)
+            d2,_=display_chart_window(extended,PRE,pre_bars=lookback)
+            pd.testing.assert_frame_equal(d1,d2)
+
+    def test_post_gap_refused_and_missing_post_reported(self):
+        source=bars(n=110,future=10)
+        partial,info=display_chart_window(source,PRE,show_post=True,post_bars=96)
+        self.assertEqual(info['post_shown'],10)
+        self.assertEqual(info['post_requested'],96)
+        bad=source.drop(index=111)
+        with self.assertRaisesRegex(ValueError,'Gap en velas POST'):
+            display_chart_window(bad,PRE,show_post=True,post_bars=96)
+
+    def test_extra_pre_gap_refused(self):
+        a=bars(n=450).drop(index=100)
+        with self.assertRaisesRegex(ValueError,'Gap'):
+            display_chart_window(a,PRE,pre_bars=384)
+
+    def test_invalid_visual_windows_refused(self):
+        with self.assertRaisesRegex(ValueError,'PRE'):
+            display_chart_window(bars(n=200),PRE,pre_bars=1000)
+        with self.assertRaisesRegex(ValueError,'POST'):
+            display_chart_window(bars(n=200),PRE,post_bars=1000)
+
+    def test_origin_zone_classification(self):
+        self.assertEqual(_origin_vs_resistance(.8, .9, 1.1),'debajo de la resistencia')
+        self.assertEqual(_origin_vs_resistance(1.0, .9, 1.1),'dentro de la zona de resistencia')
+        self.assertEqual(_origin_vs_resistance(1.2, .9, 1.1),'encima de la resistencia')
+
+    def test_visual_chart_keeps_frozen_pre_overlay_with_post(self):
+        source=bars(n=450, future=100)
+        baseline=build_phase_chart(source,PRE,.9,1.1,pd.DataFrame(),pd.DataFrame(),pre_bars=384)
+        revealed=build_phase_chart(source,PRE,.9,1.1,pd.DataFrame(),pd.DataFrame(),
+                                   pre_bars=384,show_post=True,post_bars=96)
+        self.assertEqual(baseline.layout.meta['pre_shown'],384)
+        self.assertEqual(revealed.layout.meta['post_shown'],96)
+        self.assertEqual(len(baseline.data[0].x),384)
+        self.assertEqual(len(revealed.data[0].x),480)
+        self.assertEqual(len(baseline.layout.shapes),len(revealed.layout.shapes))
+        self.assertGreater(len(baseline.layout.shapes),3)
+
     def test_chart_pre_unchanged_after_future_extension(self):
         for src in (bars(),bars(future=10)):
             fig=build_phase_chart(src,PRE,0.90,1.10,pd.DataFrame(),pd.DataFrame())
@@ -101,6 +181,53 @@ class PhaseBatchViewTests(unittest.TestCase):
                         source.index("if mode=='290 símbolos · análisis integral':"))
         self.assertIn('if not integral.is_file():\n        render_hll_phase_batch(root)', source)
         self.assertIn('render_hll_v282_pre_followup(root,blind=blind)', source)
+
+    def test_family_export_valid_join(self):
+        s=pd.DataFrame([{'attempt_id':'a','symbol':'ABCUSDT','pre_closed_ts':PRE,
+            'scale_atr':1.0,'status':'COMPLETE_PRE'}])
+        f=pd.DataFrame([{'attempt_id':'a','symbol':'ABCUSDT','pre_closed_ts':PRE,
+            'scale_atr':1.0,'status':'DESCRIPTIVE_PRE_ONLY',
+            'family_candidate':'ASCENSO_ESCALONADO','family_basis':'test',
+            'supporting_observations':'x','contradicting_observations':'',
+            'limitations':''}])
+        validate_family_export(f,s)
+        self.assertEqual(family_brief(f.iloc[0]),'Ascenso escalonado')
+
+    def test_family_export_rejects_wrong_pre(self):
+        s=pd.DataFrame([{'attempt_id':'a','symbol':'ABCUSDT','pre_closed_ts':PRE,
+            'scale_atr':1.0,'status':'COMPLETE_PRE'}])
+        f=pd.DataFrame([{'attempt_id':'a','symbol':'ABCUSDT','pre_closed_ts':PRE+TF_MS,
+            'scale_atr':1.0,'status':'DESCRIPTIVE_PRE_ONLY',
+            'family_candidate':'ASCENSO_ESCALONADO','family_basis':'test',
+            'supporting_observations':'x','contradicting_observations':'',
+            'limitations':''}])
+        with self.assertRaisesRegex(ValueError,'cortes PRE'):
+            validate_family_export(f,s)
+
+    def test_family_export_rejects_duplicate_and_wrong_status(self):
+        s=pd.DataFrame([{'attempt_id':'a','symbol':'ABCUSDT','pre_closed_ts':PRE,
+            'scale_atr':1.0,'status':'COMPLETE_PRE'}])
+        f=pd.DataFrame([{'attempt_id':'a','symbol':'ABCUSDT','pre_closed_ts':PRE,
+            'scale_atr':1.0,'status':'DESCRIPTIVE_PRE_ONLY',
+            'family_candidate':'ASCENSO_ESCALONADO','family_basis':'test',
+            'supporting_observations':'x','contradicting_observations':'',
+            'limitations':''}])
+        with self.assertRaisesRegex(ValueError,'duplicados'):
+            validate_family_export(pd.concat([f,f]),s)
+        f.loc[0,'status']='TRADE_SIGNAL'
+        with self.assertRaisesRegex(ValueError,'PRE'):
+            validate_family_export(f,s)
+
+    def test_family_manifest_guard(self):
+        s=pd.DataFrame([{'attempt_id':'a','symbol':'ABCUSDT','pre_closed_ts':PRE,
+            'scale_atr':1.0,'status':'COMPLETE_PRE'}])
+        f=pd.DataFrame([{'attempt_id':'a','symbol':'ABCUSDT','pre_closed_ts':PRE,
+            'scale_atr':1.0,'status':'DESCRIPTIVE_PRE_ONLY',
+            'family_candidate':'ASCENSO_ESCALONADO','family_basis':'test',
+            'supporting_observations':'x','contradicting_observations':'',
+            'limitations':''}])
+        with self.assertRaisesRegex(ValueError,'restricciones'):
+            validate_family_export(f,s,manifest={'guardrails':{'reads_post':True}})
 
     def test_all_visual_attempt_ids_in_real_export(self):
         # Optional local test only when the provided real historical ZIP is available.

@@ -6,14 +6,31 @@ All overlay features were created from the 96 fully closed 30m candles before PR
 from __future__ import annotations
 
 import math
+import json
+import hashlib
 from pathlib import Path
 
 import pandas as pd
 
 TF_MS = 1_800_000
+# Display context only; the frozen PRE detections/family analysis remain 96 candles.
+PRE_VISUAL_OPTIONS = (48, 96, 144, 192, 288, 384)
+POST_VISUAL_OPTIONS = (12, 24, 48, 72, 96)
 REL = Path("reports/horizontal_level_second_ascent_pre/core15_phase_reconstruction_pre_v1")
 PHASE_REL = Path("reports/horizontal_level_second_ascent_pre/core15_two_leg_v12/segments_pre.csv")
 CANDLES_REL = Path("reports/horizontal_level_lifecycle_v21/candles_aug20_oct25_core15_btc")
+FAMILY_REL = Path("reports/horizontal_level_second_ascent_pre/core15_pre_family_interpreter_v1")
+FAMILY_FILE = "families_pre.csv"
+FAMILY_MANIFEST = "manifest.json"
+FAMILY_SOURCES = {
+    "summary": REL / "phase_summary_pre.csv",
+    "pivots": REL / "phase_confirmed_pivots_pre.csv",
+    "legs": REL / "phase_legs_pre.csv",
+    "recovery": REL / "phase_recovery_candidates_pre.csv",
+    "resistance": Path("reports/horizontal_level_second_ascent_pre/core15_resistance_interaction_pre_v3/resistance_windows_pre.csv"),
+    "ohlc": Path("reports/horizontal_level_second_ascent_pre/core15_structural_approach_ohlc_pre_v2/candle_windows_pre.csv"),
+}
+
 FILES = {
     "summary": "phase_summary_pre.csv",
     "pivots": "phase_confirmed_pivots_pre.csv",
@@ -90,6 +107,57 @@ def validate_sources(summaries: pd.DataFrame, levels: pd.DataFrame) -> None:
         raise ValueError("Resistencia sin banda válida")
 
 
+
+def validate_family_export(families: pd.DataFrame, summary: pd.DataFrame,
+                           *, root: Path | None = None, manifest: dict | None = None) -> None:
+    """Fail closed: 1:1 PRE snapshot, unchanged sources, no inferred POST."""
+    keys = ["attempt_id", "symbol", "pre_closed_ts", "scale_atr"]
+    needed = set(keys) | {"family_candidate", "family_basis", "status",
+        "supporting_observations", "contradicting_observations", "limitations"}
+    if not needed.issubset(families.columns):
+        raise ValueError("Faltan columnas del intérprete de familias")
+    if families.duplicated(["attempt_id", "scale_atr"]).any():
+        raise ValueError("Intentos/escalas duplicados en familias PRE")
+    if not families.status.eq("DESCRIPTIVE_PRE_ONLY").all():
+        raise ValueError("El intérprete debe entregar exclusivamente estados descriptivos PRE")
+    if len(families) != len(summary):
+        raise ValueError("El intérprete no cubre todos los intentos/escalas de Phase PRE")
+    fam = families[keys].copy()
+    phase = summary[keys].copy()
+    for data in (fam, phase):
+        data["attempt_id"] = data["attempt_id"].astype(str)
+        data["symbol"] = data["symbol"].astype(str)
+        data["pre_closed_ts"] = pd.to_numeric(data["pre_closed_ts"], errors="raise").astype("int64")
+        data["scale_atr"] = pd.to_numeric(data["scale_atr"], errors="raise").round(6)
+    merged = phase.merge(fam, on=keys, validate="one_to_one", how="outer", indicator=True)
+    if not merged._merge.eq("both").all() or len(merged) != len(summary):
+        raise ValueError("Las familias no coinciden con los cortes PRE de Phase V1")
+    if manifest is not None:
+        guard = manifest.get("guardrails", {})
+        if not (guard.get("reads_post") is False and
+                guard.get("reads_visual_labels") is False and
+                guard.get("changes_live") is False and
+                guard.get("writes_signals") is False):
+            raise ValueError("Manifest de familias no cumple restricciones PRE")
+        if root is not None:
+            for name, reference in FAMILY_SOURCES.items():
+                path = root / reference
+                expected = manifest.get("source_sha256", {}).get(name)
+                if not expected or not path.is_file():
+                    raise ValueError(f"Falta fuente/código de procedencia para {name}")
+                h = hashlib.sha256()
+                with path.open("rb") as f:
+                    for part in iter(lambda: f.read(1024*1024), b""):
+                        h.update(part)
+                if h.hexdigest() != expected:
+                    raise ValueError(f"Fuente PRE modificada desde la ejecución: {name}")
+
+
+def family_brief(record) -> str:
+    """Display only: no signal, recommendation, probability or fitted score."""
+    return str(record["family_candidate"]).replace("_", " ").capitalize()
+
+
 def validate_closed_bars(candles: pd.DataFrame, pre_closed_ts: int, lookback: int = 96) -> pd.DataFrame:
     """Only fully closed, contiguous PRE candles. Never fill a data gap."""
     columns = {"timestamp", "open", "high", "low", "close"}
@@ -116,6 +184,65 @@ def validate_closed_bars(candles: pd.DataFrame, pre_closed_ts: int, lookback: in
             (a.low <= a[["open", "close", "high"]].min(axis=1))).all():
         raise ValueError("OHLC inconsistente")
     return a
+
+
+def display_chart_window(candles: pd.DataFrame, pre_closed_ts: int, *,
+                         pre_bars: int = 96, show_post: bool = False,
+                         post_bars: int = 24) -> tuple[pd.DataFrame, dict]:
+    """Extra chart context, without recomputing any PRE detector features.
+
+    Require a contiguous 96-bar causal core. Older PRE may be partially
+    available (explicitly reported); gaps are never interpolated. POST is
+    visual-only, starts at the PRE cutoff, and is limited to 96 bars = 48 h.
+    """
+    if pre_bars not in PRE_VISUAL_OPTIONS:
+        raise ValueError(f"Cantidad PRE no admitida: {pre_bars}")
+    if post_bars not in POST_VISUAL_OPTIONS:
+        raise ValueError(f"Cantidad POST no admitida: {post_bars}")
+    pre_closed_ts = int(pre_closed_ts)
+    # The source PRE interpretation was built with these 96 complete bars.
+    validate_closed_bars(candles, pre_closed_ts, 96)
+    times = pd.to_numeric(candles["timestamp"], errors="raise").astype("int64")
+    available_pre = int((times + TF_MS <= pre_closed_ts).sum())
+    actual_pre = min(pre_bars, available_pre)
+    pre = validate_closed_bars(candles, pre_closed_ts, actual_pre)
+    actual_post = 0
+    shown = pre.copy()
+    if show_post:
+        future = candles.loc[times.ge(pre_closed_ts)].copy()
+        future["timestamp"] = pd.to_numeric(future["timestamp"], errors="raise").astype("int64")
+        future = future.sort_values("timestamp").head(post_bars)
+        if not future.empty:
+            timestamps = future.timestamp.tolist()
+            if timestamps[0] != pre_closed_ts or any(
+                b-a != TF_MS for a, b in zip(timestamps, timestamps[1:])
+            ):
+                raise ValueError("Gap en velas POST; no se interpola ni se salta")
+            for col in ("open", "high", "low", "close"):
+                future[col] = pd.to_numeric(future[col], errors="raise")
+            if not (future[["open", "high", "low", "close"]] > 0).all().all() or not (
+                (future.high >= future[["open", "close", "low"]].max(axis=1)) &
+                (future.low <= future[["open", "close", "high"]].min(axis=1))
+            ).all():
+                raise ValueError("OHLC POST inconsistente")
+            actual_post = len(future)
+            shown = pd.concat([pre, future], ignore_index=True)
+    return shown, {
+        "pre_requested": pre_bars,
+        "pre_shown": len(pre),
+        "post_requested": post_bars if show_post else 0,
+        "post_shown": actual_post,
+        "first_pre_close": float(pre.iloc[0]["close"]),
+        "last_pre_close": float(pre.iloc[-1]["close"]),
+    }
+
+
+def _origin_vs_resistance(close: float, zone_low: float, zone_high: float) -> str:
+    if close < zone_low:
+        return "debajo de la resistencia"
+    if close > zone_high:
+        return "encima de la resistencia"
+    return "dentro de la zona de resistencia"
 
 
 def _at_scale(table: pd.DataFrame, aid: str, scale: float) -> pd.DataFrame:
@@ -154,16 +281,15 @@ def valid_legs(table: pd.DataFrame, aid: str, scale: float, pre: int) -> pd.Data
 
 def build_phase_chart(candles: pd.DataFrame, pre_closed_ts: int, zone_low: float, zone_high: float,
                       pivots: pd.DataFrame, legs: pd.DataFrame, *, show_post: bool = False,
-                      post_bars: int = 24, show_pivots: bool = True,
+                      post_bars: int = 24, pre_bars: int = 96, show_pivots: bool = True,
                       show_legs: bool = True, show_candidates: bool = False,
                       candidates: pd.DataFrame | None = None):
     """Pure Plotly chart; layers use only causally available PRE detections."""
     import plotly.graph_objects as go
     pre_closed_ts = int(pre_closed_ts)
-    shown = validate_closed_bars(candles, pre_closed_ts)
-    if show_post:
-        tail = candles.loc[pd.to_numeric(candles.timestamp) >= pre_closed_ts].sort_values("timestamp").head(post_bars)
-        shown = pd.concat([shown, tail], ignore_index=True)
+    shown, visual_info = display_chart_window(
+        candles, pre_closed_ts, pre_bars=pre_bars,
+        show_post=show_post, post_bars=post_bars)
     t = pd.to_datetime(shown.timestamp, unit="ms", utc=True)
     fig = go.Figure(go.Candlestick(x=t, open=shown.open, high=shown.high,
                      low=shown.low, close=shown.close, name="OHLC 30m",
@@ -174,6 +300,10 @@ def build_phase_chart(candles: pd.DataFrame, pre_closed_ts: int, zone_low: float
     fig.add_hline(y=float(zone_high), line_dash="dot", line_color="#bb8b38", line_width=1)
     pre_time = pd.Timestamp(pre_closed_ts, unit="ms", tz="UTC")
     fig.add_vline(x=pre_time, line_dash="dash", line_color="#8b5cf6", line_width=2)
+    # Earlier candles are visual context. The frozen detections use only PRE-96.
+    if pre_bars > 96:
+        core_start = pd.Timestamp(pre_closed_ts - 96 * TF_MS, unit="ms", tz="UTC")
+        fig.add_vline(x=core_start, line_dash="dot", line_color="#8290a2", line_width=1)
     if show_legs and not legs.empty:
         for status in ["CONFIRMED_PRE", "PROVISIONAL"]:
             for direction, clr in [("UP", "#278f78"), ("DOWN", "#cf8341")]:
@@ -212,7 +342,11 @@ def build_phase_chart(candles: pd.DataFrame, pre_closed_ts: int, zone_low: float
     fig.update_layout(height=395, xaxis_rangeslider_visible=False, showlegend=True,
         margin=dict(l=12, r=12, t=24, b=14),
         legend=dict(orientation="h", y=-0.21, font=dict(size=9)),
-        xaxis_title="UTC · corte PRE morado", yaxis_title="Precio")
+        xaxis_title="UTC · corte PRE morado", yaxis_title="Precio",
+        # Prevent pivots from expanding the requested visual window.
+        xaxis=dict(range=[pd.Timestamp(int(shown.timestamp.iloc[0]), unit="ms", tz="UTC"),
+                          pd.Timestamp(int(shown.timestamp.iloc[-1]) + TF_MS, unit="ms", tz="UTC")]),
+        meta=visual_info)
     return fig
 
 
@@ -246,6 +380,21 @@ def render_hll_phase_batch(root) -> None:
         except (OSError, KeyError, ValueError, pd.errors.ParserError) as exc:
             st.error(f"No se puede abrir esta auditoría PRE: {exc}")
             return
+        family_export = None
+        family_path = root / FAMILY_REL / FAMILY_FILE
+        manifest_path = root / FAMILY_REL / FAMILY_MANIFEST
+        if family_path.is_file() and manifest_path.is_file():
+            try:
+                fam = read_cached(str(family_path), family_path.stat().st_mtime_ns)
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                validate_family_export(fam, data["summary"], root=root, manifest=manifest)
+                family_export = fam
+            except (OSError, KeyError, ValueError, TypeError, pd.errors.ParserError) as exc:
+                st.warning(f"Interpretaciones PRE no disponibles: {exc}. Regenerá el análisis sin alterar Phase V1.")
+        else:
+            st.caption("Interpretaciones experimentales todavía no generadas. "
+                       "Ejecutá `python3 hll_pre_family_interpreter.py --plan` y `--run`. "
+                       "Los gráficos Phase V1 siguen disponibles.")
         counts = len(data["summary"]), data["summary"].attempt_id.nunique()
         st.caption(f"Cargados: {counts[1]} intentos, {counts[0]} combinaciones intento × escala. "
                    "Muestra histórica exploratoria: ejemplos cercanos pueden compartir casi todas las velas.")
@@ -259,6 +408,21 @@ def render_hll_phase_batch(root) -> None:
                                     key="hll_phase_per_page")
         with m3:
             post = st.checkbox("Revelar velas POST", value=False, key="hll_phase_reveal_post")
+        b1, b2 = st.columns(2)
+        with b1:
+            pre_bars = st.selectbox("Velas PRE para visualizar", list(PRE_VISUAL_OPTIONS),
+                                    index=1, format_func=lambda n: f"{n} velas · {n // 2} h",
+                                    key="hll_phase_pre_bars")
+        with b2:
+            post_bars = st.selectbox("Velas POST (si se revelan)", list(POST_VISUAL_OPTIONS),
+                                     index=1, format_func=lambda n: f"{n} velas · {n / 2:g} h",
+                                     key="hll_phase_post_bars", disabled=not post)
+        st.caption("La cantidad PRE y POST cambia SOLO lo visible en las velas. "
+                   "Los pivotes, las fases y las familias fueron calculados con 96 velas PRE "
+                   "cerradas (48 h) y no se recalculan al cambiar la ventana. "
+                   "Si pedís más de 96 PRE, el inicio de esas 96 se marca con línea gris. "
+                   "La banda de resistencia se proyecta hacia atrás solo como referencia visual; "
+                   "no implica que el nivel estuviera confirmado entonces.")
         c1, c2, c3 = st.columns(3)
         with c1:
             with_pivots = st.checkbox("Pivotes confirmados", value=True, key="hll_phase_pivots")
@@ -270,12 +434,36 @@ def render_hll_phase_batch(root) -> None:
         st.caption("Pivotes dibujados retrospectivamente sobre su vela de origen: "
                    "el hover indica cuándo quedaron confirmados. Tramos discontinuos = provisionales en PRE. "
                    "El POST, si se revela, es solo visual y nunca cambia las detecciones.")
+        if family_export is not None:
+            subset_fam = family_export.loc[family_export.scale_atr.astype(float).eq(float(scale))].copy()
+            st.caption("Familias experimentales: describen la geometría de PRE, NO calidad, "
+                       "probabilidad ni señal. No se entrenaron con etiquetas visuales. "
+                       "El contexto de 48 velas ya fue explorado y no es validación independiente.")
+            with st.expander("📊 Resultado del intérprete y estabilidad multiescala", expanded=False):
+                counts_fam = subset_fam.family_candidate.value_counts().rename_axis("Familia").reset_index(name="Intentos")
+                st.dataframe(counts_fam, hide_index=True, use_container_width=True)
+                pivot = family_export.pivot(index="attempt_id", columns="scale_atr", values="family_candidate")
+                agree = pivot.nunique(axis=1).eq(1)
+                st.caption(f"Escalas idénticas: {int(agree.sum())}/{len(agree)} intentos. "
+                           "Los cambios de familia según ATR son parte del resultado, no errores ocultos.")
+                st.dataframe(subset_fam[["symbol","attempt_id","family_candidate",
+                    "terminal_phase","confirmed_low_progression","confirmed_high_progression",
+                    "intercontact_trough_direction_48"]],hide_index=True,use_container_width=True)
         if group == ALL:
             metadata = data["summary"].loc[data["summary"].scale_atr.eq(1.0)]
             symbols = sorted(metadata.symbol.unique())
             sym = st.selectbox("Símbolo", ["Todos"] + symbols, key="hll_phase_symbol")
             if sym != "Todos":
                 metadata = metadata.loc[metadata.symbol.eq(sym)]
+            if family_export is not None:
+                families_for_scale = family_export.loc[family_export.scale_atr.astype(float).eq(float(scale))]
+                chosen_family = st.selectbox("Familia PRE experimental · solo navegación",
+                    ["TODAS"] + sorted(families_for_scale.family_candidate.unique()),
+                    key="hll_phase_family_navigation")
+                if chosen_family != "TODAS":
+                    ids_matching = set(families_for_scale.loc[
+                        families_for_scale.family_candidate.eq(chosen_family), "attempt_id"].astype(str))
+                    metadata = metadata.loc[metadata.attempt_id.astype(str).isin(ids_matching)]
             metadata = metadata.sort_values(["symbol", "pre_closed_ts", "attempt_id"])
             rows = [(str(r.symbol), str(r.attempt_id), "Sin evaluación visual", "Sin etiqueta")
                     for r in metadata.itertuples()]
@@ -313,13 +501,47 @@ def render_hll_phase_batch(root) -> None:
                         lg = valid_legs(data["legs"], aid, float(scale), int(r.pre_closed_ts))
                         cand = _at_scale(data["candidates"], aid, float(scale))
                         fig = build_phase_chart(candles, int(r.pre_closed_ts), float(lev.zone_low),
-                             float(lev.zone_high), pv, lg, show_post=post, show_pivots=with_pivots,
+                             float(lev.zone_high), pv, lg, show_post=post,
+                             pre_bars=pre_bars, post_bars=post_bars, show_pivots=with_pivots,
                              show_legs=with_legs, show_candidates=with_candidates, candidates=cand)
                         st.plotly_chart(fig, use_container_width=True, key=f"hll_phase_{aid}_{scale}")
+                        info = fig.layout.meta
+                        initial_side = _origin_vs_resistance(info["first_pre_close"],
+                                                             float(lev.zone_low), float(lev.zone_high))
+                        st.caption(f"Origen PRE visible: {initial_side}. "
+                                   f"PRE mostrado: {info['pre_shown']}/{info['pre_requested']} velas. "
+                                   + (f"POST mostrado: {info['post_shown']}/{info['post_requested']} velas. "
+                                      if post else "POST oculto. ")
+                                   + "Los datos extra son contexto visual, no nuevas detecciones.")
+                        if info["pre_shown"] < info["pre_requested"]:
+                            st.info("No existe todo el histórico PRE solicitado para este intento; "
+                                    "se muestran solo velas contiguas disponibles, sin rellenar huecos.")
+                        if post and info["post_shown"] < info["post_requested"]:
+                            st.info("No existe todo el POST solicitado en este CSV; "
+                                    "se muestran solo las velas contiguas disponibles.")
                         tip = str(r.terminal_leg_direction)
                         st.caption(f"Terminal PRE: {tip} PROVISIONAL · "
                                    f"pivotes confirmados: {int(r.confirmed_pivots)} · "
                                    f"mínimos candidatos: {int(r.recovery_candidates)}")
+                        if family_export is not None:
+                            sel_family = family_export.loc[
+                                family_export.attempt_id.astype(str).eq(aid) &
+                                family_export.scale_atr.astype(float).eq(float(scale))]
+                            if len(sel_family) != 1:
+                                st.error("Familia PRE ausente o duplicada para este intento/escala")
+                            else:
+                                fr = sel_family.iloc[0]
+                                st.markdown(f"**Familia PRE candidata:** {family_brief(fr)}")
+                                st.caption(f"Motivo: {fr.family_basis} · sin clasificación buena/mala")
+                                with st.expander("Evidencias y contradicciones de la familia", expanded=False):
+                                    st.write("**A favor:** " + (fr.supporting_observations or "sin observaciones específicas"))
+                                    st.write("**En contra:** " + (fr.contradicting_observations or "sin observaciones específicas"))
+                                    st.write("**Limitaciones:** " + (fr.limitations or "sin limitaciones adicionales"))
+                                    same = family_export.loc[family_export.attempt_id.astype(str).eq(aid),
+                                        ["scale_atr", "family_candidate", "confirmed_low_progression",
+                                         "confirmed_high_progression", "intercontact_trough_direction_48"]]
+                                    st.dataframe(same.sort_values("scale_atr"), hide_index=True,
+                                                 use_container_width=True)
                         with st.expander("Ver detecciones detalladas", expanded=False):
                             st.dataframe(lg[["leg_index", "leg_role", "status", "amplitude_atr",
                                              "duration_to_extreme_bars"]], hide_index=True,
