@@ -107,6 +107,9 @@ def render_hll_v28_structure_dashboard(root):
             horizontal=True,key='hll_unified_universe')
         # Panel adicional CORE15; visible también cuando se inspecciona el universo 290.
         render_hll_phase_batch(root)
+        # Do not render POST/performance blocks below an active blind PRE review.
+        if st.session_state.get('hll_phase_mode') == 'Revisión visual ciega (PRE)':
+            return
         if mode=='290 símbolos · análisis integral':
             st.caption('Corrida congelada de 290 símbolos; todas las estructuras PRE, flip, '
                        'continuación, reclaim y, cuando haya datos 1m, matrices TP/SL. '
@@ -119,6 +122,8 @@ def render_hll_v28_structure_dashboard(root):
     st.markdown('### 🧱 Calidad estructural · V2.8 (histórico 15 símbolos)')
     if not integral.is_file():
         render_hll_phase_batch(root)
+        if st.session_state.get('hll_phase_mode') == 'Revisión visual ciega (PRE)':
+            return
     st.caption('30m causal: mínimos ascendentes confirmados, calidad del retest y cruces de zona. ' 
                'Compara resultados de V2.7 sin recalcularlos ni modificar LIVE.')
     parent=root/RUNS

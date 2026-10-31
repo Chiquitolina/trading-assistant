@@ -681,6 +681,224 @@ def _review_table(rows: list[tuple]) -> pd.DataFrame:
                          "origen_revision": origin} for s, a, label, origin in rows])
 
 
+def _compare_after_blind_save(root: Path, data: dict, read_cached, aid: str) -> None:
+    """Reveal model/old labels only after this attempt's manual PRE review was saved."""
+    import streamlit as st
+
+    family_path=root / FAMILY_REL / FAMILY_FILE
+    manifest_path=root / FAMILY_REL / FAMILY_MANIFEST
+    if not (family_path.is_file() and manifest_path.is_file()):
+        st.warning("No se encontró el intérprete congelado de familias PRE")
+        return
+    try:
+        fam=read_cached(str(family_path),family_path.stat().st_mtime_ns)
+        manifest=json.loads(manifest_path.read_text(encoding="utf8"))
+        validate_family_export(fam,data["summary"],root=root,manifest=manifest)
+    except (OSError,KeyError,ValueError,TypeError,pd.errors.ParserError) as exc:
+        st.error(f"No se puede comparar con familias: {exc}")
+        return
+    selected=fam.loc[fam.attempt_id.astype(str).eq(aid)].sort_values("scale_atr")
+    st.markdown("**Familias congeladas (recién reveladas)**")
+    st.dataframe(selected[["scale_atr","family_candidate","confirmed_low_progression",
+       "confirmed_high_progression","intercontact_trough_direction_48"]],
+       hide_index=True,use_container_width=True)
+    known=[(label,provenance) for group in TANDAS.values()
+           for _symbol,old_aid,label,provenance in group if old_aid==aid]
+    if known:
+        label, provenance=known[0]
+        st.caption(f"Referencia visual anterior: {label} · procedencia: {provenance}. "
+                   "No es una etiqueta independiente ni modifica la revisión guardada.")
+    else:
+        st.caption("Sin referencia visual anterior registrada en las tandas.")
+    audit_path=root/AUDIT_REL/"audit_matrix_pre.csv"
+    audit_manifest_path=root/AUDIT_REL/"manifest.json"
+    if audit_path.is_file() and audit_manifest_path.is_file():
+        try:
+            audit=read_cached(str(audit_path),audit_path.stat().st_mtime_ns)
+            audit_manifest=json.loads(audit_manifest_path.read_text(encoding="utf8"))
+            validate_audit_export(audit,fam,root=root,manifest=audit_manifest)
+            a=audit.loc[audit.attempt_id.astype(str).eq(aid)]
+            if len(a)==1:
+                st.dataframe(a[["intercontact_direction_48","net_return_pre48_pct",
+                    "scales_agree","audit_flags"]],hide_index=True,use_container_width=True)
+        except (OSError,ValueError,TypeError,KeyError,pd.errors.ParserError) as exc:
+            st.warning(f"Matriz comparativa congelada no disponible: {exc}")
+    st.caption("Comparación descriptiva; no es validación fuera de muestra, "
+               "ni evidencia de rentabilidad o señal operativa.")
+
+
+def render_blind_review(root: Path, data: dict, read_cached) -> None:
+    """Standalone *mode* of the existing HLL tab, not another Streamlit app.
+
+    PRE-only chart + isolated append-only manual save. Neither original labels
+    nor PRE family metrics are loaded or displayed before the user's save.
+    """
+    import streamlit as st
+    from dashboard.views.hll_blind_review_v1 import (
+        _cohort_rows, QUALITY, MORPHOLOGY, ORIGIN, CONFIDENCE,
+        PREVIOUS_EXPOSURE, REVIEW_REL, make_review, save_event,
+        load_events, latest_reviews, review_frame,
+    )
+
+    try:
+        cohort=_cohort_rows(data["summary"],data["levels"])
+        events=load_events(root,cohort)
+    except (OSError,ValueError,TypeError,KeyError,UnicodeDecodeError) as exc:
+        st.error(f"Revisor ciego no disponible: {exc}")
+        return
+    latest=latest_reviews(events)
+    st.markdown("#### Revisión visual ciega · 50 intentos PRE")
+    st.caption("Se ocultan POST, trazos del detector, familias, métricas, "
+               "etiquetas y evaluaciones anteriores. Se muestra solo OHLC PRE y zona de resistencia. "
+               "Las etiquetas se pueden revelar *después de guardar* cada evaluación. "
+               "Esta ceguera de interfaz no elimina lo que ya hayas visto en sesiones previas.")
+    c1,c2,c3=st.columns(3)
+    historic_ids={aid for group in TANDAS.values() for _sym,aid,_label,_source in group}
+    untouched=[r for r in cohort if r["attempt_id"] not in historic_ids]
+    c1.metric("Revisados manualmente",f"{len(latest)}/50")
+    c2.metric("Pendientes en los 50",50-len(latest))
+    c3.metric("Sin referencia histórica",len(untouched))
+    selected_scope=st.radio("Casos para revisar",[
+        "Sin referencia visual previa", "Todos los 50"],horizontal=True,
+        key="hll_blind_scope")
+    eligible=untouched if selected_scope=="Sin referencia visual previa" else cohort
+    pre_bars=st.selectbox("Velas PRE (sin POST)",list(PRE_VISUAL_OPTIONS),
+         index=PRE_VISUAL_OPTIONS.index(288),
+         format_func=lambda n:f"{n} velas · {n//2} horas",
+         key="hll_blind_pre_window")
+    by_id={r["attempt_id"]:r for r in cohort}
+    options=[r["attempt_id"] for r in eligible]
+    pending=[aid for aid in options if aid not in latest]
+    if not options:
+        st.info("No hay casos en este subconjunto.")
+        return
+    if st.session_state.get("hll_blind_current") not in options:
+        st.session_state.pop("hll_blind_current",None)
+    if pending:
+        # The callback executes before the selectbox is created on the next rerun.
+        def go_next():
+            st.session_state["hll_blind_current"]=pending[0]
+        st.button("Ir al próximo pendiente",on_click=go_next,key="hll_blind_next")
+    indexed={aid:n for n,aid in enumerate(options,start=1)}
+    aid=st.selectbox("Seleccionar intento",options,
+        format_func=lambda a:(f"Caso {indexed[a]}/{len(options)} · "
+                              f"{by_id[a]['symbol']} · "
+                              f"{pd.Timestamp(by_id[a]['pre_closed_ts'],unit='ms',tz='UTC'):%d-%m %H:%M} UTC · "
+                              f"{a[:8]} · {'GUARDADO' if a in latest else 'PENDIENTE'}"),
+        key="hll_blind_current")
+    r=by_id[aid]
+    st.caption("Corte PRE: " + pd.Timestamp(r["pre_closed_ts"],unit="ms",tz="UTC").strftime("%Y-%m-%d %H:%M UTC")
+              + " · zona de resistencia proyectada retrospectivamente como referencia visual")
+    p=root/CANDLES_REL/f"{r['symbol']}_30m.csv"
+    if not p.is_file():
+        st.warning(f"Falta OHLC para {r['symbol']}; no se permite guardar sin gráfico.")
+        return
+    try:
+        candles=read_cached(str(p),p.stat().st_mtime_ns)
+        fig=build_phase_chart(candles,r["pre_closed_ts"],r["zone_low"],r["zone_high"],
+            pd.DataFrame(),pd.DataFrame(),show_post=False,pre_bars=int(pre_bars),
+            show_pivots=False,show_legs=False,show_candidates=False)
+        st.plotly_chart(fig,use_container_width=True,key="hll_blind_chart_"+aid)
+        info=fig.layout.meta
+        st.caption(f"PRE mostrado: {info['pre_shown']}/{info['pre_requested']} velas. "
+                   "POST: oculto. Sin detecciones automáticas superpuestas.")
+        if info["pre_shown"] < info["pre_requested"]:
+            st.warning("Histórico visual parcial: no se interpolaron velas anteriores.")
+    except (OSError,ValueError,TypeError,KeyError) as exc:
+        st.error(f"OHLC no válido para revisión ciega: {exc}")
+        return
+    previous=latest.get(aid)
+    if previous:
+        st.info("Este intento ya tiene una revisión guardada. Podés exportarla, "
+                "ver la comparación posterior o registrar una nueva versión explícita.")
+    revealed=st.session_state.setdefault("hll_blind_revealed_ids",set())
+    global_revealed=bool(st.session_state.get("hll_blind_global_revealed",False))
+    can_save=aid not in revealed and not global_revealed
+    if not can_save:
+        st.warning("Ya se revelaron etiquetas de este intento o la comparación global "
+                   "durante esta sesión. Para conservar la trazabilidad ciega, "
+                   "no se pueden registrar nuevas revisiones después de esa revelación.")
+    with st.form("hll_blind_review_form_"+aid,clear_on_submit=False):
+        st.markdown("**Evaluación propia — sin mirar el resultado del algoritmo**")
+        quality=st.selectbox("Calidad visual de la reconstrucción",
+            [""]+list(QUALITY),format_func=lambda x:QUALITY.get(x,"Seleccioná una evaluación"),
+            key="hll_blind_quality_"+aid)
+        morphology=st.selectbox("Tipo de estructura visual",
+            [""]+list(MORPHOLOGY),format_func=lambda x:MORPHOLOGY.get(x,"Seleccioná un tipo"),
+            key="hll_blind_morphology_"+aid)
+        origin=st.selectbox("¿De dónde viene el precio en el contexto PRE?",
+            [""]+list(ORIGIN),format_func=lambda x:ORIGIN.get(x,"Seleccioná el origen"),
+            key="hll_blind_origin_"+aid)
+        confidence=st.selectbox("Confianza de tu evaluación",
+            [""]+list(CONFIDENCE),format_func=lambda x:CONFIDENCE.get(x,"Seleccioná confianza"),
+            key="hll_blind_confidence_"+aid)
+        exposure=st.selectbox("¿Ya habías visto este caso o sus etiquetas?",
+            ["NO_SE","NO_RECUERDO","SI"],format_func=lambda x:PREVIOUS_EXPOSURE[x],
+            key="hll_blind_exposure_"+aid)
+        note=st.text_area("Motivo visual breve (opcional)",max_chars=1200,
+            placeholder="Qué estructura, ruptura previa, pérdida de progreso o recuperación observás",
+            key="hll_blind_note_"+aid)
+        amend=st.checkbox("Registrar una nueva versión de este intento ya evaluado",
+            value=False,key="hll_blind_amend_"+aid) if previous else False
+        submitted=st.form_submit_button("Guardar evaluación PRE ciega",disabled=not can_save)
+    if submitted:
+        if previous and not amend:
+            st.error("Ya existe una revisión. Marcá explícitamente 'nueva versión' para editarla.")
+        else:
+            try:
+                event=make_review(cohort,attempt_id=aid,quality=quality,morphology=morphology,
+                    origin=origin,confidence=confidence,previous_exposure=exposure,
+                    pre_bars_shown=int(pre_bars),note=note)
+                location=save_event(root,event,cohort)
+                events.append(event)
+                latest[aid]=event
+                st.success(f"Revisión PRE guardada en {REVIEW_REL}/events/{location.name}. "
+                           "Ningún reporte o clasificador fue modificado.")
+            except (OSError,ValueError,TypeError) as exc:
+                st.error(f"No se pudo guardar: {exc}")
+    st.caption("Las evaluaciones se guardan en archivos JSON separados, con historial "
+               "append-only y un registro por evento. Nunca se sobrescriben las fuentes HLL.")
+    if events:
+        st.download_button("Exportar revisiones guardadas · últimas por intento (CSV)",
+            review_frame(events).to_csv(index=False).encode("utf8"),
+            "hll_revisiones_ciegas_pre_50.csv",mime="text/csv",key="hll_blind_download_latest")
+        st.download_button("Exportar historial completo de revisiones (CSV)",
+            review_frame(events,latest_only=False).to_csv(index=False).encode("utf8"),
+            "hll_revisiones_ciegas_historial.csv",mime="text/csv",key="hll_blind_download_all")
+    if aid in latest:
+        reveal=st.checkbox("Revelar SOLO este intento: familias y etiquetas previas (tras guardar)",
+                           value=False,key="hll_blind_reveal_"+aid)
+        if reveal:
+            revealed.add(aid)
+            st.warning("Comparación posterior: este intento ya no debe usarse para otra revisión ciega.")
+            _compare_after_blind_save(root,data,read_cached,aid)
+    if len(latest)==50:
+        st.success("Los 50 intentos tienen al menos una evaluación manual. "
+                   "El contraste global se desbloqueó, pero sus resultados son exploratorios.")
+        if st.checkbox("Comparar globalmente las 50 revisiones con el intérprete PRE",
+                       key="hll_blind_global_reveal"):
+            st.session_state["hll_blind_global_revealed"]=True
+            family_path=root/FAMILY_REL/FAMILY_FILE
+            manifest_path=root/FAMILY_REL/FAMILY_MANIFEST
+            try:
+                families=read_cached(str(family_path),family_path.stat().st_mtime_ns)
+                manifest=json.loads(manifest_path.read_text(encoding="utf8"))
+                validate_family_export(families,data["summary"],root=root,manifest=manifest)
+                actual=review_frame(events)[["attempt_id","quality","morphology","previous_exposure"]]
+                model=families.loc[pd.to_numeric(families.scale_atr).eq(1.0),
+                    ["attempt_id","family_candidate"]]
+                merged=actual.merge(model,on="attempt_id",validate="one_to_one")
+                if len(merged)!=50:
+                    raise ValueError("Faltan casos en el contraste global")
+                st.dataframe(pd.crosstab(merged.quality,merged.family_candidate),
+                    use_container_width=True)
+                st.dataframe(merged,hide_index=True,use_container_width=True)
+                st.caption("Esto NO es una prueba fuera de muestra: hubo casos previamente vistos "
+                           "y los intentos comparten símbolos y trayectorias.")
+            except (OSError,ValueError,KeyError,TypeError,pd.errors.ParserError) as exc:
+                st.warning(f"Contraste global no disponible: {exc}")
+
+
 def render_hll_phase_batch(root) -> None:
     """Render inside existing HLL view (no new dashboard page)."""
     import streamlit as st
@@ -688,7 +906,7 @@ def render_hll_phase_batch(root) -> None:
     root = Path(root)
     src = _required_sources(root)
     with st.expander("🧩 HLL · Tandas PRE · detecciones de fases (CORE15)", expanded=False):
-        st.caption("Mismo inspector HLL. Auditoría de 50 intentos y 3 escalas ATR, solo lectura. "
+        st.caption("Mismo inspector HLL. Las auditorías existentes son de solo lectura; las revisiones manuales se guardan por separado. "
                    "Las fases NO son una clasificación de calidad ni una señal de trading.")
         absent = [str(p.relative_to(root)) for p in src.values() if not p.is_file()]
         if absent:
@@ -705,6 +923,12 @@ def render_hll_phase_batch(root) -> None:
             validate_sources(data["summary"], data["levels"])
         except (OSError, KeyError, ValueError, pd.errors.ParserError) as exc:
             st.error(f"No se puede abrir esta auditoría PRE: {exc}")
+            return
+        mode = st.radio("Modo del inspector HLL",
+            ["Inspector y auditorías existentes", "Revisión visual ciega (PRE)"],
+            horizontal=True,key="hll_phase_mode")
+        if mode == "Revisión visual ciega (PRE)":
+            render_blind_review(root, data, read_cached)
             return
         family_export = None
         family_path = root / FAMILY_REL / FAMILY_FILE
