@@ -110,6 +110,11 @@ def render_hll_v28_structure_dashboard(root):
         # Do not render POST/performance blocks below an active blind PRE review.
         if st.session_state.get('hll_phase_mode') == 'Revisión visual ciega (PRE)':
             return
+        # Búsqueda PRE experimental sobre todos los CROSS_UP (nunca durante revisión ciega).
+        if st.checkbox('🔎 Activar Discovery estructural PRE · 290 símbolos',
+                       value=False,key='hll_discovery_enabled'):
+            from dashboard.views.hll_structural_discovery_view import render_hll_structural_discovery
+            render_hll_structural_discovery(root)
         if mode=='290 símbolos · análisis integral':
             st.caption('Corrida congelada de 290 símbolos; todas las estructuras PRE, flip, '
                        'continuación, reclaim y, cuando haya datos 1m, matrices TP/SL. '
