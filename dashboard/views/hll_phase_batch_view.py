@@ -26,6 +26,16 @@ FAMILY_REL = Path("reports/horizontal_level_second_ascent_pre/core15_pre_family_
 FAMILY_FILE = "families_pre.csv"
 FAMILY_MANIFEST = "manifest.json"
 AUDIT_REL = Path("reports/horizontal_level_second_ascent_pre/core15_pre_family_audit_v1")
+CONTINUITY_REL = Path("reports/horizontal_level_second_ascent_pre/core15_pre_phase_continuity_audit_v1")
+CONTINUITY_SOURCES = {
+    "audit_matrix": AUDIT_REL / "audit_matrix_pre.csv",
+    "audit_manifest": AUDIT_REL / "manifest.json",
+    "phase_manifest": REL / "manifest.json",
+    "summary": REL / "phase_summary_pre.csv",
+    "legs": REL / "phase_legs_pre.csv",
+    "candidates": REL / "phase_recovery_candidates_pre.csv",
+}
+
 FAMILY_SOURCES = {
     "summary": REL / "phase_summary_pre.csv",
     "pivots": REL / "phase_confirmed_pivots_pre.csv",
@@ -255,6 +265,206 @@ def render_audit_matrix(root: Path, read_cached, family_export: pd.DataFrame) ->
         st.caption("Los casos SIN_EVALUACION no son negativos. No se usa POST, "
                    "ni las etiquetas visuales para generar las familias.")
 
+
+
+
+def validate_continuity_export(scales: pd.DataFrame, matrix: pd.DataFrame,
+                               cycles: pd.DataFrame, manifest: dict,
+                               *, root: Path, audit: pd.DataFrame) -> None:
+    """Fail closed if continuity report mismatches the frozen 50-row PRE audit.
+
+    The source hashes prevent displaying a result after changing input files.
+    Output hashes also protect against a manually edited/partially exported CSV.
+    """
+    required_scale = {"attempt_id", "symbol", "level_id", "pre_closed_ts",
+        "scale_atr", "status", "latest_recovery_retention_frac",
+        "completed_up_down_cycles", "complete_givebacks_last3",
+        "net_trough_progress_last3_atr", "preserved_fraction_last3",
+        "data_limitations"}
+    required_matrix = {"attempt_id", "symbol", "level_id", "pre_closed_ts",
+        "family_1p0", "retention_1p0", "preserved_fraction_last3_1p0",
+        "completed_cycles_1p0", "structure_review_notes"}
+    required_cycle = {"attempt_id", "scale_atr", "cycle_index",
+        "giveback_ratio", "left_censored", "full_giveback", "status"}
+    if not required_scale.issubset(scales.columns) or not required_matrix.issubset(matrix.columns) \
+       or not required_cycle.issubset(cycles.columns):
+        raise ValueError("Faltan columnas de continuidad PRE")
+    if len(scales) != 150 or len(matrix) != 50 or matrix.attempt_id.duplicated().any():
+        raise ValueError("Continuidad necesita exactamente 50 intentos y 150 escalas")
+    if not (manifest.get("name") == "HLL_PRE_PHASE_CONTINUITY_V1"
+            and manifest.get("attempts") == 50 and manifest.get("scale_rows") == 150
+            and manifest.get("reads_post") is False
+            and manifest.get("reads_visual_for_metrics") is False
+            and manifest.get("modifies_live") is False
+            and manifest.get("classifies_good_bad") is False
+            and manifest.get("phase_window_bars") == 96):
+        raise ValueError("Manifiesto de continuidad no certifica investigación PRE")
+    for name, relative in CONTINUITY_SOURCES.items():
+        path = root / relative
+        if not path.is_file():
+            raise ValueError(f"Fuente del auditor de continuidad ausente: {name}")
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for part in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(part)
+        if h.hexdigest() != manifest.get("source_sha256", {}).get(name):
+            raise ValueError(f"Fuente de continuidad modificada: {name}")
+    for filename in ("continuity_scales_pre.csv", "continuity_matrix_pre.csv", "continuity_cycles_pre.csv"):
+        path = root / CONTINUITY_REL / filename
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for part in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(part)
+        if h.hexdigest() != manifest.get("output_sha256", {}).get(filename):
+            raise ValueError(f"Exportación de continuidad inconsistente: {filename}")
+    if (scales.duplicated(["attempt_id", "scale_atr"]).any()
+            or not scales.status.eq("DESCRIPTIVE_PRE_ONLY").all()):
+        raise ValueError("Escalas duplicadas o sin carácter descriptivo")
+    expected = {(str(a), v) for a in audit.attempt_id for v in (0.5,1.0,1.5)}
+    actual = {(str(x.attempt_id), float(x.scale_atr)) for x in scales.itertuples(index=False)}
+    if expected != actual or set(matrix.attempt_id) != set(audit.attempt_id):
+        raise ValueError("Continuidad y auditoría no cubren las mismas escalas o intentos")
+    one = scales.loc[pd.to_numeric(scales.scale_atr).eq(1.0)]
+    merged = audit[["attempt_id", "symbol", "level_id", "pre_closed_ts", "family_1p0"]].merge(
+        matrix[["attempt_id", "symbol", "level_id", "pre_closed_ts", "family_1p0"]],
+        on="attempt_id", validate="one_to_one",suffixes=("_audit", "_continuity"))
+    if len(merged)!=50:
+        raise ValueError("Cruce incompleto con auditoría anterior")
+    for field in ("symbol", "level_id", "pre_closed_ts", "family_1p0"):
+        a,b=merged[f"{field}_audit"],merged[f"{field}_continuity"]
+        if not a.astype(str).eq(b.astype(str)).all():
+            raise ValueError(f"Continuidad cambió {field}")
+    merged2 = one[["attempt_id","symbol","level_id","pre_closed_ts",
+        "latest_recovery_retention_frac", "preserved_fraction_last3", "completed_up_down_cycles"]].merge(
+        matrix[["attempt_id","symbol","level_id","pre_closed_ts","retention_1p0",
+        "preserved_fraction_last3_1p0","completed_cycles_1p0"]],
+        on="attempt_id",suffixes=("_scale","_matrix"),validate="one_to_one")
+    if len(merged2)!=50:
+        raise ValueError("Una escala falta del resumen")
+    for field in ("symbol","level_id","pre_closed_ts"):
+        if not merged2[f"{field}_scale"].astype(str).eq(merged2[f"{field}_matrix"].astype(str)).all():
+            raise ValueError(f"La escala 1 ATR no coincide en {field}")
+    for a,b in (("latest_recovery_retention_frac","retention_1p0"),
+                ("preserved_fraction_last3","preserved_fraction_last3_1p0"),
+                ("completed_up_down_cycles","completed_cycles_1p0")):
+        x,y = pd.to_numeric(merged2[a],errors="coerce"),pd.to_numeric(merged2[b],errors="coerce")
+        if not (x.isna().eq(y.isna()).all() and ((x-y).abs().fillna(0)<1e-7).all()):
+            raise ValueError(f"Valor de continuidad distinto entre escalas/matriz: {a}")
+    if not cycles.empty:
+        if cycles.loc[~cycles.attempt_id.isin(matrix.attempt_id)].shape[0]:
+            raise ValueError("Ciclos de otros intentos")
+        if not pd.to_numeric(cycles.left_censored,errors="raise").isin([0,1]).all():
+            raise ValueError("Censura de ciclos inválida")
+        if pd.to_numeric(cycles.giveback_ratio,errors="raise").le(0).any():
+            raise ValueError("Cesión de ciclo inválida")
+        known = cycles.groupby(["attempt_id","scale_atr"])["left_censored"].apply(
+            lambda x: int((pd.to_numeric(x)==0).sum())).to_dict()
+        for r in scales.itertuples(index=False):
+            if int(r.completed_up_down_cycles) != known.get((r.attempt_id,r.scale_atr),0):
+                raise ValueError("El número de ciclos confirmados difiere del detalle")
+
+
+def render_continuity_audit(root: Path, read_cached, family_export: pd.DataFrame):
+    """Additive inspector: does not edit any detector, trading signal or CSV."""
+    import streamlit as st
+    path = root / CONTINUITY_REL / "continuity_matrix_pre.csv"
+    summary_path = root / CONTINUITY_REL / "continuity_scales_pre.csv"
+    cycles_path = root / CONTINUITY_REL / "continuity_cycles_pre.csv"
+    manifest_path = root / CONTINUITY_REL / "manifest.json"
+    with st.expander("🧬 Conservación y deterioro de fases · 50 PRE", expanded=False):
+        if not all(x.is_file() for x in (path, summary_path, cycles_path, manifest_path)):
+            st.info("Generá este reporte con `python3 hll_pre_phase_continuity_audit_v1.py --plan` "
+                    "y después `--run`. No modifica el intérprete ni los CSV anteriores.")
+            return None
+        try:
+            matrix = read_cached(str(path), path.stat().st_mtime_ns)
+            scales = read_cached(str(summary_path), summary_path.stat().st_mtime_ns)
+            cycles = read_cached(str(cycles_path), cycles_path.stat().st_mtime_ns)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            prior_path = root / AUDIT_REL / "audit_matrix_pre.csv"
+            prior_manifest_path = root / AUDIT_REL / "manifest.json"
+            prior = read_cached(str(prior_path), prior_path.stat().st_mtime_ns)
+            prior_manifest = json.loads(prior_manifest_path.read_text(encoding="utf-8"))
+            validate_audit_export(prior, family_export, root=root,manifest=prior_manifest)
+            validate_continuity_export(scales,matrix,cycles,manifest,root=root,audit=prior)
+        except (OSError, KeyError, ValueError, TypeError, pd.errors.ParserError) as exc:
+            st.warning(f"Continuidad PRE no disponible: {exc}")
+            return None
+        one = scales.loc[pd.to_numeric(scales.scale_atr).eq(1.0)]
+        k1,k2,k3,k4=st.columns(4)
+        k1.metric("Intentos",len(matrix))
+        k2.metric("Con ciclos completos",int(pd.to_numeric(one.completed_up_down_cycles).gt(0).sum()))
+        k3.metric("Pérdida neta últimos 3 ciclos",int(pd.to_numeric(one.net_trough_progress_last3_atr).lt(0).sum()))
+        k4.metric("Con alguna cesión ≥100%",int(pd.to_numeric(one.complete_givebacks_last3).fillna(0).gt(0).sum()))
+        st.caption("Muestra histórica exploratoria. Último LOW confirmado elegido por recencia, nunca por rendimiento. "
+                   "Una retención alta del rebote reciente puede coexistir con pérdidas anteriores grandes. "
+                   "Los 3 ciclos son los últimos 3 UP→DOWN confirmados, sin incluir provisional ni ciclos censurados.")
+        subset = st.selectbox("Inspeccionar continuidad",[
+            "Todos los 50", "Pérdida neta últimos 3 ciclos", "Alguna devolución completa",
+            "Sin ciclos completos", "Sin evaluación visual"],key="hll_continuity_subset")
+        shown=matrix.copy()
+        if subset=="Pérdida neta últimos 3 ciclos":
+            shown=shown.loc[pd.to_numeric(shown.net_trough_progress_last3_atr_1p0).lt(0)]
+        elif subset=="Alguna devolución completa":
+            shown=shown.loc[pd.to_numeric(shown.complete_givebacks_last3_1p0).fillna(0).gt(0)]
+        elif subset=="Sin ciclos completos":
+            shown=shown.loc[pd.to_numeric(shown.completed_cycles_1p0).eq(0)]
+        elif subset=="Sin evaluación visual":
+            shown=shown.loc[shown.review_visual.eq("SIN_EVALUACION")]
+        columns=["symbol","attempt_id","review_visual","family_1p0",
+            "retention_1p0","preserved_fraction_last3_1p0",
+            "net_trough_progress_last3_atr_1p0","complete_givebacks_last3_1p0",
+            "max_giveback_last3_1p0","completed_cycles_1p0","latest_low_age_1p0",
+            "data_limitations_1p0"]
+        st.caption(f"{len(shown)} casos visibles; filtros para navegación, no entradas ni selección rentable.")
+        st.dataframe(shown[columns],hide_index=True,use_container_width=True,height=360)
+        for filedata, filename, label, key_name in (
+            (matrix,"hll_continuity_50.csv","Exportar matriz 50 intentos","hll_continuity_matrix_download"),
+            (scales,"hll_continuity_150.csv","Exportar 150 escalas","hll_continuity_scales_download"),
+            (cycles,"hll_continuity_cycles.csv","Exportar ciclos detallados","hll_continuity_cycles_download")):
+            st.download_button(label,filedata.to_csv(index=False).encode("utf-8"),
+                file_name=filename,mime="text/csv",key=key_name)
+        options=[f"{r.symbol} · {r.attempt_id}" for r in matrix.itertuples(index=False)]
+        selected=st.selectbox("Comparar un intento en las 3 escalas",options,
+                              key="hll_continuity_select_attempt")
+        aid=selected.rsplit(" · ",1)[-1]
+        per_scale=scales.loc[scales.attempt_id.eq(aid)]
+        st.dataframe(per_scale[["scale_atr","latest_confirmed_low_age_bars",
+            "latest_recovery_retention_frac","previous_recovery_retention_frac",
+            "net_trough_progress_last3_atr","preserved_fraction_last3",
+            "complete_givebacks_last3","completed_up_down_cycles","data_limitations"]],
+            hide_index=True,use_container_width=True)
+        selected_cycles=cycles.loc[cycles.attempt_id.eq(aid) & pd.to_numeric(cycles.scale_atr).eq(1.0)]
+        if not selected_cycles.empty:
+            st.caption("Ciclos UP→DOWN de 1 ATR; los de borde izquierdo se indican y se excluyen del agregado.")
+            st.dataframe(selected_cycles[["cycle_index","up_amplitude_atr",
+                "down_amplitude_atr","giveback_ratio","undercut_previous_low",
+                "left_censored","down_confirmed_known_closed_ts"]],
+                hide_index=True,use_container_width=True,height=250)
+        st.caption("Retención = avance conservado desde último LOW / máximo avance desde ese LOW. "
+                   "Conservación de últimos 3 ciclos = 1 − suma correcciones/suma subidas. "
+                   "Puede ser negativa; NO es probabilidad, rentabilidad ni clasificación buena/mala.")
+        return scales,cycles
+
+
+def _continuity_chart_caption(scales: pd.DataFrame, aid: str, scale: float) -> str | None:
+    """Small provenance-aware annotation for the existing PRE candle chart."""
+    rows=scales.loc[scales.attempt_id.astype(str).eq(aid) &
+                    pd.to_numeric(scales.scale_atr).eq(float(scale))]
+    if len(rows)!=1:
+        return None
+    r=rows.iloc[0]
+    def fmt(value,ratio=False):
+        v=pd.to_numeric(pd.Series([value]),errors="coerce").iloc[0]
+        if pd.isna(v):return "sin datos"
+        return f"{float(v)*100:+.1f}%" if ratio else f"{float(v):+.2f} ATR"
+    age = ("desconocida" if pd.isna(r.latest_confirmed_low_age_bars)
+           else f"{int(r.latest_confirmed_low_age_bars)} velas")
+    return (f"Conservación desde último LOW confirmado: {fmt(r.latest_recovery_retention_frac,True)} "
+            f"(edad {age}) · "
+            f"Conservación últimos 3 ciclos: {fmt(r.preserved_fraction_last3,True)} · "
+            f"Progreso neto últimos 3 ciclos: {fmt(r.net_trough_progress_last3_atr)}. "
+            "Tramo final provisional no contado; métricas descriptivas PRE.")
 
 def family_brief(record) -> str:
     """Display only: no signal, recommendation, probability or fitted score."""
@@ -552,6 +762,7 @@ def render_hll_phase_batch(root) -> None:
         st.caption("Pivotes dibujados retrospectivamente sobre su vela de origen: "
                    "el hover indica cuándo quedaron confirmados. Tramos discontinuos = provisionales en PRE. "
                    "El POST, si se revela, es solo visual y nunca cambia las detecciones.")
+        continuity_export = None
         if family_export is not None:
             subset_fam = family_export.loc[family_export.scale_atr.astype(float).eq(float(scale))].copy()
             st.caption("Familias experimentales: describen la geometría de PRE, NO calidad, "
@@ -568,6 +779,7 @@ def render_hll_phase_batch(root) -> None:
                     "terminal_phase","confirmed_low_progression","confirmed_high_progression",
                     "intercontact_trough_direction_48"]],hide_index=True,use_container_width=True)
             render_audit_matrix(root, read_cached, family_export)
+            continuity_export = render_continuity_audit(root, read_cached, family_export)
         if group == ALL:
             metadata = data["summary"].loc[data["summary"].scale_atr.eq(1.0)]
             symbols = sorted(metadata.symbol.unique())
@@ -584,7 +796,10 @@ def render_hll_phase_batch(root) -> None:
                         families_for_scale.family_candidate.eq(chosen_family), "attempt_id"].astype(str))
                     metadata = metadata.loc[metadata.attempt_id.astype(str).isin(ids_matching)]
             metadata = metadata.sort_values(["symbol", "pre_closed_ts", "attempt_id"])
-            rows = [(str(r.symbol), str(r.attempt_id), "Sin evaluación visual", "Sin etiqueta")
+            review_lookup={aid: (label, origin) for entries in TANDAS.values()
+                for _,aid,label,origin in entries}
+            rows = [(str(r.symbol), str(r.attempt_id),
+                     *review_lookup.get(str(r.attempt_id), ("Sin evaluación visual", "Sin etiqueta")))
                     for r in metadata.itertuples()]
         else:
             rows = TANDAS[group]
@@ -638,6 +853,10 @@ def render_hll_phase_batch(root) -> None:
                         if post and info["post_shown"] < info["post_requested"]:
                             st.info("No existe todo el POST solicitado en este CSV; "
                                     "se muestran solo las velas contiguas disponibles.")
+                        if continuity_export is not None:
+                            continuity_note=_continuity_chart_caption(continuity_export[0],aid,float(scale))
+                            if continuity_note:
+                                st.caption(continuity_note)
                         tip = str(r.terminal_leg_direction)
                         st.caption(f"Terminal PRE: {tip} PROVISIONAL · "
                                    f"pivotes confirmados: {int(r.confirmed_pivots)} · "

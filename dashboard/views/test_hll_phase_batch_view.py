@@ -307,3 +307,94 @@ class AuditMatrixValidationTests(unittest.TestCase):
         if not (f.is_file() and m.is_file() and j.is_file()):self.skipTest('Requiere reportes auditoría en VPS')
         validate_audit_export(pd.read_csv(m),pd.read_csv(f),root=root,
                               manifest=__import__('json').loads(j.read_text()))
+
+
+class ContinuityViewTests(unittest.TestCase):
+    def test_continuity_caption_is_presentational(self):
+        from dashboard.views.hll_phase_batch_view import _continuity_chart_caption
+        table=pd.DataFrame([{'attempt_id':'a','scale_atr':1.0,
+            'latest_recovery_retention_frac':0.86,
+            'latest_confirmed_low_age_bars':3,
+            'preserved_fraction_last3':0.06,
+            'net_trough_progress_last3_atr':0.42}])
+        s=_continuity_chart_caption(table,'a',1.0)
+        self.assertIn('86.0%',s)
+        self.assertIn('+6.0%',s)
+        self.assertIn('provisional',s)
+        self.assertIsNone(_continuity_chart_caption(table,'missing',1.0))
+
+    def test_continuity_caption_missing_is_not_zero(self):
+        from dashboard.views.hll_phase_batch_view import _continuity_chart_caption
+        table=pd.DataFrame([{'attempt_id':'a','scale_atr':0.5,
+            'latest_recovery_retention_frac':float('nan'),
+            'latest_confirmed_low_age_bars':float('nan'),
+            'preserved_fraction_last3':float('nan'),
+            'net_trough_progress_last3_atr':float('nan')}])
+        text=_continuity_chart_caption(table,'a',0.5)
+        self.assertIn('sin datos',text)
+        self.assertIn('desconocida',text)
+
+    def test_continuity_integration_is_additive(self):
+        target=Path(__file__).with_name('hll_phase_batch_view.py')
+        contents=target.read_text(encoding='utf8')
+        self.assertIn('render_continuity_audit(root, read_cached, family_export)',contents)
+        self.assertIn('render_audit_matrix(root, read_cached, family_export)',contents)
+        self.assertIn('build_phase_chart(candles,',contents)
+        self.assertNotIn('st.set_page_config(',contents)
+
+
+class ContinuityExportOnDiskTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root=Path(__file__).resolve().parents[2]
+        cls.base=cls.root / 'reports/horizontal_level_second_ascent_pre/core15_pre_phase_continuity_audit_v1'
+        cls.prior=cls.root / 'reports/horizontal_level_second_ascent_pre/core15_pre_family_audit_v1/audit_matrix_pre.csv'
+        cls.exists=all(p.is_file() for p in [cls.base/'continuity_scales_pre.csv',
+                   cls.base/'continuity_matrix_pre.csv',cls.base/'continuity_cycles_pre.csv',
+                   cls.base/'manifest.json',cls.prior])
+        if cls.exists:
+            import json
+            cls.scales=pd.read_csv(cls.base/'continuity_scales_pre.csv')
+            cls.matrix=pd.read_csv(cls.base/'continuity_matrix_pre.csv')
+            cls.cycles=pd.read_csv(cls.base/'continuity_cycles_pre.csv')
+            cls.audit=pd.read_csv(cls.prior)
+            cls.manifest=json.loads((cls.base/'manifest.json').read_text(encoding='utf8'))
+
+    def validate(self,scales=None,matrix=None,cycles=None,manifest=None):
+        if not self.exists:self.skipTest('Requiere reporte continuity V1 en VPS')
+        from dashboard.views.hll_phase_batch_view import validate_continuity_export
+        validate_continuity_export(scales if scales is not None else self.scales,
+            matrix if matrix is not None else self.matrix,
+            cycles if cycles is not None else self.cycles,
+            manifest if manifest is not None else self.manifest,
+            root=self.root,audit=self.audit)
+
+    def test_real_export_validates(self):
+        self.validate()
+
+    def test_wrong_source_hash_fails_closed(self):
+        if not self.exists:self.skipTest('Requiere reporte continuity V1 en VPS')
+        data=dict(self.manifest)
+        data['source_sha256']={**data['source_sha256'],'legs':'bad'}
+        with self.assertRaisesRegex(ValueError,'modificada'):
+            self.validate(manifest=data)
+
+    def test_wrong_family_refused(self):
+        if not self.exists:self.skipTest('Requiere reporte continuity V1 en VPS')
+        wrong=self.matrix.copy()
+        wrong.loc[0,'family_1p0']='FAMILIA_CAMBIADA'
+        with self.assertRaisesRegex(ValueError,'cambió family_1p0'):
+            self.validate(matrix=wrong)
+
+    def test_wrong_cycles_count_refused(self):
+        if not self.exists:self.skipTest('Requiere reporte continuity V1 en VPS')
+        wrong=self.cycles.iloc[1:].copy()
+        with self.assertRaisesRegex(ValueError,'número de ciclos'):
+            self.validate(cycles=wrong)
+
+    def test_wrong_pre_refused(self):
+        if not self.exists:self.skipTest('Requiere reporte continuity V1 en VPS')
+        wrong=self.matrix.copy()
+        wrong.loc[0,'pre_closed_ts']=int(wrong.loc[0,'pre_closed_ts'])+TF_MS
+        with self.assertRaisesRegex(ValueError,'cambió pre_closed_ts'):
+            self.validate(matrix=wrong)
