@@ -1,4 +1,5 @@
 import io
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from dashboard.views.hll_phase_batch_view import (
     TANDAS, _at_scale, valid_legs, valid_pivots, validate_closed_bars,
     validate_sources, validate_family_export, family_brief, build_phase_chart, TF_MS,
     display_chart_window, _origin_vs_resistance, PRE_VISUAL_OPTIONS, POST_VISUAL_OPTIONS,
+    DEFAULT_PRE_VISUAL_BARS, DEFAULT_POST_VISUAL_BARS, family_evidence_text,
 )
 
 PRE = 1787400000000
@@ -85,6 +87,33 @@ class PhaseBatchViewTests(unittest.TestCase):
         q=valid_legs(l,'a',1.0,PRE)
         self.assertEqual(len(q),1)
         self.assertEqual(q.iloc[0].status,'PROVISIONAL')
+
+    def test_family_evidence_empty_csv_fields_never_break_rendering(self):
+        """Pandas converts empty exported strings to float NaN: reproduces UI issue."""
+        csv_data = ("attempt_id,supporting_observations,contradicting_observations,limitations,family_basis\n"
+                    "a,swing ascendente,,,recuperación previa\n"
+                    "b,,, ,\n")
+        loaded = pd.read_csv(io.StringIO(csv_data))
+        good = loaded.iloc[0]
+        self.assertEqual(family_evidence_text(good.supporting_observations), "swing ascendente")
+        self.assertEqual(family_evidence_text(good.contradicting_observations),
+                         "sin observaciones específicas")
+        self.assertEqual(family_evidence_text(good.limitations, fallback="sin limitaciones adicionales"),
+                         "sin limitaciones adicionales")
+        for row in loaded.itertuples():
+            for field in ("supporting_observations", "contradicting_observations", "limitations", "family_basis"):
+                label = "**A favor:** " + family_evidence_text(getattr(row, field))
+                self.assertIsInstance(label, str)
+        for empty in (None, float("nan"), pd.NA, "", "   ", "nan", "None"):
+            self.assertEqual(family_evidence_text(empty), "sin observaciones específicas")
+        self.assertEqual(family_evidence_text(1.25), "1.25")
+
+    def test_visual_defaults_match_requested_context_without_changing_core(self):
+        self.assertEqual(DEFAULT_PRE_VISUAL_BARS, 288)
+        self.assertEqual(DEFAULT_POST_VISUAL_BARS, 96)
+        self.assertIn(DEFAULT_PRE_VISUAL_BARS, PRE_VISUAL_OPTIONS)
+        self.assertIn(DEFAULT_POST_VISUAL_BARS, POST_VISUAL_OPTIONS)
+        self.assertEqual(len(validate_closed_bars(bars(n=450), PRE)), 96)
 
     def test_visual_selector_options(self):
         self.assertEqual(PRE_VISUAL_OPTIONS, (48, 96, 144, 192, 288, 384))

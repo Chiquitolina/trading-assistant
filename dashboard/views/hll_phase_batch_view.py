@@ -16,6 +16,9 @@ TF_MS = 1_800_000
 # Display context only; the frozen PRE detections/family analysis remain 96 candles.
 PRE_VISUAL_OPTIONS = (48, 96, 144, 192, 288, 384)
 POST_VISUAL_OPTIONS = (12, 24, 48, 72, 96)
+# UI-only defaults. The frozen detector still uses 96 fully closed PRE bars.
+DEFAULT_PRE_VISUAL_BARS = 288
+DEFAULT_POST_VISUAL_BARS = 96
 REL = Path("reports/horizontal_level_second_ascent_pre/core15_phase_reconstruction_pre_v1")
 PHASE_REL = Path("reports/horizontal_level_second_ascent_pre/core15_two_leg_v12/segments_pre.csv")
 CANDLES_REL = Path("reports/horizontal_level_lifecycle_v21/candles_aug20_oct25_core15_btc")
@@ -156,6 +159,19 @@ def validate_family_export(families: pd.DataFrame, summary: pd.DataFrame,
 def family_brief(record) -> str:
     """Display only: no signal, recommendation, probability or fitted score."""
     return str(record["family_candidate"]).replace("_", " ").capitalize()
+
+
+def family_evidence_text(value: object, *, fallback: str = "sin observaciones específicas") -> str:
+    """Render an optional exported CSV field safely; empty fields become NaN.
+
+    This is presentation only: never replace or modify the frozen PRE data.
+    """
+    if value is None:
+        return fallback
+    if not isinstance(value, str) and pd.api.types.is_scalar(value) and pd.isna(value):
+        return fallback
+    result = str(value).strip()
+    return result if result and result.lower() not in {"nan", "none", "<na>"} else fallback
 
 
 def validate_closed_bars(candles: pd.DataFrame, pre_closed_ts: int, lookback: int = 96) -> pd.DataFrame:
@@ -411,11 +427,13 @@ def render_hll_phase_batch(root) -> None:
         b1, b2 = st.columns(2)
         with b1:
             pre_bars = st.selectbox("Velas PRE para visualizar", list(PRE_VISUAL_OPTIONS),
-                                    index=1, format_func=lambda n: f"{n} velas · {n // 2} h",
+                                    index=PRE_VISUAL_OPTIONS.index(DEFAULT_PRE_VISUAL_BARS),
+                                    format_func=lambda n: f"{n} velas · {n // 2} h",
                                     key="hll_phase_pre_bars")
         with b2:
             post_bars = st.selectbox("Velas POST (si se revelan)", list(POST_VISUAL_OPTIONS),
-                                     index=1, format_func=lambda n: f"{n} velas · {n / 2:g} h",
+                                     index=POST_VISUAL_OPTIONS.index(DEFAULT_POST_VISUAL_BARS),
+                                     format_func=lambda n: f"{n} velas · {n / 2:g} h",
                                      key="hll_phase_post_bars", disabled=not post)
         st.caption("La cantidad PRE y POST cambia SOLO lo visible en las velas. "
                    "Los pivotes, las fases y las familias fueron calculados con 96 velas PRE "
@@ -532,11 +550,13 @@ def render_hll_phase_batch(root) -> None:
                             else:
                                 fr = sel_family.iloc[0]
                                 st.markdown(f"**Familia PRE candidata:** {family_brief(fr)}")
-                                st.caption(f"Motivo: {fr.family_basis} · sin clasificación buena/mala")
+                                st.caption(f"Motivo: {family_evidence_text(fr.family_basis, fallback='sin motivo registrado')} "
+                                           "· sin clasificación buena/mala")
                                 with st.expander("Evidencias y contradicciones de la familia", expanded=False):
-                                    st.write("**A favor:** " + (fr.supporting_observations or "sin observaciones específicas"))
-                                    st.write("**En contra:** " + (fr.contradicting_observations or "sin observaciones específicas"))
-                                    st.write("**Limitaciones:** " + (fr.limitations or "sin limitaciones adicionales"))
+                                    st.write("**A favor:** " + family_evidence_text(fr.supporting_observations))
+                                    st.write("**En contra:** " + family_evidence_text(fr.contradicting_observations))
+                                    st.write("**Limitaciones:** " + family_evidence_text(
+                                        fr.limitations, fallback="sin limitaciones adicionales"))
                                     same = family_export.loc[family_export.attempt_id.astype(str).eq(aid),
                                         ["scale_atr", "family_candidate", "confirmed_low_progression",
                                          "confirmed_high_progression", "intercontact_trough_direction_48"]]
