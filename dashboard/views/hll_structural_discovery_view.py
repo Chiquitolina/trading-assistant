@@ -15,6 +15,7 @@ import pandas as pd
 from hll_structural_discovery_v1 import CANDLES, OUTPUT_PARENT, TF, bar_window, sha
 
 OVERLAP_PARENT = Path('reports/horizontal_level_structural_overlap_audit_v1/full290_v1')
+MATURITY_PARENT = Path('reports/horizontal_level_pre_maturity_metrics_v1/full290_v1')
 # V2.6 independent test events, only test timestamps at or before selected PRE cutoff.
 TOUCHES_SOURCE = Path('reports/horizontal_level_structure_lab_v26/runs/sep290_frozen_v26_roundtrip/touches.csv')
 
@@ -26,6 +27,16 @@ TOUCH_SORTS = {
     'Mayor duración entre contactos PRE desde abajo (288 velas)': ('touch_span_pre288_bars', False),
     'Menor separación mediana entre contactos PRE desde abajo (288 velas)': ('touch_gap_median_pre288_bars', True),
     'Mayor duración observada entre contactos PRE desde abajo (histórico V2.6)': ('touch_span_all_pre_bars', False),
+}
+MATURITY_SORTS = {
+    'Menor amplitud robusta reciente (24 velas / ATR)': ('amplitude_24_recent_atr', True),
+    'Más compresión 24 vs primeras 24 (96 PRE)': ('compression_24_recent_vs_early', True),
+    'Más compresión 48 vs primeras 48 (96 PRE)': ('compression_48_recent_vs_first', True),
+    'Más compresión 72 vs primeras 72 (288 PRE)': ('compression_72_recent_vs_first_288', True),
+    'Mayor progreso de mínimos por bloques (proxy 96 PRE)': ('trough_net_progress_last3_atr', False),
+    'Mayor persistencia cercana a resistencia (48 PRE)': ('near_zone_share_48_half_atr', False),
+    'Mayor persistencia cercana a resistencia (288 PRE)': ('near_zone_share_288_half_atr', False),
+    'Menor distancia extrema debajo de zona (48 PRE)': ('max_low_below_zone_48_atr', True),
 }
 EPISODE_SORTS = {
     'Más CROSS_UP del episodio (retrospectivo)': ('attempts', False),
@@ -97,7 +108,7 @@ def compute_pre_touch_metrics(attempts: pd.DataFrame, touches: pd.DataFrame) -> 
 
 def sort_discovery_rows(rows: pd.DataFrame, order: str, *, episodic: bool) -> pd.DataFrame:
     """Stable sort without using POST; retrospective episode statistics are explicit."""
-    sort_options={**TOUCH_SORTS,**(EPISODE_SORTS if episodic else {})}
+    sort_options={**TOUCH_SORTS,**MATURITY_SORTS,**(EPISODE_SORTS if episodic else {})}
     if order=='Fecha PRE (actual)':
         keys=(['symbol','first_pre_ts','episode_id'] if episodic
               else ['symbol','pre_closed_ts','attempt_id'])
@@ -150,6 +161,51 @@ def load_discovery(directory: Path):
         raise ValueError('El archivo de Discovery expone columnas POST')
     return df,manifest
 
+
+
+def load_maturity(directory: Path, discovery: pd.DataFrame, discovery_manifest: dict,
+                  overlap_manifest: dict):
+    """Validate the PRE-only output and exact source membership before display."""
+    mp=directory/'manifest.json'
+    csvp=directory/'attempt_maturity_pre.csv'
+    epp=directory/'episode_first_maturity_pre.csv'
+    if not all(p.is_file() for p in (mp,csvp,epp)):
+        return None
+    man=json.loads(mp.read_text(encoding='utf-8'))
+    hashes=man.get('outputs_sha256',{})
+    sources=man.get('source_sha256',{})
+    if (man.get('version')!='HLL_PRE_MATURITY_METRICS_V1'
+        or man.get('mode')!='OFFLINE_READ_ONLY'
+        or man.get('reads_post') is not False
+        or man.get('reads_visual_labels') is not False
+        or man.get('quality_score_generated') is not False
+        or man.get('attempts')!=len(discovery)
+        or man.get('episodes')!=overlap_manifest.get('heuristic_episodes_gap24_cap96')
+        or sources.get('discovery_attempts') != discovery_manifest.get('output_sha256',{}).get('attempts_pre.csv')
+        or sources.get('episode_map') != overlap_manifest.get('outputs_sha256',{}).get('attempt_episode_map.csv')):
+        raise ValueError('Manifiesto de madurez no corresponde a Discovery/Episodios')
+    if sha(csvp)!=hashes.get(csvp.name) or sha(epp)!=hashes.get(epp.name):
+        raise ValueError('Hash de métricas PRE inválido')
+    from hll_pre_maturity_metrics_v1 import METRICS
+    cols=['attempt_id','symbol','level_id','pre_closed_ts','status',
+          'status_96','status_288',*METRICS]
+    metrics=pd.read_csv(csvp,usecols=cols,low_memory=False)
+    if (len(metrics)!=len(discovery) or metrics.attempt_id.isna().any()
+            or metrics.attempt_id.duplicated().any()):
+        raise ValueError('Intentos duplicados/faltantes en madurez')
+    joined=metrics[['attempt_id','symbol','level_id','pre_closed_ts','status']].merge(
+        discovery[['attempt_id','symbol','level_id','pre_closed_ts','status']],on='attempt_id',
+        how='outer',validate='one_to_one',indicator=True,suffixes=('_mat','_dis'))
+    if joined._merge.ne('both').any():
+        raise ValueError('Métrica no coincide con el universo de intentos')
+    for k in ['symbol','level_id','pre_closed_ts','status']:
+        if joined[f'{k}_mat'].astype(str).ne(joined[f'{k}_dis'].astype(str)).any():
+            raise ValueError('Métrica con PRE/episodio alterado: '+k)
+    if (metrics.status_96.eq('COMPLETE_PRE').ne(metrics.status.eq('COMPLETE_PRE')).any()
+            or metrics.loc[metrics.status_288.ne('COMPLETE_PRE_288'),
+               ['near_zone_share_288_half_atr','compression_72_recent_vs_first_288']].notna().any().any()):
+        raise ValueError('Cobertura/valores 288 inconsistentes')
+    return metrics[['attempt_id','status_96','status_288',*METRICS]]
 
 
 OVERLAP_MAP_REQUIRED = {
@@ -290,7 +346,12 @@ def episode_catalog(discovery: pd.DataFrame, amap: pd.DataFrame, episodes: pd.Da
                    'candidate_other_level_prior_count':'first_nearby_levels'})
     metric_cols=[c for c in ('touches_all_pre288','touches_below_pre288','touches_below_pre96',
                     'touch_span_pre288_bars','touch_gap_median_pre288_bars',
-                    'touch_span_all_pre_bars') if c in discovery]
+                    'touch_span_all_pre_bars',
+                    'compression_24_recent_vs_early','compression_48_recent_vs_first',
+                    'amplitude_24_recent_atr','compression_72_recent_vs_first_288',
+                    'trough_net_progress_last3_atr',
+                    'near_zone_share_48_half_atr','near_zone_share_288_half_atr',
+                    'max_low_below_zone_48_atr','status_288') if c in discovery]
     d=discovery[['attempt_id',scale_field,'scale_agreement','status']+metric_cols].rename(columns={
         'attempt_id':'first_attempt_id',scale_field:'representative_family',
         'scale_agreement':'representative_agreement','status':'representative_status'})
@@ -457,6 +518,26 @@ def render_hll_structural_discovery(root):
             st.warning(f'No se pudo cargar la medición de contactos V2.6: {exc}')
     else:
         st.caption('No se encontró touches.csv de V2.6: ordenamientos por contactos no disponibles.')
+    maturity_ready=False
+    maturity_dir=root/MATURITY_PARENT
+    if selected.name=='full290_v1' and overlap_manifest is not None and (maturity_dir/'manifest.json').is_file():
+        @st.cache_data(show_spinner=False)
+        def cached_maturity(path,mtimes,discovery_mtime,overlap_mtime):
+            return load_maturity(Path(path),data,manifest,overlap_manifest)
+        try:
+            names=['manifest.json','attempt_maturity_pre.csv','episode_first_maturity_pre.csv']
+            mtimes=tuple((maturity_dir/x).stat().st_mtime_ns for x in names)
+            mdata=cached_maturity(str(maturity_dir),mtimes,
+                (selected/'attempts_pre.csv').stat().st_mtime_ns,
+                (overlap_dir/'manifest.json').stat().st_mtime_ns)
+            if mdata is None:raise ValueError('Faltan archivos de madurez')
+            data=data.merge(mdata,on='attempt_id',how='left',validate='one_to_one')
+            if data.status_96.isna().any():raise ValueError('Faltan intentos de madurez')
+            maturity_ready=True
+        except (OSError,ValueError,KeyError,TypeError) as exc:
+            st.warning(f'No se pudieron validar las métricas PRE de compresión: {exc}')
+    elif selected.name=='full290_v1':
+        st.caption('Para ver compresión/persistencia ejecutá hll_pre_maturity_metrics_v1.py --run (solo lectura).')
     units=['Episodios (mismo nivel, 24/96)','Intentos CROSS_UP'] if overlap is not None else ['Intentos CROSS_UP']
     unit=st.radio('Unidad de análisis',units,horizontal=True,key='hll_discovery_unit')
     in_episodes=unit.startswith('Episodios')
@@ -474,6 +555,8 @@ def render_hll_structural_discovery(root):
                    else ['Fecha PRE (actual)'])
     if touch_ready:
         order_options+=list(TOUCH_SORTS)
+    if maturity_ready:
+        order_options+=list(MATURITY_SORTS)
     order=st.selectbox('Ordenar por · intentos / madurez / contactos',order_options,
                        key='hll_discovery_maturity_sort')
     if order in EPISODE_SORTS:
@@ -481,6 +564,10 @@ def render_hll_structural_discovery(root):
     elif order in TOUCH_SORTS:
         st.caption('Contactos independientes registrados por V2.6, hasta el corte PRE seleccionado (incluido), sin POST. '
                    'En modo episodios se miden SOLO al primer CROSS_UP; para comparar cortes elegí cada intento.')
+    if order in MATURITY_SORTS:
+        st.caption('Orden descriptivo usando exclusivamente velas cerradas PRE. '
+                   'En episodios se usa el primer corte; una compresión alta o baja no garantiza calidad. '
+                   'Los casos sin 288 velas completas quedan sin ese dato.')
     if in_episodes:
         s1,s2=st.columns(2)
         with s1:
@@ -527,6 +614,8 @@ def render_hll_structural_discovery(root):
         columns=['symbol','episode_id','level_id','first_pre_ts','last_pre_ts','attempts',
                  'touches_below_pre288','touches_below_pre96','touch_span_pre288_bars',
                  'touch_gap_median_pre288_bars',
+                 'compression_24_recent_vs_early','compression_72_recent_vs_first_288',
+                 'trough_net_progress_last3_atr','near_zone_share_48_half_atr','status_288',
                  'representative_family','representative_agreement','family_changes_within_episode',
                  'representative_status']
         st.dataframe(shown[[c for c in columns if c in shown]],hide_index=True,use_container_width=True)
@@ -536,15 +625,24 @@ def render_hll_structural_discovery(root):
                  key='hll_discovery_episode_id')
         ep=shown.loc[shown.episode_id.eq(chosen)].iloc[0]
         members=amap.loc[amap.episode_id.eq(chosen)].sort_values('episode_ordinal').copy()
+        member_extra=([k for k in ('compression_24_recent_vs_early',
+                 'compression_72_recent_vs_first_288','trough_net_progress_last3_atr',
+                 'near_zone_share_48_half_atr','status_288') if k in data]
+                 if maturity_ready else [])
         member_view=members[['attempt_id','episode_ordinal','pre_closed_ts',
                              'status','other_levels_same_candle',
                              'candidate_other_level_prior_count']].merge(
-                    data[['attempt_id',field,'scale_agreement']],on='attempt_id',validate='one_to_one')
+                    data[['attempt_id',field,'scale_agreement']+member_extra],
+                    on='attempt_id',validate='one_to_one')
         st.markdown('**Evolución del episodio · cortes PRE consecutivos**')
         st.caption('La tabla incluye todos los intentos del episodio y permite estudiar su evolución histórica; '
                    'no representa información disponible en el primer corte.')
         member_view['fecha_pre_utc']=pd.to_datetime(member_view.pre_closed_ts,unit='ms',utc=True)
         st.dataframe(member_view,hide_index=True,use_container_width=True)
+        if maturity_ready:
+            st.caption('Las métricas de cada fila se calcularon con el PRE de ESE intento. '
+                       'Ver filas futuras del episodio es un análisis retrospectivo, '
+                       'no información disponible en su primer corte.')
         opts=members.attempt_id.tolist()
         attempt=st.selectbox('Inspeccionar corte PRE dentro del episodio',opts,
                  format_func=lambda aid:(f'#{int(members.loc[members.attempt_id.eq(aid),"episode_ordinal"].iloc[0])}'
@@ -580,7 +678,9 @@ def render_hll_structural_discovery(root):
         display_cols=['symbol','attempt_id','pre_closed_ts','touches_below_pre288',
                       'touches_below_pre96','touch_span_pre288_bars','touch_gap_median_pre288_bars',
                       field,'scale_agreement','original_pre_pattern_48',
-                      'intercontact_48','latest_recovery_retention_1p0','preserved_fraction_last3_1p0','status']
+                      'intercontact_48','latest_recovery_retention_1p0','preserved_fraction_last3_1p0',
+                      'compression_24_recent_vs_early','trough_net_progress_last3_atr',
+                      'near_zone_share_48_half_atr','status_288','status']
         st.dataframe(shown[[x for x in display_cols if x in shown]],hide_index=True,use_container_width=True)
         opts=shown.attempt_id.tolist()
         attempt=st.selectbox('Inspeccionar intento de esta página',opts,
@@ -603,6 +703,35 @@ def render_hll_structural_discovery(root):
             f'{row.touch_gap_median_pre288_bars:.0f} velas' if pd.notna(row.touch_gap_median_pre288_bars) else 'Sin 2 contactos')
         st.caption('Estos son contactos independientes PRE de V2.6, no intentos CROSS_UP. '
                    'No representan por sí solos calidad ni un patrón de compresión.')
+    if maturity_ready:
+        with st.expander('📏 Compresión, progreso y persistencia PRE · descriptivo',expanded=False):
+            def metric_fmt(name, percent=False):
+                v=row.get(name)
+                if pd.isna(v):return 'Sin datos'
+                return f'{100*float(v):.1f}%' if percent else f'{float(v):.2f}'
+            a,b,c,d=st.columns(4)
+            a.metric('Amplitud últimas 24 (ATR)',metric_fmt('amplitude_24_recent_atr'))
+            b.metric('Compresión 24 / inicio 96',metric_fmt('compression_24_recent_vs_early'))
+            c.metric('Progreso mínimos (ATR)',metric_fmt('trough_net_progress_last3_atr'))
+            d.metric('Cerca de resistencia · 48',metric_fmt('near_zone_share_48_half_atr',True))
+            st.caption('Amplitud robusta = [P90(high)-P10(low)] / ATR_PRE. '
+                       'Compresión = amplitud últimas 24 / primeras 24 velas de las 96 PRE; '
+                       'menor que 1 indica contracción, no necesariamente una estructura mejor. '
+                       'Progreso de mínimos = diferencia entre cuantiles P10(low) de bloques de 24; '
+                       'es un proxy, NO pivotes confirmados.')
+            st.caption(f'Contexto 288: {row.get("status_288", "Sin datos")} · '
+                       f'Persistencia cerca del nivel (288): {metric_fmt("near_zone_share_288_half_atr",True)} · '
+                       f'Retroceso extremo debajo de resistencia (48, ATR): {metric_fmt("max_low_below_zone_48_atr")}. '
+                       'Cerca del nivel significa cierres entre zone_low−0,5 ATR y zone_high; '
+                       'el tiempo por encima se mide por separado. Las métricas usan ATR_PRE fijo y no cambian al elegir otra sensibilidad de la familia.')
+            vals=[row.get(k) for k in ['amplitude_24_early_atr',
+                 'amplitude_24_middle1_atr','amplitude_24_middle2_atr','amplitude_24_recent_atr']]
+            if all(pd.notna(v) for v in vals):
+                amp_data=pd.DataFrame({'Amplitud / ATR':[float(v) for v in vals]},
+                    index=['96–73 PRE','72–49 PRE','48–25 PRE','24–1 PRE'])
+                st.bar_chart(amp_data,use_container_width=True)
+            st.caption('Todas las métricas se calculan hasta el corte PRE seleccionado. '
+                       'No se usan intentos futuros, etiquetas visuales ni resultados POST.')
     if row['status']!='COMPLETE_PRE':
         st.warning(f'PRE no evaluable: {row["reason"]}. No se fabricó clasificación.')
         return
