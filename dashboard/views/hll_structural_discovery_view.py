@@ -29,6 +29,7 @@ TOUCH_SORTS = {
 }
 EPISODE_SORTS = {
     'Más CROSS_UP del episodio (retrospectivo)': ('attempts', False),
+    'Menos CROSS_UP del episodio (retrospectivo)': ('attempts', True),
     'Más duración entre primer y último CROSS_UP (retrospectivo)': ('span_bars', False),
 }
 
@@ -109,6 +110,24 @@ def sort_discovery_rows(rows: pd.DataFrame, order: str, *, episodic: bool) -> pd
     key=('episode_id' if episodic else 'attempt_id')
     return rows.sort_values([col,'symbol',key],ascending=[asc,True,True],
                             kind='mergesort',na_position='last')
+
+
+def filter_episodes_by_attempt_count(rows: pd.DataFrame, minimum: int, maximum: int) -> pd.DataFrame:
+    """Inclusive episode-level count filter. NEVER changes underlying CROSS_UP membership.
+
+    Counts describe the whole bounded episode, including attempts later than the
+    first PRE cutoff. This is retrospective navigation, not an entry feature.
+    """
+    if 'attempts' not in rows:
+        raise ValueError('Falta la cantidad de intentos por episodio')
+    if (not isinstance(minimum, int) or isinstance(minimum, bool)
+            or not isinstance(maximum, int) or isinstance(maximum, bool)
+            or minimum < 1 or maximum < minimum):
+        raise ValueError('Rango de intentos inválido')
+    counts=pd.to_numeric(rows.attempts,errors='coerce')
+    if (counts.isna().any() or counts.lt(1).any() or counts.mod(1).ne(0).any()):
+        raise ValueError('Cantidad de intentos ausente o inválida')
+    return rows.loc[counts.between(minimum,maximum)].copy()
 
 
 def load_discovery(directory: Path):
@@ -450,12 +469,12 @@ def render_hll_structural_discovery(root):
     with c5:sym=st.selectbox('Símbolo',['TODOS']+sorted(data.symbol.unique()),key='hll_discovery_sym')
     with c6:agree=st.selectbox('Acuerdo ATR',['TODOS','IGUAL_3_ATR','DISCREPA_ATR','SIN_DATOS'],key='hll_discovery_agree')
 
-    order_options=['Fecha PRE (actual)']
+    # In episode mode, show CROSS_UP count sorts first; touch-based sorts remain available.
+    order_options=(list(EPISODE_SORTS)+['Fecha PRE (actual)'] if in_episodes
+                   else ['Fecha PRE (actual)'])
     if touch_ready:
         order_options+=list(TOUCH_SORTS)
-    if in_episodes:
-        order_options+=list(EPISODE_SORTS)
-    order=st.selectbox('Ordenar por · madurez/contactos',order_options,
+    order=st.selectbox('Ordenar por · intentos / madurez / contactos',order_options,
                        key='hll_discovery_maturity_sort')
     if order in EPISODE_SORTS:
         st.caption('Orden retrospectivo: usa todos los CROSS_UP del episodio, incluidos los posteriores al primer corte. NO es una métrica causal al inicio.')
@@ -475,8 +494,27 @@ def render_hll_structural_discovery(root):
         match='PRIMERO' if matching.startswith('Primer') else 'CUALQUIERA'
         change={'Todos':'TODOS','Cambia entre intentos':'CAMBIA','No cambia':'ESTABLE'}[changes]
         catalog=episode_catalog(data,amap,eps,field)
+        # Full-episode attempt counts are known retrospectively. Do not present
+        # them as information available at the first CROSS_UP cutoff.
+        max_episode_attempts=int(catalog.attempts.max())
+        a1,a2=st.columns(2)
+        with a1:
+            min_attempts=int(st.number_input('Mínimo de intentos CROSS_UP por episodio',
+                min_value=1,max_value=max_episode_attempts,value=1,step=1,
+                key='hll_discovery_min_episode_attempts'))
+        with a2:
+            max_attempts=int(st.number_input('Máximo de intentos CROSS_UP por episodio',
+                min_value=1,max_value=max_episode_attempts,value=max_episode_attempts,step=1,
+                key='hll_discovery_max_episode_attempts'))
+        st.caption('Cantidad de CROSS_UP del mismo episodio, NO toques independientes. '
+                   'Filtro retrospectivo: incluye intentos posteriores al primer corte PRE; '
+                   'sirve para explorar el histórico, no para predecir un primer breakout.')
         filtered=filter_episodes(catalog,data,amap,field,family=fam,symbol=sym,agree=agree,
                                  family_match=match,change=change)
+        if min_attempts > max_attempts:
+            st.warning('El mínimo de intentos supera al máximo. Ajustá el rango.')
+            return
+        filtered=filter_episodes_by_attempt_count(filtered,min_attempts,max_attempts)
         st.caption(f'{len(filtered)} episodios candidatos con estos filtros. '
             'Familia y acuerdo ATR del representante = primer CROSS_UP, no el mejor resultado.'
             + (' Buscar cualquier intento usa información posterior al inicio del episodio y es retrospectivo.'
