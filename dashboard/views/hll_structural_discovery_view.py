@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_right
+from statistics import median
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +15,22 @@ import pandas as pd
 from hll_structural_discovery_v1 import CANDLES, OUTPUT_PARENT, TF, bar_window, sha
 
 OVERLAP_PARENT = Path('reports/horizontal_level_structural_overlap_audit_v1/full290_v1')
+# V2.6 independent test events, only test timestamps at or before selected PRE cutoff.
+TOUCHES_SOURCE = Path('reports/horizontal_level_structure_lab_v26/runs/sep290_frozen_v26_roundtrip/touches.csv')
+
+# These are DISPLAY SORTS only, not entry filters or quality labels.
+TOUCH_SORTS = {
+    'Más contactos PRE desde abajo (288 velas)': ('touches_below_pre288', False),
+    'Más contactos PRE desde abajo (96 velas)': ('touches_below_pre96', False),
+    'Más contactos PRE en total (288 velas)': ('touches_all_pre288', False),
+    'Mayor duración entre contactos PRE desde abajo (288 velas)': ('touch_span_pre288_bars', False),
+    'Menor separación mediana entre contactos PRE desde abajo (288 velas)': ('touch_gap_median_pre288_bars', True),
+    'Mayor duración observada entre contactos PRE desde abajo (histórico V2.6)': ('touch_span_all_pre_bars', False),
+}
+EPISODE_SORTS = {
+    'Más CROSS_UP del episodio (retrospectivo)': ('attempts', False),
+    'Más duración entre primer y último CROSS_UP (retrospectivo)': ('span_bars', False),
+}
 
 REQUIRED=('attempt_id','symbol','level_id','pre_closed_ts','zone_low','zone_high',
           'atr_pre','status','family_0p5','family_1p0','family_1p5')
@@ -26,6 +44,71 @@ FAMILY_LABELS={
  'SECUENCIA_MIXTA_INDETERMINADA':'Mixta / indeterminada',
  'INDETERMINADA_SIN_MINIMO':'Sin mínimo confirmado',
 }
+
+
+def compute_pre_touch_metrics(attempts: pd.DataFrame, touches: pd.DataFrame) -> pd.DataFrame:
+    """Counts tests with touch_closed_ts <= this attempt's PRE cutoff only.
+
+    V2.6 `touches.csv` events are not CROSS_UP attempts. No resolver/outcome is read.
+    Insufficient contacts produce null spans, NEVER a fabricated zero duration.
+    """
+    required_attempt={'attempt_id','symbol','level_id','pre_closed_ts'}
+    required_touch={'symbol','level_id','test_id','touch_closed_ts','side'}
+    if required_attempt-set(attempts) or required_touch-set(touches):
+        raise ValueError('Faltan columnas PRE para medir contactos independientes V2.6')
+    if attempts.attempt_id.isna().any() or attempts.attempt_id.duplicated().any():
+        raise ValueError('Attempt ID duplicado en cálculo de contactos')
+    x=touches[list(required_touch)].copy()
+    if (x[list(required_touch)].isna().any().any()
+            or x.duplicated(['symbol','level_id','test_id']).any()):
+        raise ValueError('Contactos V2.6 duplicados o incompletos')
+    x['touch_closed_ts']=pd.to_numeric(x.touch_closed_ts,errors='raise').astype('int64')
+    if x.touch_closed_ts.le(0).any():
+        raise ValueError('Fechas de contactos no válidas')
+    observed={}
+    for key,g in x.groupby(['symbol','level_id'],sort=False):
+        all_ts=sorted(g.touch_closed_ts.astype('int64').tolist())
+        below_ts=sorted(g.loc[g.side.eq('BELOW'),'touch_closed_ts'].astype('int64').tolist())
+        observed[key]=(all_ts,below_ts)
+    out=[]
+    for rec in attempts[['attempt_id','symbol','level_id','pre_closed_ts']].itertuples(index=False):
+        pre=int(rec.pre_closed_ts)
+        all_ts,below_ts=observed.get((rec.symbol,rec.level_id),([],[]))
+        def recent(seq,bars):
+            # Only COMPLETED test events inside the preceding `bars` 30m intervals.
+            end=bisect_right(seq,pre)
+            left=bisect_right(seq,pre-bars*TF)
+            return seq[left:end]
+        a288=recent(all_ts,288)
+        b288=recent(below_ts,288)
+        b96=recent(below_ts,96)
+        known_below_count=bisect_right(below_ts,pre)
+        span288=(b288[-1]-b288[0])//TF if len(b288)>=2 else float('nan')
+        span_all=((below_ts[known_below_count-1]-below_ts[0])//TF
+                  if known_below_count>=2 else float('nan'))
+        med_gap=(float(median([b-a for a,b in zip(b288,b288[1:])]))/TF
+                 if len(b288)>=2 else float('nan'))
+        out.append((rec.attempt_id,len(a288),len(b288),len(b96),span288,med_gap,span_all))
+    return pd.DataFrame(out,columns=['attempt_id','touches_all_pre288',
+          'touches_below_pre288','touches_below_pre96','touch_span_pre288_bars',
+          'touch_gap_median_pre288_bars','touch_span_all_pre_bars'])
+
+
+def sort_discovery_rows(rows: pd.DataFrame, order: str, *, episodic: bool) -> pd.DataFrame:
+    """Stable sort without using POST; retrospective episode statistics are explicit."""
+    sort_options={**TOUCH_SORTS,**(EPISODE_SORTS if episodic else {})}
+    if order=='Fecha PRE (actual)':
+        keys=(['symbol','first_pre_ts','episode_id'] if episodic
+              else ['symbol','pre_closed_ts','attempt_id'])
+        return rows.sort_values(keys,kind='mergesort')
+    if order not in sort_options:
+        raise ValueError('Ordenamiento de Discovery desconocido')
+    col,asc=sort_options[order]
+    if col not in rows:
+        raise ValueError(f'Falta métrica para ordenar: {col}')
+    key=('episode_id' if episodic else 'attempt_id')
+    return rows.sort_values([col,'symbol',key],ascending=[asc,True,True],
+                            kind='mergesort',na_position='last')
 
 
 def load_discovery(directory: Path):
@@ -186,7 +269,10 @@ def episode_catalog(discovery: pd.DataFrame, amap: pd.DataFrame, episodes: pd.Da
                    'pre_closed_ts':'representative_pre_ts',
                    'other_levels_same_candle':'first_other_levels_same_candle',
                    'candidate_other_level_prior_count':'first_nearby_levels'})
-    d=discovery[['attempt_id',scale_field,'scale_agreement','status']].rename(columns={
+    metric_cols=[c for c in ('touches_all_pre288','touches_below_pre288','touches_below_pre96',
+                    'touch_span_pre288_bars','touch_gap_median_pre288_bars',
+                    'touch_span_all_pre_bars') if c in discovery]
+    d=discovery[['attempt_id',scale_field,'scale_agreement','status']+metric_cols].rename(columns={
         'attempt_id':'first_attempt_id',scale_field:'representative_family',
         'scale_agreement':'representative_agreement','status':'representative_status'})
     catalog=episodes.merge(first,on=['episode_id','first_attempt_id','symbol','level_id'],validate='one_to_one')
@@ -333,6 +419,25 @@ def render_hll_structural_discovery(root):
         e3.metric('Episodios con familias cambiantes (1 ATR)',int(eps.family_changes_within_episode.sum()))
         st.caption('Agrupación heurística por mismo level_id: separación máxima de 24 velas y extensión menor de 96. '
                    'Otros niveles cercanos NO se fusionan; ningún CROSS_UP se elimina.')
+    touch_path=root/TOUCHES_SOURCE
+    touch_ready=False
+    if touch_path.is_file():
+        @st.cache_data(show_spinner=False)
+        def cached_touches(path,mtime,discovery_mtime):
+            source=pd.read_csv(path,usecols=['symbol','level_id','test_id','touch_closed_ts','side'],
+                               low_memory=False)
+            return compute_pre_touch_metrics(data,source)
+        try:
+            metrics=cached_touches(str(touch_path),touch_path.stat().st_mtime_ns,
+                                  (selected/'attempts_pre.csv').stat().st_mtime_ns)
+            data=data.merge(metrics,on='attempt_id',how='left',validate='one_to_one')
+            if data.touches_all_pre288.isna().any():
+                raise ValueError('Métricas de contactos PRE incompletas')
+            touch_ready=True
+        except (OSError,ValueError,KeyError,TypeError) as exc:
+            st.warning(f'No se pudo cargar la medición de contactos V2.6: {exc}')
+    else:
+        st.caption('No se encontró touches.csv de V2.6: ordenamientos por contactos no disponibles.')
     units=['Episodios (mismo nivel, 24/96)','Intentos CROSS_UP'] if overlap is not None else ['Intentos CROSS_UP']
     unit=st.radio('Unidad de análisis',units,horizontal=True,key='hll_discovery_unit')
     in_episodes=unit.startswith('Episodios')
@@ -345,6 +450,18 @@ def render_hll_structural_discovery(root):
     with c5:sym=st.selectbox('Símbolo',['TODOS']+sorted(data.symbol.unique()),key='hll_discovery_sym')
     with c6:agree=st.selectbox('Acuerdo ATR',['TODOS','IGUAL_3_ATR','DISCREPA_ATR','SIN_DATOS'],key='hll_discovery_agree')
 
+    order_options=['Fecha PRE (actual)']
+    if touch_ready:
+        order_options+=list(TOUCH_SORTS)
+    if in_episodes:
+        order_options+=list(EPISODE_SORTS)
+    order=st.selectbox('Ordenar por · madurez/contactos',order_options,
+                       key='hll_discovery_maturity_sort')
+    if order in EPISODE_SORTS:
+        st.caption('Orden retrospectivo: usa todos los CROSS_UP del episodio, incluidos los posteriores al primer corte. NO es una métrica causal al inicio.')
+    elif order in TOUCH_SORTS:
+        st.caption('Contactos independientes registrados por V2.6, hasta el corte PRE seleccionado (incluido), sin POST. '
+                   'En modo episodios se miden SOLO al primer CROSS_UP; para comparar cortes elegí cada intento.')
     if in_episodes:
         s1,s2=st.columns(2)
         with s1:
@@ -365,14 +482,16 @@ def render_hll_structural_discovery(root):
             + (' Buscar cualquier intento usa información posterior al inicio del episodio y es retrospectivo.'
                if match=='CUALQUIERA' else ''))
         if filtered.empty:return
-        filtered=filtered.sort_values(['symbol','first_pre_ts','episode_id'])
+        filtered=sort_discovery_rows(filtered,order,episodic=True)
         pages=max(1,math.ceil(len(filtered)/80))
         page=st.number_input('Página de episodios',min_value=1,max_value=pages,value=1,step=1,key='hll_discovery_episode_page')
         shown=filtered.iloc[(page-1)*80:page*80]
         columns=['symbol','episode_id','level_id','first_pre_ts','last_pre_ts','attempts',
+                 'touches_below_pre288','touches_below_pre96','touch_span_pre288_bars',
+                 'touch_gap_median_pre288_bars',
                  'representative_family','representative_agreement','family_changes_within_episode',
                  'representative_status']
-        st.dataframe(shown[columns],hide_index=True,use_container_width=True)
+        st.dataframe(shown[[c for c in columns if c in shown]],hide_index=True,use_container_width=True)
         chosen=st.selectbox('Inspeccionar episodio de esta página',shown.episode_id.tolist(),
                  format_func=lambda eid:(f'{shown.loc[shown.episode_id.eq(eid),"symbol"].iloc[0]}'
                      f' · {eid} · {int(shown.loc[shown.episode_id.eq(eid),"attempts"].iloc[0])} intentos'),
@@ -416,11 +535,13 @@ def render_hll_structural_discovery(root):
         if agree!='TODOS':filtered=filtered[filtered.scale_agreement.eq(agree)]
         st.caption(f'{len(filtered)} intentos con estos filtros. Ninguno se selecciona por POST ni PnL.')
         if filtered.empty:return
-        filtered=filtered.sort_values(['symbol','pre_closed_ts','attempt_id'])
+        filtered=sort_discovery_rows(filtered,order,episodic=False)
         pages=max(1,math.ceil(len(filtered)/80))
         page=st.number_input('Página de intentos',min_value=1,max_value=pages,value=1,step=1,key='hll_discovery_page')
         shown=filtered.iloc[(page-1)*80:page*80]
-        display_cols=['symbol','attempt_id','pre_closed_ts',field,'scale_agreement','original_pre_pattern_48',
+        display_cols=['symbol','attempt_id','pre_closed_ts','touches_below_pre288',
+                      'touches_below_pre96','touch_span_pre288_bars','touch_gap_median_pre288_bars',
+                      field,'scale_agreement','original_pre_pattern_48',
                       'intercontact_48','latest_recovery_retention_1p0','preserved_fraction_last3_1p0','status']
         st.dataframe(shown[[x for x in display_cols if x in shown]],hide_index=True,use_container_width=True)
         opts=shown.attempt_id.tolist()
@@ -434,6 +555,16 @@ def render_hll_structural_discovery(root):
             st.caption(f'Episodio asociado: {member.episode_id} · intento '
                        f'{int(member.episode_ordinal)}/{int(member.episode_attempt_count)} del mismo nivel. '
                        'Para navegar entre intentos relacionados, elegí el modo Episodios.')
+    if touch_ready:
+        cols=st.columns(4)
+        cols[0].metric('Contactos PRE desde abajo (288 velas)',int(row.touches_below_pre288))
+        cols[1].metric('Contactos PRE desde abajo (96 velas)',int(row.touches_below_pre96))
+        cols[2].metric('Lapso PRE desde abajo (288 velas)',
+            f'{row.touch_span_pre288_bars/48:.1f} días' if pd.notna(row.touch_span_pre288_bars) else 'Sin 2 contactos')
+        cols[3].metric('Mediana entre toques desde abajo',
+            f'{row.touch_gap_median_pre288_bars:.0f} velas' if pd.notna(row.touch_gap_median_pre288_bars) else 'Sin 2 contactos')
+        st.caption('Estos son contactos independientes PRE de V2.6, no intentos CROSS_UP. '
+                   'No representan por sí solos calidad ni un patrón de compresión.')
     if row['status']!='COMPLETE_PRE':
         st.warning(f'PRE no evaluable: {row["reason"]}. No se fabricó clasificación.')
         return
