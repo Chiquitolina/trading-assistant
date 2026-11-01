@@ -12,6 +12,8 @@ import pandas as pd
 
 from hll_structural_discovery_v1 import CANDLES, OUTPUT_PARENT, TF, bar_window, sha
 
+OVERLAP_PARENT = Path('reports/horizontal_level_structural_overlap_audit_v1/full290_v1')
+
 REQUIRED=('attempt_id','symbol','level_id','pre_closed_ts','zone_low','zone_high',
           'atr_pre','status','family_0p5','family_1p0','family_1p5')
 FAMILY_LABELS={
@@ -46,6 +48,173 @@ def load_discovery(directory: Path):
         raise ValueError('El archivo de Discovery expone columnas POST')
     return df,manifest
 
+
+
+OVERLAP_MAP_REQUIRED = {
+    'attempt_id', 'symbol', 'level_id', 'pre_closed_ts', 'zone_low', 'zone_high',
+    'status', 'family_1p0', 'episode_id', 'episode_first_attempt_id',
+    'episode_anchor_pre_ts', 'episode_ordinal', 'episode_attempt_count',
+    'is_first_in_episode', 'other_levels_same_candle',
+    'candidate_other_level_prior_count',
+}
+OVERLAP_EP_REQUIRED = {
+    'episode_id', 'symbol', 'level_id', 'first_attempt_id', 'first_pre_ts',
+    'last_pre_ts', 'span_bars', 'attempts', 'first_family_1p0',
+    'distinct_families_1p0', 'family_changes_within_episode',
+}
+OVERLAP_NEAR_REQUIRED = {
+    'attempt_id', 'symbol', 'pre_closed_ts', 'level_id', 'other_attempt_id',
+    'other_level_id', 'other_pre_closed_ts', 'delta_bars',
+    'center_distance_atr', 'zone_gap_atr', 'interpretation',
+}
+
+
+def load_overlap(directory: Path, discovery: pd.DataFrame, discovery_manifest: dict):
+    """Check source lineage, output hashes and exact one-to-one PRE membership.
+
+    Different level IDs remain separate. CSV data is not used to change any family.
+    """
+    manifest_path = directory/'manifest.json'
+    if not manifest_path.is_file():
+        return None
+    manifest=json.loads(manifest_path.read_text(encoding='utf8'))
+    rule=manifest.get('rule', {})
+    if (manifest.get('version')!='HLL_OVERLAP_AUDIT_V1'
+            or manifest.get('mode')!='READ_ONLY_ANALYSIS'
+            or manifest.get('no_post_used') is not True
+            or manifest.get('different_level_ids_merged') is not False
+            or rule.get('same_level_exact') is not True
+            or rule.get('max_gap_bars_default')!=24
+            or rule.get('max_span_from_first_pre_bars')!=96):
+        raise ValueError('Manifiesto de episodios incompatible (reglas 24/96)')
+    src=manifest.get('source_sha256',{})
+    dsrc=discovery_manifest.get('source_sha256',{})
+    dout=discovery_manifest.get('output_sha256',{})
+    if (src.get('discovery')!=dout.get('attempts_pre.csv')
+            or src.get('cohort')!=dsrc.get('cohort')):
+        raise ValueError('Episodios y Discovery tienen fuentes distintas')
+    outputs=manifest.get('outputs_sha256',{})
+    required={'attempt_episode_map.csv','episode_candidates.csv',
+              'nearby_other_levels_review.csv','level_reuse.csv','symbol_summary.csv'}
+    if not required.issubset(outputs):
+        raise ValueError('Manifiesto de episodios incompleto')
+    for name in sorted(required):
+        path=directory/name
+        if not path.is_file() or sha(path)!=outputs[name]:
+            raise ValueError(f'Archivo de episodios ausente o modificado: {name}')
+    amap=pd.read_csv(directory/'attempt_episode_map.csv',low_memory=False)
+    eps=pd.read_csv(directory/'episode_candidates.csv',low_memory=False)
+    near=pd.read_csv(directory/'nearby_other_levels_review.csv',low_memory=False)
+    if (OVERLAP_MAP_REQUIRED-set(amap) or OVERLAP_EP_REQUIRED-set(eps)
+            or OVERLAP_NEAR_REQUIRED-set(near)):
+        raise ValueError('Columnas requeridas de episodios incompletas')
+    if (len(amap)!=len(discovery) or len(amap)!=manifest.get('attempts')
+            or len(eps)!=manifest.get('heuristic_episodes_gap24_cap96')
+            or amap.symbol.nunique()!=manifest.get('symbols')
+            or amap.attempt_id.isna().any() or amap.attempt_id.duplicated().any()
+            or eps.episode_id.isna().any() or eps.episode_id.duplicated().any()):
+        raise ValueError('Cardinalidad/IDs de episodios inválidos')
+    # Validate every attempt against the source, including incomplete PRE cases.
+    keys=['attempt_id','symbol','level_id','pre_closed_ts','zone_low','zone_high','status','family_1p0']
+    source=discovery[keys].copy()
+    source['family_1p0']=source.family_1p0.fillna('SIN_DATOS')
+    joined=amap[keys].merge(source,on='attempt_id',how='outer',validate='one_to_one',
+                             suffixes=('_ep','_dis'),indicator=True)
+    if joined._merge.ne('both').any():
+        raise ValueError('Faltan intentos o existen intentos extra en episodios')
+    for field in ('symbol','level_id','pre_closed_ts','status','family_1p0'):
+        if joined[f'{field}_ep'].astype(str).ne(joined[f'{field}_dis'].astype(str)).any():
+            raise ValueError(f'Episodio vs Discovery inconsistente en {field}')
+    for field in ('zone_low','zone_high'):
+        if not pd.Series([abs(a-b)<=max(1e-12,abs(b)*1e-8)
+                          for a,b in zip(joined[f'{field}_ep'],joined[f'{field}_dis'])]).all():
+            raise ValueError(f'Episodio vs Discovery inconsistente en {field}')
+    if (amap.episode_id.isna().any() or amap.episode_ordinal.isna().any()
+            or amap.episode_attempt_count.isna().any()):
+        raise ValueError('Asignación incompleta de episodios')
+    ordered=amap.sort_values(['episode_id','episode_ordinal'])
+    group=ordered.groupby('episode_id',sort=False)
+    sizes=group.size()
+    if (ordered.episode_ordinal.ne(group.cumcount()+1).any()
+            or ordered.episode_attempt_count.ne(ordered.episode_id.map(sizes)).any()
+            or ordered.is_first_in_episode.ne(ordered.episode_ordinal.eq(1).astype(int)).any()
+            or len(sizes)!=len(eps)):
+        raise ValueError('Orden/contadores de episodios inconsistentes')
+    summary=group.agg(symbol=('symbol','first'),levels=('level_id','nunique'),
+                      symbols=('symbol','nunique'),level_id=('level_id','first'),
+                      first_attempt_id=('attempt_id','first'),
+                      first_pre_ts=('pre_closed_ts','first'),
+                      last_pre_ts=('pre_closed_ts','last'),
+                      first_family_1p0=('family_1p0','first'),
+                      distinct_families_1p0=('family_1p0','nunique'),
+                      zone_lows=('zone_low','nunique'),zone_highs=('zone_high','nunique'))
+    if (summary.levels.ne(1).any() or summary.symbols.ne(1).any()
+            or summary.zone_lows.ne(1).any() or summary.zone_highs.ne(1).any()
+            or group.pre_closed_ts.apply(lambda col: (col.diff().dropna()>24*TF).any()).any()
+            or (summary.last_pre_ts-summary.first_pre_ts).ge(96*TF).any()):
+        raise ValueError('Un episodio fusiona niveles/zonas o supera 24/96 velas')
+    e=eps.set_index('episode_id')
+    if not e.index.equals(summary.index):
+        e=e.reindex(summary.index)
+    if e.isna().all(axis=1).any():
+        raise ValueError('Faltan IDs de episodios')
+    for field in ('symbol','level_id','first_attempt_id','first_pre_ts',
+                  'last_pre_ts','first_family_1p0','distinct_families_1p0'):
+        if e[field].astype(str).ne(summary[field].astype(str)).any():
+            raise ValueError(f'Resumen de episodios inconsistente: {field}')
+    if (e.attempts.ne(e.index.map(sizes)).any()
+            or e.span_bars.ne((summary.last_pre_ts-summary.first_pre_ts)//TF).any()
+            or e.family_changes_within_episode.ne(summary.distinct_families_1p0.gt(1).astype(int)).any()
+            or ordered.episode_first_attempt_id.ne(ordered.episode_id.map(summary.first_attempt_id)).any()
+            or ordered.episode_anchor_pre_ts.ne(ordered.episode_id.map(summary.first_pre_ts)).any()):
+        raise ValueError('Mapa de episodios y resumen no coinciden')
+    if (near.attempt_id.duplicated().any() or len(near)!=manifest.get('attempts_with_prior_similar_zone_other_level',len(near))
+            or not near.attempt_id.isin(amap.attempt_id).all()):
+        raise ValueError('Alertas de niveles cercanos inconsistentes')
+    if not near.empty and (near.level_id.eq(near.other_level_id).any()
+                           or near.pre_closed_ts.le(near.other_pre_closed_ts).any()
+                           or near.interpretation.ne('POSIBLE_ZONA_EQUIVALENTE_NO_FUSIONADA').any()):
+        raise ValueError('Alerta de nivel distinto inválida')
+    return amap,eps,near,manifest
+
+
+def episode_catalog(discovery: pd.DataFrame, amap: pd.DataFrame, episodes: pd.DataFrame, scale_field: str):
+    """Build catalog using the first attempt, regardless of later favorable families."""
+    first=amap.loc[amap.episode_ordinal.eq(1),['episode_id','attempt_id','symbol','level_id','pre_closed_ts',
+                        'other_levels_same_candle','candidate_other_level_prior_count']].copy()
+    first=first.rename(columns={'attempt_id':'first_attempt_id',
+                   'pre_closed_ts':'representative_pre_ts',
+                   'other_levels_same_candle':'first_other_levels_same_candle',
+                   'candidate_other_level_prior_count':'first_nearby_levels'})
+    d=discovery[['attempt_id',scale_field,'scale_agreement','status']].rename(columns={
+        'attempt_id':'first_attempt_id',scale_field:'representative_family',
+        'scale_agreement':'representative_agreement','status':'representative_status'})
+    catalog=episodes.merge(first,on=['episode_id','first_attempt_id','symbol','level_id'],validate='one_to_one')
+    catalog=catalog.merge(d,on='first_attempt_id',validate='one_to_one')
+    if len(catalog)!=len(episodes):
+        raise ValueError('Faltan representantes de episodios')
+    return catalog
+
+
+def filter_episodes(catalog, discovery, amap, scale_field, *, family='TODAS',
+                    symbol='TODOS', agree='TODOS', family_match='PRIMERO', change='TODOS'):
+    """The default is causal first attempt. ANY is retrospective and explicitly labeled."""
+    result=catalog
+    if symbol!='TODOS':result=result[result.symbol.eq(symbol)]
+    if agree!='TODOS':result=result[result.representative_agreement.eq(agree)]
+    if family!='TODAS':
+        if family_match=='PRIMERO':
+            result=result[result.representative_family.eq(family)]
+        elif family_match=='CUALQUIERA':
+            matched=amap[['episode_id','attempt_id']].merge(discovery[['attempt_id',scale_field]],
+                         on='attempt_id',validate='one_to_one')
+            ids=matched.loc[matched[scale_field].eq(family),'episode_id'].unique()
+            result=result[result.episode_id.isin(ids)]
+        else:raise ValueError('Modo de coincidencia de familias inválido')
+    if change=='CAMBIA':result=result[result.family_changes_within_episode.eq(1)]
+    elif change=='ESTABLE':result=result[result.family_changes_within_episode.eq(0)]
+    elif change!='TODOS':raise ValueError('Filtro de cambios inválido')
+    return result
 
 def drawable_bars(candles,pre,pre_count,post_count):
     """Trailing PRE must be contiguous; any unavailable tail is explicit."""
@@ -111,6 +280,7 @@ def chart_for_attempt(r,candles,scale,pre_bars,post_bars,show_pivots):
     return fig,len(before),len(future)
 
 
+
 def render_hll_structural_discovery(root):
     import streamlit as st
     import hll_structural_approach_ohlc_pre as ohlc
@@ -131,39 +301,142 @@ def render_hll_structural_discovery(root):
         payload=cached_read(str(selected),(selected/'attempts_pre.csv').stat().st_mtime_ns)
         if payload is None:raise ValueError('Archivos de corrida incompletos')
         data,manifest=payload
-    except (ValueError,OSError,KeyError) as e:
-        st.error(f'No se pudo cargar Discovery: {e}');return
+    except (ValueError,OSError,KeyError) as exc:
+        st.error(f'No se pudo cargar Discovery: {exc}');return
     c1,c2,c3=st.columns(3)
     c1.metric('Intentos totales',len(data))
     c2.metric('Con PRE 96 completo',int(data.status.eq('COMPLETE_PRE').sum()))
     c3.metric('Sin PRE 96 completo',int(data.status.ne('COMPLETE_PRE').sum()))
+
+    overlap_dir=root/OVERLAP_PARENT
+    overlap=None
+    if selected.name=='full290_v1' and (overlap_dir/'manifest.json').is_file():
+        @st.cache_data(show_spinner=False)
+        def cached_overlap(path,mtimes,discovery_mtime):
+            return load_overlap(Path(path),data,manifest)
+        file_names=['manifest.json','attempt_episode_map.csv','episode_candidates.csv',
+                    'nearby_other_levels_review.csv','level_reuse.csv','symbol_summary.csv']
+        try:
+            mtimes=tuple((overlap_dir/x).stat().st_mtime_ns for x in file_names)
+            overlap=cached_overlap(str(overlap_dir),mtimes,(selected/'attempts_pre.csv').stat().st_mtime_ns)
+        except (OSError,ValueError,KeyError) as exc:
+            st.error(f'No se puede habilitar el modo episodios: {exc}')
+            st.caption('El modo intentos original continúa disponible. No se utilizaron datos de solapamiento inválidos.')
+    elif selected.name=='full290_v1':
+        st.info('Todavía no está el reporte de solapamiento; por ahora se conserva el modo intentos.')
+    amap=eps=near=overlap_manifest=None
+    if overlap is not None:
+        amap,eps,near,overlap_manifest=overlap
+        e1,e2,e3=st.columns(3)
+        e1.metric('Episodios candidatos (24/96)',len(eps))
+        e2.metric('Intentos posteriores agrupados',len(amap)-len(eps))
+        e3.metric('Episodios con familias cambiantes (1 ATR)',int(eps.family_changes_within_episode.sum()))
+        st.caption('Agrupación heurística por mismo level_id: separación máxima de 24 velas y extensión menor de 96. '
+                   'Otros niveles cercanos NO se fusionan; ningún CROSS_UP se elimina.')
+    units=['Episodios (mismo nivel, 24/96)','Intentos CROSS_UP'] if overlap is not None else ['Intentos CROSS_UP']
+    unit=st.radio('Unidad de análisis',units,horizontal=True,key='hll_discovery_unit')
+    in_episodes=unit.startswith('Episodios')
+
     scale=st.selectbox('Sensibilidad ATR',[0.5,1.0,1.5],index=1,key='hll_discovery_atr')
     field={0.5:'family_0p5',1.0:'family_1p0',1.5:'family_1p5'}[scale]
     names=sorted(data[field].dropna().astype(str).unique().tolist())
     c4,c5,c6=st.columns(3)
-    with c4: fam=st.selectbox('Familia',['TODAS']+names,format_func=lambda x:FAMILY_LABELS.get(x,x),key='hll_discovery_family')
-    with c5: sym=st.selectbox('Símbolo',['TODOS']+sorted(data.symbol.unique()),key='hll_discovery_sym')
-    with c6: agree=st.selectbox('Acuerdo ATR',['TODOS','IGUAL_3_ATR','DISCREPA_ATR','SIN_DATOS'],key='hll_discovery_agree')
-    filtered=data
-    if fam!='TODAS':filtered=filtered[filtered[field].eq(fam)]
-    if sym!='TODOS':filtered=filtered[filtered.symbol.eq(sym)]
-    if agree!='TODOS':filtered=filtered[filtered.scale_agreement.eq(agree)]
-    st.caption(f'{len(filtered)} intentos con estos filtros. Ninguno se selecciona por POST ni PnL.')
-    if filtered.empty:return
-    filtered=filtered.sort_values(['symbol','pre_closed_ts','attempt_id'])
-    pages=max(1,math.ceil(len(filtered)/80))
-    page=st.number_input('Página de intentos',min_value=1,max_value=pages,value=1,step=1,key='hll_discovery_page')
-    shown=filtered.iloc[(page-1)*80:page*80]
-    display_cols=['symbol','attempt_id','pre_closed_ts',field,'scale_agreement','original_pre_pattern_48',
-                  'intercontact_48','latest_recovery_retention_1p0','preserved_fraction_last3_1p0','status']
-    st.dataframe(shown[[x for x in display_cols if x in shown]],hide_index=True,use_container_width=True)
-    options=shown.attempt_id.tolist()
-    attempt=st.selectbox('Inspeccionar intento de esta página',options,
-             format_func=lambda aid:f'{shown.loc[shown.attempt_id.eq(aid),"symbol"].iloc[0]} · {aid}',
-             key='hll_discovery_attempt')
-    row=shown.loc[shown.attempt_id.eq(attempt)].iloc[0]
+    with c4:fam=st.selectbox('Familia',['TODAS']+names,format_func=lambda x:FAMILY_LABELS.get(x,x),key='hll_discovery_family')
+    with c5:sym=st.selectbox('Símbolo',['TODOS']+sorted(data.symbol.unique()),key='hll_discovery_sym')
+    with c6:agree=st.selectbox('Acuerdo ATR',['TODOS','IGUAL_3_ATR','DISCREPA_ATR','SIN_DATOS'],key='hll_discovery_agree')
+
+    if in_episodes:
+        s1,s2=st.columns(2)
+        with s1:
+            matching=st.selectbox('Familia del episodio según',
+                 ['Primer intento (causal)','Cualquier intento (retrospectivo)'],
+                 key='hll_discovery_episode_family_match')
+        with s2:
+            changes=st.selectbox('Evolución de familia a 1 ATR',
+                 ['Todos','Cambia entre intentos','No cambia'],
+                 key='hll_discovery_episode_changes')
+        match='PRIMERO' if matching.startswith('Primer') else 'CUALQUIERA'
+        change={'Todos':'TODOS','Cambia entre intentos':'CAMBIA','No cambia':'ESTABLE'}[changes]
+        catalog=episode_catalog(data,amap,eps,field)
+        filtered=filter_episodes(catalog,data,amap,field,family=fam,symbol=sym,agree=agree,
+                                 family_match=match,change=change)
+        st.caption(f'{len(filtered)} episodios candidatos con estos filtros. '
+            'Familia y acuerdo ATR del representante = primer CROSS_UP, no el mejor resultado.'
+            + (' Buscar cualquier intento usa información posterior al inicio del episodio y es retrospectivo.'
+               if match=='CUALQUIERA' else ''))
+        if filtered.empty:return
+        filtered=filtered.sort_values(['symbol','first_pre_ts','episode_id'])
+        pages=max(1,math.ceil(len(filtered)/80))
+        page=st.number_input('Página de episodios',min_value=1,max_value=pages,value=1,step=1,key='hll_discovery_episode_page')
+        shown=filtered.iloc[(page-1)*80:page*80]
+        columns=['symbol','episode_id','level_id','first_pre_ts','last_pre_ts','attempts',
+                 'representative_family','representative_agreement','family_changes_within_episode',
+                 'representative_status']
+        st.dataframe(shown[columns],hide_index=True,use_container_width=True)
+        chosen=st.selectbox('Inspeccionar episodio de esta página',shown.episode_id.tolist(),
+                 format_func=lambda eid:(f'{shown.loc[shown.episode_id.eq(eid),"symbol"].iloc[0]}'
+                     f' · {eid} · {int(shown.loc[shown.episode_id.eq(eid),"attempts"].iloc[0])} intentos'),
+                 key='hll_discovery_episode_id')
+        ep=shown.loc[shown.episode_id.eq(chosen)].iloc[0]
+        members=amap.loc[amap.episode_id.eq(chosen)].sort_values('episode_ordinal').copy()
+        member_view=members[['attempt_id','episode_ordinal','pre_closed_ts',
+                             'status','other_levels_same_candle',
+                             'candidate_other_level_prior_count']].merge(
+                    data[['attempt_id',field,'scale_agreement']],on='attempt_id',validate='one_to_one')
+        st.markdown('**Evolución del episodio · cortes PRE consecutivos**')
+        st.caption('La tabla incluye todos los intentos del episodio y permite estudiar su evolución histórica; '
+                   'no representa información disponible en el primer corte.')
+        member_view['fecha_pre_utc']=pd.to_datetime(member_view.pre_closed_ts,unit='ms',utc=True)
+        st.dataframe(member_view,hide_index=True,use_container_width=True)
+        opts=members.attempt_id.tolist()
+        attempt=st.selectbox('Inspeccionar corte PRE dentro del episodio',opts,
+                 format_func=lambda aid:(f'#{int(members.loc[members.attempt_id.eq(aid),"episode_ordinal"].iloc[0])}'
+                    f' · {pd.Timestamp(int(members.loc[members.attempt_id.eq(aid),"pre_closed_ts"].iloc[0]),unit="ms",tz="UTC")}'
+                    f' · {aid[:12]}'),key='hll_discovery_episode_attempt')
+        r=members.loc[members.attempt_id.eq(attempt)].iloc[0]
+        row=data.loc[data.attempt_id.eq(attempt)].iloc[0]
+        past_cuts=members.loc[members.pre_closed_ts.lt(int(row.pre_closed_ts)),'pre_closed_ts'].tolist()
+        st.caption(f'Episodio {ep.episode_id} · nivel {ep.level_id} · '
+                   f'{len(members)} intentos del mismo nivel · representante: {ep.first_attempt_id}.'
+                   ' Los cortes futuros no se dibujan en el gráfico PRE actual.')
+        matching_edges=near.loc[near.attempt_id.isin(opts)]
+        with st.expander('⚠️ Posibles zonas de otros niveles (no fusionadas)',expanded=False):
+            st.caption('Coincidencias de nivel distinto, revisadas hacia atrás en el tiempo. '
+                       'No implican por sí solas la misma consolidación.')
+            st.metric('Alertas en intentos de este episodio',len(matching_edges))
+            st.metric('Otros niveles en el mismo corte del intento elegido',int(r.other_levels_same_candle))
+            if not matching_edges.empty:
+                st.dataframe(matching_edges[['attempt_id','other_attempt_id','other_level_id',
+                      'delta_bars','center_distance_atr','zone_gap_atr']],
+                      hide_index=True,use_container_width=True)
+    else:
+        filtered=data
+        if fam!='TODAS':filtered=filtered[filtered[field].eq(fam)]
+        if sym!='TODOS':filtered=filtered[filtered.symbol.eq(sym)]
+        if agree!='TODOS':filtered=filtered[filtered.scale_agreement.eq(agree)]
+        st.caption(f'{len(filtered)} intentos con estos filtros. Ninguno se selecciona por POST ni PnL.')
+        if filtered.empty:return
+        filtered=filtered.sort_values(['symbol','pre_closed_ts','attempt_id'])
+        pages=max(1,math.ceil(len(filtered)/80))
+        page=st.number_input('Página de intentos',min_value=1,max_value=pages,value=1,step=1,key='hll_discovery_page')
+        shown=filtered.iloc[(page-1)*80:page*80]
+        display_cols=['symbol','attempt_id','pre_closed_ts',field,'scale_agreement','original_pre_pattern_48',
+                      'intercontact_48','latest_recovery_retention_1p0','preserved_fraction_last3_1p0','status']
+        st.dataframe(shown[[x for x in display_cols if x in shown]],hide_index=True,use_container_width=True)
+        opts=shown.attempt_id.tolist()
+        attempt=st.selectbox('Inspeccionar intento de esta página',opts,
+                 format_func=lambda aid:f'{shown.loc[shown.attempt_id.eq(aid),"symbol"].iloc[0]} · {aid}',
+                 key='hll_discovery_attempt')
+        row=shown.loc[shown.attempt_id.eq(attempt)].iloc[0]
+        past_cuts=[]
+        if overlap is not None:
+            member=amap.loc[amap.attempt_id.eq(attempt)].iloc[0]
+            st.caption(f'Episodio asociado: {member.episode_id} · intento '
+                       f'{int(member.episode_ordinal)}/{int(member.episode_attempt_count)} del mismo nivel. '
+                       'Para navegar entre intentos relacionados, elegí el modo Episodios.')
     if row['status']!='COMPLETE_PRE':
-        st.warning(f'PRE no evaluable: {row["reason"]}. No se fabricó clasificación.');return
+        st.warning(f'PRE no evaluable: {row["reason"]}. No se fabricó clasificación.')
+        return
     pre_bars=st.selectbox('Velas PRE para visualizar',[48,96,144,192,288,384],index=4,key='hll_discovery_pre_count')
     show_post=st.checkbox('Revelar POST (solo visual, no afecta familias)',value=False,key='hll_discovery_post')
     post_bars=st.selectbox('Velas POST',[12,24,48,72,96],index=4,key='hll_discovery_post_count',disabled=not show_post) if show_post else 0
@@ -176,11 +449,19 @@ def render_hll_structural_discovery(root):
     try:
         candles=cached_candles(str(candle),candle.stat().st_mtime_ns)
         fig,actual_pre,actual_post=chart_for_attempt(row,candles,scale,pre_bars,post_bars,pivots)
+        if in_episodes:
+            # Display only attempt cutoffs known before this selected PRE cutoff.
+            earliest=int(row.pre_closed_ts)-actual_pre*TF
+            for cut in past_cuts:
+                if earliest<=cut<int(row.pre_closed_ts):
+                    fig.add_vline(x=pd.Timestamp(int(cut),unit='ms',tz='UTC'),
+                                  line_dash='dot',line_width=1,line_color='#5e94c9')
         st.plotly_chart(fig,use_container_width=True,key='hll_discovery_chart')
         st.caption(f'PRE real mostrado: {actual_pre}/{pre_bars} velas · POST real mostrado: {actual_post}/{post_bars if show_post else 0}. '
-                   'Fases calculadas exclusivamente con 96 velas PRE.')
-    except (ValueError,TypeError,KeyError) as e:
-        st.error(f'No se pudo dibujar el episodio: {e}');return
+                   'Fases calculadas exclusivamente con 96 velas PRE.'
+                   + (' Líneas azules: cruces anteriores del mismo episodio.' if in_episodes else ''))
+    except (ValueError,TypeError,KeyError) as exc:
+        st.error(f'No se pudo dibujar el episodio: {exc}');return
     st.markdown(f'**Familia {scale:g} ATR:** {FAMILY_LABELS.get(str(row[field]),str(row[field]))}')
     suffix={0.5:'0p5',1.0:'1p0',1.5:'1p5'}[scale]
     for name,col in [('A favor',f'evidence_{suffix}'),('En contra',f'contradictions_{suffix}'),('Limitaciones',f'limitations_{suffix}')]:
