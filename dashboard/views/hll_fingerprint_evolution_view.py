@@ -8,6 +8,7 @@ from __future__ import annotations
 import pandas as pd
 
 import hll_structural_fingerprint_v1 as fingerprint
+import hll_structural_fingerprint_labels_v1 as labels
 import hll_structural_fingerprint_evolution_v1 as evolution
 
 
@@ -23,7 +24,8 @@ def evolution_feature_table(evo, family):
         raise ValueError("Familia de huella no reconocida")
     rows = [r for r in evolution.compare_features(evo) if r["family_id"] == family]
     return pd.DataFrame([{
-        "Variable":r["feature_id"], "#1":r["first_value"],
+        "Variable":labels.dual_label(r["feature_id"]), "ID técnico":r["feature_id"],
+        "Lectura contextual":labels.reading_badge(r["feature_id"]), "#1":r["first_value"],
         "Anterior":r["previous_value"], "Seleccionado":r["selected_value"],
         "Δ vs #1":r["delta_vs_first"], "Δ vs anterior":r["delta_vs_previous"],
         "Unidad":r["unit"], "Definición":r["definition"]
@@ -56,7 +58,7 @@ def evolution_plot(evo, feature):
         trace(causal[-1:]+after,"Posteriores (retrospectivos)","dot","#d7a45c")
     unit=fingerprint.FEATURES[feature][1]
     fig.update_layout(height=270,xaxis_title="Corte PRE (UTC)",
-        yaxis_title=f"{feature} · {unit}",margin=dict(l=6,r=8,t=8,b=25),
+        yaxis_title=f"{labels.label(feature)} · {unit}",margin=dict(l=6,r=8,t=8,b=25),
         legend=dict(orientation="h",y=-0.48))
     return fig
 
@@ -121,9 +123,10 @@ def render_fingerprint_evolution(members, selected_attempt_id, candles, scale_at
             with tabs[i]:
                 variables=FEATURES_BY_FAMILY[family]
                 metric=st.selectbox("Variable para ver su evolución",variables,
-                    format_func=lambda key: f"{key} ({fingerprint.FEATURES[key][1]})",
+                    format_func=lambda key: f"{labels.dual_label(key)} ({fingerprint.FEATURES[key][1]})",
                     key=f"hll_fp_dyn_feature_{family}")
-                st.caption(fingerprint.FEATURES[metric][2])
+                st.caption(f"**Nombre técnico:** `{metric}` · {fingerprint.FEATURES[metric][2]}")
+                st.caption(f"{labels.reading_badge(metric)} · {labels.reading(metric)}")
                 fig=evolution_plot(result,metric)
                 st.plotly_chart(fig,use_container_width=True,
                     key=f"hll_fp_dynamic_plot_{family}")

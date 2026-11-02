@@ -764,6 +764,15 @@ def render_hll_structural_discovery(root):
             # The engine truncates features to the chosen cutoff in causal mode.
             from dashboard.views.hll_fingerprint_evolution_view import render_fingerprint_evolution
             render_fingerprint_evolution(members, attempt, candles, scale)
+            # Selected cut as reference for the universal similarity search.
+            # Candidate index V1 contains one causal first CROSS_UP per episode.
+            from dashboard.views.hll_structural_similarity_view import render_structural_similarity
+            render_structural_similarity(r, candles, root)
+        elif overlap is not None:
+            # Also available in Intentos CROSS_UP mode when its canonical
+            # episode mapping is verified. Exact selected attempt remains anchor.
+            from dashboard.views.hll_structural_similarity_view import render_structural_similarity
+            render_structural_similarity(member, candles, root)
     except (ValueError,TypeError,KeyError) as exc:
         st.error(f'No se pudo dibujar el episodio: {exc}');return
     st.markdown(f'**Familia {scale:g} ATR:** {FAMILY_LABELS.get(str(row[field]),str(row[field]))}')
