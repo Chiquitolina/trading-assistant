@@ -758,6 +758,12 @@ def render_hll_structural_discovery(root):
         st.caption(f'PRE real mostrado: {actual_pre}/{pre_bars} velas · POST real mostrado: {actual_post}/{post_bars if show_post else 0}. '
                    'Fases calculadas exclusivamente con 96 velas PRE.'
                    + (' Líneas azules: cruces anteriores del mismo episodio.' if in_episodes else ''))
+        if in_episodes:
+            # Optional, read-only dynamic fingerprint. Uses the SAME selected
+            # Attempt ID, the validated episode membership and original candles.
+            # The engine truncates features to the chosen cutoff in causal mode.
+            from dashboard.views.hll_fingerprint_evolution_view import render_fingerprint_evolution
+            render_fingerprint_evolution(members, attempt, candles, scale)
     except (ValueError,TypeError,KeyError) as exc:
         st.error(f'No se pudo dibujar el episodio: {exc}');return
     st.markdown(f'**Familia {scale:g} ATR:** {FAMILY_LABELS.get(str(row[field]),str(row[field]))}')
