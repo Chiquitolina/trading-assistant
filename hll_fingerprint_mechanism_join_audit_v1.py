@@ -18,6 +18,7 @@ import math
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 VERSION = "HLL_FINGERPRINT_MECHANISM_JOIN_AUDIT_V1"
@@ -75,8 +76,26 @@ def write_json(path: Path, payload: dict) -> None:
 
 
 def stable_ts(v):
-    """Compare only equivalent textual UTC-millisecond timestamps (no coercion into float)."""
-    return str(v or "").strip()
+    """Normalize *integral* epoch milliseconds without floating-point rounding.
+
+    A timestamp serialized by pandas as ``1787292000000.0`` is the same
+    millisecond as ``1787292000000``. Decimal retains exact precision, so
+    ``1787292000000.1`` and ``1787292000001`` remain distinct. Non-numeric
+    values are left as-is to avoid silently accepting invalid timestamps.
+    """
+    raw = "" if v is None else str(v).strip()
+    if not raw:
+        return raw
+    try:
+        num = Decimal(raw)
+    except InvalidOperation:
+        return raw
+    if num.is_finite() and num == num.to_integral_value():
+        # Timestamps in this dataset fit in int64; disallow enormous numbers
+        # rather than doing unbounded large-integer conversion from CSV data.
+        if num == 0 or num.adjusted() <= 18:
+            return str(int(num))
+    return raw
 
 
 def assess(root: Path):
@@ -154,9 +173,16 @@ def assess(root: Path):
             issue("NOT_IN_EPISODE_MAP", source, aid)
             return None
         for key in fields:
-            if key in r and r[key] not in (None, "") and stable_ts(r[key]) != stable_ts(canonical[key]):
-                issue("IDENTITY_MISMATCH", source, aid, detail=key,
-                      expected=canonical[key], actual=r[key])
+            if key in r and r[key] not in (None, ""):
+                # Only timestamps get numeric-format normalization; symbol
+                # and level identifiers must remain EXACT string matches.
+                actual_value = str(r[key])
+                expected_value = str(canonical[key])
+                equal = (stable_ts(actual_value) == stable_ts(expected_value)
+                         if key.endswith("_ts") else actual_value == expected_value)
+                if not equal:
+                    issue("IDENTITY_MISMATCH", source, aid, detail=key,
+                          expected=expected_value, actual=actual_value)
         return canonical
 
     # Causally defined fingerprint PRE index; covers one cut per episode.
@@ -292,7 +318,7 @@ def assess(root: Path):
                 issue("ENTRY_EVENT_WITHOUT_VERIFIED_COVERAGE", "entry_events", aid, actual=route)
             if detail is not None:
                 for field in ("entry_ts", "signal_ts"):
-                    if e.get(field) not in (None, "") and str(e[field]) != str(detail[field]):
+                    if e.get(field) not in (None, "") and stable_ts(e[field]) != stable_ts(detail[field]):
                         issue("ENTRY_COVERAGE_DETAIL_MISMATCH", "entry_events", aid,
                               detail=f"{route}.{field}", expected=e[field], actual=detail[field])
                 try:
@@ -315,9 +341,13 @@ def assess(root: Path):
                 if a is not None:
                     for field, value in (("entry_id", detail["entry_id"]),
                                           ("entry_ts", detail["entry_ts"])):
-                        if str(a.get(field, "")) != str(value):
+                        actual_field = str(a.get(field, ""))
+                        expected_field = str(value)
+                        equal = (stable_ts(actual_field) == stable_ts(expected_field)
+                                 if field == "entry_ts" else actual_field == expected_field)
+                        if not equal:
                             issue("OPEN_AUDIT_IDENTITY_MISMATCH", "open_discrepancies", aid,
-                                  detail=f"{route}.{field}", expected=str(value), actual=str(a.get(field, "")))
+                                  detail=f"{route}.{field}", expected=expected_field, actual=actual_field)
                     try:
                         if not math.isclose(float(a["signal_reference_open_30m"]), ref_open, rel_tol=1e-10, abs_tol=1e-12) or not math.isclose(float(a["execution_open_1m"]), exe_open, rel_tol=1e-10, abs_tol=1e-12):
                             issue("OPEN_AUDIT_PRICE_MISMATCH", "open_discrepancies", aid, actual=route)

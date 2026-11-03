@@ -170,6 +170,76 @@ class JoinAuditTests(unittest.TestCase):
         self.assertEqual(summary['observed_open_source_differences'], 1)
         self.assertEqual(len(source_differences), 1)
 
+    def test_integral_timestamp_serialization_is_not_a_mismatch(self):
+        # Real FULL290 issue: entry_coverage stores epoch-ms as x.0 while
+        # entry_events stores exactly the same millisecond as integer text.
+        path = self.root/audit.SOURCE_FILES['entry_coverage']
+        with path.open(encoding='utf-8', newline='') as f:
+            rows = list(csv.DictReader(f))
+        for row in rows:
+            if row['status'] == 'ENTRY_VERIFIED':
+                row['entry_ts'] = '350.0'
+                row['signal_ts'] = '300.000'
+        write_csv(path, rows)
+        joined, issues, summary, _, _ = audit.assess(self.root)
+        self.assertEqual(issues, [])
+        self.assertTrue(summary['is_compatible'])
+        self.assertEqual(summary['mismatch_total'], 0)
+
+    def test_timestamp_equivalence_uses_decimal_not_float(self):
+        self.assertEqual(audit.stable_ts('1787292000000.0'), '1787292000000')
+        self.assertEqual(audit.stable_ts('1787292000000'), '1787292000000')
+        self.assertEqual(audit.stable_ts('1.787292e12'), '1787292000000')
+        self.assertNotEqual(audit.stable_ts('1787292000000.0001'),
+                            audit.stable_ts('1787292000000'))
+        self.assertNotEqual(audit.stable_ts('1787292000001.0'),
+                            audit.stable_ts('1787292000000'))
+        self.assertNotEqual(audit.stable_ts(''), audit.stable_ts('0'))
+
+    def test_real_timestamp_difference_still_fails(self):
+        path = self.root/audit.SOURCE_FILES['entry_coverage']
+        with path.open(encoding='utf-8', newline='') as f:
+            rows = list(csv.DictReader(f))
+        rows[0]['entry_ts'] = '350.0001'
+        write_csv(path, rows)
+        _, issues, summary, _, _ = audit.assess(self.root)
+        self.assertIn('ENTRY_COVERAGE_DETAIL_MISMATCH', {x['kind'] for x in issues})
+        self.assertFalse(summary['is_compatible'])
+
+    def test_identity_timestamps_normalize_but_real_difference_rejected(self):
+        path = self.root/audit.SOURCE_FILES['mechanisms']
+        with path.open(encoding='utf-8', newline='') as f:
+            rows = list(csv.DictReader(f))
+        rows[0]['pre_closed_ts'] = '100.0'
+        write_csv(path, rows)
+        _, issues, summary, _, _ = audit.assess(self.root)
+        self.assertEqual(issues, [])
+        self.assertTrue(summary['is_compatible'])
+        rows[0]['pre_closed_ts'] = '100.1'
+        write_csv(path, rows)
+        _, issues, summary, _, _ = audit.assess(self.root)
+        self.assertIn('IDENTITY_MISMATCH', {x['kind'] for x in issues})
+        self.assertFalse(summary['is_compatible'])
+
+    def test_open_discrepancy_timestamp_serialization_is_not_a_mismatch(self):
+        events_file = self.root/audit.SOURCE_FILES['entry_events']
+        with events_file.open(encoding='utf-8', newline='') as f:
+            events = list(csv.DictReader(f))
+        events[0]['entry_price'] = '100.4'
+        write_csv(events_file, events)
+        audit_file = self.root/audit.SOURCE_FILES['open_discrepancies']
+        audit_file.write_text(
+            'entry_id,attempt_id,symbol,route,entry_ts,entry_utc,signal_reference_open_30m,execution_open_1m,difference_pct\n'
+            + f"{events[0]['entry_id']},a1,BTCUSDT,{events[0]['route']},350.0,,100.5,100.4,-0.0995024876\n",
+            encoding='utf-8')
+        manifest_path = self.root/audit.MANIFEST_FILES['entries']
+        manifest = json.loads(manifest_path.read_text())
+        manifest['entry_open_discrepancies'] = 1
+        write_json(manifest_path, manifest)
+        _, issues, summary, _, _ = audit.assess(self.root)
+        self.assertEqual(issues, [])
+        self.assertTrue(summary['is_compatible'])
+
     def test_only_first_episode_attempt_may_be_fingerprint(self):
         # a2's episode already represented by a1: audit must not allow it.
         file=self.root/audit.SOURCE_FILES['fingerprints']
