@@ -754,10 +754,45 @@ def render_hll_structural_discovery(root):
                 if earliest<=cut<int(row.pre_closed_ts):
                     fig.add_vline(x=pd.Timestamp(int(cut),unit='ms',tz='UTC'),
                                   line_dash='dot',line_width=1,line_color='#5e94c9')
+        mechanism_rows = None
+        # Overlay V1 is a POST-only, read-only extension of THIS Discovery
+        # chart. Never load mechanism data while selecting/sorting PRE rows.
+        if selected.name=='full290_v1' and overlap is not None:
+            from dashboard.views import hll_similarity_mechanism_overlay_view as overlay_ui
+            db_file, manifest_file = overlay_ui.overlay_paths(root)
+            if db_file.is_file() and manifest_file.is_file():
+                exact = r if in_episodes else member
+                @st.cache_data(show_spinner=False, max_entries=40)
+                def cached_hll_discovery_overlay(root_path, aid, symbol, level_id,
+                                                 pre_closed, episode_id, dbmtime, manmtime):
+                    return overlay_ui.read_attempt(root_path, aid, symbol, level_id,
+                                                   pre_closed, episode_id)
+                try:
+                    mechanism_rows = cached_hll_discovery_overlay(
+                        str(root), str(exact['attempt_id']), str(exact['symbol']),
+                        str(exact['level_id']), str(int(exact['pre_closed_ts'])),
+                        str(exact['episode_id']),
+                        db_file.stat().st_mtime_ns, manifest_file.stat().st_mtime_ns)
+                    if show_post:
+                        overlay_ui.add_post_markers(fig, mechanism_rows,
+                            exact['pre_closed_ts'], actual_post, reveal=True)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    st.error(f'Overlay HLL no validado para este intento: {exc}. '
+                             'Se conserva el gráfico original sin marcas de entrada.')
+            else:
+                st.caption('Overlay histórico todavía no instalado: gráfico PRE original sin marcas POST auditadas.')
         st.plotly_chart(fig,use_container_width=True,key='hll_discovery_chart')
         st.caption(f'PRE real mostrado: {actual_pre}/{pre_bars} velas · POST real mostrado: {actual_post}/{post_bars if show_post else 0}. '
                    'Fases calculadas exclusivamente con 96 velas PRE.'
                    + (' Líneas azules: cruces anteriores del mismo episodio.' if in_episodes else ''))
+        if mechanism_rows is not None:
+            with st.expander('Mecanismos y entradas históricas · intento seleccionado',
+                             expanded=False):
+                st.caption('Solo hechos POST del Attempt ID exacto. '
+                           'NOT_COVERED es falta de cobertura FIRST_PER_LEVEL, no falta de señal. '
+                           'Las marcas aparecen únicamente al revelar POST.')
+                st.dataframe(overlay_ui.mechanism_table(mechanism_rows),
+                             hide_index=True, use_container_width=True)
         if in_episodes:
             # Optional, read-only dynamic fingerprint. Uses the SAME selected
             # Attempt ID, the validated episode membership and original candles.

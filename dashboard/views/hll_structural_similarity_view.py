@@ -152,6 +152,37 @@ def render_structural_similarity(selected_row, candles, root):
         st.markdown(f'**Referencia:** {reference["symbol"]} · '
                     f'`{reference["attempt_id"]}` · '
                     f'corte #{int(reference["episode_ordinal_report_only"])}')
+        # The historical layer is a passive exact-ID inspector, never part of
+        # similarity.rank() or the PRE feature normalization.
+        from dashboard.views import hll_similarity_mechanism_overlay_view as post_overlay
+        db_file, db_manifest = post_overlay.overlay_paths(root)
+        overlay_ready = db_file.is_file() and db_manifest.is_file()
+        if overlay_ready:
+            @st.cache_data(show_spinner=False, max_entries=40)
+            def cached_overlay_lookup(root_string, aid, sym, level, pre, ep, db_mtime, manifest_mtime):
+                return post_overlay.read_attempt(root_string, aid, sym, level, pre, ep)
+
+            def lookup_overlay(metadata):
+                return cached_overlay_lookup(str(root), str(metadata['attempt_id']),
+                    str(metadata['symbol']), str(metadata['level_id']),
+                    str(int(metadata['pre_closed_ts'])),
+                    str(metadata['episode_id']) if metadata.get('episode_id') else None,
+                    db_file.stat().st_mtime_ns, db_manifest.stat().st_mtime_ns)
+            # Do not nest Streamlit expanders. The selected reference can be #N;
+            # only reveal its historical status when explicitly requested.
+            if st.checkbox('Consultar mecanismos históricos de la referencia',
+                           value=False, key='hll_similarity_reference_overlay_v1'):
+                try:
+                    source_rows = lookup_overlay(reference)
+                    st.caption('Desenlaces POST del Attempt ID exacto (puede ser #N). '
+                               'No afectan la huella ni el ranking PRE.')
+                    st.dataframe(post_overlay.mechanism_table(source_rows),
+                                 hide_index=True, use_container_width=True)
+                except (ValueError, OSError, KeyError) as exc:
+                    st.error(f'No se puede consultar overlay histórico de referencia: {exc}')
+                    return
+        else:
+            st.caption('Overlay histórico no instalado todavía: solo búsqueda PRE.')
         st.caption(f'{len(candidates):,} episodios indexados; {manifest["complete_288"]:,} completos. '
                    'V1: se comparan los PRIMEROS intentos de otros episodios. '
                    'El índice se obtuvo sobre el histórico completo; es una búsqueda exploratoria retrospectiva.')
@@ -227,6 +258,32 @@ def render_structural_similarity(selected_row, candles, root):
             st.session_state['hll_similarity_override_attempt_v1']=choice
             st.session_state.pop('hll_similarity_search_results_v1',None)
             st.rerun()
+        # Each selection has to reveal its own future deliberately. Switching
+        # candidates always resets POST to hidden, even if one was shown earlier.
+        post_key='hll_similarity_candidate_reveal_post_v1'
+        if st.session_state.get('hll_similarity_post_candidate_id_v1') != choice:
+            st.session_state['hll_similarity_post_candidate_id_v1'] = choice
+            st.session_state[post_key] = False
+        st.markdown('**Mecanismos y entradas históricas · después del corte PRE**')
+        candidate_rows = None
+        if overlay_ready:
+            try:
+                candidate_rows = lookup_overlay(candidate)
+                st.dataframe(post_overlay.mechanism_table(candidate_rows),
+                             hide_index=True, use_container_width=True)
+                st.caption('NOT_COVERED significa fuera de la cohorte FIRST_PER_LEVEL, '
+                           'NO significa ausencia de mecanismo. Confirmación y entrada son hechos distintos.')
+            except (ValueError, OSError, KeyError) as exc:
+                st.error(f'Overlay histórico incompatible con el intento {choice}: {exc}')
+                return
+        else:
+            st.info('Todavía no hay base de mecanismos auditados. POST de velas disponible, '
+                    'pero sin marcadores de señales/OPEN.')
+        reveal_candidate = st.checkbox('Revelar POST de este candidato (solo visual)',
+                                       value=False, key=post_key)
+        candidate_post = st.selectbox('Velas POST del candidato', [12,24,48,72,96],
+                                     index=4, key='hll_similarity_candidate_post_count_v1',
+                                     disabled=not reveal_candidate) if reveal_candidate else 0
         # Load only ONE requested chart, without loading 290 OHLC files into memory.
         chart_path=root/similarity.DEFAULT_CANDLES/f'{candidate["symbol"]}_30m.csv'
         if not chart_path.is_file():
@@ -237,11 +294,17 @@ def render_structural_similarity(selected_row, candles, root):
             def load_candidate_bars(path,mtime):
                 return ohlc.load_candles(Path(path),timestamp_kind='open')[0]
             chart_bars=load_candidate_bars(str(chart_path),chart_path.stat().st_mtime_ns)
-            plot,actual_pre,_=chart_for_attempt(candidate_meta(candidate),chart_bars,1.0,288,0,True)
+            plot,actual_pre,actual_post=chart_for_attempt(
+                candidate_meta(candidate),chart_bars,1.0,288,candidate_post,True)
+            if candidate_rows is not None:
+                post_overlay.add_post_markers(plot,candidate_rows,candidate['pre_closed_ts'],
+                                              actual_post,reveal=reveal_candidate)
         except (ValueError,TypeError,KeyError,OSError) as exc:
             st.warning(f'No se pudo dibujar el candidato: {exc}')
             return
         st.plotly_chart(plot,use_container_width=True,key='hll_similarity_candidate_chart_v1')
-        st.caption(f'Gráfico del candidato: {actual_pre}/288 velas PRE, POST oculto. '
-                   'Pivotes confirmados hasta su propio corte. '
-                   'Agrupación de episodios: heurística por nivel 24/96.')
+        st.caption(f'Gráfico del candidato: {actual_pre}/288 velas PRE; '
+                   + (f'{actual_post}/{candidate_post} velas POST visibles. '
+                      if reveal_candidate else 'POST oculto. ')
+                   + 'Pivotes confirmados hasta su propio corte. '
+                   + 'Las marcas solo corresponden a entradas históricas verificadas, no a órdenes ejecutadas.')
