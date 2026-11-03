@@ -739,6 +739,16 @@ def render_hll_structural_discovery(root):
     show_post=st.checkbox('Revelar POST (solo visual, no afecta familias)',value=False,key='hll_discovery_post')
     post_bars=st.selectbox('Velas POST',[12,24,48,72,96],index=4,key='hll_discovery_post_count',disabled=not show_post) if show_post else 0
     pivots=st.checkbox('Mostrar pivotes y fases PRE',value=True,key='hll_discovery_pivots')
+    universal_on=st.checkbox('🔍 Activar auditoría universal de resistencia · comportamiento + detectores',
+        value=False,key='hll_universal_resistance_enabled',disabled=not show_post)
+    universal_types=[]
+    if universal_on and show_post:
+        from dashboard.views import hll_resistance_universal_audit_view as resistance_ui
+        universal_types=st.multiselect('Marcas descriptivas POST sobre el gráfico',
+            options=list(resistance_ui.EVENT_COLOR),
+            default=['CONTACTO_DESDE_ARRIBA','PERDIDA_ZONA','RECUPERACION_CIERRE'],
+            format_func=lambda event: resistance_ui.EVENT_LABEL[event],
+            key='hll_universal_resistance_markers')
     candle=root/CANDLES/f'{row.symbol}_30m.csv'
     @st.cache_data(show_spinner=False)
     def cached_candles(path,mtime):
@@ -781,10 +791,27 @@ def render_hll_structural_discovery(root):
                              'Se conserva el gráfico original sin marcas de entrada.')
             else:
                 st.caption('Overlay histórico todavía no instalado: gráfico PRE original sin marcas POST auditadas.')
+        # Purely retrospective dual inspector; NEVER affects PRE selection/ranking.
+        universal_result=None
+        if universal_on and show_post and selected.name=='full290_v1' and actual_post:
+            try:
+                from dashboard.views import hll_resistance_universal_audit_view as resistance_ui
+                audit_selected = r if in_episodes else (member if overlap is not None else row)
+                universal_result=resistance_ui.prepare(root,audit_selected,candles,
+                    mechanism_rows,visible_post_bars=actual_post)
+                resistance_ui.add_behavior_markers(fig,
+                    universal_result['behavior']['events'],
+                    audit_selected['pre_closed_ts'],actual_post,
+                    visible_types=universal_types)
+            except (OSError,ValueError,KeyError,TypeError,AssertionError) as exc:
+                st.error('Auditoría universal no verificable para este corte: '
+                         +str(exc)+'. No se infieren estados ni entradas.')
         st.plotly_chart(fig,use_container_width=True,key='hll_discovery_chart')
         st.caption(f'PRE real mostrado: {actual_pre}/{pre_bars} velas · POST real mostrado: {actual_post}/{post_bars if show_post else 0}. '
                    'Fases calculadas exclusivamente con 96 velas PRE.'
                    + (' Líneas azules: cruces anteriores del mismo episodio.' if in_episodes else ''))
+        if universal_result is not None:
+            resistance_ui.render_audit(universal_result)
         if mechanism_rows is not None:
             with st.expander('Mecanismos y entradas históricas · intento seleccionado',
                              expanded=False):
