@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import json
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from hll_unified_family_lifecycle_v11 import sha, exact_ts, VERSION
@@ -70,6 +71,57 @@ def find_selected(data, selected):
     return row
 
 
+
+def matrix_rows_for_attempt(data, selected, route, *, include_other_agreements=False):
+    """Matriz exacta: nunca mezclar SPLIT/ruta/geom/familia/escala.
+
+    El CSV agrupa adicionalmente por scale_agreement. Se devuelve explícito
+    para que dos filas del mismo escenario no parezcan duplicadas.
+    """
+    required=('split','pre_pattern_96','family_1p0','scale_agreement')
+    if any(k not in selected for k in required):
+        raise ValueError('Intento seleccionado sin atributos PRE exactos')
+    out=[]
+    for m in data['by_geometry_family_route_outcomes_v11.csv']:
+        if (m['split']!=selected['split'] or m['route']!=route or
+            m['scale']!='1p0' or m['family']!=selected['family_1p0'] or
+            m['pre_pattern_96']!=selected['pre_pattern_96']):
+            continue
+        same=m['scale_agreement']==selected['scale_agreement']
+        if same or include_other_agreements:
+            out.append({**m,'same_agreement_as_selected':same})
+    return sorted(out,key=lambda x:(x['scenario'],not x['same_agreement_as_selected'],x['scale_agreement']))
+
+
+def episode_timeline(data, selected):
+    """Cronología retrospectiva visible solo tras Revelar POST.
+
+    No copia la huella del primer intento ni mueve cortes PRE: cada fila
+    conserva su familia/geometría exactas.
+    """
+    eid=selected['episode_id']; symbol=selected['symbol']; level=selected['level_id']
+    rows=[a for a in data['unified_attempts_family_v11.csv'] if a['episode_id']==eid]
+    out=[]; prev=None; ordinals=[]
+    for a in sorted(rows,key=lambda x:(exact_ts(x['pre_closed_ts']),int(x['episode_ordinal']),x['attempt_id'])):
+        if a['symbol']!=symbol or a['level_id']!=level:
+            raise ValueError('Episodio cruza símbolo o nivel')
+        ordinal=int(a['episode_ordinal']); ordinals.append(ordinal)
+        ms=exact_ts(a['pre_closed_ts'])
+        instant=datetime.fromtimestamp(ms/1000,tz=timezone.utc).strftime('%Y-%m-%d %H:%M')
+        fam=a['family_1p0']
+        out.append({'intento':ordinal, 'corte_PRE_UTC':instant,
+                    'geometria_96':a['pre_pattern_96'],
+                    'familia_1_ATR':FAMILY_LABELS.get(fam,fam or 'Sin datos'),
+                    'cambio_vs_anterior':'—' if prev is None else ('Sí' if fam!=prev else 'No'),
+                    'seleccionado':'◀' if a['attempt_id']==selected['attempt_id'] else ''})
+        prev=fam
+    if ordinals!=list(range(1,len(ordinals)+1)):
+        raise ValueError('Orden de intentos incompleto o inconsistente')
+    if sum(bool(x['seleccionado']) for x in out)!=1:
+        raise ValueError('Intento seleccionado ausente de episodio')
+    return out
+
+
 def render(root, selected, *, reveal_post=False):
     """Renderizar dentro del Discovery, sin cambiar ranking ni dibujar señales."""
     import pandas as pd
@@ -106,6 +158,8 @@ def render(root, selected, *, reveal_post=False):
             st.caption('Acuerdo entre escalas: '+row['scale_agreement'])
         st.caption('Split: '+row['split']+' · Ordinal dentro del episodio: '+row['episode_ordinal']+'. '
                    'Las familias posteriores de un mismo episodio no son conocidas en el primer corte.')
+        if row['split']=='HOLDOUT_SYMBOL':
+            st.warning('Símbolo HOLDOUT: estos resultados son para validación, NO para elegir familias, umbrales ni filtros.')
         if not reveal_post:
             st.info('Revelá POST en el gráfico para ver entradas y resultados históricos. '
                     'La clasificación PRE se muestra sin utilizar resultados futuros.')
@@ -130,24 +184,38 @@ def render(root, selected, *, reveal_post=False):
             st.info('No existe OPEN 1m verificado para este intento en FIRST_PER_LEVEL. '
                     'NOT_COVERED no equivale a NO_SIGNAL.')
         st.markdown('**Matriz descriptiva · misma geometría y familia**')
+        st.caption('Agrupada también por acuerdo entre las tres escalas ATR. Los resultados pertenecen a otros '
+                   'intentos del mismo grupo PRE, NO necesariamente al seleccionado.')
         route=st.selectbox('Ruta de la matriz',
             ['FLIP_1M','V29_CONTINUATION_30M','V29_RECLAIM_30M'],
             key='hll_v11_route_'+row['attempt_id'])
-        matrix=[x for x in data['by_geometry_family_route_outcomes_v11.csv']
-            if x['split']==row['split'] and x['route']==route and x['scale']=='1p0'
-            and x['family']==row['family_1p0'] and x['pre_pattern_96']==row['pre_pattern_96']]
+        include_other=st.checkbox('Comparar también otros acuerdos entre escalas ATR',value=False,
+            key='hll_v11_other_agree_'+row['attempt_id'])
+        matrix=matrix_rows_for_attempt(data,row,route,include_other_agreements=include_other)
         if matrix:
-            st.dataframe(pd.DataFrame([{'escenario':x['scenario'],'entradas':x['entries'],
-                'episodios':x['episodes'],'TP':x['tp_first'],'SL':x['sl_first'],
-                'sin resolver':int(x['timeout'])+int(x['ambiguous'])+int(x['censored']),
-                'TP_sobre_resueltos_%':x['tp_pct_resolved']} for x in matrix]),
-                hide_index=True,use_container_width=True)
+            st.caption('Acuerdo del intento seleccionado: '+row['scale_agreement']+
+                       '. Cada escenario puede contener varios acuerdos, que NO deben confundirse.')
+            st.dataframe(pd.DataFrame([{
+                'escenario':x['scenario'],
+                'acuerdo_ATR':x['scale_agreement'],
+                'mismo_acuerdo':('Sí' if x['same_agreement_as_selected'] else 'No'),
+                'entradas':x['entries'],'episodios':x['episodes'], 'símbolos':x['symbols'],
+                'TP':x['tp_first'],'SL':x['sl_first'],
+                'sin_resolver':int(x['timeout'])+int(x['ambiguous'])+int(x['censored']),
+                'TP_sobre_resueltos_%':x['tp_pct_resolved']
+            } for x in matrix]), hide_index=True,use_container_width=True)
+            st.caption('Muestras pequeñas y episodios dependientes: los porcentajes son descriptivos, '
+                       'no probabilidades para el intento seleccionado.')
         else:
-            st.caption('No hay entradas con esta combinación en la matriz del piloto.')
+            st.caption('No hay entradas con esta combinación exacta de geometría, familia y acuerdo ATR en el piloto.')
         ep=[x for x in data['episode_family_evolution_v11.csv'] if x['episode_id']==row['episode_id']]
         if ep:
             st.markdown('**Evolución entre intentos · RETROSPECTIVA**')
-            st.caption('Familias a 1 ATR: '+ep[0]['family_sequence_1p0_retrospective'])
-            st.caption('Este resumen incorpora futuros intentos: NO es una variable conocida al primer CROSS_UP.')
+            timeline=episode_timeline(data,row)
+            st.caption(f'{len(timeline)} intentos del episodio. Cada fila es el corte PRE de ese intento; '
+                       'los intentos futuros NO estaban disponibles en el seleccionado.')
+            st.dataframe(pd.DataFrame(timeline),hide_index=True,use_container_width=True)
+            st.caption('La cronología completa solo aparece tras Revelar POST; '
+                       'no se utiliza como criterio PRE del primer intento.')
         st.caption('TP/SL son simulaciones históricas V1 sobre OHLC 1m; no fills reales. '
                    'Se preservan HOLDOUT y DISCOVERY separados; sin inferencia de rentabilidad futura.')
