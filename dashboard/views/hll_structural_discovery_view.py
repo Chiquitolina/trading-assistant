@@ -739,6 +739,11 @@ def render_hll_structural_discovery(root):
     show_post=st.checkbox('Revelar POST (solo visual, no afecta familias)',value=False,key='hll_discovery_post')
     post_bars=st.selectbox('Velas POST',[12,24,48,72,96],index=4,key='hll_discovery_post_count',disabled=not show_post) if show_post else 0
     pivots=st.checkbox('Mostrar pivotes y fases PRE',value=True,key='hll_discovery_pivots')
+    reactions_on=st.checkbox('Mostrar REACTIONs históricas (swing 15m 3x3 · solo PRE)',
+        value=False,key='hll_discovery_reaction_pre_enabled')
+    reaction_sides=(st.multiselect('Marcas REACTION',options=['LONG','SHORT'],
+        default=['LONG','SHORT'],key='hll_discovery_reaction_pre_sides')
+        if reactions_on else [])
     universal_on=st.checkbox('🔍 Activar auditoría universal de resistencia · comportamiento + detectores',
         value=False,key='hll_universal_resistance_enabled',disabled=not show_post)
     universal_types=[]
@@ -757,6 +762,28 @@ def render_hll_structural_discovery(root):
     try:
         candles=cached_candles(str(candle),candle.stat().st_mtime_ns)
         fig,actual_pre,actual_post=chart_for_attempt(row,candles,scale,pre_bars,post_bars,pivots)
+        reaction_data=None
+        if reactions_on:
+            from dashboard.views import hll_reaction_pre_overlay as reaction_ui
+            if actual_pre != pre_bars:
+                st.warning('REACTIONs no evaluables: faltan velas 30m PRE en la ventana solicitada.')
+            else:
+                min_file=root/reaction_ui.MINUTE_DIR/f'{row.symbol}_1m.csv'
+                min_manifest=root/reaction_ui.MANIFEST_DIR/f'{row.symbol}.json'
+                source_file=root/'dashboard/app.py'
+                if not all(p.is_file() for p in (min_file,min_manifest,source_file)):
+                    st.warning('REACTIONs no evaluables: falta histórico HLL 1m, manifiesto o lógica canónica.')
+                else:
+                    @st.cache_data(show_spinner=False,max_entries=32)
+                    def cached_reactions(pre_root,symbol,cutoff,npre,minute_mtime,meta_mtime,app_mtime):
+                        return reaction_ui.inspect_pre(Path(pre_root),symbol,int(cutoff),int(npre))
+                    try:
+                        reaction_data=cached_reactions(str(root),str(row.symbol),
+                            int(row.pre_closed_ts),pre_bars,min_file.stat().st_mtime_ns,
+                            min_manifest.stat().st_mtime_ns,source_file.stat().st_mtime_ns)
+                        reaction_ui.add_markers(fig,reaction_data['events'],reaction_sides)
+                    except (OSError,ValueError,KeyError,TypeError,RuntimeError,ImportError,SyntaxError) as exc:
+                        st.warning('REACTIONs PRE no verificables: '+str(exc)+'. No se infiere ausencia de señales.')
         if in_episodes:
             # Display only attempt cutoffs known before this selected PRE cutoff.
             earliest=int(row.pre_closed_ts)-actual_pre*TF
@@ -807,11 +834,30 @@ def render_hll_structural_discovery(root):
                 st.error('Auditoría universal no verificable para este corte: '
                          +str(exc)+'. No se infieren estados ni entradas.')
         st.plotly_chart(fig,use_container_width=True,key='hll_discovery_chart')
+        if reactions_on and reaction_data is not None:
+            visible=[x for x in reaction_data['events'] if x['side'] in reaction_sides]
+            st.caption(f'REACTIONs causales 15m · {len(visible)} visibles / '
+                       f'{reaction_data["count"]} detectadas antes del corte PRE. '
+                       'Marcadas al CIERRE de la vela 1m del retest; no equivalen a entradas HLL. '
+                       'Replay offline de la lógica original, sin POST. '
+                       'Solo REACTION: los primeros retests fallidos o indecisos no se marcan.')
+            if visible:
+                with st.expander('REACTIONs PRE reproducidas en el gráfico',expanded=False):
+                    view=pd.DataFrame(visible)[['event_key','side','pivot_ts',
+                         'actionable_ts','departure_ts','known_ts','swing_price','retest_close']]
+                    for col in ['pivot_ts','actionable_ts','departure_ts','known_ts']:
+                        view[col]=pd.to_datetime(view[col],unit='ms',utc=True)
+                    st.dataframe(view,hide_index=True,use_container_width=True)
         st.caption(f'PRE real mostrado: {actual_pre}/{pre_bars} velas · POST real mostrado: {actual_post}/{post_bars if show_post else 0}. '
                    'Fases calculadas exclusivamente con 96 velas PRE.'
                    + (' Líneas azules: cruces anteriores del mismo episodio.' if in_episodes else ''))
         if universal_result is not None:
             resistance_ui.render_audit(universal_result)
+        # Unified V1.1: panel opt-in, solo lectura, debajo del gráfico existente.
+        if selected.name=='full290_v1':
+            from dashboard.views import hll_unified_lifecycle_family_view_v11 as family_lifecycle_ui
+            lifecycle_selected = r if in_episodes else (member if overlap is not None else row)
+            family_lifecycle_ui.render(root, lifecycle_selected, reveal_post=show_post)
         if mechanism_rows is not None:
             with st.expander('Mecanismos y entradas históricas · intento seleccionado',
                              expanded=False):
