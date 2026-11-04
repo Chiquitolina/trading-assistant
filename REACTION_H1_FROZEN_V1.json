@@ -1,0 +1,38 @@
+{
+  "id": "REACTION_H1_HOLDOUT_V1",
+  "status": "FROZEN_BEFORE_HOLDOUT",
+  "discovery_plan_sha256": "5f6bccb690dc5f7a69de459888d1d3a7a5128dd1bc590de9633f746cb8a24aca",
+  "hypothesis": "15m SHORT reactions backed by near active 30m HIGH and any active 1h HIGH have higher 30m favorable-first probability than other SHORT reactions",
+  "holdout_cutoffs_utc": ["2026-09-25T14:00:00Z", "2026-09-30T14:00:00Z"],
+  "rule": {
+    "original_side": "SHORT",
+    "original_status": "REACTION",
+    "swing_timeframe": "15m",
+    "30m_group": "NEAR_ACTIVE_0.20",
+    "1h_group_any": ["NEAR_ACTIVE_0.20", "FAR_ACTIVE"]
+  },
+  "context_constraints": {
+    "max_level_age_minutes": 1440,
+    "htf_active_confirmation_time_must_precede_reaction": true,
+    "no_htf_unknown_in_comparison": true
+  },
+  "primary_outcome": {
+    "window_minutes": 30,
+    "target_favorable_pct": 0.5,
+    "invalidation": "wick crosses original swing",
+    "value": "original_30m_race_0_5 == FAVORABLE_FIRST",
+    "denominator": "original_30m_coverage == COMPLETE, known HTF context",
+    "ambiguous_same_1m": "count as nonwin and report count separately"
+  },
+  "secondary_outcomes": [
+    "30m favorable-first with close outside band of 0.10% invalidation",
+    "opposite breakout confirmed by two closed 1m bars within 60m",
+    "rate difference by symbol with both groups"
+  ],
+  "decision_criterion": "H1 supported descriptively if pooled difference positive AND 95pct symbol-block bootstrap CI lower bound positive; otherwise report failure/inconclusive",
+  "resampling": {"unit":"symbol (both cutoffs together)","bootstrap_repetitions":10000,"seed":20261104},
+  "exclusions": ["DYDXUSDT", "CAKEUSDT"],
+  "research_only": true,
+  "no_live_change": true,
+  "no_threshold_tuning_after_holdout": true
+}
