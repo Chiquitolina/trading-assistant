@@ -1,4 +1,4 @@
-"""Overlay histórico REACTION 15m 3x3 en el inspector PRE HLL (solo lectura).
+"""Overlay histórico de REACTIONs 15m en el inspector PRE HLL (solo lectura).
 
 NO reimplementa el detector: ejecuta por AST únicamente las tres funciones
 causales originales de dashboard/app.py, junto con SwingDetector original.
@@ -25,6 +25,9 @@ MANIFEST_DIR = Path('reports/horizontal_level_full290_v301/minutes_manifest')
 DEFAULT_TOLERANCE_PCT = 0.10
 DEFAULT_DEPARTURE_PCT = 0.20
 DEFAULT_MAX_AGE_MIN = 360
+# Configuración original del scanner: 3x3 con prominencia 0. Variantes solo research.
+SWING_SHAPES = ((2, 2), (3, 3), (3, 4), (4, 4), (5, 5))
+PROMINENCE_GRID_PCT = (0.0, 0.05, 0.10, 0.20)
 # 360m retest age + 3+3 swing candles + a safety margin for the first pivot.
 WARMUP_MINUTES = 540
 ORIGINAL_FUNCTIONS = (
@@ -116,7 +119,10 @@ def fifteen_from_one_minute(prefix: pd.DataFrame) -> pd.DataFrame:
 
 
 def replay_canonical_pre(tape: pd.DataFrame, pre_ms: int, first_visible_ms: int,
-                         *, env: dict, swing_detector_class, symbol: str):
+                         *, env: dict, swing_detector_class, symbol: str,
+                         left_bars: int = 3, right_bars: int = 3,
+                         min_prominence_pct: float = 0.0,
+                         include_first_retests: bool = False):
     """Replay causal de primeras pruebas. Devuelve solo REACTION originales.
 
     Retest conocido en retest open + 1m; pivote confirmado en cierre 15m.
@@ -124,14 +130,21 @@ def replay_canonical_pre(tape: pd.DataFrame, pre_ms: int, first_visible_ms: int,
     """
     if pre_ms % TF30 or first_visible_ms % TF30:
         raise ValueError('PRE/ventana 30m desalineados')
+    if (left_bars, right_bars) not in SWING_SHAPES:
+        raise ValueError('Ventana de swing no permitida')
+    if (not np.isfinite(min_prominence_pct) or min_prominence_pct < 0
+            or min_prominence_pct > 5.0):
+        raise ValueError('Prominencia inválida')
     start = first_visible_ms - WARMUP_MINUTES*TF1
     prefix = closed_prefix(tape, start, pre_ms)
     candles15 = fifteen_from_one_minute(prefix)
-    detector = swing_detector_class(left_bars=3,right_bars=3,min_prominence_pct=0.0)
+    detector = swing_detector_class(left_bars=left_bars,right_bars=right_bars,
+                                    min_prominence_pct=min_prominence_pct)
     points = detector.detect_all(candles15.to_dict('records'))
     confirmation = env['get_volume_exhaustion_swing_confirmation_info']
     first_touch = env['_find_confirmed_swing_retest']
     discovered={}
+    raw_first_retests=[]
     for point in points:
         info = confirmation(point=point, timeframe_candles=candles15,swing_timeframe='15m')
         if info is None or int(info['actionable_timestamp']) >= pre_ms:
@@ -139,7 +152,7 @@ def replay_canonical_pre(tape: pd.DataFrame, pre_ms: int, first_visible_ms: int,
         side = 'LONG' if point.side == 'LOW' else 'SHORT' if point.side == 'HIGH' else None
         if side is None:
             continue
-        swing = {'timeframe':'15m','detector':'3x3','signal':side,
+        swing = {'timeframe':'15m','detector':f'{left_bars}x{right_bars}','signal':side,
                  'pivot_timestamp':int(point.pivot_timestamp),
                  'actionable_timestamp':int(info['actionable_timestamp']),
                  'pivot_price':float(point.price),
@@ -148,16 +161,18 @@ def replay_canonical_pre(tape: pd.DataFrame, pre_ms: int, first_visible_ms: int,
                  'prominence_pct':point.prominence_pct}
         retest=first_touch(prefix,swing,DEFAULT_TOLERANCE_PCT,
                            DEFAULT_DEPARTURE_PCT,DEFAULT_MAX_AGE_MIN)
-        if not retest or retest['status'] != 'REACTION':
+        if not retest or (retest['status'] != 'REACTION' and not include_first_retests):
             continue
         known_ts=int(retest['retest_timestamp'])+TF1
         if not (first_visible_ms <= known_ts <= pre_ms):
             continue
         # Coincide con la clave causal de normalize_reactions del scanner online.
         key=(symbol,side,int(retest['retest_timestamp']))
-        discovered.setdefault(key,{
+        item={
+            'prominence_pct':float(point.prominence_pct),
+            'swing_shape':f'{left_bars}x{right_bars}',
             'event_key':'|'.join(map(str,key)),'symbol':symbol,'side':side,
-            'status':'REACTION','pivot_ts':int(point.pivot_timestamp),
+            'status':str(retest['status']),'pivot_ts':int(point.pivot_timestamp),
             'swing_price':float(point.price),
             'actionable_ts':int(info['actionable_timestamp']),
             'departure_ts':int(retest['departure_timestamp']),
@@ -166,12 +181,22 @@ def replay_canonical_pre(tape: pd.DataFrame, pre_ms: int, first_visible_ms: int,
             'retest_price':float(retest['retest_price']),
             'max_departure_pct':float(retest['max_departure_pct']),
             'penetration_pct':float(retest['penetration_pct']),
-            'source':'HISTORICAL_CANONICAL_REPLAY_15M_3X3',
-        })
+            'source':('HISTORICAL_CANONICAL_REPLAY_15M_3X3'
+                      if (left_bars,right_bars,min_prominence_pct)==(3,3,0.0)
+                      else 'HISTORICAL_RESEARCH_VARIANT_15M'),
+        }
+        if include_first_retests:
+            raw_first_retests.append(item)
+        else:
+            discovered.setdefault(key,item)
+    if include_first_retests:
+        return sorted(raw_first_retests,key=lambda r:(r['known_ts'],r['event_key'],r['pivot_ts']))
     return sorted(discovered.values(),key=lambda r:(r['known_ts'],r['event_key']))
 
 
-def inspect_pre(root: Path, symbol: str, pre_ms: int, pre_candles: int):
+def inspect_pre(root: Path, symbol: str, pre_ms: int, pre_candles: int,
+                *, left_bars: int = 3, right_bars: int = 3,
+                min_prominence_pct: float = 0.0):
     """API sin Streamlit; puede cubrirse con st.cache_data desde el visor."""
     root=Path(root)
     if not symbol or '/' in symbol or '\\' in symbol or '..' in symbol:
@@ -183,12 +208,16 @@ def inspect_pre(root: Path, symbol: str, pre_ms: int, pre_candles: int):
     source=root/'dashboard/app.py'
     env, swing_class, source_hash=canonical_functions(str(source),source.stat().st_mtime_ns)
     events=replay_canonical_pre(tape,pre_ms,pre_ms-pre_candles*TF30,
-                                env=env,swing_detector_class=swing_class,symbol=symbol)
+                                env=env,swing_detector_class=swing_class,symbol=symbol,
+                                left_bars=left_bars,right_bars=right_bars,
+                                min_prominence_pct=min_prominence_pct)
     return {'events':events,'source_hash':source_hash,
-            'count':len(events),'cutoff_ms':pre_ms,'first_visible_ms':pre_ms-pre_candles*TF30}
+            'count':len(events),'cutoff_ms':pre_ms,'first_visible_ms':pre_ms-pre_candles*TF30,
+            'swing_shape':f'{left_bars}x{right_bars}',
+            'min_prominence_pct':min_prominence_pct}
 
 
-def add_markers(fig, events, sides=('LONG','SHORT')):
+def add_markers(fig, events, sides=('LONG','SHORT'), *, variant_label='3x3'):
     """Solo agrega Scatter. Nunca altera el gráfico 30m ni sus marcas POST."""
     import plotly.graph_objects as go
     sides=set(sides)
@@ -200,7 +229,7 @@ def add_markers(fig, events, sides=('LONG','SHORT')):
             x=[pd.Timestamp(int(r['known_ts']),unit='ms',tz='UTC') for r in rows],
             y=[float(r['retest_close']) for r in rows],mode='markers',
             marker={'color':color,'size':10,'symbol':symbol,'line':{'width':1,'color':'#111827'}},
-            name='REACTION '+side+' · 15m',
+            name='REACTION '+side+' · 15m'+('' if variant_label=='3x3' else ' · '+variant_label),
             customdata=[[r['event_key'],pd.Timestamp(r['pivot_ts'],unit='ms',tz='UTC').isoformat(),
                          float(r['swing_price']),pd.Timestamp(r['known_ts'],unit='ms',tz='UTC').isoformat()]
                         for r in rows],

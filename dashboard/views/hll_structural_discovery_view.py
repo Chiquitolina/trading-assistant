@@ -739,11 +739,28 @@ def render_hll_structural_discovery(root):
     show_post=st.checkbox('Revelar POST (solo visual, no afecta familias)',value=False,key='hll_discovery_post')
     post_bars=st.selectbox('Velas POST',[12,24,48,72,96],index=4,key='hll_discovery_post_count',disabled=not show_post) if show_post else 0
     pivots=st.checkbox('Mostrar pivotes y fases PRE',value=True,key='hll_discovery_pivots')
-    reactions_on=st.checkbox('Mostrar REACTIONs históricas (swing 15m 3x3 · solo PRE)',
+    reactions_on=st.checkbox('Mostrar REACTIONs históricas (swing 15m · solo PRE)',
         value=False,key='hll_discovery_reaction_pre_enabled')
-    reaction_sides=(st.multiselect('Marcas REACTION',options=['LONG','SHORT'],
-        default=['LONG','SHORT'],key='hll_discovery_reaction_pre_sides')
-        if reactions_on else [])
+    reaction_shape='3x3'
+    reaction_prominence=0.0
+    reaction_sides=[]
+    compare_reactions=False
+    if reactions_on:
+        ra, rb=st.columns(2)
+        with ra:
+            reaction_shape=st.selectbox('Swing 15m: izquierda × derecha',
+                ['2x2','3x3','3x4','4x4','5x5'],index=1,key='hll_reaction_swing_shape')
+        with rb:
+            reaction_prominence=st.selectbox('Prominencia mínima del swing',
+                [0.0,0.05,0.10,0.20],index=0,
+                format_func=lambda x:f'{x:.2f}%',key='hll_reaction_min_prominence')
+        reaction_sides=st.multiselect('Marcas REACTION',options=['LONG','SHORT'],
+            default=['LONG','SHORT'],key='hll_discovery_reaction_pre_sides')
+        compare_reactions=st.checkbox('Comparar todas las sensibilidades (20 combinaciones)',
+            value=False,key='hll_reaction_compare_sensitivity')
+        st.caption('Original: 3×3 / 0,00%. Las demás configuraciones son variantes'
+                   ' históricas experimentales; 3×4 confirma un cuarto de hora más tarde.'
+                   ' Tolerancia 0,10%, alejamiento 0,20% y vigencia 360 min permanecen fijos.')
     universal_on=st.checkbox('🔍 Activar auditoría universal de resistencia · comportamiento + detectores',
         value=False,key='hll_universal_resistance_enabled',disabled=not show_post)
     universal_types=[]
@@ -775,13 +792,18 @@ def render_hll_structural_discovery(root):
                     st.warning('REACTIONs no evaluables: falta histórico HLL 1m, manifiesto o lógica canónica.')
                 else:
                     @st.cache_data(show_spinner=False,max_entries=32)
-                    def cached_reactions(pre_root,symbol,cutoff,npre,minute_mtime,meta_mtime,app_mtime):
-                        return reaction_ui.inspect_pre(Path(pre_root),symbol,int(cutoff),int(npre))
+                    def cached_reactions(pre_root,symbol,cutoff,npre,shape,prominence,
+                                         minute_mtime,meta_mtime,app_mtime):
+                        left,right=map(int,shape.split('x'))
+                        return reaction_ui.inspect_pre(Path(pre_root),symbol,int(cutoff),int(npre),
+                            left_bars=left,right_bars=right,min_prominence_pct=float(prominence))
                     try:
                         reaction_data=cached_reactions(str(root),str(row.symbol),
-                            int(row.pre_closed_ts),pre_bars,min_file.stat().st_mtime_ns,
+                            int(row.pre_closed_ts),pre_bars,reaction_shape,reaction_prominence,
+                            min_file.stat().st_mtime_ns,
                             min_manifest.stat().st_mtime_ns,source_file.stat().st_mtime_ns)
-                        reaction_ui.add_markers(fig,reaction_data['events'],reaction_sides)
+                        reaction_ui.add_markers(fig,reaction_data['events'],reaction_sides,
+                            variant_label=reaction_shape)
                     except (OSError,ValueError,KeyError,TypeError,RuntimeError,ImportError,SyntaxError) as exc:
                         st.warning('REACTIONs PRE no verificables: '+str(exc)+'. No se infiere ausencia de señales.')
         if in_episodes:
@@ -836,18 +858,58 @@ def render_hll_structural_discovery(root):
         st.plotly_chart(fig,use_container_width=True,key='hll_discovery_chart')
         if reactions_on and reaction_data is not None:
             visible=[x for x in reaction_data['events'] if x['side'] in reaction_sides]
-            st.caption(f'REACTIONs causales 15m · {len(visible)} visibles / '
-                       f'{reaction_data["count"]} detectadas antes del corte PRE. '
+            st.caption(f'REACTIONs 15m {reaction_shape} / prominencia ≥{reaction_prominence:.2f}% · '
+                       f'{len(visible)} visibles / {reaction_data["count"]} detectadas antes del corte PRE. '
                        'Marcadas al CIERRE de la vela 1m del retest; no equivalen a entradas HLL. '
-                       'Replay offline de la lógica original, sin POST. '
-                       'Solo REACTION: los primeros retests fallidos o indecisos no se marcan.')
+                       'Replay de funciones originales con parámetros de swing experimentales, sin POST. '
+                       'Solo REACTION: los primeros retests fallidos o indecisos no se marcan en el gráfico.')
             if visible:
                 with st.expander('REACTIONs PRE reproducidas en el gráfico',expanded=False):
-                    view=pd.DataFrame(visible)[['event_key','side','pivot_ts',
-                         'actionable_ts','departure_ts','known_ts','swing_price','retest_close']]
+                    view=pd.DataFrame(visible)[['event_key','side','swing_shape',
+                         'prominence_pct','pivot_ts','actionable_ts',
+                         'departure_ts','known_ts','swing_price','retest_close']]
                     for col in ['pivot_ts','actionable_ts','departure_ts','known_ts']:
                         view[col]=pd.to_datetime(view[col],unit='ms',utc=True)
                     st.dataframe(view,hide_index=True,use_container_width=True)
+            if compare_reactions:
+                from dashboard.views import hll_reaction_sensitivity_matrix as reaction_matrix
+                min_file=root/reaction_ui.MINUTE_DIR/f'{row.symbol}_1m.csv'
+                min_manifest=root/reaction_ui.MANIFEST_DIR/f'{row.symbol}.json'
+                source_file=root/'dashboard/app.py'
+                @st.cache_data(show_spinner=False,max_entries=12)
+                def cached_sensitivity(pre_root,symbol,cutoff,npre,min_mtime,man_mtime,app_mtime):
+                    return reaction_matrix.inspect_grid(Path(pre_root),symbol,int(cutoff),int(npre))
+                try:
+                    grid=cached_sensitivity(str(root),str(row.symbol),int(row.pre_closed_ts),
+                        pre_bars,min_file.stat().st_mtime_ns,min_manifest.stat().st_mtime_ns,
+                        source_file.stat().st_mtime_ns)
+                    with st.expander('Comparación de sensibilidad · todos los cruces',expanded=True):
+                        st.caption('Celda = REACTIONs totales (LONG / SHORT). '
+                                   'La cantidad no demuestra calidad ni éxito predictivo; '
+                                   'no se mezclan resultados posteriores al corte PRE.')
+                        st.dataframe(reaction_matrix.presentation_matrix(grid['rows']),
+                                     hide_index=True,use_container_width=True)
+                        detail=pd.DataFrame(grid['rows'])
+                        detail=detail.rename(columns={
+                            'swing':'Swing','prominence_pct':'Prominencia (%)',
+                            'reactions':'REACTION únicas','long':'LONG','short':'SHORT',
+                            'failed_first_retests':'Primeros retests fallidos',
+                            'indecisive_first_retests':'Primeros retests indecisos',
+                            'shared_with_canonical':'Compartidas con 3×3/0%',
+                            'new_vs_canonical':'Nuevas vs original',
+                            'lost_from_canonical':'Ausentes vs original'})
+                        st.dataframe(detail[['Swing','Prominencia (%)','LONG','SHORT',
+                            'REACTION únicas','Primeros retests fallidos',
+                            'Primeros retests indecisos','Compartidas con 3×3/0%',
+                            'Nuevas vs original','Ausentes vs original']],
+                            hide_index=True,use_container_width=True)
+                        st.caption('REACTION se deduplica por símbolo, lado y minuto de retest. '
+                                   'Fallidos/indecisos se cuentan por swing evaluado; '
+                                   'un mismo minuto podría pertenecer a más de uno. '
+                                   'Un 5×5 confirma más tarde: no es un filtro posterior de 3×3. '
+                                   'Las comparaciones miden densidad y coincidencia, no rentabilidad.')
+                except (OSError,ValueError,KeyError,TypeError,RuntimeError,ImportError,SyntaxError) as exc:
+                    st.warning('Matriz REACTION no verificable: '+str(exc)+'. No se muestran ceros inventados.')
         st.caption(f'PRE real mostrado: {actual_pre}/{pre_bars} velas · POST real mostrado: {actual_post}/{post_bars if show_post else 0}. '
                    'Fases calculadas exclusivamente con 96 velas PRE.'
                    + (' Líneas azules: cruces anteriores del mismo episodio.' if in_episodes else ''))
