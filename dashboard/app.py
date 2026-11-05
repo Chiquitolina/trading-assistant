@@ -84848,6 +84848,17 @@ if selected_section == "reaction_swing_lab":
                 shared_retest_inspector=render_confirmed_swing_retest_inspector,
                 cohort_timezone=TZ,
             )
+            # Read-only historical multi-swing viewer under the existing
+            # Continuous Event swing structure, never a parallel dashboard.
+            # Uses event-frozen candles_json, not current Redis OHLC.
+            if lab_mode == "📍 Event swing structure":
+                from dashboard.views.reaction_continuous_multiswing_view import (
+                    render_continuous_multiswing_view,
+                )
+                render_continuous_multiswing_view(
+                    BASE_DIR, timezone=TZ,
+                    chart_builder=build_volume_exhaustion_chart,
+                )
             if cohort_mode == "Todos":
                 st.divider()
                 st.markdown("### 🗄️ Legacy — herramientas existentes")
