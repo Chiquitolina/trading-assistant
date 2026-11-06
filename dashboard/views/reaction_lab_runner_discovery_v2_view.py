@@ -127,7 +127,21 @@ def _detail_bars(project, event_key):
     return decode_path(row[0]) if row and row[0] else []
 
 
-def _signal_chart(project, event, *, mode, tp, horizon, show_sl=True):
+
+def _rdv2_widget_key(widget_scope, element):
+    """Unique, stable Streamlit identity for charts reused by distinct inspectors.
+
+    Streamlit executes every tab on rerun. The same event can therefore be
+    displayed simultaneously by the all-REACTIONs, runner, and signals views.
+    Scope is the *place in the UI*, not the selected event (which may change).
+    """
+    scopes = {'all_reactions', 'runner_detail', 'signals_detail'}
+    if widget_scope not in scopes:
+        raise ValueError(f'Unknown Runner Discovery widget scope: {widget_scope!r}')
+    return f'rdv2_{widget_scope}_{element}'
+
+
+def _signal_chart(project, event, *, mode, tp, horizon, show_sl=True, widget_scope):
     import plotly.graph_objects as go
     import pandas as pd
     import streamlit as st
@@ -168,7 +182,9 @@ def _signal_chart(project, event, *, mode, tp, horizon, show_sl=True):
         fig.add_hline(y=price,line_color=col,line_dash="dash",line_width=1.25,
                       annotation_text=name,annotation_position="top right")
     fig.update_layout(xaxis_rangeslider_visible=False, showlegend=False, hovermode="x unified")
-    st.plotly_chart(_chart_style(fig,height=355),use_container_width=True,config={"displaylogo":False})
+    st.plotly_chart(_chart_style(fig,height=355),use_container_width=True,
+                    config={"displaylogo":False},
+                    key=_rdv2_widget_key(widget_scope, 'signal_chart'))
     if show_sl:
         st.caption("OHLC de 1m; si TP y SL están en la misma vela no se puede conocer su orden. "
                    "Las líneas son barreras teóricas, no órdenes ejecutadas.")
@@ -309,7 +325,7 @@ def _render_triple_runner_filter(project, working, pool, *, mode, tp, horizon):
     st.caption('Arriba: patrón PRE con picos 1/2/3 y valles A/B. '
                'Debajo: trayectoria 1m posterior y barreras TP/SL de referencia. '
                'MFE posterior y desenlace NO intervienen en la detección del patrón.')
-    _triple_15m_chart(project,event)
+    _triple_15m_chart(project,event,widget_scope='all_reactions')
     if not pd.isna(is_runner):
         state=_classify(pd.DataFrame([event]),mode=mode,tp=tp,horizon=horizon).iloc[0]
         label={'TP_FIRST':'TP antes de SL','SL_FIRST':'SL antes de TP',
@@ -319,7 +335,8 @@ def _render_triple_runner_filter(project, working, pool, *, mode, tp, horizon):
                     'Runner es MFE favorable, independiente del orden TP/SL.')
     else:
         st.warning('Sin cobertura runner: no contamos este evento como fallido.')
-    _signal_chart(project,event,mode=mode,tp=tp,horizon=horizon,show_sl=True)
+    _signal_chart(project,event,mode=mode,tp=tp,horizon=horizon,show_sl=True,
+                  widget_scope='all_reactions')
     with st.expander('Exportar todas las REACTIONs de esta selección',expanded=False):
         st.download_button('CSV · geometría PRE + desenlace de cada REACTION',
             filtered.to_csv(index=False).encode('utf-8-sig'),
@@ -373,14 +390,14 @@ def _read_triple_pre_candles(project, symbol, event_ts, max_bars=170):
     return bars
 
 
-def _triple_15m_chart(project, event):
+def _triple_15m_chart(project, event, *, widget_scope):
     """Display the three PRE contacts and common price band above the POST chart."""
     import pandas as pd
     import plotly.graph_objects as go
     import streamlit as st
 
     if not st.checkbox('Mostrar 170 velas 15m anteriores a la REACTION',
-                       value=True,key='rdv2_triple_show15m'):
+                       value=True,key=_rdv2_widget_key(widget_scope, 'triple_show15m')):
         return
     try:
         # The cache key changes when either Full Context SQLite changes.
@@ -468,7 +485,7 @@ def _triple_15m_chart(project, event):
                             annotation_text='Neckline PRE',annotation_position='bottom right')
         if peak_positions:
             zoom=st.checkbox('Acercar al patrón (los tres toques)',value=True,
-                             key='rdv2_triple_zoom')
+                             key=_rdv2_widget_key(widget_scope, 'triple_zoom'))
             if zoom:
                 xmin=max(int(bars.timestamp.min()), min(peak_positions)-8*900_000)
                 xmax=int(event['retest_ts'])
@@ -486,7 +503,8 @@ def _triple_15m_chart(project, event):
         title=f"{event['symbol']} · {state or 'sin etiqueta'} · 15m PRE",
         margin=dict(l=6,r=8,t=45,b=8),legend=dict(orientation='h',y=-.13))
     st.plotly_chart(_chart_style(f,height=470),use_container_width=True,
-                    config={'displaylogo':False,'scrollZoom':True})
+                    config={'displaylogo':False,'scrollZoom':True},
+                    key=_rdv2_widget_key(widget_scope, 'triple_chart'))
     st.caption('Gráfico superior: únicamente velas 15m cerradas PRE. '
                'Los diamantes 1/2/3 son picos; A/B son valles confirmados y la línea azul muestra la M/W. '
                'Gráfico inferior: recorrido 1m POST de la REACTION; no muestra el triple.')
@@ -620,8 +638,9 @@ def _render_runner_dna(project, working, *, mode, tp, horizon):
             key=st.selectbox("Evento",choices,key="rdv2_dna_event")
             row=events.loc[events["event_key"].eq(key)].iloc[0]
             st.caption(f"{row['symbol']} · {row['side']} · +{tp}% en {int(row['dna_minuto'])} min · {row['familia_adn']}")
-            _triple_15m_chart(project,row)
-            _signal_chart(project,row,mode=mode,tp=tp,horizon=horizon,show_sl=False)
+            _triple_15m_chart(project,row,widget_scope='runner_detail')
+            _signal_chart(project,row,mode=mode,tp=tp,horizon=horizon,show_sl=False,
+                          widget_scope='runner_detail')
     with st.expander("Exportar este estudio",expanded=False):
         st.download_button("CSV · todas las señales y su familia",pool.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"adn_runner_{tp}pct_{horizon}m.csv",mime="text/csv",key="rdv2_dna_export")
@@ -812,7 +831,8 @@ def render_runner_discovery_v2(project_root):
                 selected_key=st.selectbox("Evento",keys,key="rdv2_event_detail")
                 event=table.loc[table["event_key"].eq(selected_key)].iloc[0]
                 st.markdown(f"**{html.escape(str(event['symbol']))} · {event['side']}**   —   {LABELS.get(event['Resultado'],event['Resultado'])}")
-                _signal_chart(project,event,mode=mode,tp=tp,horizon=minutes)
+                _signal_chart(project,event,mode=mode,tp=tp,horizon=minutes,
+                              widget_scope='signals_detail')
         with st.expander("Exportar resultados de la selección",expanded=False):
             csv_out=eligible.copy()
             st.download_button("Descargar CSV de eventos filtrados",csv_out.to_csv(index=False).encode("utf-8-sig"),
