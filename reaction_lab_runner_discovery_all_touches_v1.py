@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from contextlib import closing
 import csv
 from datetime import datetime, timezone
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -164,13 +166,69 @@ def outcomes_for_path(bars, side, price):
     return hits, decisions, mfe180, mae180
 
 
-def iter_events(project, *, first_touch_db=None, auto_db=None):
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with Path(path).open('rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def recovery_index(recovery_root):
+    """Read-only, strictly validated V1.1 batch index; refuse duplicate events.
+
+    Only COMPLETE 360m historical paths from published manifests are indexed.
+    The index stores metadata only, not compressed bars, to bound RAM usage.
+    """
+    index = {}
+    batches = 0
+    root = Path(recovery_root)
+    if not root.is_dir():
+        return index, batches
+    for manifest_path in sorted(root.glob('*/manifest.json')):
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        if manifest.get('schema') != 'FIRST_TOUCH_HISTORICAL_RECOVERY_V11':
+            raise ValueError(f'Unexpected recovery schema: {manifest_path}')
+        db_path = manifest_path.parent / 'recovered_paths.sqlite3'
+        if not db_path.is_file():
+            raise ValueError(f'Historical recovery batch missing SQLite: {db_path}')
+        expected_hash = manifest.get('files_sha256', {}).get('recovered_paths.sqlite3')
+        if not expected_hash or _sha256_file(db_path) != expected_hash:
+            raise ValueError(f'Historical recovery SHA256 mismatch: {db_path}')
+        with closing(ro_connect(db_path)) as db:
+            check_columns(db, 'recovered_paths', (
+                'touch_key','symbol','side','original_status','retest_ts','entry_ts',
+                'path_state','count','path_blob','provider'))
+            for key, symbol, side, status, retest, entry, state, count, provider in db.execute(
+                    'SELECT touch_key,symbol,side,original_status,retest_ts,entry_ts,'
+                    'path_state,count,provider FROM recovered_paths'):
+                if state != 'FULL_360':
+                    continue
+                if count != 360 or provider != 'BINANCE_USDM_PUBLIC_REST_1M_OFFLINE':
+                    raise ValueError(f'Invalid FULL_360 recovered record: {key} in {db_path}')
+                if key in index:
+                    raise ValueError(f'Duplicate historical touch_key in recovery batches: {key}')
+                index[key] = (db_path, symbol, side, status, int(retest), int(entry))
+        batches += 1
+    return index, batches
+
+
+def verify_historical_overlay(online_bars, recovered_blob, entry):
+    """Accept only 360 consecutive historical 1m bars matching every online bar."""
+    historical = decode_checked(recovered_blob, 360, entry)
+    if not all(same_bar(a, b) for a, b in zip(online_bars, historical)):
+        raise ValueError('HISTORICAL_ONLINE_OHLC_CONFLICT')
+    return historical
+
+
+def iter_events(project, *, first_touch_db=None, auto_db=None, recovery=None):
     project = Path(project)
     root = project / 'reports' / 'reaction_lab'
     ft_path = Path(first_touch_db) if first_touch_db else root / 'first_touch_paths_v2.sqlite3'
     ap_path = Path(auto_db) if auto_db else root / 'auto_paths_v1.sqlite3'
     ft = ro_connect(ft_path)
     ap = ro_connect(ap_path) if ap_path.is_file() else None
+    recovery_dbs = {}
     try:
         check_columns(ft, 'paths', ('touch_key','symbol','side','status','retest_ts',
                                     'entry_ts','first_seen_ms','state','count','path_blob','retest_close'))
@@ -203,6 +261,31 @@ def iter_events(project, *, first_touch_db=None, auto_db=None):
                 yield row
                 continue
             bars, provenance = match_auto(ft_bars, auto_index.get((symbol,side,int(retest)), []), ap, entry)
+            # A historical path is only a fallback when its exact First Touch
+            # identity matches, the ONLINE prefix agrees and it extends coverage.
+            # Never override corrupted/ambiguous online sources silently.
+            hist = recovery.get(key) if recovery else None
+            if hist and len(bars) < 360 and provenance not in ('AMBIGUOUS_AUTO', 'BAD_AUTO') and not any(
+                    tag in provenance for tag in ('BAD_', 'MISMATCH', 'CONFLICT', 'AMBIGUOUS')):
+                path, hs, hd, original_status, historical_retest, historical_entry = hist
+                if ((symbol, side, status, int(retest), int(entry)) !=
+                        (hs, hd, original_status, historical_retest, historical_entry)):
+                    raise ValueError(f'Historical first-touch identity mismatch: {key}')
+                db = recovery_dbs.get(path)
+                if db is None:
+                    db = ro_connect(path)
+                    recovery_dbs[path] = db
+                record = db.execute('SELECT path_blob FROM recovered_paths WHERE touch_key=?', (key,)).fetchone()
+                if record is None:
+                    raise ValueError(f'Historical recovery record missing: {key}')
+                try:
+                    historical_bars = verify_historical_overlay(bars, record[0], entry)
+                except (ValueError, zlib.error, struct.error):
+                    provenance = 'HISTORICAL_OHLC_CONFLICT'
+                    # Leave original online prefix available; never use conflicting history.
+                else:
+                    bars = historical_bars
+                    provenance = 'HISTORICAL_BINANCE_V11'
             row['path_source']=provenance
             row['path_count']=len(bars)
             if not bars:
@@ -227,6 +310,7 @@ def iter_events(project, *, first_touch_db=None, auto_db=None):
     finally:
         ft.close()
         if ap: ap.close()
+        for db in recovery_dbs.values(): db.close()
 
 
 def _atomic_write_csv(path,rows):
@@ -253,15 +337,20 @@ def _atomic_write_csv(path,rows):
     return counts
 
 
-def build_dataset(project, *, first_touch_db=None, auto_db=None):
+def build_dataset(project, *, first_touch_db=None, auto_db=None, recovery_root=None, no_recovery=False):
     project=Path(project).resolve()
     folder=project/RESULT_DIR
     folder.mkdir(parents=True,exist_ok=True)
     output=folder/'all_first_touches.csv'
-    counts=_atomic_write_csv(output,iter_events(project,first_touch_db=first_touch_db,auto_db=auto_db))
+    if recovery_root is None:
+        recovery_root=project/'reports/reaction_lab/first_touch_historical_recovery_v11'
+    found, batch_count = ({}, 0) if no_recovery else recovery_index(recovery_root)
+    counts=_atomic_write_csv(output,iter_events(project,first_touch_db=first_touch_db,auto_db=auto_db,recovery=found))
     manifest={
         'schema':SCHEMA,'created_utc':datetime.now(timezone.utc).isoformat(),
         'events_csv':str(output),'counts':dict(sorted(counts.items())),
+        'historical_recovery':{'enabled':not no_recovery,'root':str(recovery_root),
+                               'batches':batch_count,'full_360_indexed':len(found)},
         'settings':{'targets_pct':list(TARGETS),'horizons_min':list(HORIZONS),
                     'stop_pct_for_barrier_sequence':1.0,'evaluation_requires_full_selected_horizon':True},
         'notes':[
@@ -273,6 +362,7 @@ def build_dataset(project, *, first_touch_db=None, auto_db=None):
             'Rangos historicos no implican entrada observable/ejecutable.',
             'Datos ausentes, invalidos o no maduros NO son perdedores.',
             'Las coberturas entre categorias difieren hasta completar backfill; no inferir ventaja estadistica.',
+            'Historical recovered paths verified by batch SHA256, identity, contiguity and online prefix OHLC.',
             'No se alteraron SQLite ni procesos LIVE.']}
     fd,tmp=tempfile.mkstemp(prefix='.all_manifest_',suffix='.json',dir=folder)
     try:
@@ -290,8 +380,11 @@ def main(argv=None):
     parser.add_argument('--project',default='.')
     parser.add_argument('--first-touch-db',default=None)
     parser.add_argument('--auto-db',default=None)
+    parser.add_argument('--recovery-root',default=None,help='Directory containing verified V1.1 historical batches')
+    parser.add_argument('--no-recovery',action='store_true',help='Ignore historical batches; preserve original calculation')
     args=parser.parse_args(argv)
-    result=build_dataset(args.project,first_touch_db=args.first_touch_db,auto_db=args.auto_db)
+    result=build_dataset(args.project,first_touch_db=args.first_touch_db,auto_db=args.auto_db,
+                         recovery_root=args.recovery_root,no_recovery=args.no_recovery)
     print('RUNNER_DISCOVERY_ALL_TOUCHES_V1 '+json.dumps(result,ensure_ascii=False))
     return 0
 
