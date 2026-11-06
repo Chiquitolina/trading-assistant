@@ -23,7 +23,7 @@ from multi_swing_structural_quality_v1 import (
 SUPPORTED_TF = ("1m", "5m", "15m")
 DEFAULT_WINDOWS = (30, 60, 120, 240)
 DEFAULT_BARS = {"1m": 5, "5m": 5, "15m": 3}
-SCHEMA = "MULTI_SWING_RECONSTRUCTION_PRE_TOUCH_V11"
+SCHEMA = "MULTI_SWING_RECONSTRUCTION_PRE_TOUCH_V111"
 
 
 def _contiguous(frame_ts: set[int], first: int, last_exclusive: int, step: int) -> bool:
@@ -140,7 +140,16 @@ def compute_reconstruction(event: Mapping, pivots: Iterable[Mapping],
         dedup[key]=p
     eligible=list(dedup.values())
 
+    # La identidad del ancla es el minuto fisico 1m, NO la apertura de
+    # su vela 15m. Es posible que un pivot 1m/5m caiga en la ventana
+    # corta mientras el timestamp del pivot 15m quede fuera de ella.
+    # Restar 1 por pivot_ts dentro de la ventana producia conteos no
+    # monotonicos y falsos "extremos independientes".
+    anchor_minute, anchor_physical_state = _physical_minute(canonical[0], index)
+
     out={'reconstruction_schema': SCHEMA,
+         'anchor_physical_minute_ts': anchor_minute,
+         'anchor_physical_state': anchor_physical_state,
          'structural_cutoff_ts': cutoff,
          'original_known_ts': e['known_ts'],
          'canonical_actionable_ts_journal':e['actionable_ts'],
@@ -186,7 +195,12 @@ def compute_reconstruction(event: Mapping, pivots: Iterable[Mapping],
             per_id=Counter(minute for minute,_ in checked)
             out[prefix+'near_zone_unique_extrema']=len(ids)
             out[prefix+'near_zone_shared_tf_extrema']=sum(n>1 for n in per_id.values())
-            anchor_in_window=(first<=e['pivot_ts']<cutoff)
-            out[prefix+'near_zone_independent_extrema']=max(0,len(ids)-int(anchor_in_window))
+            # Si no se pudo identificar el ancla original, no existe
+            # evidencia suficiente para separar las identidades cercanas
+            # de la identidad del swing que estamos auditando.
+            if ids and anchor_physical_state != 'VERIFIED':
+                out[prefix+'near_zone_independent_extrema']=None
+            else:
+                out[prefix+'near_zone_independent_extrema']=len(ids - {anchor_minute})
         out.update({prefix+k:v for k,v in _movement_metrics(selected,side,e['swing_price']).items()})
     return out

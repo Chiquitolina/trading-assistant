@@ -116,6 +116,53 @@ class ReconstructionV11(unittest.TestCase):
         self.assertEqual(result['w120_near_zone_unique_extrema'],3)
         self.assertEqual(result['w120_near_zone_independent_extrema'],2)
 
+    def test_anchor_inside_physical_window_but_outside_pivot_window(self):
+        # Pivot 15m abre 60+ minutos antes del retest. Su LOW fisico
+        # esta a los 250m, ya DENTRO de la ventana corta de 60m.
+        # Un swing 1m/5m del mismo minimo NO es un extremo independiente.
+        e,p,minute,stamps=fixture()
+        e=dict(e,retest_ts=301*M,known_ts=302*M)
+        for bar in minute:
+            bar['low']=101.0
+        minute.extend([{'timestamp':300*M,'open':103.,'high':104.,
+                        'low':101.,'close':103.}])
+        minute[250]['low']=100.0
+        def pv(tf, ts, avail):
+            return {'timeframe':tf,'side':'LOW','pivot_ts':ts*M,
+                    'available_ts':avail*M,'price':100.0}
+        pts=[pv('15m',240,300),pv('5m',250,280),pv('1m',250,256)]
+        stamps={tf:list(range(0,301*M,dt*M))
+                for tf,dt in [('1m',1),('5m',5),('15m',15)]}
+        result=compute_reconstruction(e,pts,minute,stamps)
+        self.assertEqual(result['anchor_physical_minute_ts'],250*M)
+        self.assertEqual(result['anchor_physical_state'],'VERIFIED')
+        self.assertEqual(result['w60_near_zone_unique_extrema'],1)
+        self.assertEqual(result['w120_near_zone_unique_extrema'],1)
+        self.assertEqual(result['w60_near_zone_independent_extrema'],0)
+        self.assertEqual(result['w120_near_zone_independent_extrema'],0)
+        self.assertEqual(result['w240_near_zone_independent_extrema'],0)
+
+    def test_tied_original_anchor_is_not_mistaken_for_independence(self):
+        e,p,minute,stamps=fixture()
+        e=dict(e,retest_ts=301*M,known_ts=302*M)
+        for bar in minute:
+            bar['low']=101.0
+        minute.extend([{'timestamp':300*M,'open':103.,'high':104.,
+                        'low':101.,'close':103.}])
+        minute[250]['low']=100.0
+        minute[251]['low']=100.0  # empate del 15m; 1m univoco.
+        def pv(tf, ts, avail):
+            return {'timeframe':tf,'side':'LOW','pivot_ts':ts*M,
+                    'available_ts':avail*M,'price':100.0}
+        pts=[pv('15m',240,300),pv('1m',250,256)]
+        stamps={tf:list(range(0,301*M,dt*M))
+                for tf,dt in [('1m',1),('5m',5),('15m',15)]}
+        result=compute_reconstruction(e,pts,minute,stamps)
+        self.assertEqual(result['anchor_physical_state'],'TIED_EXTREMA')
+        self.assertEqual(result['w60_near_zone_unique_extrema'],1)
+        self.assertIsNone(result['w60_near_zone_independent_extrema'])
+        self.assertIsNone(result['w120_near_zone_independent_extrema'])
+
     def test_unsafe_original_anchor_refused(self):
         e,p,mins,ts=fixture()
         e=dict(e,retest_ts=290*M,known_ts=291*M)
