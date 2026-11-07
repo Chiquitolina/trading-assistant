@@ -40,6 +40,22 @@ DEFAULT_STRUCT_BUFFER_PCT = .1
 DEFAULT_MIN_LEG_PCT = .25
 DEFAULT_BREAK_BUFFER_PCT = 0.
 TARGETS = (2, 3, 5)
+
+
+def parse_targets(targets):
+    """Normalize allowed percentage targets; never interpolate barrier outcomes."""
+    try:
+        if isinstance(targets, str):
+            values = targets.split(',')
+        else:
+            values = tuple(targets)
+        numbers = tuple(sorted({int(v) for v in values}))
+    except (TypeError, ValueError) as exc:
+        raise ValueError('TP targets must be integers from 1 to 6') from exc
+    if not numbers or any(n < 1 or n > 6 for n in numbers):
+        raise ValueError('TP targets must be integers from 1 to 6')
+    return numbers
+
 MODES = ('IMMEDIATE_ORIGINAL', 'V2_SWEEP_REBOUND', 'V2_RECLAIM_2_CLOSES',
          'REVERSAL_OPEN', 'RETEST_25', 'RETEST_50', 'RETEST_75')
 EVENT_FIELDS = v1.EVENT_FIELDS
@@ -373,8 +389,12 @@ def summarize(rows,events,group_type,group,mode,depth,tp,stop_mode,sl):
 def build(project,*,journal_db=None,first_touch_db=None,auto_db=None,
           recovery_root=None,sample_metadata=None,max_wait=60,hold=180,
           stop_mode='pct',sl_pct=1.,struct_buffer_pct=.1,
-          depths=DEFAULT_DEPTHS,cost=.2,min_leg=.25,break_buffer=0.,out=None):
+          depths=DEFAULT_DEPTHS,cost=.2,min_leg=.25,break_buffer=0.,out=None,
+          targets=TARGETS,frozen_keys=None,cutoff_ms=None,eligible_keys=None):
     depths=v2.parse_depths(depths)
+    targets=parse_targets(targets)
+    if targets != TARGETS and out is None:
+        raise ValueError('Extended TP targets require --out to protect legacy V3 reports; use V3.1 matrix runner')
     if depths!=DEFAULT_DEPTHS or min_leg!=DEFAULT_MIN_LEG_PCT or break_buffer!=DEFAULT_BREAK_BUFFER_PCT:
         raise ValueError('V3 frozen experiment: depths 1,2; min leg 0.25; break buffer 0')
     if not (stop_mode in ('pct','structural') and 1<=max_wait<=120 and
@@ -398,21 +418,39 @@ def build(project,*,journal_db=None,first_touch_db=None,auto_db=None,
                              recovery=recoveries,include_bars=True,only_status='TOUCH_FAILED')
         scope='FULL_VPS_VERIFIED_ONLINE_AND_HISTORY'
     events=[];outcomes=[];seen=set()
+    if frozen_keys is not None:
+        frozen_keys=set(frozen_keys)
+        if not frozen_keys.issubset(journal):
+            raise ValueError('Frozen cohort not present in source journal')
+    if eligible_keys is not None:
+        eligible_keys=set(eligible_keys)
+        if frozen_keys is None or not eligible_keys.issubset(frozen_keys):
+            raise ValueError('Frozen eligible keys require frozen cohort')
     def consume(row,bars):
+        if frozen_keys is not None and row['touch_key'] not in frozen_keys:
+            return
+        if cutoff_ms is not None and bars:
+            bars=[b for b in bars if b[0]+MINUTE<=cutoff_ms]
         key=row['touch_key']
         if key in seen:raise ValueError('Duplicate touch key '+key)
         seen.add(key)
         if row['first_touch_status']!='TOUCH_FAILED':raise ValueError('Wrong touch status')
         base=v1.event_base(row,bars,journal.get(key),max_wait,hold)
+        if eligible_keys is not None:
+            originally_eligible=key in eligible_keys
+            if originally_eligible and not base['eligible_common_180m']:
+                raise ValueError('Frozen eligible path became incomplete: '+key)
+            if not originally_eligible:
+                base['eligible_common_180m']=False
         events.append(base)
         for depth in depths:
             for mode in MODES:
-                for tp in TARGETS:
+                for tp in targets:
                     outcomes.append(evaluate(base,bars,mode,depth,tp,stop_mode=stop_mode,sl=sl_pct,
                         buffer=struct_buffer_pct,max_wait=max_wait,hold=hold,cost=cost,
                         min_leg=min_leg,break_buffer=break_buffer))
     for row,bars in iterator:consume(row,bars)
-    for key in sorted(set(journal)-seen):
+    for key in sorted((set(journal) if frozen_keys is None else frozen_keys)-seen):
         raw=journal[key];meta=raw.get('meta') if isinstance(raw.get('meta'),dict) else {}
         ts=int(raw['retest_ts'])
         row=dict(touch_key=key,symbol=raw['symbol'],side=raw['side'],
@@ -430,20 +468,21 @@ def build(project,*,journal_db=None,first_touch_db=None,auto_db=None,
         for group in groups:
             for depth in depths:
                 for mode in MODES:
-                    for tp in TARGETS:
+                    for tp in targets:
                         summaries.append(summarize(by_scenario[(mode,depth,tp)],events,gtype,
                             group,mode,depth,tp,stop_mode,sl_pct))
     folder=config_dir(root,stop_mode,sl_pct,struct_buffer_pct,out)
     folder.mkdir(parents=True,exist_ok=True)
     manifest=dict(schema=SCHEMA,created_utc=datetime.now(timezone.utc).isoformat(),
         scope=scope,source_journal=str(sample_metadata or journal_db or root/'reports/reaction_lab/scanner_first_touches_v1.sqlite3'),
-        historical_root=str(hist),cohort_total=len(events),journal_total=len(journal),
+        historical_root=str(hist),cohort_total=len(events),
+        journal_total=len(journal) if frozen_keys is None else len(frozen_keys),
         coverage_common=sum(e['eligible_common_180m'] for e in events),
         censored_common=sum(not e['eligible_common_180m'] for e in events),
         metadata_states=dict(Counter(e['metadata_state'] for e in events)),
         sources=dict(Counter(e['path_source'] for e in events)),
         observation_types=dict(Counter(e['observation_type'] for e in events)),
-        modes=list(MODES),targets_pct=list(TARGETS),
+        modes=list(MODES),targets_pct=list(targets),
         settings=dict(max_wait_min=max_wait,hold_min=hold,depths_pct=list(depths),
             retracements_pct=list(DEFAULT_RETRACEMENTS),stop_mode=stop_mode,
             sl_pct=sl_pct if stop_mode=='pct' else None,
@@ -480,6 +519,8 @@ def main(argv=None):
     p.add_argument('--sl-pct',type=float,default=DEFAULT_SL_PCT)
     p.add_argument('--struct-buffer-pct',type=float,default=DEFAULT_STRUCT_BUFFER_PCT)
     p.add_argument('--sweep-depths',default='1,2')
+    p.add_argument('--targets-pct',default='2,3,5',
+                   help='Comma-separated TP targets from 1 to 6; legacy default 2,3,5')
     p.add_argument('--min-leg-pct',type=float,default=DEFAULT_MIN_LEG_PCT)
     p.add_argument('--break-buffer-pct',type=float,default=DEFAULT_BREAK_BUFFER_PCT)
     p.add_argument('--cost-roundtrip-pct',type=float,default=.2)
@@ -490,6 +531,7 @@ def main(argv=None):
     a=p.parse_args(argv)
     try:
         depths=v2.parse_depths(a.sweep_depths)
+        targets=parse_targets(a.targets_pct)
         if depths!=DEFAULT_DEPTHS or a.min_leg_pct!=DEFAULT_MIN_LEG_PCT or a.break_buffer_pct!=DEFAULT_BREAK_BUFFER_PCT:
             raise ValueError('V3 frozen experiment: sweep 1,2; min leg 0.25; break buffer 0')
         if not (1<=a.max_wait<=120 and 15<=a.hold<=360 and a.max_wait+a.hold<=360 and
@@ -502,7 +544,7 @@ def main(argv=None):
             a.journal_db or Path(a.project)/'reports/reaction_lab/scanner_first_touches_v1.sqlite3')
         print('FAILED_REVERSAL_V3_PLAN '+json.dumps(dict(schema=SCHEMA,mode='PLAN',
             journal_failed=len(journal),modes=list(MODES),depths_pct=list(depths),
-            retracements_pct=list(DEFAULT_RETRACEMENTS),targets_pct=list(TARGETS),
+            retracements_pct=list(DEFAULT_RETRACEMENTS),targets_pct=list(targets),
             stop_mode=a.stop_mode,sl_pct=a.sl_pct if a.stop_mode=='pct' else None,
             struct_buffer_pct=a.struct_buffer_pct if a.stop_mode=='structural' else None,
             common_min_bars=a.max_wait+a.hold,read_only_sources=True,
@@ -512,7 +554,8 @@ def main(argv=None):
         auto_db=a.auto_db,recovery_root=a.recovery_root,sample_metadata=a.sample_metadata,
         max_wait=a.max_wait,hold=a.hold,stop_mode=a.stop_mode,sl_pct=a.sl_pct,
         struct_buffer_pct=a.struct_buffer_pct,depths=depths,cost=a.cost_roundtrip_pct,
-        min_leg=a.min_leg_pct,break_buffer=a.break_buffer_pct,out=a.out)
+        min_leg=a.min_leg_pct,break_buffer=a.break_buffer_pct,out=a.out,
+        targets=targets)
     print('FAILED_REVERSAL_V3_RESULT '+json.dumps(result,ensure_ascii=False))
     return 0
 

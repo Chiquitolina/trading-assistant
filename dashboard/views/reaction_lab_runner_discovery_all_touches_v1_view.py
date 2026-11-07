@@ -159,6 +159,12 @@ def render_all_first_touches(project):
         render_failed_reversal_retest(project)
     except ImportError as exc:
         st.info(f'FAILED Reversal Retest V3 todavía no está instalado: {exc}')
+    st.divider()
+    try:
+        from dashboard.views.reaction_lab_failed_reversal_retest_matrix_v31_view import render_failed_reversal_matrix
+        render_failed_reversal_matrix(project)
+    except ImportError as exc:
+        st.info(f'Matriz TP/SL V3.1 todavía no está instalada: {exc}')
 
 
 def _all_first_touch_path(project,key):
