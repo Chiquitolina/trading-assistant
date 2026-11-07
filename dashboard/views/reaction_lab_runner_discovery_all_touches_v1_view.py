@@ -153,6 +153,12 @@ def render_all_first_touches(project):
         render_failed_pullback_entry(project)
     except ImportError as exc:
         st.info(f'FAILED Sweep V2 todavía no está instalado: {exc}')
+    st.divider()
+    try:
+        from dashboard.views.reaction_lab_failed_reversal_retest_v3_view import render_failed_reversal_retest
+        render_failed_reversal_retest(project)
+    except ImportError as exc:
+        st.info(f'FAILED Reversal Retest V3 todavía no está instalado: {exc}')
 
 
 def _all_first_touch_path(project,key):
