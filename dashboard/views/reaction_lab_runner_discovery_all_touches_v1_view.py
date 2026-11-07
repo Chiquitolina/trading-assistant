@@ -7,7 +7,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from reaction_lab_runner_discovery_all_touches_v1 import build_dataset, RESULT_DIR
+from reaction_lab_runner_discovery_all_touches_v1 import (
+    build_dataset, RESULT_DIR, iter_events, recovery_index, ro_connect,
+)
 
 STATES = ('REACTION','TOUCH_INDECISIVE','TOUCH_FAILED')
 
@@ -119,7 +121,7 @@ def render_all_first_touches(project):
     m4.metric('Frecuencia',f'{100*len(runners)/len(eligible):.1f}%' if len(eligible) else '—')
     st.caption(f'Sin recorrido completo o referencia válida: {len(group)-len(eligible):,}. '
                f'Con cobertura, pero sin +{tp}% en {horizon}m: {len(nohit):,}. '
-               'Los porcentajes por categoría NO son comparables causalmente hasta completar el backfill histórico.')
+               'La cobertura histórica fue reconstruida; sigue siendo una comparación descriptiva, no una señal de trading.')
     e1,e2,e3=st.columns([1.3,1.1,1.3])
     only_runners=e1.checkbox('Solo runners',value=True,key='rdall_onlyrunners')
     search=e2.text_input('Símbolo',key='rdall_symbol',placeholder='Ej. BTC').strip().upper()
@@ -141,5 +143,108 @@ def render_all_first_touches(project):
     st.caption('Cobertura por categoría: consultar el denominador evaluable del informe actual. '
                'Los eventos recientes o sin horizonte completo nunca se cuentan como perdedores.')
     st.divider()
+    render_all_first_touch_chart(project,table,tp=tp,horizon=horizon,basis=basis)
+    st.divider()
     from dashboard.views.reaction_lab_failed_reclaim_audit_v1_view import render_failed_reclaim_audit
     render_failed_reclaim_audit(project)
+    st.divider()
+    try:
+        from dashboard.views.reaction_lab_failed_pullback_entry_v2_view import render_failed_pullback_entry
+        render_failed_pullback_entry(project)
+    except ImportError as exc:
+        st.info(f'FAILED Sweep V2 todavía no está instalado: {exc}')
+
+
+def _all_first_touch_path(project,key):
+    root=Path(project)/'reports/reaction_lab/first_touch_historical_recovery_v11'
+    hist,_=recovery_index(root)
+    matches=list(iter_events(project,recovery=hist,include_bars=True,only_touch_key=key))
+    if len(matches)!=1:raise ValueError('No existe un único primer retest para esta identidad')
+    row,bars=matches[0]
+    if row['path_quality']!='CONTIGUOUS_VALID' or not bars:
+        raise ValueError('El episodio no tiene OHLC verificado')
+    return row,bars
+
+
+def _level_from_journal(project,key):
+    import json
+    journal=Path(project)/'reports/reaction_lab/scanner_first_touches_v1.sqlite3'
+    with ro_connect(journal) as db:
+        record=db.execute('SELECT status,causal_json FROM first_touches WHERE touch_key=?',
+                          (key,)).fetchone()
+    if record is None:return None
+    try:
+        meta=json.loads(record[1])
+        if not isinstance(meta,dict):return None
+        value=float(meta.get('swing_price'))
+        return value if value>0 else None
+    except (ValueError,TypeError):return None
+
+
+def plot_all_first_touch_case(bars,row,*,tp=2,sl=1.,n=180,basis='open',
+                              level=None,sweep_depth=1.):
+    import plotly.graph_objects as go
+    import pandas as pd
+    seq=bars[:min(n,len(bars))]
+    if not seq:raise ValueError('Missing 1m bars')
+    xs=pd.to_datetime([b[0] for b in seq],unit='ms',utc=True)
+    fig=go.Figure(go.Candlestick(x=xs,open=[b[1] for b in seq],
+        high=[b[2] for b in seq],low=[b[3] for b in seq],close=[b[4] for b in seq],
+        increasing_line_color='#16856a',decreasing_line_color='#dc5b4d',name='POST 1m'))
+    side=row['side'];price=float(seq[0][1]) if basis=='open' else float(row['retest_close'])
+    fig.add_hline(y=price,line_dash='dot',line_color='#a68b59',annotation_text='Base seleccionada')
+    if level is not None:
+        fig.add_hline(y=level,line_dash='dash',line_color='#64748b',annotation_text='Nivel original')
+    tp_price=price*(1+tp/100 if side=='LONG' else 1-tp/100)
+    sl_price=price*(1-sl/100 if side=='LONG' else 1+sl/100)
+    fig.add_hline(y=tp_price,line_dash='dot',line_color='#16856a',annotation_text=f'TP +{tp:g}%')
+    fig.add_hline(y=sl_price,line_dash='dot',line_color='#cd544b',annotation_text=f'SL −{sl:g}%')
+    if row['first_touch_status']=='TOUCH_FAILED':
+        fail_close=float(row['retest_close'])
+        sweep=fail_close*(1-sweep_depth/100 if side=='LONG' else 1+sweep_depth/100)
+        fig.add_hline(y=sweep,line_dash='dash',line_color='#b77ed8',
+                      annotation_text=f'Sweep adverso {sweep_depth:g}%')
+    fig.update_layout(height=490,margin=dict(l=12,r=20,t=25,b=25),
+        xaxis_rangeslider_visible=False,xaxis_title='POST 1m, UTC',
+        yaxis_title='Precio',hovermode='x unified')
+    return fig
+
+
+def render_all_first_touch_chart(project,listing,*,tp,horizon,basis):
+    import streamlit as st
+    st.markdown('**📈 Gráfico del episodio seleccionado (velas verificadas)**')
+    st.caption('Ahora aparece directamente en Runner Discovery. Seleccioná un caso para ver '
+               'las velas POST y el nivel original; no requiere descargar un CSV ni otro dashboard.')
+    if listing.empty:
+        st.info('Sin eventos para graficar con estos filtros.');return
+    items=listing.head(250)
+    keys=items['touch_key'].astype(str).tolist()
+    labels={r['touch_key']:f"{r['date_utc']} · {r['symbol']} {r['side']} · {r['first_touch_status']}"
+            for _,r in items.iterrows()}
+    key=st.selectbox('Episodio entre las primeras 250 filas',keys,
+                     format_func=lambda k:labels.get(k,k),key='rdall_chart_key')
+    c1,c2,c3=st.columns(3)
+    visible=c1.select_slider('Velas POST',options=[60,120,180,240,360],
+             value=min(360,max(60,horizon)),key='rdall_chart_bars')
+    sl_choice=c2.selectbox('SL visual (%)',[1.,3.,4.,5.,'OTRO'],
+           format_func=lambda x: 'Otro…' if x=='OTRO' else f'−{x:g}%',key='rdall_visual_sl_choice')
+    sl=float(sl_choice) if sl_choice!='OTRO' else float(c2.number_input(
+        'SL visual personalizado (%)',min_value=.25,max_value=10.,value=2.,
+        step=.25,format='%.2f',key='rdall_visual_sl_custom'))
+    sweep_depth=c3.number_input('Sweep visual (%)',min_value=.25,max_value=10.,value=1.,
+                       step=.25,format='%.2f',key='rdall_visual_sweep')
+    if sl!=1.:
+        st.warning('El CSV agregado de TP-first usa SL −1%. Cambiar el SL VISUAL '
+                   'solo mueve la línea del gráfico; para otras simulaciones usá FAILED Sweep V2.')
+    try:
+        source,bars=_all_first_touch_path(project,key)
+        level=_level_from_journal(project,key)
+        fig=plot_all_first_touch_case(bars,source,tp=tp,sl=sl,n=visible,
+                  basis=basis,level=level,sweep_depth=sweep_depth)
+        st.plotly_chart(fig,use_container_width=True,key='rdall_verified_candles',
+                        config={'displaylogo':False})
+        st.caption(f"Fuente verificada: {source['path_source']} · "
+                   f"{source['path_count']} velas de 1 minuto disponibles. "
+                   'El nivel original se dibuja solo cuando consta en el diario causal.')
+    except Exception as exc:
+        st.error(f'No se pudo abrir el gráfico: {type(exc).__name__}: {exc}')
