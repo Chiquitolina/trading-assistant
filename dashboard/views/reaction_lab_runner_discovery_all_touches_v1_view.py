@@ -138,5 +138,8 @@ def render_all_first_touches(project):
     st.download_button('Descargar CSV del filtro',data=table.to_csv(index=False).encode('utf-8-sig'),
                        file_name=f'first_touch_all_runners_{chosen.lower()}_{tp}pct_{horizon}m.csv',
                        mime='text/csv',key='rdall_export')
-    st.info('Cobertura incompleta en TOUCH_FAILED/TOUCH_INDECISIVE: muchos eventos antiguos esperan backfill. '
-            'Este análisis muestra resultados observables y el faltante, sin inventar trayectorias.')
+    st.caption('Cobertura por categoría: consultar el denominador evaluable del informe actual. '
+               'Los eventos recientes o sin horizonte completo nunca se cuentan como perdedores.')
+    st.divider()
+    from dashboard.views.reaction_lab_failed_reclaim_audit_v1_view import render_failed_reclaim_audit
+    render_failed_reclaim_audit(project)

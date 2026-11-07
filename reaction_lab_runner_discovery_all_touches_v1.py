@@ -221,7 +221,8 @@ def verify_historical_overlay(online_bars, recovered_blob, entry):
     return historical
 
 
-def iter_events(project, *, first_touch_db=None, auto_db=None, recovery=None):
+def iter_events(project, *, first_touch_db=None, auto_db=None, recovery=None,
+                include_bars=False, only_status=None, only_touch_key=None):
     project = Path(project)
     root = project / 'reports' / 'reaction_lab'
     ft_path = Path(first_touch_db) if first_touch_db else root / 'first_touch_paths_v2.sqlite3'
@@ -241,8 +242,16 @@ def iter_events(project, *, first_touch_db=None, auto_db=None, recovery=None):
                     (key,entry,int(count)))
         source_sql = '''SELECT touch_key,symbol,side,status,retest_ts,entry_ts,
                     first_seen_ms,state,count,path_blob,retest_close
-                    FROM paths ORDER BY retest_ts,touch_key'''
-        for key,symbol,side,status,retest,entry,seen,state,count,blob,ref in ft.execute(source_sql):
+                    FROM paths'''
+        where,params=[],[]
+        if only_status is not None:
+            where.append('status=?');params.append(str(only_status).upper())
+        if only_touch_key is not None:
+            where.append('touch_key=?');params.append(str(only_touch_key))
+        if where:
+            source_sql += ' WHERE ' + ' AND '.join(where)
+        source_sql += ' ORDER BY retest_ts,touch_key'
+        for key,symbol,side,status,retest,entry,seen,state,count,blob,ref in ft.execute(source_sql,params):
             symbol,side,status = str(symbol).upper(),str(side).upper(),str(status).upper()
             row = dict.fromkeys(FIELDS)
             row.update(touch_key=key,symbol=symbol,side=side,first_touch_status=status,
@@ -252,13 +261,13 @@ def iter_events(project, *, first_touch_db=None, auto_db=None, recovery=None):
                        path_count=0,path_quality='NO_CONTIGUOUS_PATH')
             if side not in ('LONG','SHORT') or int(entry) != int(retest) + MINUTE or int(entry)%MINUTE:
                 row['path_quality']='BAD_IDENTITY'
-                yield row
+                yield (row, []) if include_bars else row
                 continue
             try:
                 ft_bars = decode_checked(blob,count,entry)
             except (ValueError, TypeError, zlib.error, struct.error):
                 row['path_quality']='BAD_FT_PATH'
-                yield row
+                yield (row, []) if include_bars else row
                 continue
             bars, provenance = match_auto(ft_bars, auto_index.get((symbol,side,int(retest)), []), ap, entry)
             # A historical path is only a fallback when its exact First Touch
@@ -290,7 +299,7 @@ def iter_events(project, *, first_touch_db=None, auto_db=None, recovery=None):
             row['path_count']=len(bars)
             if not bars:
                 row['path_quality']='NO_CONTIGUOUS_PATH' if provenance in ('NO_PATH','FIRST_TOUCH_V2') else provenance
-                yield row
+                yield (row, []) if include_bars else row
                 continue
             row['next_open']=bars[0][1]
             # Never interpret a source conflict as validated recovered data.
@@ -306,7 +315,7 @@ def iter_events(project, *, first_touch_db=None, auto_db=None, recovery=None):
                     row[f'{basis}_time_to_run_{tp}pct']=hits[tp]
                     row[f'{basis}_tp{tp}_result']=decisions[tp][0]
                     row[f'{basis}_tp{tp}_minute']=decisions[tp][1]
-            yield row
+            yield (row, bars) if include_bars else row
     finally:
         ft.close()
         if ap: ap.close()
