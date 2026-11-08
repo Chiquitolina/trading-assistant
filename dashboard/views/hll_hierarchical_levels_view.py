@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 from hll_hierarchical_levels_v1 import RUNS, TF, sha, score_asof
 from hll_structural_zones_v2 import RUNS as STRUCTURAL_RUNS, load_v2, snapshot_zones, zone_score_history
 from hll_structural_zone_ranking_v21 import rank_zone_evidence, select_historical_map
+from hll_structural_zone_recency_v221 import annotate_recency, select_recent_overlay
 
 COLORS={'A':'#df7770','B':'#e2b15b','C':'#6a9dd6','D':'#8995a7'}
 
@@ -144,6 +145,10 @@ def make_chart(bars:pd.DataFrame,scores:pd.DataFrame,cutoff:int,days:int,timefra
 # V1.1 VISUAL ONLY. Never alters a frozen level, tier, causal event, or ID.
 # Spatial grouping is an *inspection aid* and not a new HLL detection.
 ZONE_COLORS={'HIGH':'#ed9873', 'LOW':'#59bcbb', 'MIXED':'#bd94db'}
+# Recency is a separate visual dimension, NOT a change in importance or direction.
+RECENCY_COLORS={'INTERACCION_3D':'#b4eb67',
+                'INTERACCION_RECIENTE':'#60adff',
+                'ZONA_NUEVA_SIN_INTERACCION_RECIENTE':'#e7b0ff'}
 
 
 def group_price_zones(scores:pd.DataFrame, proximity_pct:float=.35) -> list[dict]:
@@ -244,7 +249,10 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
         start=max(first,int(z.get('created_at',r.formation_closed_ts)))
         end=min(cutoff,int(z.get('end_at',r.last_observed_closed_ts)))
         if start>=end:continue
-        color=ZONE_COLORS.get(z['kind'],ZONE_COLORS['MIXED'])
+        fresh=(z.get('recent_overlay_enabled',False) and
+               z.get('recent_status','SOLO_HISTORICA') in RECENCY_COLORS)
+        color=(RECENCY_COLORS[z['recent_status']] if fresh else
+               ZONE_COLORS.get(z['kind'],ZONE_COLORS['MIXED']))
         focused=selected_zone_id==z['id']
         x0=pd.Timestamp(start,unit='ms',tz='UTC')
         x1=pd.Timestamp(end,unit='ms',tz='UTC')
@@ -257,13 +265,31 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
               f"<br>{z['count']} horizontales originales"
               f"<br>Centros: {z['min_center']:,.2f}–{z['max_center']:,.2f}"
               f"<br>Línea representativa: {str(r.level_id)[:20]}"
-              f"<br>Formación: {pd.Timestamp(r.formation_closed_ts,unit='ms',tz='UTC')}"
-              f"<br>Importancia al corte: {importance_label}")
+              f"<br>Inicio de trazo: {pd.Timestamp(int(z.get('created_at',r.formation_closed_ts)),unit='ms',tz='UTC')}"
+              f"<br>Importancia al corte: {importance_label}"
+              f"<br>Actividad: {z.get('recent_status','sin resaltado')}"
+              f"<br>Vigencia TTL: {z.get('lifecycle','sin dato')}"
+              f"<br>No indica soporte, flip ni compra/venta")
         fig.add_trace(go.Scatter(x=[x0,x1],y=[float(r.center)]*2,mode='lines',
-             line=dict(color=color,width=3.2 if focused else 2.1),
-             name=f"{z['tier']} · {importance_label} · {z['anchor']:,.0f} · ×{z['count']}",
+             line=dict(color=color,width=3.2 if focused else 2.6 if fresh else 2.1),
+             name=(('⏱ ' if fresh else '')+f"{z['tier']} · {importance_label} · "
+                   f"{z['anchor']:,.0f} · ×{z['count']}"),
              text=[description]*2,hovertemplate='%{text}<extra></extra>',
              showlegend=True))
+        if fresh:
+            marker_ts=z.get('last_interaction_ts')
+            status=z.get('recent_status')
+            if marker_ts is None and status=='ZONA_NUEVA_SIN_INTERACCION_RECIENTE':
+                marker_ts=z['created_at']
+            if marker_ts is not None and first<=int(marker_ts)<=cutoff and int(marker_ts)>=start:
+                fig.add_trace(go.Scatter(
+                    x=[pd.Timestamp(int(marker_ts),unit='ms',tz='UTC')],
+                    y=[float(r.center)],mode='markers',showlegend=False,
+                    marker=dict(symbol='diamond',size=10,color=color,
+                                line=dict(color='#172027',width=1)),
+                    hovertemplate=(f"Actividad confirmada: {status}"
+                                   "<br>%{x}<br>Marcador sobre centro de zona, no precio exacto del evento"
+                                   "<extra></extra>")))
         if focused:
             fig.add_annotation(x=x1,y=float(r.center),
                  text=f"{z['tier']} · {importance_label} · {z['count']} líneas",
@@ -474,6 +500,42 @@ def render_hll_hierarchical_levels(root:Path):
             grade_col='tier'
             st.caption('Modo de comparación con el scoring LEGADO V2. Hereda '
                        'la máxima puntuación de un integrante; no es importancia propia.')
+        # Independent current/local overlay. Historical importance is NEVER
+        # changed by these controls, and B/C/D recent zones can appear alongside A.
+        all_ranked=structural.copy()
+        # Store the causal display end once for ALL zones, including B/C/D
+        # candidates selectable through the local overlay.
+        byid_known={str(r.level_id):r for r in scores.itertuples(index=False)}
+        all_ranked['last_zone_observed_closed_ts']=all_ranked.level_ids.map(
+            lambda member_json: max(int(byid_known[k].last_observed_closed_ts)
+                for k in json.loads(member_json)))
+        show_recency=False
+        recency_ranked=None
+        if updated:
+            st.markdown('**Actividad temporal / niveles locales**')
+            show_recency=st.checkbox('Resaltar subzonas recientes, incluso B/C/D',
+                                    value=True,key='hllhier_v221_recency_on')
+            if show_recency:
+                rc1,rc2,rc3=st.columns(3)
+                with rc1:
+                    recency_days=st.selectbox('Actividad en últimos (días)',
+                             [3,7,14],index=1,key='hllhier_v221_recency_days')
+                with rc2:
+                    n_recent=st.slider('Máximo de subzonas locales adicionales',
+                             1,8,4,key='hllhier_v221_recent_count')
+                with rc3:
+                    distance_limit=st.select_slider('Distancia máxima al precio (%)',
+                             options=[2.,3.,5.,8.,12.],value=8.,
+                             key='hllhier_v221_recent_distance')
+                try:
+                    recency_ranked=annotate_recency(all_ranked,events,cutoff,
+                                                    recency_days)
+                except (KeyError,TypeError,ValueError) as exc:
+                    st.error('Actualidad causal no verificable: '+str(exc));return
+                st.caption('Lima: interacción confirmada ≤3 días; azul: interacción en '
+                           'la ventana elegida; lila: subzona recién formada sin '
+                           'interacción posterior. Solo se destacan datos conocidos '
+                           'al CORTE. Reciente no significa soporte vigente, flip ni señal.')
         structural=structural.loc[structural[grade_col].isin(wanted)].copy()
         if not include_expired:
             structural=structural.loc[structural.lifecycle.eq('ACTIVE_TTL')]
@@ -495,6 +557,29 @@ def render_hll_hierarchical_levels(root:Path):
                  cutoff-days*86_400_000)]
             visible=(select_historical_map(eligible,nmax,spacing)
                      if spacing else eligible.head(nmax))
+            local_count=0
+            if show_recency and recency_ranked is not None:
+                recent_meta=recency_ranked[['zone_id','recent_status',
+                    'last_interaction_ts','days_since_last_interaction']]
+                visible=visible.merge(recent_meta,on='zone_id',how='left',
+                                      validate='one_to_one')
+                # Remaining line slots are available to recent B/C/D zones,
+                # without deleting or upgrading the historical ranked A zones.
+                free_slots=max(0,min(n_recent,nmax-len(visible)))
+                latest_price=float(bars.loc[bars.timestamp+TF<=cutoff,'close'].iloc[-1])
+                extra=select_recent_overlay(recency_ranked,latest_price,
+                    excluded_ids=set(visible.zone_id.astype(str)),
+                    reserved_centers=visible.center.astype(float).tolist(),
+                    limit=free_slots,spacing_pct=max(.35,spacing),
+                    max_distance_pct=distance_limit,
+                    include_partial_expired=include_expired)
+                local_count=len(extra)
+                if not extra.empty:
+                    visible=pd.concat([visible,extra],ignore_index=True)
+                st.caption(f'Mapa combinado: {len(visible)-local_count} zonas '
+                           f'históricas + {local_count} locales recientes; '
+                           f'{len(visible)} trazos en total. Las locales no se '
+                           'reclasifican como A y pueden ser B/C/D.')
         else:
             structural=structural.sort_values(['importance_score','members'],
                               ascending=[False,False],kind='stable')
@@ -506,8 +591,10 @@ def render_hll_hierarchical_levels(root:Path):
                    'Una sola línea puede formar una subzona válida.')
         key_all='(Todas las subzonas del mapa)'
         # Always list ALL eligible zones, not only the first plotted ones.
-        ids=[key_all]+structural.zone_id.astype(str).tolist()
-        by_code=structural.set_index('zone_id',drop=False)
+        inspection=(recency_ranked if updated and show_recency and
+                    recency_ranked is not None else structural)
+        ids=[key_all]+inspection.zone_id.astype(str).tolist()
+        by_code=inspection.set_index('zone_id',drop=False)
         def format_pick(code):
             if code==key_all:return code
             r=by_code.loc[code]
@@ -521,7 +608,7 @@ def render_hll_hierarchical_levels(root:Path):
         pick=st.selectbox('Inspeccionar subzona estructural',ids,
                           format_func=format_pick,key='hllhier_v2_zone_pick')
         focus=None if pick==key_all else pick
-        drawn=visible if focus is None else structural.loc[structural.zone_id.eq(focus)]
+        drawn=visible if focus is None else inspection.loc[inspection.zone_id.eq(focus)]
         if updated and focus is not None and int(drawn.iloc[0].created_at) < cutoff-days*86_400_000:
             last_ts=int(drawn.iloc[0].last_zone_observed_closed_ts)
             if last_ts<=cutoff-days*86_400_000:
@@ -537,6 +624,9 @@ def render_hll_hierarchical_levels(root:Path):
             end_at=max(int(original_byid[k].last_observed_closed_ts) for k in levels)
             importance=(f'E{float(r.evidence_index):.1f} · '
                         f'P{float(r.relative_percentile):.0f}') if updated else f'{r.importance_score}/100 (V2)'
+            recent_status=getattr(r,'recent_status','SOLO_HISTORICA')
+            last_contact=getattr(r,'last_interaction_ts',None)
+            if pd.isna(last_contact):last_contact=None
             zones.append(dict(id=r.zone_id,leader=leader,anchor=float(r.center),
                 score=int(r.importance_score),
                 tier=str(r.relative_tier if updated else r.tier),
@@ -544,10 +634,13 @@ def render_hll_hierarchical_levels(root:Path):
                 kind=str(r.origin_kind),count=int(r.members),members=levels,
                 rows=[],label=str(r.zone_id),end_at=end_at,
                 min_center=min(centers),max_center=max(centers),
-                low=float(r.low),high=float(r.high),created_at=int(r.created_at)))
+                low=float(r.low),high=float(r.high),created_at=int(r.created_at),
+                recent_overlay_enabled=show_recency,
+                recent_status=recent_status,
+                last_interaction_ts=last_contact,lifecycle=str(r.lifecycle)))
         individual=None
         if focus is not None:
-            row=structural.loc[structural.zone_id.eq(focus)].iloc[0]
+            row=inspection.loc[inspection.zone_id.eq(focus)].iloc[0]
             constituent=json.loads(row.level_ids)
             st.caption(f'Subzona creada: {pd.Timestamp(row.created_at,unit="ms",tz="UTC")} · '
                        f'Historial desde su nacimiento: {row.tests_since_zone_birth} tests '
@@ -571,6 +664,13 @@ def render_hll_hierarchical_levels(root:Path):
                    'no debe proyectarse retrospectivamente al nacimiento. '
                    'E=índice de evidencia propia sin techo; P=percentil relativo a las '
                    'subzonas del corte. Con el modo original se muestra V2 heredado.')
+        if updated and show_recency and recency_ranked is not None:
+            with st.expander('Actividad reciente de TODAS las subzonas (incluye B/C/D)'):
+                recent_table=recency_ranked.loc[recency_ranked.has_recent_activity].copy()
+                cols=['zone_id','center','relative_tier','lifecycle',
+                      'recent_status','interactions_in_window',
+                      'days_since_last_interaction','created_at','members']
+                st.dataframe(recent_table[cols],hide_index=True,use_container_width=True)
         display_cols=['zone_id','center','low','high','members','tier',
               'importance_score','created_at','tests_since_zone_birth',
               'defenses_since_birth','losses_since_birth','lifecycle',
