@@ -30,7 +30,8 @@ except ModuleNotFoundError:
 from hll_hierarchical_levels_v1 import (TF, build, sha, score_asof, load_candles,
                                          source_metadata)
 from dashboard.views.hll_hierarchical_levels_view import (chart_candles,visible_levels,
-    make_chart,read_frozen)
+    make_chart,read_frozen,group_price_zones,limit_price_zones,
+    events_for_line,make_zone_chart)
 
 START=1_790_000_000_000//TF*TF
 
@@ -149,5 +150,72 @@ class Hierarchy(unittest.TestCase):
         traces=[trace for trace in fig.data if trace.type=='scatter']
         self.assertEqual(len(traces),1)
         self.assertEqual(str(traces[0].x[0]),str(pd.Timestamp(end-3*86_400_000,unit='ms',tz='UTC')))
+
+    def test_visual_groups_close_centers_without_overlapping_bands(self):
+        # Proves the user's BTC issue: close prices need not share HLL bands.
+        cutoff=START+600*TF
+        rows=[]
+        for name,center,score in [('main',82000.,90),('near',82180.,83),
+                                  ('far',80000.,78)]:
+            rows.append(dict(level_id=name,center=center,
+                 tier='A',importance_score=score,origin='HIGH',
+                 zone_low=center-12,zone_high=center+12,
+                 formation_closed_ts=cutoff-30*TF,
+                 last_observed_closed_ts=cutoff,state_at_cutoff='ACTIVE'))
+        df=pd.DataFrame(rows)
+        grouped=group_price_zones(df,.35)
+        self.assertEqual(len(grouped),2)
+        self.assertEqual(grouped[0]['members'],['main','near'])
+        self.assertEqual(grouped[0]['count'],2)
+        self.assertEqual(grouped[0]['leader'].level_id,'main')
+        self.assertEqual(len(df),3)  # Does not collapse source IDs.
+
+    def test_visual_group_non_transitive_and_limit(self):
+        cutoff=START+600*TF
+        df=pd.DataFrame([dict(level_id=str(i),center=100+i*.30,
+            tier='A',importance_score=90-i,origin='LOW',zone_low=99,zone_high=102,
+            formation_closed_ts=cutoff-20*TF,last_observed_closed_ts=cutoff,
+            state_at_cutoff='ACTIVE') for i in range(3)])
+        z=group_price_zones(df,.35)
+        self.assertEqual(len(z),2)  # 100.60 must not join anchored 100.00.
+        self.assertEqual(len(limit_price_zones(z,1)),1)
+
+    def test_visual_group_mixed_origin_explicit(self):
+        cutoff=START+600*TF
+        df=pd.DataFrame([dict(level_id=str(i),center=100+i*.02,
+            tier='A',importance_score=90-i,origin=origin,zone_low=99.98,
+            zone_high=100.02,formation_closed_ts=cutoff-20*TF,
+            last_observed_closed_ts=cutoff,state_at_cutoff='ACTIVE')
+            for i,origin in enumerate(['HIGH','LOW'])])
+        self.assertEqual(group_price_zones(df,.35)[0]['kind'],'MIXED')
+
+    def test_markers_restricted_to_selected_original_level_and_cutoff(self):
+        first=START+400*TF; cutoff=START+410*TF
+        e=pd.DataFrame([dict(level_id=lv,event_type=event,
+              observed_closed_ts=ts,close=100.) for lv,event,ts in [
+             ('a','TEST_FROM_ABOVE',first+TF),
+             ('b','DEFENSE_CONFIRMED',first+TF),
+             ('a','LOSS_CONFIRMED',cutoff+TF),
+             ('a','DEFENSE_CONFIRMED',first-TF)]])
+        out=events_for_line(e,'a',first,cutoff)
+        self.assertEqual(out.event_type.tolist(),['TEST_FROM_ABOVE'])
+
+    def test_clean_zone_plot_has_single_level_line_no_range_slider(self):
+        b=bars()
+        cutoff=int(b.timestamp.iloc[-1])+TF
+        form=int(b.timestamp.iloc[400])+TF
+        df=pd.DataFrame([dict(level_id='a',tier='A',importance_score=85,
+           origin='LOW',center=100.,zone_low=99.8,zone_high=100.2,
+           formation_closed_ts=form,last_observed_closed_ts=cutoff,
+           state_at_cutoff='ACTIVE')])
+        zones=group_price_zones(df,.35)
+        e=pd.DataFrame([dict(level_id='a',event_type='TEST_FROM_ABOVE',
+             observed_closed_ts=cutoff-TF,close=100.)])
+        fig,tf=make_zone_chart(b,zones,cutoff,7,'30m',
+                              selected_zone_id='a',selected_line_id='a',events=e)
+        self.assertEqual(tf,'30m')
+        self.assertEqual(len([t for t in fig.data if t.type=='scatter' and t.mode=='lines']),1)
+        self.assertFalse(fig.layout.xaxis.rangeslider.visible)
+        self.assertEqual(len([t for t in fig.data if t.type=='scatter' and t.mode=='markers']),1)
 
 if __name__=='__main__':unittest.main()
