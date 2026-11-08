@@ -229,6 +229,7 @@ def render_all_first_touch_chart(project,listing,*,tp,horizon,basis,all_events=N
                'las velas POST y el nivel original; no requiere descargar un CSV ni otro dashboard.')
     from dashboard.views.reaction_hll_confluence_overlay_v1 import (
         available_runs, audited_metadata, load_case, read_pre_30m, decorate_chart,
+        candidate_options, selected_candidates, marker_run, load_pre_markers,
     )
     runs=available_runs(project)
     show_hll=False
@@ -236,6 +237,7 @@ def render_all_first_touch_chart(project,listing,*,tp,horizon,basis,all_events=N
     browse_hll=False
     show_pre=False
     show_persistent=False
+    show_markers=False
     n_pre=120
     if runs:
         st.markdown('**Confluencias HLL V2.1 — auditoría offline**')
@@ -247,9 +249,11 @@ def render_all_first_touch_chart(project,listing,*,tp,horizon,basis,all_events=N
                                value=True,key='rdall_hll_browse')
         h1,h2,h3,h4=st.columns([1,1,1,1])
         show_hll=h1.checkbox('Líneas HLL',value=True,key='rdall_hll_show')
-        show_persistent=h2.checkbox('Horizontales persistentes',value=True,key='rdall_persist_show')
+        show_persistent=h2.checkbox('Horizontales persistentes',value=False,key='rdall_persist_show')
         show_pre=h3.checkbox('Velas PRE 30m',value=True,key='rdall_hll_pre_show')
         n_pre=h4.selectbox('Velas PRE',[40,80,120,160,240],index=2,key='rdall_hll_pre_bars')
+        show_markers=st.checkbox('Marcar contactos, defensas y pérdidas confirmadas PRE',
+                                 value=True,key='rdall_hll_markers')
         st.caption('HLL Lifecycle V2.1 y persistentes son detectores distintos. '
                    'Bandas y recuentos corresponden solo a información conocida antes del retest. '
                    'El piloto ampliado abarca cinco símbolos; no representa los 289 todavía.')
@@ -305,21 +309,57 @@ def render_all_first_touch_chart(project,listing,*,tp,horizon,basis,all_events=N
                         'Se conserva el gráfico original, sin inventar líneas.')
             else:
                 audit,record,candidates=result
+                selection='NEAREST'
+                selected=[]
+                if record['hll_coverage']=='COMPLETE':
+                    options=candidate_options(candidates)
+                    selection=st.selectbox('Línea HLL para inspeccionar',
+                        [x[0] for x in options],
+                        format_func=lambda value:dict(options).get(value,value),
+                        key='rdall_hll_single_line')
+                    selected=selected_candidates(candidates,selection)
                 pre=(read_pre_30m(project,audit,record['symbol'],int(record['retest_ts']),
                                   max_bars=n_pre) if show_pre else [])
+                marks=None
+                if show_hll and show_pre and show_markers and record['hll_coverage']=='COMPLETE':
+                    marker_file=marker_run(project,selected_run)
+                    if marker_file is None:
+                        st.caption('Las marcas exactas de contactos/defensas/pérdidas requieren '
+                                   'la exportación offline HLL PRE; no se inventan puntos desde recuentos.')
+                    else:
+                        marks=load_pre_markers(project,selected_run,record,candidates)
                 fig=decorate_chart(fig,pre_bars=pre,row=record,candidates=candidates,
                                    show_hll=show_hll,show_persistent=show_persistent,
-                                   show_pre=show_pre)
+                                   show_pre=show_pre,selected_hll=selection,
+                                   pre_markers=marks,show_markers=show_markers)
                 st.caption('Cruce HLL: '+str(record['hll_persistent_group'])+' · '
                            'Cobertura: '+str(record['hll_coverage'])+' · '
                            'HLL a ≤0,5 ATR: '+str(record['hll_near_05atr_count'])+' · '
                            'PRE: '+str(len(pre))+' velas 30m. '
                            'Azul: HLL HIGH; violeta: HLL LOW; dorado: horizontal persistente.')
                 if record['hll_coverage']=='COMPLETE':
-                    st.caption('Línea HLL más próxima: '+str(record['hll_nearest_level_id'] or 'ninguna')+
-                               ' · defensas PRE: '+str(record['hll_nearest_prior_defenses'] or '0')+
-                               ' · pérdidas PRE: '+str(record['hll_nearest_prior_losses'] or '0')+
-                               ' · tests PRE: '+str(record['hll_nearest_prior_tests'] or '0'))
+                    if selected:
+                        if selection=='ALL':
+                            st.caption(f'{len(selected)} líneas HLL seleccionadas. '
+                                       'Marcadores: ámbar = test; verde = defensa; rojo = pérdida, '
+                                       'todos confirmados antes del retest original.')
+                        else:
+                            chosen=selected[0]
+                            st.caption('Línea seleccionada: '+chosen['level_id']+
+                                ' · tests PRE: '+str(chosen.get('prior_tests') or '0')+
+                                ' · defensas PRE: '+str(chosen.get('prior_defenses') or '0')+
+                                ' · pérdidas PRE: '+str(chosen.get('prior_losses') or '0'))
+                    if marks is not None:
+                        from collections import Counter
+                        relevant={c['level_id'] for c in selected}
+                        displayed=Counter(m['event_type'] for m in marks
+                                          if m['level_id'] in relevant and
+                                          int(m['bar_open_ts']) in {b[0] for b in pre})
+                        st.caption('Marcas visibles dentro de la ventana PRE: '
+                            f"{displayed['TEST_FROM_ABOVE']+displayed['TEST_FROM_BELOW']} contactos, "
+                            f"{displayed['DEFENSE_CONFIRMED']} defensas, "
+                            f"{displayed['LOSS_CONFIRMED']} pérdidas. "
+                            'Las marcas fuera de la ventana visible siguen auditadas, pero no se dibujan.')
                     with st.expander('Inspeccionar líneas HLL candidatas (≤1 ATR)',expanded=False):
                         import pandas as pd
                         if candidates:
