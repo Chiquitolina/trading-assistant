@@ -143,7 +143,7 @@ def render_all_first_touches(project):
     st.caption('Cobertura por categoría: consultar el denominador evaluable del informe actual. '
                'Los eventos recientes o sin horizonte completo nunca se cuentan como perdedores.')
     st.divider()
-    render_all_first_touch_chart(project,table,tp=tp,horizon=horizon,basis=basis)
+    render_all_first_touch_chart(project,table,tp=tp,horizon=horizon,basis=basis,all_events=frame)
     st.divider()
     from dashboard.views.reaction_lab_failed_reclaim_audit_v1_view import render_failed_reclaim_audit
     render_failed_reclaim_audit(project)
@@ -222,14 +222,59 @@ def plot_all_first_touch_case(bars,row,*,tp=2,sl=1.,n=180,basis='open',
     return fig
 
 
-def render_all_first_touch_chart(project,listing,*,tp,horizon,basis):
+def render_all_first_touch_chart(project,listing,*,tp,horizon,basis,all_events=None):
     import streamlit as st
     st.markdown('**📈 Gráfico del episodio seleccionado (velas verificadas)**')
     st.caption('Ahora aparece directamente en Runner Discovery. Seleccioná un caso para ver '
                'las velas POST y el nivel original; no requiere descargar un CSV ni otro dashboard.')
-    if listing.empty:
-        st.info('Sin eventos para graficar con estos filtros.');return
-    items=listing.head(250)
+    from dashboard.views.reaction_hll_confluence_overlay_v1 import (
+        available_runs, audited_metadata, load_case, read_pre_30m, decorate_chart,
+    )
+    runs=available_runs(project)
+    show_hll=False
+    selected_run=None
+    browse_hll=False
+    show_pre=False
+    show_persistent=False
+    n_pre=120
+    if runs:
+        st.markdown('**Confluencias HLL V2.1 — auditoría offline**')
+        selected_run=st.selectbox('Cohorte HLL congelada', [x[0] for x in runs],
+            format_func=lambda path: (f'{path.name} · '
+                f'{next(n for p,n,_ in runs if p == path):,} eventos'),
+            key='rdall_hll_run')
+        browse_hll=st.checkbox('Explorar episodios de esta cohorte HLL',
+                               value=True,key='rdall_hll_browse')
+        h1,h2,h3,h4=st.columns([1,1,1,1])
+        show_hll=h1.checkbox('Líneas HLL',value=True,key='rdall_hll_show')
+        show_persistent=h2.checkbox('Horizontales persistentes',value=True,key='rdall_persist_show')
+        show_pre=h3.checkbox('Velas PRE 30m',value=True,key='rdall_hll_pre_show')
+        n_pre=h4.selectbox('Velas PRE',[40,80,120,160,240],index=2,key='rdall_hll_pre_bars')
+        st.caption('HLL Lifecycle V2.1 y persistentes son detectores distintos. '
+                   'Bandas y recuentos corresponden solo a información conocida antes del retest. '
+                   'El piloto ampliado abarca cinco símbolos; no representa los 289 todavía.')
+    if browse_hll and selected_run is not None:
+        source=all_events if all_events is not None else listing
+        hll_meta=audited_metadata(project,selected_run)
+        items=source.loc[source['touch_key'].astype(str).isin(hll_meta)].copy()
+        items['hll_group']=items['touch_key'].astype(str).map(lambda key:hll_meta[key][2])
+        fh1,fh2=st.columns([1,1.6])
+        symbol_choice=fh1.selectbox('Símbolo del piloto HLL',
+            ['TODOS',*sorted(items['symbol'].astype(str).unique())],key='rdall_hll_filter_symbol')
+        group_choice=fh2.selectbox('Coincidencia entre horizontales',
+            ['TODOS',*sorted(items['hll_group'].unique())],key='rdall_hll_filter_group')
+        if symbol_choice!='TODOS':
+            items=items.loc[items['symbol'].eq(symbol_choice)]
+        if group_choice!='TODOS':
+            items=items.loc[items['hll_group'].eq(group_choice)]
+        if 'retest_ts' in items:
+            items=items.sort_values('retest_ts',ascending=False)
+        st.caption(f'{len(items):,} episodios disponibles para inspección de la cohorte HLL seleccionada.')
+        items=items.head(250)
+    else:
+        items=listing.head(250)
+    if items.empty:
+        st.info('Sin eventos para graficar con estos filtros o esta cohorte HLL.');return
     keys=items['touch_key'].astype(str).tolist()
     labels={r['touch_key']:f"{r['date_utc']} · {r['symbol']} {r['side']} · {r['first_touch_status']}"
             for _,r in items.iterrows()}
@@ -253,6 +298,41 @@ def render_all_first_touch_chart(project,listing,*,tp,horizon,basis):
         level=_level_from_journal(project,key)
         fig=plot_all_first_touch_case(bars,source,tp=tp,sl=sl,n=visible,
                   basis=basis,level=level,sweep_depth=sweep_depth)
+        if selected_run is not None:
+            result=load_case(project,selected_run,key)
+            if result is None:
+                st.info('Este First Touch todavía no tiene una unión HLL auditada. '
+                        'Se conserva el gráfico original, sin inventar líneas.')
+            else:
+                audit,record,candidates=result
+                pre=(read_pre_30m(project,audit,record['symbol'],int(record['retest_ts']),
+                                  max_bars=n_pre) if show_pre else [])
+                fig=decorate_chart(fig,pre_bars=pre,row=record,candidates=candidates,
+                                   show_hll=show_hll,show_persistent=show_persistent,
+                                   show_pre=show_pre)
+                st.caption('Cruce HLL: '+str(record['hll_persistent_group'])+' · '
+                           'Cobertura: '+str(record['hll_coverage'])+' · '
+                           'HLL a ≤0,5 ATR: '+str(record['hll_near_05atr_count'])+' · '
+                           'PRE: '+str(len(pre))+' velas 30m. '
+                           'Azul: HLL HIGH; violeta: HLL LOW; dorado: horizontal persistente.')
+                if record['hll_coverage']=='COMPLETE':
+                    st.caption('Línea HLL más próxima: '+str(record['hll_nearest_level_id'] or 'ninguna')+
+                               ' · defensas PRE: '+str(record['hll_nearest_prior_defenses'] or '0')+
+                               ' · pérdidas PRE: '+str(record['hll_nearest_prior_losses'] or '0')+
+                               ' · tests PRE: '+str(record['hll_nearest_prior_tests'] or '0'))
+                    with st.expander('Inspeccionar líneas HLL candidatas (≤1 ATR)',expanded=False):
+                        import pandas as pd
+                        if candidates:
+                            display=[{k:r.get(k) for k in ('level_id','origin','zone_low',
+                                'center','zone_high','gap_atr','age_30m','prior_tests',
+                                'prior_defenses','prior_losses','quality_flag')}
+                                for r in candidates]
+                            st.dataframe(pd.DataFrame(display),hide_index=True,
+                                         use_container_width=True)
+                        else:
+                            st.caption('Sin candidatos HLL dentro de 1 ATR.')
+                else:
+                    st.warning('Historia HLL incompleta: no se puede concluir ausencia de nivel.')
         st.plotly_chart(fig,use_container_width=True,key='rdall_verified_candles',
                         config={'displaylogo':False})
         st.caption(f"Fuente verificada: {source['path_source']} · "
