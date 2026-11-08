@@ -17,6 +17,9 @@ from hll_structural_zone_ranking_v21 import rank_zone_evidence, select_historica
 from hll_structural_zone_recency_v221 import annotate_recency, select_recent_overlay
 from hll_structural_behavior_inspector_v22 import (available_runs as behavior_runs,
     verified_load as load_behavior, episode_window, episode_marks)
+from hll_reaction_overlay_v1 import (RELATIVE_RUN as REACTION_OVERLAY_RUN,
+    KINDS as REACTION_KINDS, load_frozen as load_reaction_overlay,
+    select_events as select_reaction_overlay, add_reaction_traces)
 
 COLORS={'A':'#df7770','B':'#e2b15b','C':'#6a9dd6','D':'#8995a7'}
 
@@ -231,7 +234,9 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
                     timeframe:str,*,selected_zone_id:str|None=None,
                     selected_line_id:str|None=None,events:pd.DataFrame|None=None,
                     behavior_transitions:pd.DataFrame|None=None,
-                    focus_window:tuple[int,int]|None=None):
+                    focus_window:tuple[int,int]|None=None,
+                    reaction_events:pd.DataFrame|None=None,
+                    reaction_selected:str|None=None):
     """Clean price-map: one line and one narrow band per visible zone.
 
     For a selected zone, markers refer only to the selected original level;
@@ -343,6 +348,8 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
                     marker=dict(symbol=symbols.get(role,'square'),size=11,
                                 color=colors.get(role,'#b99df3'),line=dict(width=1,color='#121820')),
                     hovertemplate='%{text}<br>Cierre observado %{x}<br>Close 30m: %{y}<extra></extra>'))
+    if reaction_events is not None and not reaction_events.empty:
+        add_reaction_traces(fig,reaction_events,selected=reaction_selected)
     if focus_window is not None:
         fig.update_xaxes(range=[pd.Timestamp(focus_window[0],unit='ms',tz='UTC'),
                                 pd.Timestamp(focus_window[1],unit='ms',tz='UTC')])
@@ -752,10 +759,73 @@ def render_hll_hierarchical_levels(root:Path):
             individual=st.selectbox('Línea original para mostrar sus marcas',constituent,
                      format_func=lambda k: f'{original_byid[k].origin} · {original_byid[k].center:,.2f} · {k}',
                      key='hllhier_v2_line_pick')
+        # Overlay de eventos First Touch congelados: activación bajo demanda.
+        # La geometría/ranking HLL conserva su propia identidad y fecha al corte.
+        reaction_marks=None
+        reaction_selected=None
+        if manifest.get('symbol')=='BTCUSDT' and st.checkbox(
+                'Overlay Reaction Lab · First Touch BTC (solo lectura)',
+                value=False,key='hllhier_reaction_overlay_enabled'):
+            reaction_path=root/REACTION_OVERLAY_RUN
+            try:
+                @st.cache_data(show_spinner=False,max_entries=4)
+                def cached_reaction_overlay(path,signature):
+                    return load_reaction_overlay(Path(path),symbol='BTCUSDT')
+                sig=tuple((f,(reaction_path/f).stat().st_size,
+                           (reaction_path/f).stat().st_mtime_ns)
+                          for f in ('audit.json','event_hll_labels.csv'))
+                reaction_data,reaction_audit=cached_reaction_overlay(str(reaction_path),sig)
+                st.caption('Fuente: piloto congelado Reaction × HLL de cinco símbolos. '
+                           'En BTC contiene 181 First Touch; no son todas las REACTION históricas. '
+                           'Marcadores en el precio del SWING y instante known_ts (no precio de fill).')
+                chosen_kinds=st.multiselect('Estados de First Touch',list(REACTION_KINDS),
+                    default=list(REACTION_KINDS),key='hllhier_reaction_types')
+                chosen_sides=st.multiselect('Dirección', ['LONG','SHORT'],
+                    default=['LONG','SHORT'],key='hllhier_reaction_sides')
+                if focus_window is not None:
+                    range_first=int(focus_window[0])
+                else:
+                    range_first=int(cutoff)-int(days)*86_400_000
+                available,_=select_reaction_overlay(reaction_data,
+                    cutoff=int(cutoff),first=range_first,
+                    kinds=tuple(chosen_kinds),sides=tuple(chosen_sides),limit=100000)
+                if not available.empty:
+                    keys=['(Todos los eventos visibles)']+available.touch_key.astype(str).tolist()
+                    event_by_key=available.set_index('touch_key')
+                    def show_reaction(key):
+                        if key==keys[0]:return key
+                        item=event_by_key.loc[key]
+                        return (f"{pd.Timestamp(int(item.known_ts),unit='ms',tz='UTC'):%d/%m %H:%M} "
+                            f"UTC · {item.status} · {item.side} · {float(item.swing_price):,.2f} · "
+                            f"{key[:30]}")
+                    pick_reaction=st.selectbox('Inspeccionar First Touch de BTC',keys,
+                         format_func=show_reaction,key='hllhier_reaction_selected')
+                    reaction_selected=None if pick_reaction==keys[0] else pick_reaction
+                    if reaction_selected:
+                        record=event_by_key.loc[reaction_selected]
+                        st.caption(f"touch_key: {reaction_selected} · HLL cerca 0.5 ATR: "
+                            f"{int(record.hll_near_05atr_count)} · "
+                            f"{record.hll_persistent_group} · cobertura {record.hll_coverage}. "
+                            'Solo contexto causal PRE; no se muestran resultados futuros.')
+                else:
+                    st.info('No hay eventos del piloto para estos filtros y fechas. '
+                            'Esto no significa que no existan otras REACTION históricas.')
+                reaction_marks,total=select_reaction_overlay(reaction_data,
+                    cutoff=int(cutoff),first=range_first,
+                    kinds=tuple(chosen_kinds),sides=tuple(chosen_sides),
+                    limit=240,chosen=reaction_selected)
+                if total>len(reaction_marks):
+                    st.caption(f'{total} eventos cumplen filtros; se muestran '
+                               f'{len(reaction_marks)} marcadores distribuidos para preservar rendimiento.')
+                else:
+                    st.caption(f'{total} eventos First Touch visibles en esta ventana.')
+            except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError) as exc:
+                st.warning(f'Overlay no disponible; datos congelados sin verificar: {exc}')
         try:
             fig,actual=make_zone_chart(bars,zones,cutoff,days,timeframe,
                      selected_zone_id=focus,selected_line_id=individual,events=events,
-                     behavior_transitions=selected_behavior_marks,focus_window=focus_window)
+                     behavior_transitions=selected_behavior_marks,focus_window=focus_window,
+                     reaction_events=reaction_marks,reaction_selected=reaction_selected)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_structural_v2_chart')
             if actual!=timeframe:
                 st.info(f'Visualización ajustada a {actual} con OHLC agregado real.')
