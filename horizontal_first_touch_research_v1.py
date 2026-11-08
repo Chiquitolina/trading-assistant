@@ -65,14 +65,16 @@ def readonly(path: Path):
     return con
 
 
-def load_touches(project,limit=0):
+def load_touches(project,limit=0,event_end_exclusive=None,symbols=None):
     with closing(readonly(project / SOURCE_REL)) as con:
         rows=con.execute('''SELECT touch_key,legacy_event_key,symbol,side,status,
             observation_type,retest_ts,known_ts FROM first_touches
             WHERE status IN ('TOUCH_FAILED','TOUCH_INDECISIVE','REACTION')
             ORDER BY retest_ts DESC,touch_key ASC''').fetchall()
     keys=('touch_key','legacy_event_key','symbol','side','status','observation_type','retest_ts','known_ts')
-    events=[dict(zip(keys,r)) for r in rows]
+    events=[dict(zip(keys,r)) for r in rows
+            if (event_end_exclusive is None or int(r[6])<event_end_exclusive)
+            and (symbols is None or r[2] in symbols)]
     for e in events:
         if e['known_ts']!=e['retest_ts']+60_000:
             raise RuntimeError('Non-causal first-touch known_ts: '+e['touch_key'])
@@ -167,6 +169,30 @@ def load_history(symbol,ctx,hist,redis_client,now_ms):
     return frames,sources
 
 
+
+def load_offline_history(symbol, offline_dir):
+    """Read isolated verified 15m/30m historical bars, never Redis or old SQLite.
+
+    A missing symbol is unknown history; corrupt/unverifiable symbol data raise
+    and are handled as UNKNOWN_HISTORY by the caller, never as no-level.
+    """
+    import universal_runner_horizontal_history_v1 as hsource
+    folder=offline_dir/'symbols'/symbol
+    if not (folder/'manifest.json').is_file():
+        return ({tf:pd.DataFrame(columns=COLUMNS) for tf in TIMES},
+                {tf:'OFFLINE_MISSING' for tf in TIMES},None)
+    manifest=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
+    hsource.verify_symbol(offline_dir,symbol,int(manifest['start']),int(manifest['end']))
+    frames={};sources={}
+    for tf in TIMES:
+        frame=pd.read_csv(folder/f'{tf}.csv',encoding='utf-8-sig')
+        if tuple(frame.columns)!=COLUMNS:
+            raise RuntimeError(f'Unexpected offline OHLCV schema {symbol} {tf}')
+        frames[tf]=frame
+        sources[tf]='OFFLINE_VERIFIED_'+manifest['timeframes'][tf]['validation']['status']
+    return frames,sources,hsource.sha(folder/'manifest.json')
+
+
 def write_csv(path,rows,cols):
     temp=path.with_suffix(path.suffix+'.tmp')
     with temp.open('w',newline='',encoding='utf-8') as f:
@@ -188,8 +214,8 @@ def check_input_files(project,use_redis):
     return paths
 
 
-def plan(project,limit,use_redis):
-    touches=load_touches(project,limit)
+def plan(project,limit,use_redis,offline_history_dir=None,event_end_exclusive=None,symbols=None):
+    touches=load_touches(project,limit,event_end_exclusive,symbols)
     return {'version':VERSION,'mode':'PLAN_READ_ONLY','first_touches':len(touches),
        'statuses':dict(Counter(e['status'] for e in touches)),
        'observation_type':dict(Counter(e['observation_type'] for e in touches)),
@@ -197,30 +223,42 @@ def plan(project,limit,use_redis):
        'event_range_utc':[iso(min(e['retest_ts'] for e in touches)),iso(max(e['retest_ts'] for e in touches))] if touches else [],
        'archive_exists':(project/ARCHIVE_REL).is_file(),
        'history_cache_exists':(project/HISTORY_REL).is_file(),
-       'redis_requested':use_redis,'events_per_status_limit':limit,
+       'redis_requested':use_redis,'offline_history_dir':str(offline_history_dir) if offline_history_dir else None,
+       'event_end_exclusive':iso(event_end_exclusive) if event_end_exclusive else None,
+       'symbols_filter':sorted(symbols) if symbols is not None else None,'events_per_status_limit':limit,
        'outcomes_accessed':False,'any_writes':False}
 
 
-def run(project,limit,use_redis,output_dir=None,redis_client=None):
-    events=load_touches(project,limit)
+def run(project,limit,use_redis,output_dir=None,redis_client=None,
+        offline_history_dir=None,event_end_exclusive=None,symbols=None):
+    events=load_touches(project,limit,event_end_exclusive,symbols)
     if not events:raise RuntimeError('No first touches in source SQLite')
-    check_input_files(project,use_redis)
+    if offline_history_dir is not None:
+        offline_history_dir=Path(offline_history_dir).resolve()
+        if use_redis:raise ValueError('Do not mix offline historical snapshot with Redis')
+        if not offline_history_dir.is_dir():raise FileNotFoundError(str(offline_history_dir))
+    else:
+        check_input_files(project,use_redis)
     if use_redis and redis_client is None:raise ValueError('Redis client required')
     now=int(time.time()*1000)
     name=datetime.fromtimestamp(now/1000,timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     out=output_dir or (project/REPORT_REL/'runs'/name)
     # Do not overwrite/falsely fold new events into previous frozen cohorts.
     out.mkdir(parents=True,exist_ok=False)
-    labels=[];levels=[];errors=[]
-    ctx=readonly(project/ARCHIVE_REL) if (project/ARCHIVE_REL).is_file() else None
-    hist=readonly(project/HISTORY_REL) if (project/HISTORY_REL).is_file() else None
+    labels=[];levels=[];errors=[];manifest_hashes={}
+    ctx=readonly(project/ARCHIVE_REL) if offline_history_dir is None and (project/ARCHIVE_REL).is_file() else None
+    hist=readonly(project/HISTORY_REL) if offline_history_dir is None and (project/HISTORY_REL).is_file() else None
     try:
         by_symbol=defaultdict(list)
         for e in events:by_symbol[e['symbol']].append(e)
         for nth,(symbol,evs) in enumerate(sorted(by_symbol.items()),1):
             # An error for this symbol is UNKNOWN, not a negative/no-level label.
             try:
-                frames,sources=load_history(symbol,ctx,hist,redis_client,now)
+                if offline_history_dir is not None:
+                    frames,sources,manifest_hash=load_offline_history(symbol,offline_history_dir)
+                    if manifest_hash:manifest_hashes[symbol]=manifest_hash
+                else:
+                    frames,sources=load_history(symbol,ctx,hist,redis_client,now)
             except RuntimeError as err:
                 frames={tf:pd.DataFrame(columns=COLUMNS) for tf in TIMES}
                 sources={tf:'ERROR_SOURCE' for tf in TIMES}
@@ -265,6 +303,11 @@ def run(project,limit,use_redis,output_dir=None,redis_client=None):
              'source_error_symbols':len(errors),'level_records':len(levels),
              'events_per_status_limit':limit,'no_outcomes_used_for_labels':True,
              'redis_read_only':bool(use_redis),
+             'source_mode':'OFFLINE_FROZEN' if offline_history_dir is not None else 'ARCHIVE_OR_REDIS',
+             'offline_history_dir':str(offline_history_dir) if offline_history_dir else None,
+             'event_end_exclusive':iso(event_end_exclusive) if event_end_exclusive else None,
+             'symbols_filter':sorted(symbols) if symbols is not None else None,
+             'offline_manifest_sha256':manifest_hashes,
              'detector_versions':{'persistent':persistent.VERSION,'audit_rule':persistent.AUDIT_RULE},
              'inputs':{'first_touches':str(project/SOURCE_REL),'archives':[str(p) for p in (project/ARCHIVE_REL,project/HISTORY_REL) if p.is_file()]},
              'sha256':{f:sha(out/f) for f in ('event_labels.csv','candidate_levels.csv')},
@@ -351,15 +394,30 @@ def main(argv=None):
     ap.add_argument('--root',type=Path,default=Path(__file__).resolve().parent)
     ap.add_argument('--max-per-status',type=int,default=0,help='0 = entire frozen universe; nonzero = newest N of EACH status (biased pilot)')
     ap.add_argument('--redis',action='store_true',help='READ-ONLY Redis histories for recent symbols')
+    ap.add_argument('--offline-history-dir',type=Path,help='Frozen, independently verified 15m/30m snapshot (exclusive of Redis/old archives)')
+    ap.add_argument('--event-end-exclusive',help='Only first-touch retests before this UTC time (YYYY-MM-DDTHH:MM:SSZ)')
+    ap.add_argument('--symbols',default='',help='Optional comma-separated symbol subset for pilot')
     ap.add_argument('--run-dir',type=Path,help='Existing frozen run for --analyze')
     a=ap.parse_args(argv)
     if a.max_per_status<0:ap.error('--max-per-status must be >=0')
     root=a.root.resolve()
+    if a.offline_history_dir and a.redis:ap.error('Cannot combine --redis and --offline-history-dir')
+    if a.offline_history_dir and a.analyze:ap.error('--analyze uses a previously frozen run, not source switches')
+    selected_symbols=None
+    if a.symbols:
+        from universal_runner_horizontal_history_v1 import symbols_for
+        selected_symbols=set(symbols_for(root,a.symbols))
+    cutoff=None
+    if a.event_end_exclusive:
+        from universal_runner_horizontal_history_v1 import to_ms
+        cutoff=to_ms(a.event_end_exclusive)
     if a.analyze:
         if a.run_dir is None:ap.error('--analyze needs --run-dir')
         result=analyze(root,a.run_dir.resolve())
-    elif a.plan:result=plan(root,a.max_per_status,a.redis)
-    else:result=run(root,a.max_per_status,a.redis,redis_client=connect_redis(root) if a.redis else None)
+    elif a.plan:result=plan(root,a.max_per_status,a.redis,a.offline_history_dir,cutoff,selected_symbols)
+    else:result=run(root,a.max_per_status,a.redis,
+        redis_client=connect_redis(root) if a.redis else None,
+        offline_history_dir=a.offline_history_dir,event_end_exclusive=cutoff,symbols=selected_symbols)
     print('HFT_RESEARCH_RESULT '+json.dumps(result,ensure_ascii=False,allow_nan=False),flush=True)
     return 0
 
