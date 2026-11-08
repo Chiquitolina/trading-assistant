@@ -17,6 +17,7 @@ from hll_structural_zone_ranking_v21 import rank_zone_evidence, select_historica
 from hll_structural_zone_recency_v221 import annotate_recency, select_recent_overlay
 from hll_structural_behavior_inspector_v22 import (available_runs as behavior_runs,
     verified_load as load_behavior, episode_window, episode_marks)
+from hll_btc_visual_reader_v1 import RELATIVE_RUN as BTC_1M_RUN, load_verified as load_btc_1m, plot_window as btc_plot_window
 from hll_reaction_overlay_v1 import (RELATIVE_RUN as REACTION_OVERLAY_RUN,
     KINDS as REACTION_KINDS, load_frozen as load_reaction_overlay,
     select_events as select_reaction_overlay, add_reaction_traces)
@@ -231,7 +232,7 @@ def events_for_line(events:pd.DataFrame, level_id:str, first:int, cutoff:int) ->
 
 
 def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
-                    timeframe:str,*,selected_zone_id:str|None=None,
+                    timeframe:str,*,visual_bars:pd.DataFrame|None=None,visual_manifest:dict|None=None,selected_zone_id:str|None=None,
                     selected_line_id:str|None=None,events:pd.DataFrame|None=None,
                     behavior_transitions:pd.DataFrame|None=None,
                     focus_window:tuple[int,int]|None=None,
@@ -242,11 +243,18 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
     For a selected zone, markers refer only to the selected original level;
     the visual group never fabricates aggregate contacts or a new HLL event.
     """
-    if focus_window is None:
+    small=timeframe in ('1m','3m','5m','15m')
+    if small:
+        if visual_bars is None or visual_manifest is None:
+            raise ValueError('No se cargó el histórico BTC 1m verificado')
+        # A selected behavior episode can still use the regular visible day window;
+        # zoom only changes x-axis, never authorizes a candle after the HLL cut.
+        plot_bars=btc_plot_window(visual_bars,visual_manifest,cutoff,days,timeframe)
+        rendered_tf=timeframe
+    elif focus_window is None:
         plot_bars,rendered_tf=chart_candles(bars,cutoff,days,timeframe)
     else:
         focus_start,focus_end=focus_window
-        # Fetch only a few full days of OHLC; focus x-axis to the episode afterwards.
         zoom_days=max(1,int(np.ceil((focus_end-focus_start)/86_400_000))+1)
         plot_bars,rendered_tf=chart_candles(bars,focus_end,zoom_days,timeframe)
     first=int(plot_bars.timestamp.iloc[0])
@@ -395,12 +403,12 @@ def render_hll_hierarchical_levels(root:Path):
         cutoff=int(bars.timestamp.iloc[step])+TF
         st.caption(f'Corte causal: {pd.Timestamp(cutoff,unit="ms",tz="UTC"):%Y-%m-%d %H:%M} UTC')
     with b:
-        available=[d for d in (3,7,14,21,30,45,60) if d*48<=step+1]
-        if not available:available=[3]
+        available=[d for d in (1,2,3,5,7,14,21,30,45,60) if d*48<=step+1]
+        if not available:available=[1]
         default=21 if 21 in available else available[-1]
         days=st.selectbox('Días visibles',available,index=available.index(default),key='hllhier_days')
     with c:
-        timeframe=st.selectbox('Velas visuales',['30m','1h','4h'],key='hllhier_tf')
+        timeframe=st.selectbox('Velas visuales',['1m','3m','5m','15m','30m','1h','4h'],index=4,key='hllhier_tf')
     st.caption(f'Fuente congelada: {manifest["source_first_utc"]} → '
                f'{manifest["source_last_closed_utc"]} · '
                f'{manifest["source_provenance"]} · {manifest["symbol"]}.')
@@ -821,8 +829,25 @@ def render_hll_hierarchical_levels(root:Path):
                     st.caption(f'{total} eventos First Touch visibles en esta ventana.')
             except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError) as exc:
                 st.warning(f'Overlay no disponible; datos congelados sin verificar: {exc}')
+        visual_bars=None
+        visual_manifest=None
+        if timeframe in ('1m','3m','5m','15m'):
+            btc_dir=root/BTC_1M_RUN
+            try:
+                @st.cache_data(show_spinner=False,max_entries=2)
+                def cached_btc_visual(path,signature):
+                    return load_btc_1m(Path(path))
+                signature=tuple((n,(btc_dir/n).stat().st_size,
+                                  (btc_dir/n).stat().st_mtime_ns)
+                                 for n in ('manifest.json','BTCUSDT_1m.csv'))
+                visual_bars,visual_manifest=cached_btc_visual(str(btc_dir),signature)
+                st.caption('Velas pequeñas: histórico BTC 1m congelado y verificado; '
+                           'zonas HLL y eventos no se recalculan.')
+            except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError) as exc:
+                st.warning(f'Histórico visual BTC 1m no disponible: {exc}')
         try:
             fig,actual=make_zone_chart(bars,zones,cutoff,days,timeframe,
+                     visual_bars=visual_bars,visual_manifest=visual_manifest,
                      selected_zone_id=focus,selected_line_id=individual,events=events,
                      behavior_transitions=selected_behavior_marks,focus_window=focus_window,
                      reaction_events=reaction_marks,reaction_selected=reaction_selected)
