@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 
 from hll_hierarchical_levels_v1 import RUNS, TF, sha, score_asof
 from hll_structural_zones_v2 import RUNS as STRUCTURAL_RUNS, load_v2, snapshot_zones, zone_score_history
+from hll_structural_zone_ranking_v21 import rank_zone_evidence, select_historical_map
 
 COLORS={'A':'#df7770','B':'#e2b15b','C':'#6a9dd6','D':'#8995a7'}
 
@@ -241,7 +242,7 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
         # The leader is an actual causal level. Do not extend its chart segment
         # earlier than its confirmation or beyond its observed end.
         start=max(first,int(z.get('created_at',r.formation_closed_ts)))
-        end=min(cutoff,int(r.last_observed_closed_ts))
+        end=min(cutoff,int(z.get('end_at',r.last_observed_closed_ts)))
         if start>=end:continue
         color=ZONE_COLORS.get(z['kind'],ZONE_COLORS['MIXED'])
         focused=selected_zone_id==z['id']
@@ -250,20 +251,22 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
         fig.add_shape(type='rect',xref='x',yref='y',x0=x0,x1=x1,
               y0=float(z.get('low',r.zone_low)),y1=float(z.get('high',r.zone_high)),
               line=dict(width=0),fillcolor=color,opacity=.17 if focused else .105)
-        description=(f"Zona visual {z['kind']} · {z['tier']}/{z['score']}"
-              f"<br>{z['count']} horizontales originales próximas"
+        importance_label=str(z.get('score_label',f"{z['score']}/100"))
+        zone_label='Subzona causal' if z.get('structural') else 'Zona visual'
+        description=(f"{zone_label} {z['kind']} · {z['tier']}"
+              f"<br>{z['count']} horizontales originales"
               f"<br>Centros: {z['min_center']:,.2f}–{z['max_center']:,.2f}"
-              f"<br>Línea principal: {str(r.level_id)[:20]}"
-              f"<br>Formación principal: {pd.Timestamp(r.formation_closed_ts,unit='ms',tz='UTC')}"
-              f"<br>Score experimental al corte: {z['score']}/100")
+              f"<br>Línea representativa: {str(r.level_id)[:20]}"
+              f"<br>Formación: {pd.Timestamp(r.formation_closed_ts,unit='ms',tz='UTC')}"
+              f"<br>Importancia al corte: {importance_label}")
         fig.add_trace(go.Scatter(x=[x0,x1],y=[float(r.center)]*2,mode='lines',
              line=dict(color=color,width=3.2 if focused else 2.1),
-             name=f"{z['tier']} {z['score']} · {z['anchor']:,.0f} · ×{z['count']}",
+             name=f"{z['tier']} · {importance_label} · {z['anchor']:,.0f} · ×{z['count']}",
              text=[description]*2,hovertemplate='%{text}<extra></extra>',
              showlegend=True))
         if focused:
             fig.add_annotation(x=x1,y=float(r.center),
-                 text=f"{z['tier']} · {z['score']}/100 · {z['count']} líneas",
+                 text=f"{z['tier']} · {importance_label} · {z['count']} líneas",
                  showarrow=False,xanchor='right',yshift=13,
                  font=dict(color=color,size=12),bgcolor='rgba(15,19,26,.85)')
     if selected_line_id and events is not None:
@@ -340,7 +343,7 @@ def render_hll_hierarchical_levels(root:Path):
     k1,k2,k3=st.columns(3)
     k1.metric('Líneas HLL originales',len(scores))
     k2.metric('Sin expiración TTL',int(scores.state_at_cutoff.eq('ACTIVE').sum()) if not scores.empty else 0)
-    k3.metric('Líneas A/B',int(scores.tier.isin(['A','B']).sum()) if not scores.empty else 0)
+    k3.metric('Líneas A/B · escala V1',int(scores.tier.isin(['A','B']).sum()) if not scores.empty else 0)
     view=st.radio('Cómo ver los niveles',
         ['Mapa claro · zonas principales','Subzonas estructurales V2 · causales','Auditoría · líneas individuales'],
         horizontal=True,index=0,key='hllhier_visual_mode')
@@ -442,42 +445,109 @@ def render_hll_hierarchical_levels(root:Path):
         if structural.empty:
             st.info('No hay horizontales confirmadas antes de este corte.')
             return
-        structural=structural.loc[structural.tier.isin(wanted)].copy()
+        scale=st.radio('Criterio de importancia de las subzonas',
+            ['V2.1 · evidencia propia y ranking relativo',
+             'V2 original · máxima puntuación de integrante'],
+            index=0, horizontal=True, key='hllhier_v21_rank_mode')
+        updated=scale.startswith('V2.1')
+        if updated:
+            try:
+                structural=rank_zone_evidence(structural,events,cutoff,
+                                               cutoff-days*86_400_000)
+            except (ValueError,KeyError,TypeError) as exc:
+                st.error('Error de ranking experimental V2.1: '+str(exc))
+                return
+            st.caption('La escala V2.1 usa episodios deduplicados de la SUBZONA, '
+                       'con rendimientos decrecientes. A/B/C/D es una posición RELATIVA '
+                       'entre subzonas existentes al corte, no un score validado ni una señal. '
+                       'El estado TTL, las defensas/pérdidas y la posición respecto al precio '
+                       'se presentan por separado. El mapa largo es una revisión retrospectiva '
+                       'con lo conocido al corte, NO un ranking conocido desde septiembre.')
+            grade_col='relative_tier'
+            rank_mode=st.radio('Distribución en el gráfico',
+                ['Equilibrar períodos históricos y franjas de precio',
+                 'Ranking puro · sin separación visual'],
+                horizontal=True,index=0,key='hllhier_v21_distribution')
+            spacing=st.slider('Separación visual mínima entre centros (%)',
+                    0.25,2.0,0.70,0.05,key='hllhier_v21_spacing') if rank_mode.startswith('Equilibrar') else 0.0
+        else:
+            grade_col='tier'
+            st.caption('Modo de comparación con el scoring LEGADO V2. Hereda '
+                       'la máxima puntuación de un integrante; no es importancia propia.')
+        structural=structural.loc[structural[grade_col].isin(wanted)].copy()
         if not include_expired:
             structural=structural.loc[structural.lifecycle.eq('ACTIVE_TTL')]
-        st.caption(f'En el corte seleccionado: {len(structural)} subzonas causales, '
-                   f'{int((structural.members>1).sum())} con varias líneas HLL. '
-                   'Los vínculos solo aparecen cuando existen 3 contactos compartidos '
-                   'independientes, bandas compatibles y controles de amplitud.')
         if structural.empty:
-            st.info('No hay subzonas en este filtro.');return
-        structural=structural.sort_values(['importance_score','members'],
-                 ascending=[False,False],kind='stable')
-        visible=structural.head(nmax)
-        key_all='(Todas las subzonas principales)'
-        ids=[key_all]+visible.zone_id.tolist()
+            st.info('No hay subzonas en este filtro. Probá A+B o Todos.')
+            return
+        if updated:
+            structural=structural.sort_values(['evidence_index','zone_id'],
+                              ascending=[False,True],kind='stable')
+            # An old zone can be important historically but have no segment in
+            # the CURRENT visible window. Keep it inspectable, not map-ranked.
+            byid_at_cut={str(r.level_id):r for r in scores.itertuples(index=False)}
+            def zone_last_known_end(members_json):
+                return max(int(byid_at_cut[k].last_observed_closed_ts)
+                           for k in json.loads(members_json))
+            structural['last_zone_observed_closed_ts']=structural.level_ids.map(zone_last_known_end)
+            eligible=structural.loc[(structural.created_at.astype('int64')<=cutoff) &
+                (structural.last_zone_observed_closed_ts.astype('int64')>
+                 cutoff-days*86_400_000)]
+            visible=(select_historical_map(eligible,nmax,spacing)
+                     if spacing else eligible.head(nmax))
+        else:
+            structural=structural.sort_values(['importance_score','members'],
+                              ascending=[False,False],kind='stable')
+            visible=structural.head(nmax)
+        st.caption(f'Subzonas con el grado elegido: {len(structural)}; '
+                   f'con múltiples líneas: {int((structural.members>1).sum())}; '
+                   f'dibujadas en el mapa: {len(visible)}. '
+                   'El selector permite inspeccionar también las no dibujadas. '
+                   'Una sola línea puede formar una subzona válida.')
+        key_all='(Todas las subzonas del mapa)'
+        # Always list ALL eligible zones, not only the first plotted ones.
+        ids=[key_all]+structural.zone_id.astype(str).tolist()
+        by_code=structural.set_index('zone_id',drop=False)
         def format_pick(code):
             if code==key_all:return code
-            r=visible.loc[visible.zone_id.eq(code)].iloc[0]
-            return f'{r.tier}{r.importance_score} · {r.center:,.0f} · {r.members} línea(s) · {code}'
-        pick=st.selectbox('Inspeccionar subzona estructural',ids,format_func=format_pick,
-                          key='hllhier_v2_zone_pick')
+            r=by_code.loc[code]
+            if updated:
+                label=(f'{r.relative_tier} · E{r.evidence_index:.1f} '
+                       f'· P{r.relative_percentile:.0f}')
+            else:
+                label=f'{r.tier}{r.importance_score} (V2 original)'
+            kind='subzona' if int(r.members)>1 else 'línea'
+            return f'{label} · {r.center:,.0f} · {r.members} {kind} · {code}'
+        pick=st.selectbox('Inspeccionar subzona estructural',ids,
+                          format_func=format_pick,key='hllhier_v2_zone_pick')
         focus=None if pick==key_all else pick
+        drawn=visible if focus is None else structural.loc[structural.zone_id.eq(focus)]
+        if updated and focus is not None and int(drawn.iloc[0].created_at) < cutoff-days*86_400_000:
+            last_ts=int(drawn.iloc[0].last_zone_observed_closed_ts)
+            if last_ts<=cutoff-days*86_400_000:
+                st.info('Esta subzona es histórica y su ciclo terminó fuera de la '
+                        'ventana visible. Ampliá los días o retrocedé el corte.')
         original_byid={str(r.level_id):r for r in scores.itertuples(index=False)}
         zones=[]
-        for r in visible.itertuples(index=False):
+        for r in drawn.itertuples(index=False):
             leader=original_byid.get(r.leader_level_id)
             if leader is None:continue
             levels=json.loads(r.level_ids)
             centers=[float(original_byid[k].center) for k in levels]
+            end_at=max(int(original_byid[k].last_observed_closed_ts) for k in levels)
+            importance=(f'E{float(r.evidence_index):.1f} · '
+                        f'P{float(r.relative_percentile):.0f}') if updated else f'{r.importance_score}/100 (V2)'
             zones.append(dict(id=r.zone_id,leader=leader,anchor=float(r.center),
-                score=int(r.importance_score),tier=str(r.tier),kind=str(r.origin_kind),
-                count=int(r.members),members=levels,rows=[],label=str(r.zone_id),
+                score=int(r.importance_score),
+                tier=str(r.relative_tier if updated else r.tier),
+                score_label=importance,structural=True,
+                kind=str(r.origin_kind),count=int(r.members),members=levels,
+                rows=[],label=str(r.zone_id),end_at=end_at,
                 min_center=min(centers),max_center=max(centers),
                 low=float(r.low),high=float(r.high),created_at=int(r.created_at)))
         individual=None
         if focus is not None:
-            row=visible.loc[visible.zone_id.eq(focus)].iloc[0]
+            row=structural.loc[structural.zone_id.eq(focus)].iloc[0]
             constituent=json.loads(row.level_ids)
             st.caption(f'Subzona creada: {pd.Timestamp(row.created_at,unit="ms",tz="UTC")} · '
                        f'Historial desde su nacimiento: {row.tests_since_zone_birth} tests '
@@ -497,13 +567,24 @@ def render_hll_hierarchical_levels(root:Path):
         except (ValueError,KeyError,TypeError) as exc:
             st.error(f'Error en gráfico V2: {exc}')
         st.caption('Cada subzona empieza en su fecha de unión, nunca antes. '
-                   'A/B/C/D expresa la puntuación del miembro líder al CORTE actual; '
-                   'no se proyecta como puntuación histórica desde el inicio.')
+                   'La puntuación/jerarquía se conoce al CORTE del gráfico; '
+                   'no debe proyectarse retrospectivamente al nacimiento. '
+                   'E=índice de evidencia propia sin techo; P=percentil relativo a las '
+                   'subzonas del corte. Con el modo original se muestra V2 heredado.')
         display_cols=['zone_id','center','low','high','members','tier',
               'importance_score','created_at','tests_since_zone_birth',
               'defenses_since_birth','losses_since_birth','lifecycle',
               'price_relation','last_response','level_ids']
-        st.dataframe(structural[display_cols],hide_index=True,use_container_width=True)
+        if updated:
+            with st.expander('Tabla completa de importancia V2.1 y auditoría por zona'):
+                st.dataframe(structural[['zone_id','center','members','relative_tier',
+                    'evidence_index','relative_percentile','primary_phase',
+                    'tests_in_window','tests_since_zone_birth',
+                    'defenses_since_birth','losses_since_birth',
+                    'lifecycle','price_relation','v2_tier','v2_score']],
+                    hide_index=True,use_container_width=True)
+        else:
+            st.dataframe(structural[display_cols],hide_index=True,use_container_width=True)
         if focus is not None:
             st.markdown('**Líneas integrantes y puntuaciones actuales**')
             st.dataframe(scores.loc[scores.level_id.astype(str).isin(constituent),
@@ -513,8 +594,8 @@ def render_hll_hierarchical_levels(root:Path):
             own=[b for b in births if b['zone_id']==focus]
             if own:
                 st.caption('Linaje de esta agrupación: '+own[-1]['parent_zone_ids'])
-            with st.expander('Evolución histórica de importancia · corte diario causal'):
-                show_history=st.checkbox('Calcular puntuación histórica de esta subzona',
+            with st.expander('Historial del puntaje LEGADO V1 de sus integrantes · corte diario causal'):
+                show_history=st.checkbox('Calcular historial LEGADO del mejor integrante (no es el índice V2.1)',
                         value=False,key='hllhier_v2_score_history')
                 if show_history:
                     @st.cache_data(show_spinner=False,max_entries=30)
@@ -558,7 +639,8 @@ def render_hll_hierarchical_levels(root:Path):
     st.download_button('Exportar todos los niveles al corte (CSV)',
           scores.to_csv(index=False).encode('utf-8'),file_name='hll_hierarchy_asof.csv',
           mime='text/csv',key='hllhier_export')
-    st.caption('A≥75, B≥55, C≥35, D<35: puntuaciones exploratorias, no calibradas. '
+    st.caption('V1/V2 originales: A≥75, B≥55, C≥35; V2.1: percentiles relativos '
+               'de evidencia estructural causal (exploratorios, no calibrados). '
                'La macroagrupación V1.1 es visual, V2 exige evidencia causal. La clase asignada al CORTE no '
                'debe proyectarse retrospectivamente a la fecha de formación. '
                'No se usan TP/SL, retornos ni resultados futuros.')
