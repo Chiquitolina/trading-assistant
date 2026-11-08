@@ -43,6 +43,48 @@ class CausalLevels(unittest.TestCase):
         _,cov=m.candidate_zones(e,'15m',df)
         self.assertEqual(cov,'GAPPED')
 
+    def test_old_continuous_history_is_stale_not_complete(self):
+        df=synthetic()
+        e=event(df)
+        e['retest_ts'] += 5*m.TF['15m']
+        rows,cov=m.candidate_zones(e,'15m',df)
+        self.assertEqual(rows,[])
+        self.assertEqual(cov,'STALE')
+        label=m.classify(e,{'15m':[],'30m':[]},
+                         {'15m':cov,'30m':'COMPLETE'})
+        self.assertEqual(label['group_pre'],m.GROUP_UNKNOWN)
+
+    def test_missing_last_closed_candle_is_stale(self):
+        df=synthetic()
+        e=event(df)
+        # Still >=160 historical bars, but the most recent is absent.
+        missing_last=df.iloc[:-1].copy()
+        window,cov=m.coverage_slice(missing_last,'15m',e['retest_ts'])
+        self.assertIsNone(window)
+        self.assertEqual(cov,'STALE')
+
+    def test_complete_latest_window_remains_complete(self):
+        df=synthetic()
+        e=event(df)
+        window,cov=m.coverage_slice(df,'15m',e['retest_ts'])
+        self.assertEqual(cov,'COMPLETE')
+        self.assertEqual(len(window),m.WINDOW['15m'])
+
+    def test_partial_current_bar_is_not_historical(self):
+        df=synthetic()
+        e=event(df)
+        e['retest_ts'] += 60_000
+        current=df.iloc[-1:].copy()
+        current['timestamp']=df.timestamp.iloc[-1]+m.TF['15m']
+        current['close']=9000
+        current['high']=9000
+        current['open']=9000
+        current['low']=9000
+        full=pd.concat([df,current],ignore_index=True)
+        window,cov=m.coverage_slice(full,'15m',e['retest_ts'])
+        self.assertEqual(cov,'COMPLETE')
+        self.assertEqual(int(window.timestamp.iloc[-1]),int(df.timestamp.iloc[-1]))
+
     def test_after_reaction_bar_is_ignored(self):
         df=synthetic()
         e=event(df)

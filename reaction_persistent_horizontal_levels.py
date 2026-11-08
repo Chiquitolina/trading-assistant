@@ -25,7 +25,7 @@ import reaction_structural_level_atlas as atlas_v1
 import reaction_compression_breakout_retest_v4 as v4
 
 VERSION = 'persistent-horizontal-pre-v1.0'  # preserve v1 run-folder token for shard repair
-AUDIT_RULE = 'strict_response_close_before_retest_v1.1'
+AUDIT_RULE = 'strict_response_close_and_history_freshness_v1.2'
 ROOT_REL = Path('reports/reaction_lab/reaction_persistent_horizontal_v1')
 TF = {'15m': 15*60000, '30m': 30*60000}
 WINDOW = {'15m': 160, '30m': 80}  # 40h PRE in each timeframe; frozen pilot
@@ -70,6 +70,13 @@ def coverage_slice(frame, tf, event_ts):
     closed=frame.loc[frame.timestamp+step<=int(event_ts)].tail(n).copy().reset_index(drop=True)
     if len(closed)<n:return None,'INSUFFICIENT'
     ts=closed.timestamp.to_numpy(dtype='int64')
+    # A gap-free window can still be days old. Only the most recent fully
+    # closed HTF candle at the event boundary may terminate a COMPLETE window.
+    expected_last_open=(int(event_ts)//step)*step-step
+    if ts[-1] != expected_last_open:
+        return None,'STALE'
+    if np.any(ts % step != 0):
+        return None,'MISALIGNED'
     if not np.all(np.diff(ts)==step):return None,'GAPPED'
     v=closed[['open','high','low','close','volume']].to_numpy(dtype=float)
     if not np.isfinite(v).all() or (v[:,1]<v[:,2]).any() or (v[:,0:4]<=0).any():
@@ -236,7 +243,8 @@ def _setup(root,cohort,max_events):
     with closing(atlas_v1.lineage.ro(path)) as ctx:
         selected=v4.select_events(ctx,cohort,max_events)
     token={'version':VERSION,'cohort':cohort,'max_events':max_events,
-           'source_sha256':audit['frozen_cohort_sha256'],'windows':WINDOW,
+           'source_sha256':audit['frozen_cohort_sha256'],
+           'audit_rule':AUDIT_RULE,'windows':WINDOW,
            'near_atr':NEAR_ATR,'response_atr':MIN_RESPONSE_ATR,
            'max_response_bars':MAX_RESPONSE_BARS,'min_span':MIN_SPAN_BARS}
     short=hashlib.sha256(json.dumps(token,sort_keys=True).encode()).hexdigest()[:12]
