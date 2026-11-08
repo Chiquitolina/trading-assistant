@@ -129,7 +129,7 @@ def render_horizontal_breakout_lab(root):
         box.metric(label,value)
     st.caption(f"Fuente: {cfg.get('source_type','?')} · Confirmación: {cfg.get('settings',{}).get('trigger','?')} · Ventanas: {cfg.get('settings',{}).get('windows','?')}")
     st.info('Sin datos 1m suficientes = CENSORED/NO_FILL, nunca SL. No inferir rendimiento de mercado sin cobertura completa, costos, control temporal y validación fuera de muestra.')
-    tabs=st.tabs(['🧱 Todas las bases', '🚀 Rupturas y resultados', '📊 Factores', '🔎 Inspector 30m / 1m', '📋 Cobertura y metodología', '🧬 Estructuras V2.6', '🎯 Flip LONG V2.7', '🧱 Estructura V2.8'])
+    tabs=st.tabs(['🧱 Todas las bases', '🚀 Rupturas y resultados', '📊 Factores', '🔎 Inspector 30m / 1m', '📋 Cobertura y metodología', '🧬 Estructuras V2.6', '🎯 Flip LONG V2.7', '🧱 Estructura V2.8', '🗺️ Jerarquía de horizontales'])
     with tabs[5]:
         from dashboard.views.hll_v26_structure_dashboard_view import render_hll_v26_structure_dashboard
         render_hll_v26_structure_dashboard(root)
@@ -139,6 +139,9 @@ def render_horizontal_breakout_lab(root):
     with tabs[7]:
         from dashboard.views.hll_v28_structure_dashboard_view import render_hll_v28_structure_dashboard
         render_hll_v28_structure_dashboard(root)
+    with tabs[8]:
+        from dashboard.views.hll_hierarchical_levels_view import render_hll_hierarchical_levels
+        render_hll_hierarchical_levels(root)
     with tabs[0]:
         if setups.empty:
             st.info('No se formaron bases verificables con esta cobertura o configuración.')
