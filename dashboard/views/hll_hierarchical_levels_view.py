@@ -18,6 +18,7 @@ from hll_structural_zone_recency_v221 import annotate_recency, select_recent_ove
 from hll_structural_behavior_inspector_v22 import (available_runs as behavior_runs,
     verified_load as load_behavior, episode_window, episode_marks)
 from hll_btc_visual_reader_v1 import RELATIVE_RUN as BTC_1M_RUN, load_verified as load_btc_1m, plot_window as btc_plot_window
+from hll_chart_vertical_v12 import price_axis_window, zone_in_price_window
 from hll_reaction_overlay_v1 import (RELATIVE_RUN as REACTION_OVERLAY_RUN,
     KINDS as REACTION_KINDS, load_frozen as load_reaction_overlay,
     select_events as select_reaction_overlay, add_reaction_traces)
@@ -237,7 +238,8 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
                     behavior_transitions:pd.DataFrame|None=None,
                     focus_window:tuple[int,int]|None=None,
                     reaction_events:pd.DataFrame|None=None,
-                    reaction_selected:str|None=None):
+                    reaction_selected:str|None=None,
+                    vertical_mode:str="all"):
     """Clean price-map: one line and one narrow band per visible zone.
 
     For a selected zone, markers refer only to the selected original level;
@@ -257,6 +259,9 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
         focus_start,focus_end=focus_window
         zoom_days=max(1,int(np.ceil((focus_end-focus_start)/86_400_000))+1)
         plot_bars,rendered_tf=chart_candles(bars,focus_end,zoom_days,timeframe)
+    if vertical_mode not in ('price','all'):
+        raise ValueError('Modo de escala vertical inválido')
+    price_window=price_axis_window(plot_bars) if vertical_mode=='price' else None
     first=int(plot_bars.timestamp.iloc[0])
     fig=go.Figure()
     x=pd.to_datetime(plot_bars.timestamp,unit='ms',utc=True)
@@ -266,6 +271,8 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
              increasing_fillcolor='#21ac92',decreasing_fillcolor='#d56d78'))
     shown=[z for z in zones if selected_zone_id is None or z['id']==selected_zone_id]
     for z in shown:
+        if price_window is not None and not zone_in_price_window(z,price_window):
+            continue
         r=z['leader']
         # The leader is an actual causal level. Do not extend its chart segment
         # earlier than its confirmation or beyond its observed end.
@@ -361,12 +368,14 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
     if focus_window is not None:
         fig.update_xaxes(range=[pd.Timestamp(focus_window[0],unit='ms',tz='UTC'),
                                 pd.Timestamp(focus_window[1],unit='ms',tz='UTC')])
-    fig.update_layout(height=635,dragmode='pan',hovermode='closest',
+    fig.update_layout(height=(820 if small else 690),dragmode='pan',hovermode='closest',
          xaxis_rangeslider_visible=False,  # Do not duplicate dozens of lines underneath.
          xaxis_title='UTC · velas cerradas',yaxis_title='Precio',
          legend=dict(orientation='h',y=1.04,x=0,font=dict(size=10)),
          margin=dict(l=5,r=10,t=72,b=15),
-         uirevision=f'hll-visual-v11-{selected_zone_id}-{selected_line_id}')
+         uirevision=f'hll-visual-v12-{cutoff}-{days}-{timeframe}-{vertical_mode}-{selected_zone_id}-{selected_line_id}')
+    if price_window is not None:
+        fig.update_yaxes(range=list(price_window),autorange=False, fixedrange=False)
     return fig,rendered_tf
 
 
@@ -845,12 +854,24 @@ def render_hll_hierarchical_levels(root:Path):
                            'zonas HLL y eventos no se recalculan.')
             except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError) as exc:
                 st.warning(f'Histórico visual BTC 1m no disponible: {exc}')
+        vertical_choice=st.radio('Escala vertical del gráfico',
+            ['Automática · zoom en temporalidades chicas',
+             'Precio visible · zoom limpio','Todas las zonas · contexto completo'],
+            index=0,horizontal=True,key='hllhier_v12_vertical_mode')
+        vertical_mode=('price' if vertical_choice.startswith('Precio') or
+            (vertical_choice.startswith('Automática') and timeframe in
+             ('1m','3m','5m','15m')) else 'all')
+        if vertical_mode=='price':
+            st.caption('Escala ajustada a las velas visibles: las zonas lejanas '
+                'se ocultan solo del dibujo, no de los selectores ni de los datos HLL. '
+                'Podés cambiar a contexto completo en cualquier momento.')
         try:
             fig,actual=make_zone_chart(bars,zones,cutoff,days,timeframe,
                      visual_bars=visual_bars,visual_manifest=visual_manifest,
                      selected_zone_id=focus,selected_line_id=individual,events=events,
                      behavior_transitions=selected_behavior_marks,focus_window=focus_window,
-                     reaction_events=reaction_marks,reaction_selected=reaction_selected)
+                     reaction_events=reaction_marks,reaction_selected=reaction_selected,
+                     vertical_mode=vertical_mode)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_structural_v2_chart')
             if actual!=timeframe:
                 st.info(f'Visualización ajustada a {actual} con OHLC agregado real.')
