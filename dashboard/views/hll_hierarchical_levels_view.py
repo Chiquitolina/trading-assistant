@@ -15,6 +15,8 @@ from hll_hierarchical_levels_v1 import RUNS, TF, sha, score_asof
 from hll_structural_zones_v2 import RUNS as STRUCTURAL_RUNS, load_v2, snapshot_zones, zone_score_history
 from hll_structural_zone_ranking_v21 import rank_zone_evidence, select_historical_map
 from hll_structural_zone_recency_v221 import annotate_recency, select_recent_overlay
+from hll_structural_behavior_inspector_v22 import (available_runs as behavior_runs,
+    verified_load as load_behavior, episode_window, episode_marks)
 
 COLORS={'A':'#df7770','B':'#e2b15b','C':'#6a9dd6','D':'#8995a7'}
 
@@ -227,13 +229,21 @@ def events_for_line(events:pd.DataFrame, level_id:str, first:int, cutoff:int) ->
 
 def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
                     timeframe:str,*,selected_zone_id:str|None=None,
-                    selected_line_id:str|None=None,events:pd.DataFrame|None=None):
+                    selected_line_id:str|None=None,events:pd.DataFrame|None=None,
+                    behavior_transitions:pd.DataFrame|None=None,
+                    focus_window:tuple[int,int]|None=None):
     """Clean price-map: one line and one narrow band per visible zone.
 
     For a selected zone, markers refer only to the selected original level;
     the visual group never fabricates aggregate contacts or a new HLL event.
     """
-    plot_bars,rendered_tf=chart_candles(bars,cutoff,days,timeframe)
+    if focus_window is None:
+        plot_bars,rendered_tf=chart_candles(bars,cutoff,days,timeframe)
+    else:
+        focus_start,focus_end=focus_window
+        # Fetch only a few full days of OHLC; focus x-axis to the episode afterwards.
+        zoom_days=max(1,int(np.ceil((focus_end-focus_start)/86_400_000))+1)
+        plot_bars,rendered_tf=chart_candles(bars,focus_end,zoom_days,timeframe)
     first=int(plot_bars.timestamp.iloc[0])
     fig=go.Figure()
     x=pd.to_datetime(plot_bars.timestamp,unit='ms',utc=True)
@@ -311,6 +321,31 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
                 name=f'{label} ({len(sub)})',
                 text=sub.event_type.astype(str),
                 hovertemplate='%{text}<br>%{x}<br>Precio de confirmación: %{y}<extra></extra>'))
+    if behavior_transitions is not None and not behavior_transitions.empty:
+        # These markers belong to the selected frozen episode; location uses the
+        # contemporaneous OHLC CLOSE, not a fabricated event fill or trade price.
+        colors={'TEST':'#e2b15b','RESOLUTION':'#8cb9fa'}
+        symbols={'TEST':'circle','RESOLUTION':'diamond'}
+        close_ts=(bars.timestamp.astype('int64')+TF).to_numpy()
+        close_val=bars.close.to_numpy(dtype=float)
+        for role,part in behavior_transitions.groupby('transition_role'):
+            px=[];ts=[];desc=[]
+            for r in part.itertuples(index=False):
+                stamp=int(r.observed_closed_ts)
+                j=int(np.searchsorted(close_ts,stamp,'left'))
+                if j>=len(close_ts) or close_ts[j]!=stamp:continue
+                ts.append(pd.Timestamp(stamp,unit='ms',tz='UTC'))
+                px.append(float(close_val[j]))
+                desc.append(f'{r.event_type} · línea {str(r.level_id)[:12]} · test {str(r.test_id)[:12]}')
+            if ts:
+                fig.add_trace(go.Scatter(x=ts,y=px,mode='markers',
+                    name=f'V2.2-A {role} · {len(ts)}',text=desc,
+                    marker=dict(symbol=symbols.get(role,'square'),size=11,
+                                color=colors.get(role,'#b99df3'),line=dict(width=1,color='#121820')),
+                    hovertemplate='%{text}<br>Cierre observado %{x}<br>Close 30m: %{y}<extra></extra>'))
+    if focus_window is not None:
+        fig.update_xaxes(range=[pd.Timestamp(focus_window[0],unit='ms',tz='UTC'),
+                                pd.Timestamp(focus_window[1],unit='ms',tz='UTC')])
     fig.update_layout(height=635,dragmode='pan',hovermode='closest',
          xaxis_rangeslider_visible=False,  # Do not duplicate dozens of lines underneath.
          xaxis_title='UTC · velas cerradas',yaxis_title='Precio',
@@ -608,6 +643,71 @@ def render_hll_hierarchical_levels(root:Path):
         pick=st.selectbox('Inspeccionar subzona estructural',ids,
                           format_func=format_pick,key='hllhier_v2_zone_pick')
         focus=None if pick==key_all else pick
+        selected_behavior=None
+        selected_behavior_marks=None
+        focus_window=None
+        if st.checkbox('Inspector de episodios V2.2-A · solo lectura',
+                       value=False,key='hllhier_behavior_inspector_enabled'):
+            candidates=behavior_runs(root,folder,v2folder,cutoff)
+            if not candidates:
+                st.info('No existe una auditoría V2.2-A compatible con este corte y estas fuentes. '
+                        'Seleccioná el corte original de la auditoría o generá otra corrida offline.')
+            else:
+                behavior_folder=st.selectbox('Auditoría V2.2-A congelada',candidates,
+                   format_func=lambda p:p.name,key='hllhier_behavior_run')
+                try:
+                    @st.cache_data(show_spinner=False,max_entries=3)
+                    def cached_behavior(directory,v1path,v2path,cut,signature):
+                        return load_behavior(Path(directory),Path(v1path),Path(v2path),cut)
+                    filenames=('manifest.json','episodes.csv','episode_transitions.csv','behavior_summary.csv')
+                    sig=tuple((n,(behavior_folder/n).stat().st_size,
+                              (behavior_folder/n).stat().st_mtime_ns) for n in filenames)
+                    behavior_manifest,behavior_ep,behavior_tr=cached_behavior(
+                        str(behavior_folder),str(folder),str(v2folder),int(cutoff),sig)
+                    valid_zones=set(inspection.zone_id.astype(str))
+                    subset=behavior_ep.loc[behavior_ep.zone_id.astype(str).isin(valid_zones)].copy()
+                    if focus is not None:
+                        subset=subset.loc[subset.zone_id.astype(str).eq(focus)]
+                    state_options=['TODOS']+sorted(subset.state.dropna().astype(str).unique().tolist())
+                    state=st.selectbox('Resolución del episodio',state_options,
+                                       key='hllhier_behavior_state')
+                    if state!='TODOS':subset=subset.loc[subset.state.eq(state)]
+                    subset=subset.sort_values(['first_test_closed_ts','episode_id'],ascending=[False,True])
+                    if subset.empty:
+                        st.info('No hay episodios para esta subzona y resolución.')
+                    else:
+                        codes=subset.episode_id.astype(str).tolist()
+                        by_episode=subset.set_index('episode_id',drop=False)
+                        def fmt_episode(code):
+                            rr=by_episode.loc[code]
+                            when=pd.Timestamp(int(rr.first_test_closed_ts),unit='ms',tz='UTC')
+                            return (f'{when:%d/%m %H:%M} UTC · {rr.state} · {rr.side} '
+                                    f'· {str(rr.zone_id)[:13]} · {str(code)[:15]}')
+                        ep_id=st.selectbox('Seleccionar episodio físico',codes,
+                                           format_func=fmt_episode,key='hllhier_behavior_episode')
+                        selected_behavior=by_episode.loc[ep_id]
+                        focus=str(selected_behavior.zone_id)
+                        p1,p2=st.columns(2)
+                        with p1: pre_h=st.selectbox('Horas anteriores',[3,6,12,24,48],index=2,
+                                                    key='hllhier_behavior_pre_h')
+                        with p2: post_h=st.selectbox('Horas posteriores',[3,6,12,24,48],index=2,
+                                                     key='hllhier_behavior_post_h')
+                        focus_window=episode_window(selected_behavior,cutoff,pre_h,post_h)
+                        selected_behavior_marks=episode_marks(behavior_tr,ep_id,cutoff)
+                        st.caption(f'Evento {ep_id} · {len(selected_behavior_marks)} transiciones originales · '
+                                   f'{int(selected_behavior.member_test_count)} tests de líneas · '
+                                   f'{int(selected_behavior.test_count_unique)} instantes de test. '
+                                   'Se enfoca el gráfico en el episodio, sin alterar la subzona ni sus datos.')
+                        st.dataframe(selected_behavior_marks[['observed_closed_ts','event_type',
+                           'transition_role','level_id','test_id']].assign(
+                            utc=lambda d:pd.to_datetime(d.observed_closed_ts,unit='ms',utc=True))[
+                            ['utc','event_type','transition_role','level_id','test_id']],
+                            hide_index=True,use_container_width=True)
+                        st.caption('V2.2-A: resoluciones del Lifecycle original; no demuestra '
+                                   'rechazo físico, aceptación, flip ni PnL. '
+                                   'La identidad de subzona pertenece al corte auditado.')
+                except (OSError,ValueError,KeyError,TypeError,IndexError,json.JSONDecodeError) as exc:
+                    st.error(f'No se pudo abrir la auditoría V2.2-A: {exc}')
         drawn=visible if focus is None else inspection.loc[inspection.zone_id.eq(focus)]
         if updated and focus is not None and int(drawn.iloc[0].created_at) < cutoff-days*86_400_000:
             last_ts=int(drawn.iloc[0].last_zone_observed_closed_ts)
@@ -639,6 +739,7 @@ def render_hll_hierarchical_levels(root:Path):
                 recent_status=recent_status,
                 last_interaction_ts=last_contact,lifecycle=str(r.lifecycle)))
         individual=None
+        constituent=[]
         if focus is not None:
             row=inspection.loc[inspection.zone_id.eq(focus)].iloc[0]
             constituent=json.loads(row.level_ids)
@@ -653,7 +754,8 @@ def render_hll_hierarchical_levels(root:Path):
                      key='hllhier_v2_line_pick')
         try:
             fig,actual=make_zone_chart(bars,zones,cutoff,days,timeframe,
-                     selected_zone_id=focus,selected_line_id=individual,events=events)
+                     selected_zone_id=focus,selected_line_id=individual,events=events,
+                     behavior_transitions=selected_behavior_marks,focus_window=focus_window)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_structural_v2_chart')
             if actual!=timeframe:
                 st.info(f'Visualización ajustada a {actual} con OHLC agregado real.')
