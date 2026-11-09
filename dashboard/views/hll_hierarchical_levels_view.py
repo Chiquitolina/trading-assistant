@@ -20,6 +20,7 @@ from hll_structural_behavior_inspector_v22 import (available_runs as behavior_ru
 from hll_btc_visual_reader_v1 import RELATIVE_RUN as BTC_1M_RUN, load_verified as load_btc_1m, plot_window as btc_plot_window
 from hll_chart_vertical_v12 import price_axis_window, zone_in_price_window
 from hll_historical_projection_v1 import projection_segments
+from hll_level_succession_v1c import successor_candidates, max_age_ids_from_ends
 from hll_reaction_overlay_v1 import (RELATIVE_RUN as REACTION_OVERLAY_RUN,
     KINDS as REACTION_KINDS, load_frozen as load_reaction_overlay,
     select_events as select_reaction_overlay, add_reaction_traces)
@@ -448,6 +449,31 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
     return fig,rendered_tf
 
 
+
+def add_succession_markers(fig, pairs, old_id, cutoff, first_ms):
+    """Plot historical succession BIRTHS only, no synthetic reactive period.
+
+    Mutates only the constructed Plotly figure, never Lifecycle or PRE joins.
+    """
+    if pairs is None or old_id is None or pairs.empty:
+        return fig
+    selected=pairs.loc[pairs.old_level_id.astype(str).eq(str(old_id))].head(8)
+    for r in selected.itertuples(index=False):
+        if not (int(first_ms) <= int(r.successor_birth_ms) < int(cutoff)):
+            continue
+        instant=pd.Timestamp(int(r.successor_birth_ms),unit='ms',tz='UTC')
+        fig.add_trace(go.Scatter(x=[instant],y=[float(r.successor_center)],
+           mode='markers',marker=dict(symbol='diamond-open',size=13,color='#f3d77b',
+                                     line=dict(width=2,color='#f3d77b')),
+           name='Posible sucesora · '+str(r.successor_level_id)[:10],showlegend=False,
+           hovertemplate=(f'Posible sucesora: {r.successor_level_id}'
+              f'<br>Original: {r.old_level_id}'
+              f'<br>Solapamiento: {float(r.overlap_iou):.1%}'
+              f'<br>Formación conocida: {instant}'
+              '<br>NO es reactivación confirmada<extra></extra>')))
+    return fig
+
+
 def render_hll_hierarchical_levels(root:Path):
     import streamlit as st
     root=Path(root)
@@ -517,6 +543,63 @@ def render_hll_hierarchical_levels(root:Path):
         st.caption('El trazo continuo termina en Lifecycle. Su prolongación punteada '
                    'es solo una guía histórica hasta el corte: no implica ACTIVE, '
                    'defensa, recuperación ni señal PRE.')
+    # Succession inspector is historical descriptive research, separate from
+    # the First Touch PRE overlay and from the V2 structural-zone detector.
+    succession_pairs=None
+    succession_selected=None
+    with st.expander('Continuidad histórica V1-C · posibles sucesoras (auditoría)',expanded=False):
+        st.caption('Se evalúan únicamente horizontales que terminaron por MAX_AGE antes '
+                   'del corte elegido. Una sucesora solo aparece después de su propia '
+                   'formación. Coincidencia geométrica NO equivale a reactivación.')
+        ca,cb,cc=st.columns(3)
+        with ca:
+            successor_days=st.selectbox('Ventana de sucesión (días)',[3,7,14,30],index=2,
+                                        key='hllhier_v1c_gap_days')
+        with cb:
+            successor_iou=st.selectbox('Solapamiento mínimo', [.15,.25,.40,.60],index=1,
+                                       format_func=lambda n:f'{n:.0%}',key='hllhier_v1c_iou')
+        with cc:
+            successor_distance=st.selectbox('Distancia entre centros máxima',
+                                            [.2,.5,1.0],index=1,
+                                            format_func=lambda n:f'{n:.1f}%',
+                                            key='hllhier_v1c_center_pct')
+        try:
+            expired_ids=max_age_ids_from_ends(ends,cutoff_ms=int(cutoff))
+            succession_pairs=successor_candidates(scores,cutoff_ms=int(cutoff),
+                max_gap_days=successor_days,min_overlap_iou=successor_iou,
+                max_center_distance_pct=successor_distance,max_age_ids=expired_ids)
+            old_with_pairs=succession_pairs.old_level_id.unique().tolist()
+            st.caption(f'{len(expired_ids)} IDs MAX_AGE al corte · '
+                       f'{len(old_with_pairs)} con sucesora candidata · '
+                       f'{len(succession_pairs)} pares geométricos.')
+            example_old=['ce7c566bfe13084ba002577b',
+                         '3450c0079d4e691cd7144642',
+                         'd6eee9bf1b3640986ca5ca3b']
+            available_old=set(scores.level_id.astype(str)) & expired_ids
+            options=['(Sin selección)']+[k for k in example_old if k in available_old]+[
+                k for k in old_with_pairs if k not in example_old]
+            succession_selected=st.selectbox('Horizontal vencida para inspeccionar',options,
+                format_func=lambda key: key if key==options[0] else
+                    f'{float(scores.loc[scores.level_id.astype(str).eq(key),"center"].iloc[0]):,.2f} USD · {key}',
+                key='hllhier_v1c_old_pick')
+            if succession_selected==options[0]:succession_selected=None
+            if succession_selected is not None:
+                relevant=succession_pairs.loc[succession_pairs.old_level_id.eq(succession_selected)].copy()
+                relevant['nacimiento_UTC']=pd.to_datetime(relevant.successor_birth_ms,unit='ms',utc=True)
+                if relevant.empty:
+                    st.info('Sin sucesora que cumpla estos umbrales. El nivel vencido '
+                            'puede seguir visualizándose con línea discontinua.')
+                else:
+                    st.dataframe(relevant[['successor_level_id','successor_center',
+                    'nacimiento_UTC','hours_after_expiry','overlap_iou',
+                    'center_distance_pct','candidate_state_at_cutoff']],
+                    use_container_width=True,hide_index=True)
+                st.caption('Diamantes en el gráfico: nacimiento de posibles sucesoras. '
+                           'No extrapolan vigencia y no aparecen en inspección First Touch PRE.')
+        except (ValueError,KeyError,TypeError) as exc:
+            st.warning(f'Auditoría V1-C no verificable: {exc}')
+            succession_pairs=None
+            succession_selected=None
     wanted={'A':{'A'},'AB':{'A','B'},'ABC':{'A','B','C'},'ALL':{'A','B','C','D'}}[tier]
     filtered=scores.loc[scores.tier.isin(wanted)].copy()
     if not include_expired:
@@ -561,6 +644,8 @@ def render_hll_hierarchical_levels(root:Path):
                 selected_zone_id=chosen['id'] if chosen else None,
                 selected_line_id=selected_line,events=events,
                 project_expired=project_expired)
+            if succession_selected is not None:
+                add_succession_markers(fig,succession_pairs,succession_selected,cutoff,cutoff-days*86_400_000)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_chart_v11')
             if actual!=timeframe:
                 st.info(f'Resolución agregada visualmente a {actual}, preservando OHLC original.')
@@ -1041,6 +1126,8 @@ def render_hll_hierarchical_levels(root:Path):
                      reaction_events=reaction_marks,reaction_selected=reaction_selected,
                      vertical_mode=vertical_mode,
                      project_expired=project_expired and inspection_candles is None)
+            if succession_selected is not None and inspection_candles is None:
+                add_succession_markers(fig,succession_pairs,succession_selected,cutoff,cutoff-days*86_400_000)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_structural_v2_chart')
             if actual!=timeframe:
                 st.info(f'Visualización ajustada a {actual} con OHLC agregado real.')
@@ -1117,6 +1204,8 @@ def render_hll_hierarchical_levels(root:Path):
                           project_expired=project_expired)
             # Important change also for the old auditor: no small duplicate chart below.
             fig.update_layout(xaxis_rangeslider_visible=False,height=635)
+            if succession_selected is not None:
+                add_succession_markers(fig,succession_pairs,succession_selected,cutoff,cutoff-days*86_400_000)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_audit_chart_v11')
         except (ValueError,KeyError) as exc:
             st.error(f'No se pudo dibujar el gráfico individual: {exc}')
