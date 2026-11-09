@@ -19,9 +19,13 @@ from hll_structural_behavior_inspector_v22 import (available_runs as behavior_ru
     verified_load as load_behavior, episode_window, episode_marks)
 from hll_btc_visual_reader_v1 import RELATIVE_RUN as BTC_1M_RUN, load_verified as load_btc_1m, plot_window as btc_plot_window
 from hll_chart_vertical_v12 import price_axis_window, zone_in_price_window
+from hll_historical_projection_v1 import projection_segments
 from hll_reaction_overlay_v1 import (RELATIVE_RUN as REACTION_OVERLAY_RUN,
     KINDS as REACTION_KINDS, load_frozen as load_reaction_overlay,
     select_events as select_reaction_overlay, add_reaction_traces)
+from hll_reaction_confluence_inspector_v1 import (
+    load_candidates as load_confluence_candidates, event_context as confluence_context,
+    focus_interval as confluence_interval, interval_candles as confluence_candles)
 
 COLORS={'A':'#df7770','B':'#e2b15b','C':'#6a9dd6','D':'#8995a7'}
 
@@ -109,7 +113,8 @@ def visible_levels(scores:pd.DataFrame,min_tier:str='AB',include_expired:bool=Tr
 
 
 def make_chart(bars:pd.DataFrame,scores:pd.DataFrame,cutoff:int,days:int,timeframe:str,
-               *,selected_id:str|None=None,show_labels=True):
+               *,selected_id:str|None=None,show_labels=True,
+               project_expired:bool=False):
     plot_bars,rendered_tf=chart_candles(bars,cutoff,days,timeframe)
     first=int(plot_bars.timestamp.iloc[0]);last=int(plot_bars.timestamp.iloc[-1])+TF
     fig=go.Figure()
@@ -121,22 +126,38 @@ def make_chart(bars:pd.DataFrame,scores:pd.DataFrame,cutoff:int,days:int,timefra
     for lv in scores.itertuples(index=False):
         start=max(first,int(lv.formation_closed_ts))
         end=min(cutoff,int(lv.last_observed_closed_ts))
-        if start>=end:continue
+        _,projected=projection_segments(birth_ms=int(lv.formation_closed_ts),
+            end_ms=int(lv.last_observed_closed_ts),first_ms=first,
+            cutoff_ms=cutoff,enabled=project_expired)
+        if start>=end and projected is None:continue
         color=COLORS.get(lv.tier,'#8995a7')
         focused=selected_id is not None and lv.level_id==selected_id
         width=3.3 if focused else {'A':2.5,'B':1.8,'C':1.2,'D':.9}[lv.tier]
         x0=pd.Timestamp(start,unit='ms',tz='UTC')
         x1=pd.Timestamp(end,unit='ms',tz='UTC')
-        fig.add_shape(type='rect',xref='x',yref='y',x0=x0,x1=x1,
-                      y0=float(lv.zone_low),y1=float(lv.zone_high),
-                      line=dict(width=0),fillcolor=color,opacity=.09 if not focused else .19)
-        fig.add_trace(go.Scatter(x=[x0,x1],y=[lv.center,lv.center],mode='lines',
+        if start<end:
+            fig.add_shape(type='rect',xref='x',yref='y',x0=x0,x1=x1,
+                          y0=float(lv.zone_low),y1=float(lv.zone_high),
+                          line=dict(width=0),fillcolor=color,opacity=.09 if not focused else .19)
+            fig.add_trace(go.Scatter(x=[x0,x1],y=[lv.center,lv.center],mode='lines',
             line=dict(color=color,width=width,dash='solid' if focused else 'dash'),
             name=f'{lv.tier} · {lv.origin} · {lv.importance_score}',
             text=[f'{lv.level_id}<br>Confirmada: {pd.Timestamp(lv.formation_closed_ts,unit="ms",tz="UTC")}'
                   f'<br>Tests {lv.tests_pre} · Defensas {lv.defenses_pre} · Pérdidas {lv.losses_pre}'
                   f'<br>Importancia al corte: {lv.importance_score}/100']*2,
             hovertemplate='%{text}<br>Precio %{y}<extra></extra>',showlegend=focused))
+        if project_expired:
+            _,extension=projection_segments(birth_ms=int(lv.formation_closed_ts),
+                end_ms=int(lv.last_observed_closed_ts),first_ms=first,
+                cutoff_ms=cutoff,enabled=True)
+            if extension is not None:
+                px0,px1=(pd.Timestamp(t,unit='ms',tz='UTC') for t in extension)
+                fig.add_trace(go.Scatter(x=[px0,px1],y=[lv.center]*2,mode='lines',
+                    line=dict(color=color,width=1.8,dash='dot'),opacity=.52,
+                    name='Proyección histórica · '+str(lv.level_id)[:12],
+                    text=['PROYECCIÓN VISUAL después del fin Lifecycle. No activa ni defensas.']*2,
+                    hovertemplate='%{text}<br>%{x}<br>Centro %{y}<extra></extra>',
+                    showlegend=focused))
         if focused and show_labels:
             fig.add_annotation(x=x1,y=lv.center,text=f'{lv.tier} {lv.importance_score} · {lv.origin}',
                                showarrow=False,xanchor='right',yshift=10,font=dict(color=color,size=11))
@@ -239,14 +260,20 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
                     focus_window:tuple[int,int]|None=None,
                     reaction_events:pd.DataFrame|None=None,
                     reaction_selected:str|None=None,
-                    vertical_mode:str="all"):
+                    vertical_mode:str="all",inspection_candles:pd.DataFrame|None=None,
+                    inspection_candidates:pd.DataFrame|None=None,
+                    inspection_focus:tuple[int,int]|None=None,
+                    project_expired:bool=False):
     """Clean price-map: one line and one narrow band per visible zone.
 
     For a selected zone, markers refer only to the selected original level;
     the visual group never fabricates aggregate contacts or a new HLL event.
     """
     small=timeframe in ('1m','3m','5m','15m')
-    if small:
+    if inspection_candles is not None:
+        plot_bars=inspection_candles
+        rendered_tf=timeframe
+    elif small:
         if visual_bars is None or visual_manifest is None:
             raise ValueError('No se cargó el histórico BTC 1m verificado')
         # A selected behavior episode can still use the regular visible day window;
@@ -278,7 +305,10 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
         # earlier than its confirmation or beyond its observed end.
         start=max(first,int(z.get('created_at',r.formation_closed_ts)))
         end=min(cutoff,int(z.get('end_at',r.last_observed_closed_ts)))
-        if start>=end:continue
+        _,projected=projection_segments(birth_ms=int(z.get('created_at',r.formation_closed_ts)),
+            end_ms=int(z.get('end_at',r.last_observed_closed_ts)),first_ms=first,
+            cutoff_ms=cutoff,enabled=project_expired and inspection_candles is None)
+        if start>=end and projected is None:continue
         fresh=(z.get('recent_overlay_enabled',False) and
                z.get('recent_status','SOLO_HISTORICA') in RECENCY_COLORS)
         color=(RECENCY_COLORS[z['recent_status']] if fresh else
@@ -286,9 +316,10 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
         focused=selected_zone_id==z['id']
         x0=pd.Timestamp(start,unit='ms',tz='UTC')
         x1=pd.Timestamp(end,unit='ms',tz='UTC')
-        fig.add_shape(type='rect',xref='x',yref='y',x0=x0,x1=x1,
-              y0=float(z.get('low',r.zone_low)),y1=float(z.get('high',r.zone_high)),
-              line=dict(width=0),fillcolor=color,opacity=.17 if focused else .105)
+        if start<end:
+            fig.add_shape(type='rect',xref='x',yref='y',x0=x0,x1=x1,
+                  y0=float(z.get('low',r.zone_low)),y1=float(z.get('high',r.zone_high)),
+                  line=dict(width=0),fillcolor=color,opacity=.17 if focused else .105)
         importance_label=str(z.get('score_label',f"{z['score']}/100"))
         zone_label='Subzona causal' if z.get('structural') else 'Zona visual'
         description=(f"{zone_label} {z['kind']} · {z['tier']}"
@@ -300,12 +331,22 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
               f"<br>Actividad: {z.get('recent_status','sin resaltado')}"
               f"<br>Vigencia TTL: {z.get('lifecycle','sin dato')}"
               f"<br>No indica soporte, flip ni compra/venta")
-        fig.add_trace(go.Scatter(x=[x0,x1],y=[float(r.center)]*2,mode='lines',
-             line=dict(color=color,width=3.2 if focused else 2.6 if fresh else 2.1),
+        if start<end:
+            fig.add_trace(go.Scatter(x=[x0,x1],y=[float(r.center)]*2,mode='lines',
+                 line=dict(color=color,width=3.2 if focused else 2.6 if fresh else 2.1),
              name=(('⏱ ' if fresh else '')+f"{z['tier']} · {importance_label} · "
                    f"{z['anchor']:,.0f} · ×{z['count']}"),
              text=[description]*2,hovertemplate='%{text}<extra></extra>',
              showlegend=True))
+        if projected is not None:
+            xp0,xp1=(pd.Timestamp(t,unit='ms',tz='UTC') for t in projected)
+            fig.add_trace(go.Scatter(x=[xp0,xp1],y=[float(r.center)]*2,mode='lines',
+                line=dict(color=color,width=2.1 if focused else 1.5,dash='dot'),
+                opacity=.6,showlegend=focused,
+                name='Proyección histórica · '+str(z['id'])[:12],
+                text=[description+'<br>PROYECCIÓN VISUAL post-vencimiento; NO ACTIVE_TTL, '
+                      'no confirma defensas ni REACTION PRE.']*2,
+                hovertemplate='%{text}<extra></extra>'))
         if fresh:
             marker_ts=z.get('last_interaction_ts')
             status=z.get('recent_status')
@@ -325,6 +366,31 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
                  text=f"{z['tier']} · {importance_label} · {z['count']} líneas",
                  showarrow=False,xanchor='right',yshift=13,
                  font=dict(color=color,size=12),bgcolor='rgba(15,19,26,.85)')
+    if inspection_candidates is not None:
+        # Draw only the frozen PRE HLL candidates of this event. Never use
+        # today’s ranking or retrospectively formed subzone membership.
+        for r in inspection_candidates.itertuples(index=False):
+            start=max(first,int(r.formation_closed_ts))
+            end=int(inspection_focus[1]) if inspection_focus else cutoff
+            if end<=start:continue
+            low,high=float(r.zone_low),float(r.zone_high)
+            if price_window is not None and (high<price_window[0] or low>price_window[1]):
+                continue
+            x0=pd.Timestamp(start,unit='ms',tz='UTC')
+            x1=pd.Timestamp(end,unit='ms',tz='UTC')
+            color='#f3ca70' if float(r.gap_atr)<=.5 else '#8d9aab'
+            fig.add_shape(type='rect',xref='x',yref='y',x0=x0,x1=x1,
+                y0=low,y1=high,fillcolor=color,opacity=.14,
+                line=dict(width=0))
+            text=(f"HLL PRE · {r.level_id}<br>Distancia: {float(r.gap_atr):.3f} ATR"
+                  f"<br>Defensas: {int(r.prior_defenses)} · Pérdidas: {int(r.prior_losses)}"
+                  f"<br>RETURN_INSIDE: {int(r.prior_returns)} (no confirma recuperación)"
+                  "<br>Valores congelados al First Touch, no al corte del gráfico")
+            fig.add_trace(go.Scatter(x=[x0,x1],y=[float(r.center)]*2,
+                mode='lines',line=dict(color=color,width=2.4 if float(r.gap_atr)<=.5 else 1.2,
+                    dash='solid' if float(r.gap_atr)<=.5 else 'dot'),
+                name=f'HLL PRE · {str(r.level_id)[:9]} · {float(r.gap_atr):.2f} ATR',
+                text=[text]*2,hovertemplate='%{text}<extra></extra>'))
     if selected_line_id and events is not None:
         marks=events_for_line(events,selected_line_id,first,cutoff)
         for typ,label,marker,color in (
@@ -365,7 +431,10 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
                     hovertemplate='%{text}<br>Cierre observado %{x}<br>Close 30m: %{y}<extra></extra>'))
     if reaction_events is not None and not reaction_events.empty:
         add_reaction_traces(fig,reaction_events,selected=reaction_selected)
-    if focus_window is not None:
+    if inspection_focus is not None:
+        fig.update_xaxes(range=[pd.Timestamp(inspection_focus[0],unit="ms",tz="UTC"),
+                                pd.Timestamp(inspection_focus[1],unit="ms",tz="UTC")])
+    elif focus_window is not None:
         fig.update_xaxes(range=[pd.Timestamp(focus_window[0],unit='ms',tz='UTC'),
                                 pd.Timestamp(focus_window[1],unit='ms',tz='UTC')])
     fig.update_layout(height=(820 if small else 690),dragmode='pan',hovermode='closest',
@@ -373,7 +442,7 @@ def make_zone_chart(bars:pd.DataFrame,zones:list[dict],cutoff:int,days:int,
          xaxis_title='UTC · velas cerradas',yaxis_title='Precio',
          legend=dict(orientation='h',y=1.04,x=0,font=dict(size=10)),
          margin=dict(l=5,r=10,t=72,b=15),
-         uirevision=f'hll-visual-v12-{cutoff}-{days}-{timeframe}-{vertical_mode}-{selected_zone_id}-{selected_line_id}')
+         uirevision=f'hll-visual-v13-{cutoff}-{days}-{timeframe}-{vertical_mode}-{selected_zone_id}-{selected_line_id}-{inspection_focus}')
     if price_window is not None:
         fig.update_yaxes(range=list(price_window),autorange=False, fixedrange=False)
     return fig,rendered_tf
@@ -441,6 +510,13 @@ def render_hll_hierarchical_levels(root:Path):
         include_expired=st.checkbox('Incluir niveles vencidos',value=True,key='hllhier_expired')
     with f3:
         nmax=st.slider('Máximo de zonas / líneas',3,20,7,1,key='hllhier_max_draw_v11')
+    project_expired=(include_expired and st.checkbox(
+        'Prolongar horizontales vencidas · referencia visual discontinua',
+        value=True,key='hllhier_projection_v1'))
+    if project_expired:
+        st.caption('El trazo continuo termina en Lifecycle. Su prolongación punteada '
+                   'es solo una guía histórica hasta el corte: no implica ACTIVE, '
+                   'defensa, recuperación ni señal PRE.')
     wanted={'A':{'A'},'AB':{'A','B'},'ABC':{'A','B','C'},'ALL':{'A','B','C','D'}}[tier]
     filtered=scores.loc[scores.tier.isin(wanted)].copy()
     if not include_expired:
@@ -483,7 +559,8 @@ def render_hll_hierarchical_levels(root:Path):
         try:
             fig,actual=make_zone_chart(bars,visible,cutoff,days,timeframe,
                 selected_zone_id=chosen['id'] if chosen else None,
-                selected_line_id=selected_line,events=events)
+                selected_line_id=selected_line,events=events,
+                project_expired=project_expired)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_chart_v11')
             if actual!=timeframe:
                 st.info(f'Resolución agregada visualmente a {actual}, preservando OHLC original.')
@@ -612,8 +689,8 @@ def render_hll_hierarchical_levels(root:Path):
                            for k in json.loads(members_json))
             structural['last_zone_observed_closed_ts']=structural.level_ids.map(zone_last_known_end)
             eligible=structural.loc[(structural.created_at.astype('int64')<=cutoff) &
-                (structural.last_zone_observed_closed_ts.astype('int64')>
-                 cutoff-days*86_400_000)]
+                ((structural.last_zone_observed_closed_ts.astype('int64')>
+                  cutoff-days*86_400_000) | project_expired)]
             visible=(select_historical_map(eligible,nmax,spacing)
                      if spacing else eligible.head(nmax))
             local_count=0
@@ -780,6 +857,10 @@ def render_hll_hierarchical_levels(root:Path):
         # La geometría/ranking HLL conserva su propia identidad y fecha al corte.
         reaction_marks=None
         reaction_selected=None
+        confluence_inspection=None
+        confluence_candidates=None
+        confluence_window=None
+        confluence_reveal=False
         if manifest.get('symbol')=='BTCUSDT' and st.checkbox(
                 'Overlay Reaction Lab · First Touch BTC (solo lectura)',
                 value=False,key='hllhier_reaction_overlay_enabled'):
@@ -806,6 +887,14 @@ def render_hll_hierarchical_levels(root:Path):
                 available,_=select_reaction_overlay(reaction_data,
                     cutoff=int(cutoff),first=range_first,
                     kinds=tuple(chosen_kinds),sides=tuple(chosen_sides),limit=100000)
+                inspect_on=st.checkbox('Inspector individual de confluencias · PRE',
+                        value=False,key='hllhier_confluence_inspect_on')
+                if inspect_on:
+                    # Historical events from full verified pilot, not just the
+                    # last visible day. Never offer an event after HLL cutoff.
+                    available,_=select_reaction_overlay(reaction_data,
+                        cutoff=int(cutoff),first=int(reaction_data.known_ts.min()),
+                        kinds=tuple(chosen_kinds),sides=tuple(chosen_sides),limit=100000)
                 if not available.empty:
                     keys=['(Todos los eventos visibles)']+available.touch_key.astype(str).tolist()
                     event_by_key=available.set_index('touch_key')
@@ -824,6 +913,47 @@ def render_hll_hierarchical_levels(root:Path):
                             f"{int(record.hll_near_05atr_count)} · "
                             f"{record.hll_persistent_group} · cobertura {record.hll_coverage}. "
                             'Solo contexto causal PRE; no se muestran resultados futuros.')
+                        if inspect_on:
+                            try:
+                                @st.cache_data(show_spinner=False,max_entries=3)
+                                def cached_hll_candidates(path,signature):
+                                    return load_confluence_candidates(Path(path),symbol='BTCUSDT')
+                                cf=(reaction_path/'hll_candidates_near_1atr.csv')
+                                sig_cf=(cf.stat().st_size,cf.stat().st_mtime_ns)
+                                all_candidates=cached_hll_candidates(str(reaction_path),sig_cf)
+                                all_pre,near_pre=confluence_context(record,all_candidates)
+                                st.markdown('**Contexto estructural PRE congelado**')
+                                x1,x2,x3=st.columns(3)
+                                x1.metric('HLL a ≤0,5 ATR',len(near_pre))
+                                x2.metric('Con defensas previas',int((near_pre.prior_defenses>0).sum()))
+                                x3.metric('HLL a ≤1 ATR',len(all_pre))
+                                if not all_pre.empty:
+                                    st.dataframe(all_pre[['level_id','origin','gap_atr','prior_tests',
+                                         'prior_defenses','prior_losses','prior_returns','zone_low',
+                                         'zone_high']].rename(columns={'gap_atr':'distancia_ATR',
+                                         'prior_returns':'RETURN_INSIDE_PRE'}),
+                                         use_container_width=True,hide_index=True)
+                                st.caption('RETURN_INSIDE es retorno registrado, NO recuperación '
+                                           'sostenida. Estos niveles son del JOIN causal del evento; '
+                                           'no se usa el ranking posterior de las subzonas.')
+                                cpre,cpost=st.columns(2)
+                                with cpre:
+                                    hpre=st.selectbox('Horas PRE', [2,4,6,12,24],index=2,
+                                                     key='hllhier_confluence_pre_h')
+                                with cpost:
+                                    hpost=st.selectbox('Horas POST', [2,4,6,12,24],index=2,
+                                                     key='hllhier_confluence_post_h')
+                                confluence_reveal=st.checkbox('Revelar velas POST (solo visual)',
+                                    value=False,key='hllhier_confluence_show_post')
+                                confluence_inspection=record
+                                confluence_candidates=all_pre
+                                confluence_hours=(hpre,hpost)
+                                st.info('Modo inspección: el mapa HLL del corte se sustituye '
+                                        'por las bandas PRE congeladas del First Touch. '
+                                        'Sin simulación de entrada ni PnL.')
+                            except (OSError,KeyError,ValueError,TypeError) as exc:
+                                st.warning(f'Inspector PRE no disponible: {exc}')
+                                confluence_inspection=None
                 else:
                     st.info('No hay eventos del piloto para estos filtros y fechas. '
                             'Esto no significa que no existan otras REACTION históricas.')
@@ -854,6 +984,38 @@ def render_hll_hierarchical_levels(root:Path):
                            'zonas HLL y eventos no se recalculan.')
             except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError) as exc:
                 st.warning(f'Histórico visual BTC 1m no disponible: {exc}')
+        inspection_candles=None
+        if confluence_inspection is not None:
+            try:
+                instant=int(confluence_inspection.known_ts)
+                if timeframe in ('1m','3m','5m','15m'):
+                    if visual_bars is None or visual_manifest is None:
+                        raise ValueError('Faltan velas BTC 1m verificadas')
+                    source=visual_bars
+                    src_minute=1
+                    available_start=int(visual_manifest['start_ms'])
+                    available_end=int(visual_manifest['end_exclusive_ms'])
+                else:
+                    source=bars
+                    src_minute=30
+                    available_start=int(bars.timestamp.iloc[0])
+                    available_end=int(bars.timestamp.iloc[-1])+TF
+                confluence_window=confluence_interval(instant,
+                    pre_hours=confluence_hours[0],post_hours=confluence_hours[1],
+                    reveal_post=confluence_reveal,cutoff_ms=int(cutoff),
+                    available_start=available_start,available_end=available_end)
+                inspection_candles=confluence_candles(source,first=confluence_window[0],
+                    end=confluence_window[1],timeframe=timeframe,source_minute=src_minute)
+                # Do not display other marker events or any HLL subzone ranked
+                # at a later historical cutoff during PRE inspection.
+                reaction_marks=reaction_data.loc[
+                    reaction_data.touch_key.eq(str(confluence_inspection.touch_key))].copy()
+            except (OSError,ValueError,KeyError,TypeError) as exc:
+                st.warning(f'No se puede enfocar esta REACTION en {timeframe}: {exc}')
+                confluence_inspection=None
+                confluence_candidates=None
+                confluence_window=None
+                inspection_candles=None
         vertical_choice=st.radio('Escala vertical del gráfico',
             ['Automática · zoom en temporalidades chicas',
              'Precio visible · zoom limpio','Todas las zonas · contexto completo'],
@@ -866,12 +1028,19 @@ def render_hll_hierarchical_levels(root:Path):
                 'se ocultan solo del dibujo, no de los selectores ni de los datos HLL. '
                 'Podés cambiar a contexto completo en cualquier momento.')
         try:
-            fig,actual=make_zone_chart(bars,zones,cutoff,days,timeframe,
+            fig,actual=make_zone_chart(bars,[] if inspection_candles is not None else zones,cutoff,days,timeframe,
+                     inspection_candles=inspection_candles,
+                     inspection_candidates=confluence_candidates if inspection_candles is not None else None,
+                     inspection_focus=confluence_window if inspection_candles is not None else None,
                      visual_bars=visual_bars,visual_manifest=visual_manifest,
-                     selected_zone_id=focus,selected_line_id=individual,events=events,
-                     behavior_transitions=selected_behavior_marks,focus_window=focus_window,
+                     selected_zone_id=None if inspection_candles is not None else focus,
+                     selected_line_id=None if inspection_candles is not None else individual,
+                     events=events,
+                     behavior_transitions=None if inspection_candles is not None else selected_behavior_marks,
+                     focus_window=None if inspection_candles is not None else focus_window,
                      reaction_events=reaction_marks,reaction_selected=reaction_selected,
-                     vertical_mode=vertical_mode)
+                     vertical_mode=vertical_mode,
+                     project_expired=project_expired and inspection_candles is None)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_structural_v2_chart')
             if actual!=timeframe:
                 st.info(f'Visualización ajustada a {actual} con OHLC agregado real.')
@@ -944,7 +1113,8 @@ def render_hll_hierarchical_levels(root:Path):
         shown=individual if pick==options[0] else individual.loc[individual.level_id.eq(pick)]
         try:
             fig,actual=make_chart(bars,shown,cutoff,days,timeframe,
-                          selected_id=None if pick==options[0] else pick)
+                          selected_id=None if pick==options[0] else pick,
+                          project_expired=project_expired)
             # Important change also for the old auditor: no small duplicate chart below.
             fig.update_layout(xaxis_rangeslider_visible=False,height=635)
             st.plotly_chart(fig,use_container_width=True,key='hllhier_audit_chart_v11')
