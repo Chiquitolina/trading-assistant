@@ -96,6 +96,29 @@ def _selected_cutoff_date(last_exclusive: int):
     return datetime.fromtimestamp((last_exclusive-M)/1000,timezone.utc).date()
 
 
+def v22_visual_context_window(*, source_start: int, cutoff: int,
+                              stage_known_from: int, context: str) -> tuple[int, int]:
+    """Solo limites de DIBUJO, nunca los limites de la auditoria V2.2.
+
+    El contexto completo empieza en el inicio del freeze principal BTC 60D
+    (no incluye el warmup). La banda de la etapa seleccionada solo es
+    representable desde `stage_known_from`; sus velas anteriores son contexto.
+    """
+    if context not in ('FULL_60D', 'FROM_STAGE', 'LAST_7D'):
+        raise ValueError('INVALID_V22_VISUAL_CONTEXT')
+    source_start, cutoff, stage_known_from = (
+        int(source_start), int(cutoff), int(stage_known_from))
+    if not (source_start < cutoff and source_start <= stage_known_from <= cutoff):
+        raise ValueError('INVALID_V22_VISUAL_TIMELINE')
+    if context == 'FULL_60D':
+        left = source_start
+    elif context == 'FROM_STAGE':
+        left = stage_known_from
+    else:
+        left = max(source_start, cutoff - 7 * DAY)
+    return left, cutoff
+
+
 def render_btc_multiswing_60d_view(project):
     import pandas as pd
     import streamlit as st
@@ -354,6 +377,15 @@ def render_btc_multiswing_60d_view(project):
         if len(visible_members)<len(region_member_details):
             st.caption(f'La región tiene {len(region_member_details)} extremos físicos confirmados '
                        f'al corte; {len(visible_members)} están dentro de esta ventana visible.')
+    # Explicit viewport: choosing 60 days really shows the full frozen period
+    # in general exploration. A selected pivot still gets its PRE/POST window.
+    fig.update_xaxes(range=[pd.to_datetime(chart_start,unit='ms',utc=True),
+                            pd.to_datetime(chart_end,unit='ms',utc=True)],
+                     autorange=False)
+    st.caption(f'Mapa BTC · velas cerradas {display_tf}: {len(candles):,} '
+               f'· contexto {iso(chart_start)} → {iso(chart_end)}. '
+               'La ventana se dibuja completa; el selector de pivotes solo '
+               'incluye los 500 más recientes.')
     st.plotly_chart(fig,use_container_width=True,key='ms60_chart',
                     config={'displaylogo':False,'scrollZoom':True})
     with st.expander('🔎 Pivotes confirmados en la ventana · evidencia PRE',expanded=chosen_row is not None):
@@ -427,12 +459,37 @@ def render_btc_multiswing_60d_view(project):
                 'Una excursión POST-contacto solo se conoce posteriormente; '
                 'el estado CENSORED no se interpreta como cero movimiento.')
 
-            # Separate retrospective figure: old bands can remain a reference
-            # even after the V2 visual projection horizon, NEVER ACTIVE.
+            # This is a visual-only window; V2.2 audit_fixed_region() above
+            # always starts at the selected causal stage and does not depend on
+            # context controls. No future pivots, no stage modification, no LIVE.
             import plotly.graph_objects as go
-            chart_v22_start=max(int(region_inspection.known_from)-DAY,cutoff-14*DAY)
-            chart_v22=aggregate_closed(full,'30m',chart_v22_start,cutoff)
-            if not chart_v22.empty and len(chart_v22)<=850:
+            context_labels={
+                'FULL_60D':'BTC 60D completo hasta el corte',
+                'FROM_STAGE':'Desde confirmación de la etapa PRE',
+                'LAST_7D':'Últimos 7 días hasta el corte',
+            }
+            v22c1,v22c2=st.columns([3,1])
+            with v22c1:
+                v22_context=st.selectbox('Contexto del historial V2.2',
+                    list(context_labels),format_func=context_labels.get,
+                    index=0,key='ms60_v22_visual_context')
+            with v22c2:
+                v22_chart_tf=st.selectbox('Velas del historial V2.2',
+                    ['30m','1h','4h'],index=0,key='ms60_v22_chart_tf')
+            chart_v22_start,_=v22_visual_context_window(
+                source_start=start,cutoff=cutoff,
+                stage_known_from=int(region_inspection.known_from),
+                context=v22_context)
+            chart_v22=(aggregate_closed(full,v22_chart_tf,chart_v22_start,cutoff)
+                       if chart_v22_start<cutoff else pd.DataFrame())
+            st.caption(f'Vista V2.2: {iso(chart_v22_start)} → {iso(cutoff)} '
+                       f'· {len(chart_v22):,} velas {v22_chart_tf} completas. '
+                       f'Banda fija conocida desde {iso(int(region_inspection.known_from))}; '
+                       'nunca se dibuja antes de esa etapa. '
+                       'Los contactos y recorridos se calculan siempre sobre '
+                       'todo el historial causal de la etapa, no sobre este zoom.')
+            max_v22_candles=4000
+            if not chart_v22.empty and len(chart_v22)<=max_v22_candles:
                 fig_v22=go.Figure(go.Candlestick(
                     x=pd.to_datetime(chart_v22.timestamp,unit='ms',utc=True),
                     open=chart_v22.open,high=chart_v22.high,
@@ -475,17 +532,28 @@ def render_btc_multiswing_60d_view(project):
                     st.caption(f'Hay {len(highlight)} marcadores de eventos; '
                                'se mantienen en la tabla y se omiten del gráfico '
                                'para evitar saturación.')
-                fig_v22.update_layout(title='BTC · banda original prolongada solo para auditoría',
+                fig_v22.update_layout(title=f'BTC · {v22_chart_tf} · banda PRE fija · contexto {context_labels[v22_context]}',
                     height=510,xaxis_rangeslider_visible=False,
                     xaxis_title='UTC',yaxis_title='USD',
                     margin={'l':25,'r':20,'t':45,'b':25},
                     legend={'orientation':'h','y':-0.16})
+                fig_v22.update_xaxes(
+                    range=[pd.to_datetime(chart_v22_start,unit='ms',utc=True),
+                           pd.to_datetime(cutoff,unit='ms',utc=True)],
+                    autorange=False)
                 st.plotly_chart(fig_v22,use_container_width=True,
                     key='ms60_v22_fixed_region_chart',
                     config={'displaylogo':False,'scrollZoom':True})
             else:
-                st.caption('Gráfico V2.2 no disponible con este rango; '
-                           'se conserva la auditoría completa de velas 1m.')
+                if len(chart_v22)>max_v22_candles:
+                    st.warning(f'Historial V2.2: {len(chart_v22):,} velas exceden '
+                               f'el máximo visual de {max_v22_candles:,}. '
+                               'Seleccioná velas 1h o 4h; la auditoría 1m '
+                               'completa no se recorta.')
+                else:
+                    st.info('No hay velas cerradas entre el inicio del contexto '
+                            'y el corte elegido. Podés seleccionar 60D completo '
+                            'para ver el nacimiento de la banda.')
 
             st.markdown('**Contactos físicos y excursiones posteriores**')
             if contacts_v22.empty:
