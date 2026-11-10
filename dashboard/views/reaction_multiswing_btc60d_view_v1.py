@@ -11,7 +11,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from btc_multiswing_structural_confluence_v2 import (
-    construct_regions, visible_region_stages,
+    construct_regions, visible_region_stages, visible_region_candidates,
+    display_region_ids, region_member_evidence,
 )
 
 from btc_multiswing_60d_explorer_v1 import (
@@ -237,6 +238,8 @@ def render_btc_multiswing_60d_view(project):
     regions = None
     region_stages = None
     region_stats = None
+    region_inspection = None
+    region_member_details = None
     if show_regions:
         # Always reconstruct from representations known at selected PRE cutoff.
         # Do not apply the >=2 TF VISUAL filter: this is a test of *independent*
@@ -245,34 +248,104 @@ def render_btc_multiswing_60d_view(project):
             asof, cutoff, tolerance_pct=tolerance_pct,
             lookback_days=lookback_days,min_separation_minutes=separation)
         st.caption(f"V2 · {region_stats['candidate_regions']} regiones geométricas conocidas "
-                   f"al corte · {region_stats['physical_extrema_evaluated']} extremos físicos "
-                   f"evaluados · {region_stats['ambiguous_excluded']} representaciones "
-                   'ambiguas excluidas. Universo: temporalidades y lado seleccionados.')
+                   f"al corte (historia completa) · {region_stats['physical_extrema_evaluated']} "
+                   f"extremos físicos evaluados · {region_stats['ambiguous_excluded']} "
+                   'representaciones ambiguas excluidas. Universo: temporalidades y lado seleccionados.')
+        st.markdown('#### V2.1 · Inspección de regiones sin saturar el gráfico')
+        f1,f2,f3,f4=st.columns(4)
+        with f1:
+            region_min=int(st.selectbox('Mínimo de extremos independientes',[2,3,4,5],
+                                        index=0,key='ms60_v21_min_extrema'))
+        with f2:
+            region_side=st.selectbox('Lado de las regiones',['BOTH','LOW','HIGH'],
+                                      format_func=lambda x:{'BOTH':'Ambos','LOW':'LOW','HIGH':'HIGH'}[x],
+                                      key='ms60_v21_region_side')
+        with f3:
+            max_regions=int(st.selectbox('Máximo de regiones dibujadas',[5,10,20,40],
+                                         index=1,key='ms60_v21_max_regions'))
+        with f4:
+            region_order=st.selectbox('Orden descriptivo',['RECENT','EXTREMA'],
+                                      format_func=lambda x:{'RECENT':'Confirmación más reciente',
+                                                            'EXTREMA':'Más extremos independientes'}[x],
+                                      key='ms60_v21_order')
+        candidates = visible_region_candidates(
+            regions,region_stages,chart_start,cutoff,
+            min_extrema=region_min,side=region_side,order=region_order)
+        candidates_by_id = {str(r.region_id):r for r in candidates.itertuples(index=False)}
+        region_selection = st.selectbox('Inspeccionar una región candidata',
+            ['']+candidates.region_id.astype(str).tolist(),
+            format_func=lambda rid:'Vista general · regiones seleccionadas por orden descriptivo'
+            if not rid else (
+                f"{candidates_by_id[rid].side} · {candidates_by_id[rid].center:,.2f} USD"
+                f" · {int(candidates_by_id[rid].independent_extrema)} extremos PRE"
+                f" · {iso(int(candidates_by_id[rid].known_from))} · {rid[:12]}"),
+            key='ms60_v21_region_selection')
+        draw_region_ids, draw_stats = display_region_ids(
+            candidates,max_regions,region_selection)
+        st.caption(f"V2.1 · {draw_stats['eligible_regions']} regiones con etapas conocidas "
+                   f"en la ventana y filtros seleccionados; {draw_stats['drawn_regions']} "
+                   f"para dibujar; {draw_stats['hidden_by_display_limit']} omitidas "
+                   'solo visualmente. Ningún registro se elimina del catálogo. '
+                   'El mínimo de extremos se aplica a cada etapa PRE, no al total final.')
+        if region_selection:
+            region_inspection = candidates.loc[
+                candidates.region_id.eq(region_selection)].iloc[0]
+            region_member_details = region_member_evidence(asof, regions.loc[
+                regions.region_id.eq(region_selection)].iloc[0],cutoff)
     fig=build_figure(candles,markers,display_tf=display_tf,
                      selected=chosen_row,cutoff=cutoff if chosen_row is not None else None,
                      chart_end=chart_end)
     if show_regions and region_stages is not None and not region_stages.empty:
         try:
-            visible=visible_region_stages(region_stages,chart_start,cutoff,limit=100)
+            filtered_stages=region_stages[
+                region_stages.region_id.isin(draw_region_ids) &
+                (region_stages.independent_extrema >= region_min)].copy()
+            visible=visible_region_stages(filtered_stages,chart_start,cutoff,limit=100)
             if len(visible)>400:
                 st.warning(f'V2: {len(visible)} etapas de regiones exceden el límite visual de 400. '
                            'Reducí temporalidades o ventana; no se ocultan registros sin avisar.')
             else:
                 for stage in visible.itertuples(index=False):
                     color='#4fd3ae' if stage.side=='LOW' else '#ffb36a'
+                    highlighted=region_inspection is not None
                     left=pd.to_datetime(int(stage.visible_from),unit='ms',utc=True)
                     right=pd.to_datetime(int(stage.visible_until),unit='ms',utc=True)
                     if float(stage.band_low)==float(stage.band_high):
                         fig.add_shape(type='line',xref='x',yref='y',x0=left,x1=right,
                                       y0=float(stage.band_low),y1=float(stage.band_high),
-                                      line={'color':color,'width':2,'dash':'dot'},opacity=0.65)
+                                      line={'color':color,'width':3 if highlighted else 2,'dash':'dot'},opacity=0.85 if highlighted else 0.65)
                     else:
                         fig.add_shape(type='rect',xref='x',yref='y',x0=left,x1=right,
                                       y0=float(stage.band_low),y1=float(stage.band_high),
-                                      fillcolor=color,opacity=0.10,
-                                      line={'color':color,'width':1,'dash':'dot'})
+                                      fillcolor=color,opacity=0.20 if highlighted else 0.10,
+                                      line={'color':color,'width':2 if highlighted else 1,'dash':'dot'})
         except ValueError as exc:
             st.warning(f'V2: {exc}. Reducí el período o las temporalidades.')
+    if region_member_details is not None and not region_member_details.empty:
+        # These marks are all already-confirmed physical members at PRE cutoff.
+        # A physical pivot is displayed at its own timestamp, NOT at confirmation.
+        # Its hover says when that physical extremum first became available.
+        import plotly.graph_objects as go
+        visible_members=region_member_details[
+            (region_member_details.plot_ts>=chart_start) &
+            (region_member_details.plot_ts<cutoff)].copy()
+        if not visible_members.empty:
+            fig.add_trace(go.Scatter(
+                x=pd.to_datetime(visible_members.plot_ts,unit='ms',utc=True),
+                y=visible_members.price,mode='markers',
+                marker={'size':15,'symbol':'circle-open','color':'#f9d36a',
+                        'line':{'width':3,'color':'#f9d36a'}},
+                name='Extremos físicos de región seleccionada',
+                hovertext=[
+                    f"{r.side} · {float(r.price):,.2f} USD"
+                    f"<br>Extremo físico: {iso(int(r.plot_ts))}"
+                    f"<br>Primera confirmación: {iso(int(r.first_available_asof))}"
+                    f"<br>TF conocidos: {r.tf_set_asof}"
+                    for r in visible_members.itertuples(index=False)],
+                hoverinfo='text'))
+        if len(visible_members)<len(region_member_details):
+            st.caption(f'La región tiene {len(region_member_details)} extremos físicos confirmados '
+                       f'al corte; {len(visible_members)} están dentro de esta ventana visible.')
     st.plotly_chart(fig,use_container_width=True,key='ms60_chart',
                     config={'displaylogo':False,'scrollZoom':True})
     with st.expander('🔎 Pivotes confirmados en la ventana · evidencia PRE',expanded=chosen_row is not None):
@@ -287,6 +360,31 @@ def render_btc_multiswing_60d_view(project):
                   hide_index=True,use_container_width=True)
             if len(view)>1000:
                 st.caption(f'Tabla: últimas 1000 de {len(view)} filas; el gráfico no se recortó.')
+    if region_inspection is not None and region_member_details is not None:
+        st.markdown('#### 🔬 Región seleccionada · evidencia física causal')
+        s1,s2,s3=st.columns(3)
+        with s1:
+            st.metric('Extremos conocidos en etapa PRE',int(region_inspection.independent_extrema))
+        with s2:
+            st.metric('Centro de etapa PRE (USD)',f'{float(region_inspection.center):,.2f}')
+        with s3:
+            st.metric('Miembros físicos al corte',len(region_member_details))
+        st.caption(f"Etapa geométrica desde {iso(int(region_inspection.known_from))} "
+                   f"· banda PRE {float(region_inspection.band_low):,.2f}–"
+                   f"{float(region_inspection.band_high):,.2f} USD. "
+                   'El detalle enumera todos los miembros confirmados hasta el corte; '
+                   'algunos pueden haberse incorporado después de la etapa mostrada. '
+                   'No certifica defensa, ruptura, departure ni calidad predictiva.')
+        details=region_member_details.copy()
+        details['extremo_UTC']=pd.to_datetime(details.plot_ts,unit='ms',utc=True)
+        details['primera_confirmacion_UTC']=pd.to_datetime(
+            details.first_available_asof,unit='ms',utc=True)
+        details['ultima_confirmacion_UTC']=pd.to_datetime(
+            details.last_available_asof,unit='ms',utc=True)
+        st.dataframe(details[['physical_id','side','price','extremo_UTC',
+                    'primera_confirmacion_UTC','ultima_confirmacion_UTC',
+                    'tf_set_asof','representations_asof']],
+                    hide_index=True,use_container_width=True)
     if show_regions and regions is not None:
         with st.expander('🧩 V2 · Regiones por extremos físicos independientes · PRE',expanded=False):
             if regions.empty:

@@ -201,3 +201,112 @@ def visible_region_stages(stages: pd.DataFrame, start: int, end: int, limit: int
     rows['visible_from'] = rows['known_from'].clip(lower=int(start))
     rows['visible_until'] = rows['known_until'].clip(upper=int(end))
     return rows[rows['visible_from'] < rows['visible_until']]
+
+
+# V2.1: selection/inspection layer. Never mutates V2 geometric regions or stages.
+_REGION_CANDIDATE_COLUMNS = [
+    'region_id', 'side', 'center', 'band_low', 'band_high',
+    'independent_extrema', 'known_from', 'born_ts', 'last_confirmation_ts',
+    'temporalities', 'members', 'status',
+]
+
+
+def visible_region_candidates(regions: pd.DataFrame, stages: pd.DataFrame,
+                              start: int, cutoff: int, *,
+                              min_extrema: int = 2, side: str = 'BOTH',
+                              order: str = 'RECENT') -> pd.DataFrame:
+    """List only regions with an eligible causal stage inside the visible window.
+
+    Importantly, display count/price is the *last qualifying stage known by the
+    requested cutoff*, NOT the region's retrospectively final count or band.
+    Does not rank predictive quality: RECENT and EXTREMA are descriptive orders.
+    """
+    if (int(start) >= int(cutoff) or min_extrema not in (2, 3, 4, 5)
+            or side not in ('BOTH', 'HIGH', 'LOW')
+            or order not in ('RECENT', 'EXTREMA')):
+        raise ValueError('INVALID_REGION_INSPECTION_FILTER')
+    empty = pd.DataFrame(columns=_REGION_CANDIDATE_COLUMNS)
+    if regions.empty or stages.empty:
+        return empty
+    required_regions = {'region_id', 'born_ts', 'last_confirmation_ts',
+                        'members', 'temporalities', 'status'}
+    required_stages = {'region_id', 'side', 'known_from', 'known_until',
+                       'band_low', 'band_high', 'independent_extrema'}
+    if not required_regions.issubset(regions.columns) or not required_stages.issubset(stages.columns):
+        raise ValueError('INVALID_REGION_INSPECTOR_SCHEMA')
+    if (regions.region_id.duplicated().any()
+            or (stages.known_until < stages.known_from).any()):
+        raise ValueError('INVALID_REGION_INSPECTOR_IDENTITY')
+    frame = stages.loc[
+        (stages.known_from < cutoff) & (stages.known_until > start)
+        & (stages.independent_extrema >= min_extrema)
+    ].copy()
+    if side != 'BOTH':
+        frame = frame[frame.side == side]
+    if frame.empty:
+        return empty
+    # No future stage or final-band leakage: the last *eligible* causal stage
+    # supplies the displayed geometry, even when the final region has grown.
+    frame = frame.sort_values(['known_from', 'region_id'], kind='mergesort')
+    frame = frame.drop_duplicates('region_id', keep='last')
+    metadata = regions[list(required_regions)].copy()
+    frame = frame.merge(metadata, on='region_id', how='left', validate='one_to_one')
+    if frame[list(required_regions - {'region_id'})].isna().any().any():
+        raise ValueError('UNKNOWN_REGION_STAGE_ID')
+    if (frame.born_ts > frame.known_from).any():
+        raise ValueError('REGION_STAGE_BEFORE_BIRTH')
+    frame['center'] = (frame['band_low'].astype(float) + frame['band_high'].astype(float)) / 2
+    if order == 'RECENT':
+        by, asc = ['known_from', 'independent_extrema', 'region_id'], [False, False, True]
+    else:
+        by, asc = ['independent_extrema', 'known_from', 'region_id'], [False, False, True]
+    return frame.sort_values(by, ascending=asc, kind='mergesort').loc[:,
+        _REGION_CANDIDATE_COLUMNS].reset_index(drop=True)
+
+
+def display_region_ids(candidates: pd.DataFrame, maximum: int,
+                       selected_region_id: str = '') -> tuple[list[str], dict]:
+    """Select geometric overlays only; never truncate data or alter V2 state."""
+    if maximum not in (5, 10, 20, 40):
+        raise ValueError('INVALID_REGION_DRAW_LIMIT')
+    if candidates.empty:
+        if selected_region_id:
+            raise ValueError('SELECTED_REGION_NOT_VISIBLE_ASOF')
+        return [], {'eligible_regions':0,'drawn_regions':0,'hidden_by_display_limit':0}
+    all_ids = candidates.region_id.astype(str).tolist()
+    if selected_region_id and selected_region_id not in all_ids:
+        raise ValueError('SELECTED_REGION_NOT_VISIBLE_ASOF')
+    shown = [selected_region_id] if selected_region_id else all_ids[:maximum]
+    return shown, {
+        'eligible_regions':len(all_ids),
+        'drawn_regions':len(shown),
+        'hidden_by_display_limit':0 if selected_region_id else max(0,len(all_ids)-len(shown)),
+    }
+
+
+def region_member_evidence(known: pd.DataFrame, region_row: pd.Series,
+                           cutoff: int) -> pd.DataFrame:
+    """Constituent verified physical extrema known as-of cutoff, never POST."""
+    cols = ['physical_id', 'side', 'price', 'plot_ts', 'first_available_asof',
+            'last_available_asof', 'tf_set_asof', 'representations_asof']
+    if known.empty:
+        raise ValueError('REGION_MEMBER_EVIDENCE_MISSING')
+    if (known.available_ts.isna().any() or (known.available_ts > int(cutoff)).any()):
+        raise ValueError('FUTURE_REGION_MEMBER_EVIDENCE')
+    ids = str(region_row['members']).split(',')
+    if not ids or any(not s for s in ids) or len(ids)!=len(set(ids)):
+        raise ValueError('INVALID_REGION_MEMBERS')
+    grouped = group_asof(known, collapse=True)
+    eligible = grouped[
+        grouped.physical_identity_state.eq('VERIFIED') & grouped.physical_id.isin(ids)
+    ].copy()
+    if len(eligible)!=len(ids) or set(eligible.physical_id)!=set(ids):
+        raise ValueError('REGION_MEMBER_EVIDENCE_MISSING')
+    if ((eligible.first_available_asof > int(cutoff))
+            | (eligible.last_available_asof > int(cutoff))).any():
+        raise ValueError('FUTURE_REGION_MEMBER_EVIDENCE')
+    if eligible.side.nunique()!=1 or eligible.side.iloc[0]!=region_row['side']:
+        raise ValueError('REGION_MEMBER_SIDE_CONFLICT')
+    return eligible[cols].sort_values(
+        ['first_available_asof','plot_ts','physical_id'],kind='mergesort'
+    ).reset_index(drop=True)
