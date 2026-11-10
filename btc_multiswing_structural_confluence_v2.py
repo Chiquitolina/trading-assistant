@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""BTC 60D Multi-Swing Structural Confluence V2: candidate regions, PRE only.
+
+This is a descriptive geometric inspector, NOT a support/resistance detector,
+trade filter, HLL level, defense or recovery classifier. It never reads POST.
+Input is the validated frozen 6TF catalog via `asof_rows` from the V1 explorer.
+
+One physical extremum is counted once, even when confirmed by many TFs.
+A region is born only at the CLOSED confirmation of the second independent
+physical extremum meeting the selected price/time criteria. Each subsequent
+stage is time stamped so earlier geometry is never rewritten by future pivots.
+TIED_EXTREMA are excluded rather than being assigned a fake physical identity.
+"""
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field
+
+import pandas as pd
+
+from btc_multiswing_60d_explorer_v1 import DAY, M, group_asof
+
+_ALLOWED = {'LOW', 'HIGH'}
+
+
+@dataclass
+class _Candidate:
+    side: str
+    first_id: str
+    first_price: float
+    first_pivot_ts: int
+    members: list[dict] = field(default_factory=list)
+    born_ts: int | None = None
+    stages: list[dict] = field(default_factory=list)
+
+
+def _region_id(side: str, first_id: str, second_id: str) -> str:
+    raw = f'BTCUSDT|MULTISWING_V2|{side}|{first_id}|{second_id}'
+    return 'msv2_' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]
+
+
+def _price_spread_ok(prices: list[float], new_price: float, tolerance_pct: float) -> bool:
+    lo, hi = min([*prices, new_price]), max([*prices, new_price])
+    midpoint = (lo + hi) / 2
+    return midpoint > 0 and (hi - lo) / midpoint * 100 <= tolerance_pct + 1e-12
+
+
+def _unique_confirmed(known: pd.DataFrame, cutoff: int) -> list[dict]:
+    """Only verified distinct extrema, using their *first as-of* confirmation."""
+    if known.empty:
+        return []
+    needed = {'pivot_id','side','price','available_ts','physical_id',
+              'physical_identity_state','physical_minute_ts','timeframe','pivot_ts'}
+    if not needed.issubset(known.columns):
+        raise ValueError('MISSING_CAUSAL_SWING_COLUMNS')
+    if known['available_ts'].isna().any() or (known['available_ts'] > cutoff).any():
+        raise ValueError('FUTURE_SWING_INPUT_NOT_ASOF')
+    group = group_asof(known, collapse=True, multi_only=False)
+    verified = group[(group.physical_identity_state == 'VERIFIED') & group.physical_id.ne('')].copy()
+    if verified.empty:
+        return []
+    # V1 group_asof enforces same physical side, position and price for all TFs.
+    result = []
+    for p in verified.itertuples(index=False):
+        if p.side not in _ALLOWED:
+            raise ValueError('INVALID_SWING_SIDE')
+        when = int(p.first_available_asof)
+        where = int(p.physical_minute_ts)
+        if when > cutoff or where >= when:
+            raise ValueError('FUTURE_OR_INVALID_PHYSICAL_EXTREMUM')
+        result.append({
+            'physical_id': str(p.physical_id), 'side': str(p.side),
+            'price': float(p.price), 'pivot_ts': where,
+            'known_ts': when, 'tf_set_at_cutoff': str(p.tf_set_asof),
+        })
+    return sorted(result, key=lambda e:(e['known_ts'], e['pivot_ts'], e['physical_id']))
+
+
+def construct_regions(known: pd.DataFrame, cutoff: int, *,
+                      tolerance_pct: float = 0.20,
+                      lookback_days: int = 7,
+                      min_separation_minutes: int = 60,
+                      min_extrema: int = 2) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Incremental PRE-only region formation from already-confirmed swings.
+
+    Every physical extremum is assigned to at most one candidate cluster.
+    Zones never mix HIGH and LOW. The band's recorded stages only reflect
+    independently confirmed members available at each stage's known_ts.
+
+    Price tolerance is MAX allowed spread between extrema, not +/- radius.
+    Last-stage display ends after the lookback horizon without fresh confirmation;
+    this is only a VISUAL horizon, never a lifecycle claim.
+    Lookback bounds physical pivot-time span of a cluster. Separation rejects
+    near-simultaneous extrema as independent structural confirmations.
+    """
+    if not (0 < tolerance_pct <= 2.0 and 1 <= lookback_days <= 60 and
+            1 <= min_separation_minutes <= 24*60 and 2 <= min_extrema <= 10):
+        raise ValueError('INVALID_REGION_PARAMETERS')
+    events = _unique_confirmed(known, int(cutoff))
+    if not events:
+        empty = pd.DataFrame(columns=[
+            'region_id','side','center','band_low','band_high','first_pivot_ts',
+            'last_pivot_ts','born_ts','last_confirmation_ts','independent_extrema',
+            'members','temporalities','status'])
+        stages = pd.DataFrame(columns=['region_id','known_from','known_until',
+                                       'band_low','band_high','independent_extrema','side'])
+        return empty, stages, {'physical_extrema_evaluated':0,'ambiguous_excluded':int(len(known)),
+                               'candidate_regions':0,'descriptive_only':True}
+    clusters: list[_Candidate] = []
+    interval = int(lookback_days)*DAY
+    gap = int(min_separation_minutes)*M
+    ignored_near_time = 0
+    for event in events:
+        price, ts = event['price'], event['pivot_ts']
+        options = []
+        close_without_gap = False
+        for cluster in clusters:
+            if cluster.side != event['side']:
+                continue
+            moments = [m['pivot_ts'] for m in cluster.members]
+            prices = [m['price'] for m in cluster.members]
+            if (max([*moments, ts]) - min([*moments, ts]) > interval
+                    or not _price_spread_ok(prices,price,tolerance_pct)):
+                continue
+            if any(abs(ts - other) < gap for other in moments):
+                close_without_gap = True
+                continue
+            center = sum(prices)/len(prices)
+            options.append((abs(price-center)/center,cluster.first_pivot_ts,cluster.first_id,cluster))
+        if options:
+            cluster = min(options, key=lambda o:o[:3])[3]
+        elif close_without_gap:
+            ignored_near_time += 1
+            continue
+        else:
+            cluster = _Candidate(event['side'],event['physical_id'],price,ts)
+            clusters.append(cluster)
+        cluster.members.append(event)
+        if len(cluster.members) >= min_extrema:
+            if cluster.born_ts is None:
+                cluster.born_ts = event['known_ts']
+            prices = [m['price'] for m in cluster.members]
+            cluster.stages.append({
+                'known_from':int(event['known_ts']),
+                'band_low':min(prices), 'band_high':max(prices),
+                'independent_extrema':len(cluster.members), 'side':cluster.side,
+            })
+    regions = []
+    stage_rows = []
+    for cluster in clusters:
+        if len(cluster.members) < min_extrema:
+            continue
+        members = cluster.members
+        prices = [m['price'] for m in members]
+        rid = _region_id(cluster.side,members[0]['physical_id'],members[1]['physical_id'])
+        timestamps = [m['pivot_ts'] for m in members]
+        tfs = sorted(set(','.join(m['tf_set_at_cutoff'] for m in members).split(',')))
+        regions.append({
+            'region_id':rid, 'side':cluster.side,
+            'center':sum(prices)/len(prices),
+            'band_low':min(prices),'band_high':max(prices),
+            'first_pivot_ts':min(timestamps),'last_pivot_ts':max(timestamps),
+            'born_ts':int(cluster.born_ts),'last_confirmation_ts':max(m['known_ts'] for m in members),
+            'independent_extrema':len(members),
+            'members':','.join(m['physical_id'] for m in members),
+            'temporalities':','.join(tfs),
+            'status':'GEOMETRIC_CANDIDATE_NOT_ACTIVE',
+        })
+        ordered = cluster.stages
+        for i, stage in enumerate(ordered):
+            known_until = (int(ordered[i+1]['known_from']) if i+1<len(ordered)
+                           else min(int(cutoff), int(stage['known_from']) + interval))
+            stage_rows.append({**stage, 'region_id':rid, 'known_until':known_until})
+    region_frame = pd.DataFrame(regions, columns=[
+        'region_id','side','center','band_low','band_high','first_pivot_ts','last_pivot_ts',
+        'born_ts','last_confirmation_ts','independent_extrema','members','temporalities','status'])
+    stage_frame = pd.DataFrame(stage_rows, columns=[
+        'region_id','known_from','known_until','band_low','band_high','independent_extrema','side'])
+    if not region_frame.empty:
+        region_frame = region_frame.sort_values(['born_ts','side','region_id']).reset_index(drop=True)
+    if not stage_frame.empty:
+        stage_frame = stage_frame.sort_values(['known_from','side','region_id']).reset_index(drop=True)
+    return region_frame,stage_frame,{
+        'physical_extrema_evaluated':len(events),
+        'ambiguous_excluded':int(known[known.physical_identity_state.ne('VERIFIED')]['pivot_id'].nunique()),
+        'candidate_regions':len(region_frame),
+        'near_time_extrema_skipped':ignored_near_time,
+        'descriptive_only':True,
+    }
+
+
+def visible_region_stages(stages: pd.DataFrame, start: int, end: int, limit: int = 100) -> pd.DataFrame:
+    """Clip stages in [start,end) without leaking their pre-birth or POST ranges."""
+    if not (start < end and 1 <= limit <= 1000):
+        raise ValueError('INVALID_REGION_VIEW_WINDOW')
+    if stages.empty:
+        return stages.copy()
+    rows = stages[(stages.known_until > int(start)) & (stages.known_from < int(end))].copy()
+    if rows['region_id'].nunique() > limit:
+        raise ValueError(f'TOO_MANY_REGIONS_FOR_VISUALIZATION: {rows.region_id.nunique()} > {limit}')
+    rows['visible_from'] = rows['known_from'].clip(lower=int(start))
+    rows['visible_until'] = rows['known_until'].clip(upper=int(end))
+    return rows[rows['visible_from'] < rows['visible_until']]

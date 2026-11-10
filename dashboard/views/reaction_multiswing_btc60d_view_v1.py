@@ -10,6 +10,10 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+from btc_multiswing_structural_confluence_v2 import (
+    construct_regions, visible_region_stages,
+)
+
 from btc_multiswing_60d_explorer_v1 import (
     DAY, M, TF_COLORS, TF_MINUTES, aggregate_closed, asof_rows,
     chart_window, group_asof, iso, load_snapshot, selected_inspection_window,
@@ -87,10 +91,10 @@ def render_btc_multiswing_60d_view(project):
     import pandas as pd
     import streamlit as st
 
-    st.markdown('### 🧭 Multi-Swing Structural Lab · BTC 60D · V1')
+    st.markdown('### 🧭 Multi-Swing Structural Lab · BTC 60D · V1 + V2 experimental')
     st.caption('Catálogo congelado 1m / 5m / 15m / 30m / 1h / 4h. '
                'Los pivotes solo son elegibles cuando su confirmación está cerrada. '
-               'Sin nuevos detectores, sin consultas de red y sin modificar LIVE.')
+               'Sin nuevos detectores de pivotes, sin consultas de red y sin modificar LIVE.')
     try:
         full, catalog, source = load_snapshot(Path(project))
     except (FileNotFoundError, KeyError, ValueError, OSError) as exc:
@@ -126,6 +130,26 @@ def render_btc_multiswing_60d_view(project):
     with c:
         display_tf=st.selectbox('Velas del gráfico',list(TF_MINUTES),
                                 index=3,key='ms60_display_tf')
+    show_regions=st.checkbox(
+        'V2 · Regiones geométricas de swings físicos independientes (experimental)',
+        value=False,key='ms60_v2_regions')
+    if show_regions:
+        v1,v2,v3=st.columns(3)
+        with v1:
+            tolerance_pct=float(st.selectbox('Dispersión máxima entre extremos (%)',
+                            [0.10,0.20,0.30,0.50],index=1,key='ms60_v2_price_spread'))
+        with v2:
+            lookback_days=int(st.selectbox('Ventana entre extremos (días)',
+                            [1,3,7,14],index=2,key='ms60_v2_lookback'))
+        with v3:
+            separation=int(st.selectbox('Separación física mínima (min)',
+                            [15,30,60,120],index=2,key='ms60_v2_separation'))
+        st.caption('V2: un mismo extremo reconocido en 6 TF cuenta UNA vez. '
+                   'Una región requiere dos extremos físicos distintos con suficiente separación. '
+                   'Las bandas comienzan al confirmar el segundo; sus cambios posteriores '
+                   'no se aplican retroactivamente. La proyección visual caduca sin nueva confirmación '
+                   'después de la ventana elegida. Son candidatas geométricas, no defensas, '
+                   'ACTIVE ni señales de trading. TIED_EXTREMA queda excluido.')
     if not selected_tfs:
         st.info('Seleccioná una o más temporalidades para continuar.')
         return
@@ -210,9 +234,45 @@ def render_btc_multiswing_60d_view(project):
         st.warning(f'{len(markers):,} marcadores, sobre el límite visual {max_markers:,}. '
                    'Reducí ventana o temporalidades; no ocultamos pivotes sin avisar.')
         return
+    regions = None
+    region_stages = None
+    region_stats = None
+    if show_regions:
+        # Always reconstruct from representations known at selected PRE cutoff.
+        # Do not apply the >=2 TF VISUAL filter: this is a test of *independent*
+        # physical extrema, including ones detected by only one timeframe.
+        regions, region_stages, region_stats = construct_regions(
+            asof, cutoff, tolerance_pct=tolerance_pct,
+            lookback_days=lookback_days,min_separation_minutes=separation)
+        st.caption(f"V2 · {region_stats['candidate_regions']} regiones geométricas conocidas "
+                   f"al corte · {region_stats['physical_extrema_evaluated']} extremos físicos "
+                   f"evaluados · {region_stats['ambiguous_excluded']} representaciones "
+                   'ambiguas excluidas. Universo: temporalidades y lado seleccionados.')
     fig=build_figure(candles,markers,display_tf=display_tf,
                      selected=chosen_row,cutoff=cutoff if chosen_row is not None else None,
                      chart_end=chart_end)
+    if show_regions and region_stages is not None and not region_stages.empty:
+        try:
+            visible=visible_region_stages(region_stages,chart_start,cutoff,limit=100)
+            if len(visible)>400:
+                st.warning(f'V2: {len(visible)} etapas de regiones exceden el límite visual de 400. '
+                           'Reducí temporalidades o ventana; no se ocultan registros sin avisar.')
+            else:
+                for stage in visible.itertuples(index=False):
+                    color='#4fd3ae' if stage.side=='LOW' else '#ffb36a'
+                    left=pd.to_datetime(int(stage.visible_from),unit='ms',utc=True)
+                    right=pd.to_datetime(int(stage.visible_until),unit='ms',utc=True)
+                    if float(stage.band_low)==float(stage.band_high):
+                        fig.add_shape(type='line',xref='x',yref='y',x0=left,x1=right,
+                                      y0=float(stage.band_low),y1=float(stage.band_high),
+                                      line={'color':color,'width':2,'dash':'dot'},opacity=0.65)
+                    else:
+                        fig.add_shape(type='rect',xref='x',yref='y',x0=left,x1=right,
+                                      y0=float(stage.band_low),y1=float(stage.band_high),
+                                      fillcolor=color,opacity=0.10,
+                                      line={'color':color,'width':1,'dash':'dot'})
+        except ValueError as exc:
+            st.warning(f'V2: {exc}. Reducí el período o las temporalidades.')
     st.plotly_chart(fig,use_container_width=True,key='ms60_chart',
                     config={'displaylogo':False,'scrollZoom':True})
     with st.expander('🔎 Pivotes confirmados en la ventana · evidencia PRE',expanded=chosen_row is not None):
@@ -227,6 +287,29 @@ def render_btc_multiswing_60d_view(project):
                   hide_index=True,use_container_width=True)
             if len(view)>1000:
                 st.caption(f'Tabla: últimas 1000 de {len(view)} filas; el gráfico no se recortó.')
+    if show_regions and regions is not None:
+        with st.expander('🧩 V2 · Regiones por extremos físicos independientes · PRE',expanded=False):
+            if regions.empty:
+                st.info('No se formaron regiones con los criterios seleccionados. '
+                        'No equivale a ausencia de estructura real.')
+            else:
+                table=regions[(regions.born_ts<=cutoff)].copy()
+                if table.empty:
+                    st.info('No hay regiones formadas hasta el corte elegido.')
+                else:
+                    table['formada_UTC']=pd.to_datetime(table.born_ts,unit='ms',utc=True)
+                    table['ultimo_pivote_UTC']=pd.to_datetime(table.last_pivot_ts,unit='ms',utc=True)
+                    st.dataframe(table[['region_id','side','center','band_low','band_high',
+                        'independent_extrema','formada_UTC','ultimo_pivote_UTC','temporalities',
+                        'status']].sort_values('formada_UTC',ascending=False).head(250),
+                        hide_index=True,use_container_width=True)
+                    if len(table)>250:
+                        st.caption(f'Tabla: primeras 250 de {len(table)} regiones; '
+                                   'la reconstrucción interna no se recortó.')
+            st.caption('Construcción por confirmaciones conocidas al corte. '
+                       'No identifica aún departure, defensas, rupturas, HLL ni outcomes. '
+                       'La extensión dibujada se limita por la ventana de exploración y es descriptiva, '
+                       'NO vigencia operativa.')
     with st.expander('📦 Procedencia y límites de interpretación',expanded=False):
         st.json({'symbol':'BTCUSDT','catalog':'6TF v1.1','source_sha256':source['source_sha256'],
                  'catalog_sha256':source['catalog_sha256'],
