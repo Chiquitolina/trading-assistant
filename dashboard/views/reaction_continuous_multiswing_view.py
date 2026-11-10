@@ -212,6 +212,19 @@ def render_continuous_multiswing_view(project, *, timezone='UTC', chart_builder=
     import pandas as pd
     import streamlit as st
     import plotly.graph_objects as go
+    # El historico BTC 60D vive en el mismo Event swing structure: no se toca
+    # dashboard/app.py ni el visor de First Touch existente.
+    modality = st.selectbox(
+        'Modo de investigacion Multi-Swing',
+        ['Evento REACTION · Continuous', 'Mapa BTC 60D · 6 TF'],
+        key='rcms_study_mode_v1',
+    )
+    if modality == 'Mapa BTC 60D · 6 TF':
+        from dashboard.views.reaction_multiswing_btc60d_view_v1 import (
+            render_btc_multiswing_60d_view,
+        )
+        render_btc_multiswing_60d_view(project)
+        return
     from dashboard.views.reaction_lab_first_touches_view import (
         get_page, get_touch, get_symbols,
     )
