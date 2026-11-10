@@ -8,6 +8,7 @@ corte seleccionado. No altera event journal, HLL, scores ni LIVE.
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+import math
 from pathlib import Path
 
 from btc_multiswing_structural_confluence_v2 import (
@@ -119,11 +120,68 @@ def v22_visual_context_window(*, source_start: int, cutoff: int,
     return left, cutoff
 
 
+V3_MODES = ('MAPA', 'INSPECTOR', 'EJECUCION')
+
+
+def v3_view_policy(mode: str) -> dict:
+    """UI-only policy. No impact on causal evidence or research datasets."""
+    if mode not in V3_MODES:
+        raise ValueError('INVALID_MULTISWING_UI_MODE')
+    return {
+        'draw_all_pivots_by_default': False,
+        'show_region_audit': mode == 'INSPECTOR',
+        'allow_post_inspection': mode == 'INSPECTOR',
+        'read_only_execution_preview': mode == 'EJECUCION',
+    }
+
+
+def v3_rank_regions_near_price(candidates, price: float):
+    """Display ranking only: proximity to last known PRE close, not quality."""
+    if not math.isfinite(float(price)) or float(price) <= 0:
+        raise ValueError('INVALID_PRE_REFERENCE_PRICE')
+    if candidates.empty:
+        return candidates.copy()
+    if not {'region_id','center','known_from'}.issubset(candidates.columns):
+        raise ValueError('INVALID_REGION_RANKING_INPUT')
+    frame = candidates.copy()
+    if frame.center.isna().any() or (frame.center <= 0).any():
+        raise ValueError('INVALID_REGION_RANKING_PRICE')
+    frame['_distance_pct'] = (frame.center.astype(float) / float(price) - 1.0).abs()
+    return (frame.sort_values(['_distance_pct','known_from','region_id'],
+                              ascending=[True,False,True],kind='mergesort')
+            .drop(columns=['_distance_pct']).reset_index(drop=True))
+
+
+def v3_execution_visual_window(*, source_start: int, cutoff: int,
+                               minutes: int = 24 * 60) -> tuple[int, int]:
+    """Closed PRE history for visual-only 1m/5m preparation; never POST."""
+    if int(source_start) >= int(cutoff) or not (1 <= int(minutes) <= 24 * 60):
+        raise ValueError('INVALID_EXECUTION_VISUAL_WINDOW')
+    return max(int(source_start), int(cutoff) - int(minutes) * M), int(cutoff)
+
+
 def render_btc_multiswing_60d_view(project):
     import pandas as pd
     import streamlit as st
 
-    st.markdown('### 🧭 Multi-Swing Structural Lab · BTC 60D · V1 + V2 experimental')
+    st.markdown('### 🧭 Multi-Swing Structural Lab · BTC 60D')
+    mode = st.radio(
+        'Modo de investigación', V3_MODES, horizontal=True, index=0,
+        format_func=lambda m: {
+            'MAPA': '① Mapa estructural',
+            'INSPECTOR': '② Inspector de región',
+            'EJECUCION': '③ Preparación 1m/5m · experimental',
+        }[m], key='ms60_v3_mode')
+    policy = v3_view_policy(mode)
+    if mode == 'MAPA':
+        st.caption('Mapa limpio: velas + bandas geométricas. Los pivotes se ocultan '
+                   'por defecto y los criterios descriptivos NO representan un score.')
+    elif mode == 'INSPECTOR':
+        st.caption('Elegí una región para revisar miembros físicos, evolución PRE, '
+                   'contactos V2.2 y visitas V2.3 en paneles separados.')
+    else:
+        st.caption('Preparación visual PRE con velas 1m/5m; SIN triggers validados, '
+                   'órdenes, backtest ni conexión LIVE. No revela resultados POST.')
     st.caption('Catálogo congelado 1m / 5m / 15m / 30m / 1h / 4h. '
                'Los pivotes solo son elegibles cuando su confirmación está cerrada. '
                'Sin nuevos detectores de pivotes, sin consultas de red y sin modificar LIVE.')
@@ -152,20 +210,31 @@ def render_btc_multiswing_60d_view(project):
         side=st.selectbox('Tipo', ['BOTH','LOW','HIGH'],
                           format_func=lambda s: {'BOTH':'Ambos','LOW':'LOW','HIGH':'HIGH'}[s],
                           key='ms60_side')
-    a,b,c=st.columns([2,2,2])
-    with a:
-        group_mode=st.selectbox('Identidad física',
-                ['Una marca por extremo','Todas las representaciones TF'],
-                key='ms60_group_mode')
-    with b:
-        multi_only=st.checkbox('Solo extremos con ≥2 TF confirmados',value=False,key='ms60_multi')
-    with c:
+    group_mode = 'Una marca por extremo'
+    multi_only = False
+    if mode == 'EJECUCION':
+        display_tf=st.selectbox('Velas del contexto PRE', ['1m','5m'], index=1,
+                                key='ms60_v3_execution_tf')
+    else:
         display_tf=st.selectbox('Velas del gráfico',list(TF_MINUTES),
                                 index=3,key='ms60_display_tf')
-    show_regions=st.checkbox(
-        'V2 · Regiones geométricas de swings físicos independientes (experimental)',
-        value=False,key='ms60_v2_regions')
-    if show_regions:
+    show_all_pivots=False
+    if mode == 'MAPA':
+        show_all_pivots=st.checkbox('Mostrar pivotes individuales (puede saturar)',
+                                    value=False,key='ms60_v3_map_pivots')
+    elif mode == 'INSPECTOR':
+        with st.expander('Pivotes generales · opciones avanzadas',expanded=False):
+            show_all_pivots=st.checkbox('Mostrar todos los pivotes de la ventana',
+                                         value=False,key='ms60_v3_inspect_pivots')
+            group_mode=st.selectbox('Identidad física',
+                    ['Una marca por extremo','Todas las representaciones TF'],
+                    key='ms60_group_mode')
+            multi_only=st.checkbox('Solo extremos con ≥2 TF confirmados',
+                                   value=False,key='ms60_multi')
+    show_regions=True  # Modes are structurally oriented; no detector mutation.
+    with st.expander('⚙️ Parámetros geométricos V2 · avanzados',expanded=False):
+        st.caption('Estos controles reconstruyen candidatos geométricos OFFLINE. '
+                   'Los parámetros no validan vigencia ni probabilidad de trading.')
         v1,v2,v3=st.columns(3)
         with v1:
             tolerance_pct=float(st.selectbox('Dispersión máxima entre extremos (%)',
@@ -205,26 +274,28 @@ def render_btc_multiswing_60d_view(project):
                'Los contadores corresponden únicamente a pivotes ubicados en la ventana, '
                'confirmados al corte y con los TF/lado/filtro múltiple seleccionados. '
                'No representan toda la historia PRE de 60 días.')
-    if pool.empty:
-        st.info('No hay pivotes confirmados para estos filtros y esta ventana.')
-        return
-    selector_count=500
-    subset=pool.head(selector_count)
-    keys=['']+subset['group_key'].astype(str).tolist() if group_mode.startswith('Una') else ['']+subset['pivot_id'].astype(str).tolist()
-    keys=list(dict.fromkeys(keys))
-    by_key={
-        (str(row.group_key) if group_mode.startswith('Una') else str(row.pivot_id)):row
-        for row in subset.itertuples(index=False)
-    }
-    chosen=st.selectbox('Inspeccionar un pivote (los 500 más recientes de la ventana)',keys,
-        format_func=lambda k: 'Exploración general · sin seleccionar' if not k else (
-            f"{iso(int(by_key[k].plot_ts))} · {by_key[k].side} · "
-            f"{float(by_key[k].price):,.2f} · TF PRE {by_key[k].tf_set_asof} · "
-            f"{by_key[k].physical_identity_state}"), key='ms60_selected')
-    if len(pool)>selector_count:
-        st.caption(f'Selector: últimos {selector_count} de {len(pool)} pivotes visibles. '
-                   'Para inspeccionar anteriores, cambiá la fecha del corte y/o temporalidades. '
-                   'El gráfico general sigue mostrando todos los pivotes que admite su límite visual.')
+    chosen=''
+    if mode == 'INSPECTOR':
+        with st.expander('Inspeccionar un pivote individual · opcional',expanded=False):
+            selector_count=500
+            subset=pool.head(selector_count)
+            keys=['']+subset['group_key'].astype(str).tolist() if group_mode.startswith('Una') else ['']+subset['pivot_id'].astype(str).tolist()
+            keys=list(dict.fromkeys(keys))
+            by_key={
+                (str(row.group_key) if group_mode.startswith('Una') else str(row.pivot_id)):row
+                for row in subset.itertuples(index=False)
+            }
+            chosen=st.selectbox('Inspeccionar un pivote (los 500 más recientes de la ventana)',keys,
+                format_func=lambda k: 'Exploración general · sin seleccionar' if not k else (
+                    f"{iso(int(by_key[k].plot_ts))} · {by_key[k].side} · "
+                    f"{float(by_key[k].price):,.2f} · TF PRE {by_key[k].tf_set_asof} · "
+                    f"{by_key[k].physical_identity_state}"), key='ms60_v3_selected_pivot')
+            if len(pool)>selector_count:
+                st.caption(f'Selector: últimos {selector_count} de {len(pool)} pivotes visibles. '
+                           'Para inspeccionar anteriores, cambiá la fecha del corte y/o temporalidades.')
+    elif pool.empty:
+        st.info('No hay pivotes nuevos en esta ventana; las bandas históricas conocidas '
+                'al corte siguen siendo inspeccionables cuando sus etapas se intersectan.')
     chosen_row=None
     cutoff=exploration_cutoff
     chart_start=explore_start
@@ -246,6 +317,12 @@ def render_btc_multiswing_60d_view(project):
         st.caption(f'Pivote: {iso(int(row.plot_ts))} · Corte PRE: {iso(cutoff)} · '
                    'Toda confirmación POST permanece oculta incluso al revelar velas futuras.')
 
+    if mode == 'EJECUCION':
+        chart_start,chart_end=v3_execution_visual_window(
+            source_start=start,cutoff=cutoff,minutes=24*60)
+        st.caption(f'Preparación PRE: ventana 1m/5m hasta {iso(cutoff)} '
+                   'sin velas ni extremos posteriores al corte. '
+                   'La banda seleccionada se muestra como referencia, no como entrada.')
     candles=aggregate_closed(full,display_tf,chart_start,chart_end)
     if candles.empty:
         st.warning('No hay velas completas en la temporalidad elegida hasta ese corte. '
@@ -262,7 +339,7 @@ def render_btc_multiswing_60d_view(project):
     markers = group_asof(asof,collapse=group_mode.startswith('Una'),multi_only=multi_only)
     markers = markers[(markers['plot_ts']>=chart_start) & (markers['plot_ts']<cutoff)].copy()
     max_markers=3500
-    if len(markers)>max_markers:
+    if show_all_pivots and len(markers)>max_markers:
         st.warning(f'{len(markers):,} marcadores, sobre el límite visual {max_markers:,}. '
                    'Reducí ventana o temporalidades; no ocultamos pivotes sin avisar.')
         return
@@ -282,7 +359,7 @@ def render_btc_multiswing_60d_view(project):
                    f"al corte (historia completa) · {region_stats['physical_extrema_evaluated']} "
                    f"extremos físicos evaluados · {region_stats['ambiguous_excluded']} "
                    'representaciones ambiguas excluidas. Universo: temporalidades y lado seleccionados.')
-        st.markdown('#### V2.1 · Inspección de regiones sin saturar el gráfico')
+        st.markdown('#### Bandas geométricas · selección y filtros')
         f1,f2,f3,f4=st.columns(4)
         with f1:
             region_min=int(st.selectbox('Mínimo de extremos independientes',[2,3,4,5],
@@ -295,13 +372,25 @@ def render_btc_multiswing_60d_view(project):
             max_regions=int(st.selectbox('Máximo de regiones dibujadas',[5,10,20,40],
                                          index=1,key='ms60_v21_max_regions'))
         with f4:
-            region_order=st.selectbox('Orden descriptivo',['RECENT','EXTREMA'],
-                                      format_func=lambda x:{'RECENT':'Confirmación más reciente',
-                                                            'EXTREMA':'Más extremos independientes'}[x],
+            region_order=st.selectbox('Orden descriptivo',
+                                      ['DISTANCE','RECENT','EXTREMA'],
+                                      index=0 if mode == 'MAPA' else 1,
+                                      format_func=lambda x:{
+                                          'DISTANCE':'Más cerca del último cierre PRE',
+                                          'RECENT':'Confirmación más reciente',
+                                          'EXTREMA':'Más extremos independientes'}[x],
                                       key='ms60_v21_order')
         candidates = visible_region_candidates(
             regions,region_stages,chart_start,cutoff,
-            min_extrema=region_min,side=region_side,order=region_order)
+            min_extrema=region_min,side=region_side,
+            order='RECENT' if region_order == 'DISTANCE' else region_order)
+        if region_order == 'DISTANCE':
+            # Fully closed 1m candle before cutoff, never the future candle.
+            recent_closes = full.loc[full.timestamp < cutoff, 'close']
+            if recent_closes.empty:
+                st.error('No hay cierre PRE disponible para ordenar bandas por distancia.')
+                return
+            candidates = v3_rank_regions_near_price(candidates,float(recent_closes.iloc[-1]))
         candidates_by_id = {str(r.region_id):r for r in candidates.itertuples(index=False)}
         region_selection = st.selectbox('Inspeccionar una región candidata',
             ['']+candidates.region_id.astype(str).tolist(),
@@ -313,17 +402,22 @@ def render_btc_multiswing_60d_view(project):
             key='ms60_v21_region_selection')
         draw_region_ids, draw_stats = display_region_ids(
             candidates,max_regions,region_selection)
-        st.caption(f"V2.1 · {draw_stats['eligible_regions']} regiones con etapas conocidas "
-                   f"en la ventana y filtros seleccionados; {draw_stats['drawn_regions']} "
-                   f"para dibujar; {draw_stats['hidden_by_display_limit']} omitidas "
-                   'solo visualmente. Ningún registro se elimina del catálogo. '
+        if mode in ('INSPECTOR','EJECUCION') and not region_selection:
+            draw_region_ids = []  # Single-region modes require explicit selection.
+        st.caption(f"V2.1 · {draw_stats['eligible_regions']} regiones elegibles en la ventana. "
+                   f"Máximo descriptivo: {max_regions}; "
+                   f"bandas realmente dibujadas en este modo: {len(draw_region_ids)}. "
+                   'Las demás siguen disponibles en el catálogo; ninguna se elimina. '
                    'El mínimo de extremos se aplica a cada etapa PRE, no al total final.')
         if region_selection:
             region_inspection = candidates.loc[
                 candidates.region_id.eq(region_selection)].iloc[0]
             region_member_details = region_member_evidence(asof, regions.loc[
                 regions.region_id.eq(region_selection)].iloc[0],cutoff)
-    fig=build_figure(candles,markers,display_tf=display_tf,
+    # Never clutter the initial map. In the inspector only selected physical
+    # members are highlighted unless the user explicitly enables all pivots.
+    plot_markers = markers if show_all_pivots else markers.iloc[0:0].copy()
+    fig=build_figure(candles,plot_markers,display_tf=display_tf,
                      selected=chosen_row,cutoff=cutoff if chosen_row is not None else None,
                      chart_end=chart_end)
     if show_regions and region_stages is not None and not region_stages.empty:
@@ -352,7 +446,7 @@ def render_btc_multiswing_60d_view(project):
                                       line={'color':color,'width':2 if highlighted else 1,'dash':'dot'})
         except ValueError as exc:
             st.warning(f'V2: {exc}. Reducí el período o las temporalidades.')
-    if region_member_details is not None and not region_member_details.empty:
+    if mode == 'INSPECTOR' and region_member_details is not None and not region_member_details.empty:
         # These marks are all already-confirmed physical members at PRE cutoff.
         # A physical pivot is displayed at its own timestamp, NOT at confirmation.
         # Its hover says when that physical extremum first became available.
@@ -382,12 +476,39 @@ def render_btc_multiswing_60d_view(project):
     fig.update_xaxes(range=[pd.to_datetime(chart_start,unit='ms',utc=True),
                             pd.to_datetime(chart_end,unit='ms',utc=True)],
                      autorange=False)
-    st.caption(f'Mapa BTC · velas cerradas {display_tf}: {len(candles):,} '
+    st.caption(f'{"Mapa estructural" if mode == "MAPA" else ("Inspector" if mode == "INSPECTOR" else "Contexto PRE 1m/5m")} '
+               f'· velas cerradas {display_tf}: {len(candles):,} '
                f'· contexto {iso(chart_start)} → {iso(chart_end)}. '
-               'La ventana se dibuja completa; el selector de pivotes solo '
-               'incluye los 500 más recientes.')
+               'La ventana se dibuja completa; ningún dato se recorta silenciosamente.')
     st.plotly_chart(fig,use_container_width=True,key='ms60_chart',
                     config={'displaylogo':False,'scrollZoom':True})
+    if mode == 'MAPA':
+        if region_inspection is not None:
+            st.info(f'Región {region_inspection.side} · {float(region_inspection.center):,.2f} USD. '
+                    'Abrí el inspector para consultar su historia física.')
+            def _open_inspector():
+                st.session_state['ms60_v3_mode'] = 'INSPECTOR'
+            st.button('Inspeccionar esta banda',on_click=_open_inspector,
+                      key='ms60_v3_open_inspector')
+        st.caption('Mapa estructural: la opacidad no es confianza estadística; '
+                   'las bandas no son niveles ACTIVE ni señales de trading.')
+        return
+    if mode == 'EJECUCION':
+        if region_inspection is None:
+            st.info('Seleccioná una banda en el desplegable para verla en el contexto PRE 1m/5m. '
+                    'Aún no hay señales ejecutables ni órdenes.')
+        else:
+            st.info(f'Zona {region_inspection.side} · '
+                    f'{float(region_inspection.band_low):,.2f}–'
+                    f'{float(region_inspection.band_high):,.2f} USD · conocida desde '
+                    f'{iso(int(region_inspection.known_from))}. '
+                    'Este modo NO determina rechazo, breakout, TP/SL, tamaño ni ejecución. '
+                    'Es una referencia de preparación sin resultados futuros.')
+        st.caption('No hay integración HLL/REACTION ni estrategias operativas habilitadas aquí. '
+                   'La investigación de triggers se desarrollará y validará por separado.')
+        return
+    if region_inspection is None:
+        st.info('Elegí una región para ver su evidencia física y su historial V2.2/V2.3.')
     with st.expander('🔎 Pivotes confirmados en la ventana · evidencia PRE',expanded=chosen_row is not None):
         view=markers.copy().sort_values('plot_ts',ascending=False)
         if not view.empty:
@@ -425,7 +546,9 @@ def render_btc_multiswing_60d_view(project):
                     'primera_confirmacion_UTC','ultima_confirmacion_UTC',
                     'tf_set_asof','representations_asof']],
                     hide_index=True,use_container_width=True)
-    if region_inspection is not None and show_regions:
+    inspect_history = st.checkbox('Abrir historial de contactos y visitas · V2.2 / V2.3',
+                                  value=False,key='ms60_v3_inspector_history') if region_inspection is not None else False
+    if mode == 'INSPECTOR' and inspect_history and region_inspection is not None and show_regions:
         st.markdown('#### 🧭 V2.2 · Historial físico de la banda fija · retrospectivo')
         st.caption('La banda se CONGELA con límites conocidos en la etapa PRE seleccionada. '
                    'Los eventos posteriores se reconstruyen solo con velas BTC 1m ya cerradas '
