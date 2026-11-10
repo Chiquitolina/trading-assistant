@@ -213,6 +213,31 @@ def group_asof(rows: pd.DataFrame, *, collapse: bool, multi_only: bool = False) 
     return frame.sort_values(['plot_ts','side','timeframe']).reset_index(drop=True)
 
 
+def window_evidence_stats(known: pd.DataFrame, start: int, end: int, *,
+                          multi_only: bool = False) -> dict[str, int]:
+    """Metricas PRE de extremos *dentro* de la ventana de exploracion.
+
+    `known` ya esta filtrado por available_ts <= corte, timeframe y lado.
+    La agrupacion por identidad se calcula as-of *antes* del recorte espacial,
+    para que confirmaciones de un mismo extremo no se pierdan en el borde.
+    La ventana se aplica al minuto fisico verificado o pivot_ts ambiguo,
+    usando el mismo plot_ts que el grafico. No lee resultados POST.
+    """
+    if int(end) <= int(start):
+        raise ValueError('INVALID_EVIDENCE_WINDOW')
+    reps = group_asof(known, collapse=False, multi_only=multi_only)
+    reps = reps[(reps['plot_ts'] >= int(start)) &
+                (reps['plot_ts'] < int(end))]
+    verified = reps[reps['physical_identity_state'].eq('VERIFIED')]
+    shared = verified.groupby('physical_id')['timeframe'].nunique()
+    return {
+        'representations': int(len(reps)),
+        'verified_extrema': int(verified['physical_id'].nunique()),
+        'multi_tf_extrema': int((shared >= 2).sum()),
+        'ambiguous_representations': int(reps['physical_identity_state'].ne('VERIFIED').sum()),
+    }
+
+
 def aggregate_closed(full: pd.DataFrame, tf: str, start: int, end: int) -> pd.DataFrame:
     """Render only complete, UTC-aligned bars in [start,end). No partial TF."""
     if tf not in TF_MINUTES or int(end) <= int(start):

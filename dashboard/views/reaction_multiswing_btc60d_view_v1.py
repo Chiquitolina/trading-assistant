@@ -13,6 +13,7 @@ from pathlib import Path
 from btc_multiswing_60d_explorer_v1 import (
     DAY, M, TF_COLORS, TF_MINUTES, aggregate_closed, asof_rows,
     chart_window, group_asof, iso, load_snapshot, selected_inspection_window,
+    window_evidence_stats,
 )
 
 
@@ -136,15 +137,18 @@ def render_btc_multiswing_60d_view(project):
     display=group_asof(known,collapse=group_mode.startswith('Una'),multi_only=multi_only)
     pool=display[(display['plot_ts']>=explore_start) & (display['plot_ts']<exploration_cutoff)].copy()
     pool=pool.sort_values(['plot_ts','timeframe'],ascending=[False,True]).reset_index(drop=True)
-    verified=known.loc[known['physical_identity_state']=='VERIFIED','physical_id'].nunique()
-    shared=known[known.physical_identity_state=='VERIFIED'].groupby('physical_id').size()
+    # Las cifras deben corresponder a la misma ventana espacial del grafico;
+    # las agrupaciones siguen siendo causales al corte, sin confirmar pivotes futuros.
+    stats=window_evidence_stats(known,explore_start,exploration_cutoff,multi_only=multi_only)
     x1,x2,x3,x4=st.columns(4)
-    x1.metric('Representaciones PRE',len(known))
-    x2.metric('Extremos físicos verificados PRE',verified)
-    x3.metric('Extremos ≥2 TF PRE',int((shared>=2).sum()))
-    x4.metric('Identidad ambigua PRE',int((known.physical_identity_state!='VERIFIED').sum()))
+    x1.metric('Representaciones PRE · ventana',stats['representations'])
+    x2.metric('Extremos físicos verificados · ventana',stats['verified_extrema'])
+    x3.metric('Extremos ≥2 TF · ventana',stats['multi_tf_extrema'])
+    x4.metric('Identidad ambigua · ventana',stats['ambiguous_representations'])
     st.caption(f"Corte: {iso(exploration_cutoff)} · Ventana desde {iso(explore_start)}. "
-               'Las cantidades anteriores son PRE al corte y consideran únicamente los TF seleccionados.')
+               'Los contadores corresponden únicamente a pivotes ubicados en la ventana, '
+               'confirmados al corte y con los TF/lado/filtro múltiple seleccionados. '
+               'No representan toda la historia PRE de 60 días.')
     if pool.empty:
         st.info('No hay pivotes confirmados para estos filtros y esta ventana.')
         return

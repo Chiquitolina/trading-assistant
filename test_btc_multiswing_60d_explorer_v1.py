@@ -15,6 +15,7 @@ import pandas as pd
 from btc_multiswing_60d_explorer_v1 import (
     DAY, M, TF_MINUTES, aggregate_closed, asof_rows, chart_window,
     group_asof, iso, load_snapshot, ms, read_snapshot, selected_inspection_window,
+    window_evidence_stats,
     FREEZE_REL, CATALOG_REL,
 )
 from dashboard.views.reaction_multiswing_btc60d_view_v1 import build_figure
@@ -60,6 +61,39 @@ def digest(path):
 
 
 class MultiSwingExplorerV1(unittest.TestCase):
+    def test_stats_count_only_pivots_inside_window(self):
+        # P1 tiene dos TF confirmados en el corte, P2 uno, E es ambiguo.
+        known=asof_rows(catalog_frame(),START+200*M,tuple(TF_MINUTES))
+        # Recorte incluye P2 y E, pero excluye P1 (fisico +1m).
+        stats=window_evidence_stats(known,START+5*M,START+40*M)
+        self.assertEqual(stats,{
+            'representations':2, 'verified_extrema':1,
+            'multi_tf_extrema':0, 'ambiguous_representations':1,
+        })
+        # Acercar la ventana a P1 muestra 3 representaciones, un solo fisico.
+        stats=window_evidence_stats(known,START,START+5*M)
+        self.assertEqual(stats['representations'],3)
+        self.assertEqual(stats['verified_extrema'],1)
+        self.assertEqual(stats['multi_tf_extrema'],1)
+
+    def test_stats_respect_confirmation_and_multi_only(self):
+        # La tercera TF de P1 se confirma recién en +70m.
+        early=asof_rows(catalog_frame(),START+40*M,tuple(TF_MINUTES))
+        stats=window_evidence_stats(early,START,START+40*M,multi_only=True)
+        self.assertEqual(stats,{
+            'representations':2,'verified_extrema':1,
+            'multi_tf_extrema':1,'ambiguous_representations':0,
+        })
+        late=asof_rows(catalog_frame(),START+200*M,tuple(TF_MINUTES))
+        stats=window_evidence_stats(late,START,START+200*M,multi_only=True)
+        self.assertEqual(stats['representations'],3)
+        self.assertEqual(stats['verified_extrema'],1)
+        self.assertEqual(stats['ambiguous_representations'],0)
+
+    def test_window_stats_fail_closed(self):
+        with self.assertRaisesRegex(ValueError,'INVALID_EVIDENCE_WINDOW'):
+            window_evidence_stats(pd.DataFrame(),START,START)
+
     def test_multiple_tfs_same_physical_only_one_identity(self):
         source=catalog_frame()
         pre=asof_rows(source,START+40*M,('1m','5m','15m','30m'))
@@ -232,6 +266,7 @@ class MultiSwingExplorerV1(unittest.TestCase):
         self.assertEqual(len(fake.figures),1)
         self.assertEqual(fake.figures[0].data[0].type,'candlestick')
         self.assertEqual(len(fake.metrics),4)
+        self.assertTrue(all('ventana' in args[0] for args in fake.metrics))
 
     def test_route_new_view_without_loading_event_journal(self):
         mockui=types.ModuleType('streamlit')
