@@ -15,6 +15,10 @@ from btc_multiswing_structural_confluence_v2 import (
     display_region_ids, region_member_evidence,
 )
 
+from btc_multiswing_region_interactions_v22 import (
+    audit_fixed_region, later_compatible_extrema,
+)
+
 from btc_multiswing_60d_explorer_v1 import (
     DAY, M, TF_COLORS, TF_MINUTES, aggregate_closed, asof_rows,
     chart_window, group_asof, iso, load_snapshot, selected_inspection_window,
@@ -385,6 +389,150 @@ def render_btc_multiswing_60d_view(project):
                     'primera_confirmacion_UTC','ultima_confirmacion_UTC',
                     'tf_set_asof','representations_asof']],
                     hide_index=True,use_container_width=True)
+    if region_inspection is not None and show_regions:
+        st.markdown('#### 🧭 V2.2 · Historial físico de la banda fija · retrospectivo')
+        st.caption('La banda se CONGELA con límites conocidos en la etapa PRE seleccionada. '
+                   'Los eventos posteriores se reconstruyen solo con velas BTC 1m ya cerradas '
+                   'al corte. CONTACTO = intersección del rango 1m con la banda; '
+                   'CRUCE = cambio de lado por CIERRE; DOS CIERRES = racha descriptiva. '
+                   'No significa defensa, resistencia vigente, ruptura validada ni señal LIVE.')
+        horizon=int(st.selectbox(
+            'Horizonte de excursión después del contacto (minutos)',
+            [60,240,720],index=1,key='ms60_v22_excursion_horizon'))
+        try:
+            events_v22, contacts_v22, audit_v22 = audit_fixed_region(
+                full,region_inspection,cutoff,horizon_minutes=horizon)
+            compatible_v22 = later_compatible_extrema(asof,region_inspection,cutoff)
+        except (ValueError,KeyError,TypeError) as exc:
+            st.warning(f'V2.2 no pudo reconstruir la trayectoria: {exc}. '
+                       'No se fabrican eventos a partir de datos incompletos.')
+        else:
+            q1,q2,q3,q4=st.columns(4)
+            q1.metric('Episodios de contacto 1m',audit_v22['contact_episodes'])
+            q2.metric('Cruces por cierre arriba',audit_v22['close_cross_above'])
+            q3.metric('Cruces por cierre abajo',audit_v22['close_cross_below'])
+            q4.metric('Nuevos extremos HIGH/LOW compatibles',len(compatible_v22))
+            st.caption(
+                f"Etapa fijada: {iso(audit_v22['stage_known_from'])} · "
+                f"banda {audit_v22['fixed_band_low']:,.2f}–"
+                f"{audit_v22['fixed_band_high']:,.2f} USD · "
+                f"{audit_v22['closed_minutes']:,} velas 1m cerradas hasta "
+                f"{iso(audit_v22['cutoff'])}. "
+                f"Dos cierres consecutivos arriba: {audit_v22['two_closes_above']}; "
+                f"abajo: {audit_v22['two_closes_below']}. "
+                'Una excursión POST-contacto solo se conoce posteriormente; '
+                'el estado CENSORED no se interpreta como cero movimiento.')
+
+            # Separate retrospective figure: old bands can remain a reference
+            # even after the V2 visual projection horizon, NEVER ACTIVE.
+            import plotly.graph_objects as go
+            chart_v22_start=max(int(region_inspection.known_from)-DAY,cutoff-14*DAY)
+            chart_v22=aggregate_closed(full,'30m',chart_v22_start,cutoff)
+            if not chart_v22.empty and len(chart_v22)<=850:
+                fig_v22=go.Figure(go.Candlestick(
+                    x=pd.to_datetime(chart_v22.timestamp,unit='ms',utc=True),
+                    open=chart_v22.open,high=chart_v22.high,
+                    low=chart_v22.low,close=chart_v22.close,
+                    increasing_line_color='#43ae90',
+                    decreasing_line_color='#df7070',showlegend=False))
+                left=max(chart_v22_start,int(region_inspection.known_from))
+                t0=pd.to_datetime(left,unit='ms',utc=True)
+                t1=pd.to_datetime(cutoff,unit='ms',utc=True)
+                bottom=float(region_inspection.band_low)
+                top=float(region_inspection.band_high)
+                fig_v22.add_shape(type='rect',xref='x',yref='y',
+                    x0=t0,x1=t1,y0=bottom,y1=top,
+                    line={'color':'#ffc477','width':1.5,'dash':'dot'},
+                    fillcolor='#ffc477',opacity=0.16)
+                fig_v22.add_annotation(x=t0,y=top,xref='x',yref='y',
+                    text='Banda PRE fija · referencia retrospectiva',
+                    showarrow=False,yanchor='bottom',font={'color':'#ffc477','size':10})
+                highlight=events_v22[events_v22.event_type.isin([
+                    'CONTACT_START','TWO_CLOSES_ABOVE','TWO_CLOSES_BELOW'])].copy()
+                highlight=highlight.loc[
+                    (highlight.event_ts>=chart_v22_start) &
+                    (highlight.event_ts<=cutoff)]
+                if len(highlight)<=300:
+                    for kind,marker,color,ypos in (
+                        ('CONTACT_START','diamond','#f4d27a',(bottom+top)/2),
+                        ('TWO_CLOSES_ABOVE','triangle-up','#bd99f2',top),
+                        ('TWO_CLOSES_BELOW','triangle-down','#7ebfe8',bottom)):
+                        part=highlight[highlight.event_type.eq(kind)]
+                        if not part.empty:
+                            fig_v22.add_trace(go.Scatter(
+                                x=pd.to_datetime(part.event_ts,unit='ms',utc=True),
+                                y=[ypos]*len(part),mode='markers',
+                                marker={'symbol':marker,'size':9,'color':color},
+                                name=kind.replace('_',' ').title(),
+                                hovertext=[f"{r.description} · {iso(int(r.event_ts))}"
+                                           for r in part.itertuples(index=False)],
+                                hoverinfo='text'))
+                else:
+                    st.caption(f'Hay {len(highlight)} marcadores de eventos; '
+                               'se mantienen en la tabla y se omiten del gráfico '
+                               'para evitar saturación.')
+                fig_v22.update_layout(title='BTC · banda original prolongada solo para auditoría',
+                    height=510,xaxis_rangeslider_visible=False,
+                    xaxis_title='UTC',yaxis_title='USD',
+                    margin={'l':25,'r':20,'t':45,'b':25},
+                    legend={'orientation':'h','y':-0.16})
+                st.plotly_chart(fig_v22,use_container_width=True,
+                    key='ms60_v22_fixed_region_chart',
+                    config={'displaylogo':False,'scrollZoom':True})
+            else:
+                st.caption('Gráfico V2.2 no disponible con este rango; '
+                           'se conserva la auditoría completa de velas 1m.')
+
+            st.markdown('**Contactos físicos y excursiones posteriores**')
+            if contacts_v22.empty:
+                st.info('No se encontraron intersecciones 1m después de fijar esta etapa.')
+            else:
+                table22=contacts_v22.copy()
+                for col in ('start_ts','last_touch_close_ts','end_known_ts','post_known_until'):
+                    table22[col.replace('_ts','_UTC').replace('_until','_until_UTC')]=pd.to_datetime(
+                        table22[col],unit='ms',utc=True)
+                keep=['contact_number','start_UTC','last_touch_close_UTC',
+                      'touch_minutes','body_overlap_minutes','status',
+                      'post_minutes_observed','max_above_band_pct',
+                      'max_below_band_pct','post_status','post_known_until_UTC']
+                st.dataframe(table22[keep].head(250),hide_index=True,use_container_width=True)
+                if len(table22)>250:
+                    st.caption(f'Se ven 250 de {len(table22)} contactos; descarga completa disponible.')
+                st.download_button('Exportar contactos V2.2 · CSV',
+                    contacts_v22.to_csv(index=False).encode('utf-8'),
+                    file_name='btc_multiswing_region_v22_contacts.csv',
+                    mime='text/csv',key='ms60_v22_contacts_export')
+            with st.expander('Todos los eventos por cierre 1m · V2.2',expanded=False):
+                e22=events_v22.copy()
+                if not e22.empty:
+                    e22['evento_UTC']=pd.to_datetime(e22.event_ts,unit='ms',utc=True)
+                    st.dataframe(e22[['evento_UTC','event_type','close_price',
+                        'contact_number','description']].head(500),
+                        hide_index=True,use_container_width=True)
+                    if len(e22)>500:
+                        st.caption(f'Primeros 500 de {len(e22)} eventos; descarga completa disponible.')
+                st.download_button('Exportar eventos V2.2 · CSV',
+                    events_v22.to_csv(index=False).encode('utf-8'),
+                    file_name='btc_multiswing_region_v22_events.csv',
+                    mime='text/csv',key='ms60_v22_events_export')
+            with st.expander('Nuevos extremos físicos compatibles con la banda fija',expanded=False):
+                st.caption('Extremos VERIFIED confirmados DESPUÉS de la etapa fijada, '
+                           'dentro de la banda original y con los TF seleccionados. '
+                           'No equivalen automáticamente a nuevas defensas ni a una región sucesora.')
+                if compatible_v22.empty:
+                    st.info('No se encontraron nuevos extremos compatibles hasta el corte.')
+                else:
+                    new22=compatible_v22.copy()
+                    new22['extremo_UTC']=pd.to_datetime(new22.plot_ts,unit='ms',utc=True)
+                    new22['confirmado_UTC']=pd.to_datetime(
+                        new22.first_available_asof,unit='ms',utc=True)
+                    st.dataframe(new22[['physical_id','side','price','extremo_UTC',
+                        'confirmado_UTC','tf_set_asof']],
+                        hide_index=True,use_container_width=True)
+            st.caption('V2.2 es exclusivamente retrospectivo. '
+                       'Las bandas visibles después de su horizonte geométrico '
+                       'NO están ACTIVE; ningún resultado se publica a estrategias LIVE.')
+
     if show_regions and regions is not None:
         with st.expander('🧩 V2 · Regiones por extremos físicos independientes · PRE',expanded=False):
             if regions.empty:
