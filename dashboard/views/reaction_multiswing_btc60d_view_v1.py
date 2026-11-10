@@ -19,6 +19,10 @@ from btc_multiswing_region_interactions_v22 import (
     audit_fixed_region, later_compatible_extrema,
 )
 
+from btc_multiswing_structural_visits_v23 import (
+    audit_structural_visits, visit_gap_sensitivity,
+)
+
 from btc_multiswing_60d_explorer_v1 import (
     DAY, M, TF_COLORS, TF_MINUTES, aggregate_closed, asof_rows,
     chart_window, group_asof, iso, load_snapshot, selected_inspection_window,
@@ -532,6 +536,154 @@ def render_btc_multiswing_60d_view(project):
             st.caption('V2.2 es exclusivamente retrospectivo. '
                        'Las bandas visibles después de su horizonte geométrico '
                        'NO están ACTIVE; ningún resultado se publica a estrategias LIVE.')
+
+            st.markdown('#### 🧪 V2.3 · Visitas estructurales y recorridos posteriores')
+            st.caption('Agrupa los contactos V2.2 si entre ellos transcurrieron '
+                       'como máximo 5, 15, 30 o 60 minutos sin tocar la banda. '
+                       'No clasifica defensas ni rupturas. El FIN de una visita '
+                       'se conoce únicamente después de gap+1 velas sin contacto '
+                       'cerradas; los recorridos POST comienzan recién ahí.')
+            vg1,vg2=st.columns(2)
+            with vg1:
+                gap_v23=int(st.selectbox('Separación máxima para unir contactos (min)',
+                    [5,15,30,60],index=2,key='ms60_v23_gap'))
+            with vg2:
+                horizon_v23=int(st.selectbox('Horizonte POST para comparar (min)',
+                    [60,240,720,1440,2880],index=1,key='ms60_v23_horizon'))
+            try:
+                visits_v23, outcomes_v23, vs23 = audit_structural_visits(
+                    full,region_inspection,cutoff,gap_minutes=gap_v23)
+                sensitivity_v23=visit_gap_sensitivity(contacts_v22)
+            except (ValueError,KeyError,TypeError) as exc:
+                st.warning(f'V2.3 no pudo analizar visitas: {exc}. '
+                           'No se extrapolan velas ni se completan horizontes censurados.')
+            else:
+                v1,v2,v3,v4=st.columns(4)
+                v1.metric('Contactos V2.2',vs23['contact_episodes_v22'])
+                v2.metric('Visitas agrupadas',vs23['visits'])
+                v3.metric('Visitas finalizadas y conocidas',vs23['visits_closed'])
+                v4.metric('Visitas abiertas / no cerradas',vs23['visits_open'])
+                st.caption('Sensibilidad del mismo historial a distintos intervalos de unión: '
+                           + ' · '.join(f"{int(r.gap_minutes)}m → {int(r.visits)} visitas"
+                           for r in sensitivity_v23.itertuples(index=False)) + '. '
+                           'El umbral es exploratorio; no se eligió para maximizar un resultado.')
+                if visits_v23.empty:
+                    st.info('No hay contactos para construir visitas con la etapa PRE seleccionada.')
+                else:
+                    vt23=visits_v23.copy()
+                    for col in ('first_touch_ts','first_known_ts',
+                                'last_touch_close_ts','end_known_ts'):
+                        vt23[col.replace('_ts','_UTC')]=pd.to_datetime(
+                            vt23[col],unit='ms',utc=True)
+                    st.dataframe(vt23[[
+                        'visit_number','first_touch_UTC','last_touch_close_UTC',
+                        'end_known_UTC','status','arrival_side','exit_side',
+                        'contact_episodes','touch_minutes','bridged_noncontact_minutes',
+                        'two_closes_above','two_closes_below',
+                        'in_visit_max_above_pct','in_visit_max_below_pct',
+                    ]].head(250),hide_index=True,use_container_width=True)
+                    if len(vt23)>250:
+                        st.caption(f'Mostradas 250 de {len(vt23)} visitas; CSV contiene todas.')
+                    st.download_button('Exportar visitas V2.3 · CSV',
+                        visits_v23.to_csv(index=False).encode('utf-8'),
+                        file_name='btc_multiswing_region_v23_visits.csv',
+                        mime='text/csv',key='ms60_v23_visits_export')
+                    st.download_button('Exportar resultados POST V2.3 · CSV',
+                        outcomes_v23.to_csv(index=False).encode('utf-8'),
+                        file_name='btc_multiswing_region_v23_outcomes.csv',
+                        mime='text/csv',key='ms60_v23_outcomes_export')
+
+                    choices=visits_v23.visit_number.astype(int).tolist()
+                    selected_visit=st.selectbox('Inspeccionar una visita estructural',
+                        choices,index=len(choices)-1,
+                        format_func=lambda num: (
+                            f"Visita #{num} · "
+                            f"{iso(int(visits_v23.iloc[num-1].first_touch_ts))} · "
+                            f"{int(visits_v23.iloc[num-1].contact_episodes)} contactos V2.2"),
+                        key='ms60_v23_selected_visit')
+                    visit=visits_v23.loc[
+                        visits_v23.visit_number.eq(selected_visit)].iloc[0]
+                    st.caption(
+                        f"Visita #{selected_visit} · llegada {visit.arrival_side} "
+                        f"(cierre 1m anterior) · primera evidencia conocida "
+                        f"{iso(int(visit.first_known_ts))} · cierre de visita: "
+                        f"{iso(int(visit.end_known_ts)) if pd.notna(visit.end_known_ts) else 'PENDIENTE'} "
+                        f"· estado {visit.status}. El cierre no se conoce en el primer contacto.")
+                    selected_outcomes=outcomes_v23[
+                        outcomes_v23.visit_number.eq(selected_visit)].copy()
+                    selected_outcomes['desde_UTC']=pd.to_datetime(
+                        selected_outcomes.evaluation_from_ts,unit='ms',utc=True)
+                    selected_outcomes['conocido_hasta_UTC']=pd.to_datetime(
+                        selected_outcomes.last_known_ts,unit='ms',utc=True)
+                    st.dataframe(selected_outcomes[[
+                        'horizon_minutes','desde_UTC','observed_minutes','status',
+                        'max_above_band_pct','max_below_band_pct','conocido_hasta_UTC',
+                    ]],hide_index=True,use_container_width=True)
+                    chosen_post=selected_outcomes.loc[
+                        selected_outcomes.horizon_minutes.eq(horizon_v23)].iloc[0]
+                    st.caption(
+                        f"POST {horizon_v23}m para visita #{selected_visit}: "
+                        f"{chosen_post.status} · {int(chosen_post.observed_minutes)} "
+                        'minutos observados. FULL_HORIZON exige todas las velas; '
+                        'CENSORED nunca significa movimiento cero.')
+
+                    # Zoom on one visit. No future bars beyond cutoff and no
+                    # recomputation of the selected V2 stage/band.
+                    zoom_left=max(int(region_inspection.known_from),
+                                  int(visit.first_touch_ts)-3*60*M)
+                    zoom_right=min(cutoff,max(int(visit.last_touch_close_ts)+6*60*M,
+                                             int(visit.first_touch_ts)+4*60*M))
+                    zoom_tf='5m' if zoom_right-zoom_left<=2*DAY else '30m'
+                    local_candles=aggregate_closed(full,zoom_tf,zoom_left,zoom_right)
+                    if not local_candles.empty and len(local_candles)<=900:
+                        fig23=go.Figure(go.Candlestick(
+                            x=pd.to_datetime(local_candles.timestamp,unit='ms',utc=True),
+                            open=local_candles.open,high=local_candles.high,
+                            low=local_candles.low,close=local_candles.close,
+                            increasing_line_color='#43ae90',
+                            decreasing_line_color='#df7070',showlegend=False))
+                        ltime=pd.to_datetime(zoom_left,unit='ms',utc=True)
+                        rtime=pd.to_datetime(zoom_right,unit='ms',utc=True)
+                        fig23.add_shape(type='rect',xref='x',yref='y',
+                            x0=ltime,x1=rtime,
+                            y0=float(region_inspection.band_low),
+                            y1=float(region_inspection.band_high),
+                            fillcolor='#ffc477',opacity=0.14,
+                            line={'color':'#ffc477','width':1,'dash':'dot'})
+                        for when,kind,color in (
+                            (int(visit.first_known_ts),'Primer contacto confirmado','#f9d36a'),
+                            (int(visit.last_touch_close_ts),'Último contacto','#70d5c0'),
+                        ):
+                            dt=pd.to_datetime(when,unit='ms',utc=True)
+                            fig23.add_shape(type='line',xref='x',yref='paper',
+                                x0=dt,x1=dt,y0=0,y1=1,
+                                line={'color':color,'width':1.5,'dash':'dot'})
+                            fig23.add_annotation(x=dt,y=0.98,xref='x',yref='paper',
+                                text=kind,showarrow=False,
+                                font={'color':color,'size':10})
+                        if pd.notna(visit.end_known_ts):
+                            done_at=pd.to_datetime(int(visit.end_known_ts),
+                                                   unit='ms',utc=True)
+                            fig23.add_shape(type='line',xref='x',yref='paper',
+                                x0=done_at,x1=done_at,y0=0,y1=1,
+                                line={'color':'#d7a5ff','width':1.5,'dash':'dash'})
+                            fig23.add_annotation(x=done_at,y=0.06,xref='x',yref='paper',
+                                text='Fin conocido',showarrow=False,
+                                font={'color':'#d7a5ff','size':10})
+                        fig23.update_layout(
+                            title=f'Visita #{selected_visit} · BTC {zoom_tf} · banda PRE fija',
+                            height=490,xaxis_rangeslider_visible=False,
+                            margin={'l':25,'r':20,'t':50,'b':20},
+                            xaxis_title='UTC',yaxis_title='USD')
+                        st.plotly_chart(fig23,use_container_width=True,
+                            key='ms60_v23_visit_chart',
+                            config={'displaylogo':False,'scrollZoom':True})
+                    else:
+                        st.caption('Zoom V2.3 no representable; permanecen las tablas y CSV.')
+                st.caption('V2.3 es investigación OFFLINE/retrospectiva. '
+                           'Cada visita se conoce progresivamente; los resultados POST '
+                           'no eran conocidos en el primer contacto. '
+                           'No hay scoring, HLL, órdenes ni señales LIVE.')
 
     if show_regions and regions is not None:
         with st.expander('🧩 V2 · Regiones por extremos físicos independientes · PRE',expanded=False):
