@@ -160,6 +160,98 @@ def v3_execution_visual_window(*, source_start: int, cutoff: int,
     return max(int(source_start), int(cutoff) - int(minutes) * M), int(cutoff)
 
 
+def v31_replay_cutoff_utc(day: date, clock: time, *,
+                          source_start: int, source_end: int) -> int:
+    """A closed-minute decision time on the frozen UTC timeline.
+
+    The replay does not use the host's local timezone or current clock. A PRE
+    timestamp is the instant at which earlier candles have finished closing.
+    """
+    if (not isinstance(day, date) or isinstance(day, datetime)
+            or not isinstance(clock, time) or clock.tzinfo is not None
+            or clock.second or clock.microsecond):
+        raise ValueError('INVALID_REPLAY_UTC_TIME')
+    stamp = int(datetime.combine(day, clock, tzinfo=timezone.utc).timestamp()*1000)
+    if (stamp <= int(source_start) or stamp > int(source_end)
+            or stamp % M != 0):
+        raise ValueError('REPLAY_CUTOFF_OUTSIDE_FROZEN_WINDOW')
+    return stamp
+
+
+def v31_replay_visual_window(*, source_start: int, cutoff: int,
+                             hours: int = 24) -> tuple[int, int]:
+    """Only PRE candles, with up to 48h context and no silent lookahead."""
+    if int(hours) not in (2, 4, 8, 12, 24, 48):
+        raise ValueError('INVALID_REPLAY_CONTEXT_HOURS')
+    if int(source_start) >= int(cutoff):
+        raise ValueError('INVALID_REPLAY_PRE_WINDOW')
+    return max(int(source_start), int(cutoff)-int(hours)*60*M), int(cutoff)
+
+
+def v31_reveal_post_window(*, pre_cutoff: int, source_end: int,
+                            reveal: bool, horizon_minutes: int) -> tuple[int, str]:
+    """Display-only POST window. Truncation is explicitly CENSORED."""
+    if int(horizon_minutes) not in (15, 30, 60, 240, 720):
+        raise ValueError('INVALID_REPLAY_POST_HORIZON')
+    if int(pre_cutoff) > int(source_end):
+        raise ValueError('REPLAY_POST_BEYOND_FREEZE')
+    if not reveal:
+        return int(pre_cutoff), 'HIDDEN'
+    requested = int(pre_cutoff) + int(horizon_minutes)*M
+    return min(requested, int(source_end)), ('FULL_HORIZON' if requested <= source_end
+                                             else 'CUTOFF_CENSORED')
+
+
+def v31_pre_region_segments(stages, *, region_id: str, pre_start: int,
+                            pre_cutoff: int, min_extrema: int = 2):
+    """Render a region's immutable stages strictly within known PRE time.
+
+    The source may contain future stages (e.g. a retrospective full-history
+    catalog); these may NEVER enter the replay. No final-stage band is allowed
+    to rewrite historical width/center. Returns segments clipped to PRE only.
+    """
+    if int(pre_start) >= int(pre_cutoff) or not region_id or int(min_extrema) < 2:
+        raise ValueError('INVALID_REPLAY_REGION_SEGMENTS')
+    if stages.empty:
+        return stages.copy()
+    needed = {'region_id', 'known_from', 'known_until', 'band_low', 'band_high',
+              'independent_extrema'}
+    if not needed.issubset(stages.columns):
+        raise ValueError('INVALID_REPLAY_STAGE_SCHEMA')
+    rows = stages.loc[
+        stages.region_id.eq(region_id) &
+        (stages.known_from <= int(pre_cutoff)) &
+        (stages.independent_extrema >= int(min_extrema))
+    ].copy()
+    if rows.empty:
+        return rows
+    if ((rows.known_until < rows.known_from) |
+        (rows.band_low > rows.band_high)).any():
+        raise ValueError('INVALID_REPLAY_CAUSAL_STAGE')
+    return visible_region_stages(rows, int(pre_start), int(pre_cutoff), limit=1)
+
+
+def v31_replay_candidates(regions, stages, start: int, cutoff: int, *,
+                          min_extrema: int = 2, side: str = 'BOTH',
+                          order: str = 'RECENT'):
+    """Only as-of candidates, including a band confirmed AT the PRE minute.
+
+    V2 expresses its last known stage with a zero-length [cutoff,cutoff)
+    interval. For selector visibility only, extend exactly that boundary one
+    millisecond; never extend geometry in time, never include future stages.
+    """
+    if stages.empty:
+        return visible_region_candidates(regions, stages, start, cutoff,
+                 min_extrema=min_extrema,side=side,order=order)
+    if not {'known_from','known_until'}.issubset(stages.columns):
+        raise ValueError('INVALID_REPLAY_CANDIDATE_STAGES')
+    safe=stages.loc[stages.known_from <= int(cutoff)].copy()
+    at_cutoff=(safe.known_from == int(cutoff)) & (safe.known_until == int(cutoff))
+    safe.loc[at_cutoff,'known_until']=int(cutoff)+1
+    return visible_region_candidates(regions,safe,start,int(cutoff)+1,
+                        min_extrema=min_extrema,side=side,order=order)
+
+
 def render_btc_multiswing_60d_view(project):
     import pandas as pd
     import streamlit as st
@@ -173,6 +265,13 @@ def render_btc_multiswing_60d_view(project):
             'EJECUCION': '③ Preparación 1m/5m · experimental',
         }[m], key='ms60_v3_mode')
     policy = v3_view_policy(mode)
+    ui_state = getattr(st, 'session_state', None)
+    if ui_state is not None:
+        previous_mode = ui_state.get('ms60_v31_last_mode')
+        if mode == 'EJECUCION' and previous_mode in ('MAPA', 'INSPECTOR'):
+            # Re-entering the replay always starts blind after another mode.
+            ui_state['ms60_v31_reveal_post'] = False
+        ui_state['ms60_v31_last_mode'] = mode
     if mode == 'MAPA':
         st.caption('Mapa limpio: velas + bandas geométricas. Los pivotes se ocultan '
                    'por defecto y los criterios descriptivos NO representan un score.')
@@ -180,8 +279,8 @@ def render_btc_multiswing_60d_view(project):
         st.caption('Elegí una región para revisar miembros físicos, evolución PRE, '
                    'contactos V2.2 y visitas V2.3 en paneles separados.')
     else:
-        st.caption('Preparación visual PRE con velas 1m/5m; SIN triggers validados, '
-                   'órdenes, backtest ni conexión LIVE. No revela resultados POST.')
+        st.caption('Replay UTC de velas 1m/5m: PRE cerrado por minuto y POST oculto '
+                   'hasta revelar explícitamente. SIN triggers validados, órdenes, backtest ni LIVE.')
     st.caption('Catálogo congelado 1m / 5m / 15m / 30m / 1h / 4h. '
                'Los pivotes solo son elegibles cuando su confirmación está cerrada. '
                'Sin nuevos detectores de pivotes, sin consultas de red y sin modificar LIVE.')
@@ -196,7 +295,8 @@ def render_btc_multiswing_60d_view(project):
     d1,d2,d3,d4=st.columns([2,1,2,1])
     with d1:
         selected_date=st.date_input(
-            'Corte de exploración (UTC)',
+            'Fecha del replay PRE (UTC)' if mode == 'EJECUCION'
+            else 'Corte de exploración (UTC)',
             value=_selected_cutoff_date(end),
             min_value=datetime.fromtimestamp(start/1000,timezone.utc).date(),
             max_value=_selected_cutoff_date(end),
@@ -254,9 +354,54 @@ def render_btc_multiswing_60d_view(project):
     if not selected_tfs:
         st.info('Seleccioná una o más temporalidades para continuar.')
         return
-    # Date picker selects a DAY INCLUSIVE in UTC. 8-Nov data ends at 01:00.
+    # Historical exploration uses a day-inclusive cutoff. Execution replay
+    # instead uses an explicit UTC minute; changing that minute hides POST again.
     midnight_after=datetime.combine(selected_date+timedelta(days=1),time.min,tzinfo=timezone.utc)
     exploration_cutoff=min(end,int(midnight_after.timestamp()*1000))
+    replay_hours = 24
+    reveal_post = False
+    replay_post_horizon = 60
+    replay_post_status = 'HIDDEN'
+    if mode == 'EJECUCION':
+        initial_clock = (datetime.fromtimestamp(end/1000,timezone.utc).time()
+                         if selected_date == datetime.fromtimestamp(end/1000,timezone.utc).date()
+                         else time(12,0))
+        rc1,rc2=st.columns([2,1])
+        with rc1:
+            replay_clock=st.time_input('Instante PRE exacto (UTC) · HH:MM',
+                         value=initial_clock,step=timedelta(minutes=1),
+                         key='ms60_v31_replay_clock')
+        with rc2:
+            replay_hours=int(st.selectbox('Contexto anterior (horas)',
+                              [2,4,8,12,24,48],index=4,
+                              key='ms60_v31_pre_hours'))
+        try:
+            exploration_cutoff=v31_replay_cutoff_utc(
+                selected_date,replay_clock,source_start=start,source_end=end)
+        except ValueError as exc:
+            st.warning(f'Replay PRE fuera del historial congelado: {exc}. '
+                       'Elegí un instante UTC dentro del período disponible.')
+            return
+        if st.session_state.get('ms60_v31_last_cutoff') != exploration_cutoff:
+            # Do this BEFORE creating the widget. A moved replay never carries
+            # an already-open POST from another decision time.
+            st.session_state['ms60_v31_reveal_post'] = False
+            st.session_state['ms60_v31_last_cutoff'] = exploration_cutoff
+        rp1,rp2=st.columns([2,1])
+        with rp1:
+            reveal_post=st.checkbox('Revelar POST · solo velas cerradas',
+                                    key='ms60_v31_reveal_post')
+        with rp2:
+            replay_post_horizon=int(st.selectbox('POST a revelar (minutos)',
+                    [15,30,60,240,720],index=2,disabled=not reveal_post,
+                    key='ms60_v31_post_minutes'))
+        _,replay_post_status=v31_reveal_post_window(
+            pre_cutoff=exploration_cutoff,source_end=end,
+            reveal=reveal_post,horizon_minutes=replay_post_horizon)
+        st.caption(f'Instante de decisión PRE: {iso(exploration_cutoff)} · '
+                   f'POST: {replay_post_status}. Todos los swings y las bandas '
+                   'se reconstruyen exclusivamente al corte PRE; revelar POST '
+                   'NO actualiza evidencias ni geometría.')
     explore_start,_=chart_window(exploration_cutoff,start,int(span_days))
     known=asof_rows(catalog,exploration_cutoff,selected_tfs,side)
     display=group_asof(known,collapse=group_mode.startswith('Una'),multi_only=multi_only)
@@ -318,11 +463,16 @@ def render_btc_multiswing_60d_view(project):
                    'Toda confirmación POST permanece oculta incluso al revelar velas futuras.')
 
     if mode == 'EJECUCION':
-        chart_start,chart_end=v3_execution_visual_window(
-            source_start=start,cutoff=cutoff,minutes=24*60)
-        st.caption(f'Preparación PRE: ventana 1m/5m hasta {iso(cutoff)} '
-                   'sin velas ni extremos posteriores al corte. '
-                   'La banda seleccionada se muestra como referencia, no como entrada.')
+        chart_start,_=v31_replay_visual_window(
+            source_start=start,cutoff=cutoff,hours=replay_hours)
+        chart_end,replay_post_status=v31_reveal_post_window(
+            pre_cutoff=cutoff,source_end=end,
+            reveal=reveal_post,horizon_minutes=replay_post_horizon)
+        st.caption(f'PRE cerrado: {iso(chart_start)} → {iso(cutoff)} · '
+                   f'POST: {replay_post_status}' +
+                   (f' · hasta {iso(chart_end)}; solo velas, no evidencia nueva.'
+                    if reveal_post else ' · completamente oculto.') +
+                   ' El contexto de la banda sigue siendo una hipótesis geométrica.')
     candles=aggregate_closed(full,display_tf,chart_start,chart_end)
     if candles.empty:
         st.warning('No hay velas completas en la temporalidad elegida hasta ese corte. '
@@ -380,7 +530,9 @@ def render_btc_multiswing_60d_view(project):
                                           'RECENT':'Confirmación más reciente',
                                           'EXTREMA':'Más extremos independientes'}[x],
                                       key='ms60_v21_order')
-        candidates = visible_region_candidates(
+        candidate_selector=(v31_replay_candidates if mode == 'EJECUCION'
+                            else visible_region_candidates)
+        candidates = candidate_selector(
             regions,region_stages,chart_start,cutoff,
             min_extrema=region_min,side=region_side,
             order='RECENT' if region_order == 'DISTANCE' else region_order)
@@ -418,14 +570,28 @@ def render_btc_multiswing_60d_view(project):
     # members are highlighted unless the user explicitly enables all pivots.
     plot_markers = markers if show_all_pivots else markers.iloc[0:0].copy()
     fig=build_figure(candles,plot_markers,display_tf=display_tf,
-                     selected=chosen_row,cutoff=cutoff if chosen_row is not None else None,
+                     selected=chosen_row,
+                     cutoff=cutoff if (chosen_row is not None or mode == 'EJECUCION') else None,
                      chart_end=chart_end)
+    if mode == 'EJECUCION' and reveal_post and chart_end > cutoff:
+        import pandas as pd
+        fig.add_shape(type='rect',xref='x',yref='paper',
+                      x0=pd.to_datetime(cutoff,unit='ms',utc=True),
+                      x1=pd.to_datetime(chart_end,unit='ms',utc=True),
+                      y0=0,y1=1,line={'width':0},fillcolor='#9e7ed3',
+                      opacity=0.055,layer='below')
     if show_regions and region_stages is not None and not region_stages.empty:
         try:
             filtered_stages=region_stages[
                 region_stages.region_id.isin(draw_region_ids) &
                 (region_stages.independent_extrema >= region_min)].copy()
-            visible=visible_region_stages(filtered_stages,chart_start,cutoff,limit=100)
+            if mode == 'EJECUCION' and region_inspection is not None:
+                visible=v31_pre_region_segments(
+                    filtered_stages,region_id=str(region_selection),
+                    pre_start=chart_start,pre_cutoff=cutoff,
+                    min_extrema=region_min)
+            else:
+                visible=visible_region_stages(filtered_stages,chart_start,cutoff,limit=100)
             if len(visible)>400:
                 st.warning(f'V2: {len(visible)} etapas de regiones exceden el límite visual de 400. '
                            'Reducí temporalidades o ventana; no se ocultan registros sin avisar.')
@@ -444,6 +610,46 @@ def render_btc_multiswing_60d_view(project):
                                       y0=float(stage.band_low),y1=float(stage.band_high),
                                       fillcolor=color,opacity=0.20 if highlighted else 0.10,
                                       line={'color':color,'width':2 if highlighted else 1,'dash':'dot'})
+                if mode == 'EJECUCION' and region_inspection is not None:
+                    # Stage transition markers are at CONFIRMATION time, not at
+                    # the earlier historical pivot. They never reveal future
+                    # width or replace the old band with the final geometry.
+                    import plotly.graph_objects as go
+                    transitions=filtered_stages.loc[
+                        (filtered_stages.region_id == region_selection) &
+                        (filtered_stages.known_from >= chart_start) &
+                        (filtered_stages.known_from <= cutoff) &
+                        (filtered_stages.independent_extrema >= region_min)
+                    ].copy()
+                    if not transitions.empty:
+                        fig.add_trace(go.Scatter(
+                            x=pd.to_datetime(transitions.known_from,unit='ms',utc=True),
+                            y=(transitions.band_low+transitions.band_high)/2,
+                            mode='markers',marker={'size':11,'symbol':'diamond',
+                              'color':'#efc569','line':{'width':1,'color':'#302612'}},
+                            hovertext=[
+                                f'Etapa PRE confirmada: {iso(int(r.known_from))}'
+                                f'<br>Banda conocida: {float(r.band_low):,.2f}–'
+                                f'{float(r.band_high):,.2f} USD'
+                                f'<br>Extremos confirmados: {int(r.independent_extrema)}'
+                                for r in transitions.itertuples(index=False)],
+                            hoverinfo='text',name='Confirmaciones de banda PRE'))
+                    if reveal_post and chart_end > cutoff:
+                        # The exact PRE-selected stage is a STATIC reference
+                        # over POST, even if the stage was just born at cutoff.
+                        # It is never updated using a future pivot.
+                        stage=region_inspection
+                        x0=pd.to_datetime(cutoff,unit='ms',utc=True)
+                        x1=pd.to_datetime(chart_end,unit='ms',utc=True)
+                        fig.add_shape(type='rect',xref='x',yref='y',
+                              x0=x0,x1=x1,y0=float(stage.band_low),
+                              y1=float(stage.band_high),
+                              line={'color':color,'width':1,'dash':'dash'},
+                              fillcolor=color,opacity=0.06)
+                        fig.add_annotation(x=x0,y=float(stage.band_high),
+                             xref='x',yref='y',yanchor='bottom',showarrow=False,
+                             text='POST · referencia PRE fija (no ACTIVE)',
+                             font={'color':color,'size':10})
         except ValueError as exc:
             st.warning(f'V2: {exc}. Reducí el período o las temporalidades.')
     if mode == 'INSPECTOR' and region_member_details is not None and not region_member_details.empty:
@@ -503,7 +709,12 @@ def render_btc_multiswing_60d_view(project):
                     f'{float(region_inspection.band_high):,.2f} USD · conocida desde '
                     f'{iso(int(region_inspection.known_from))}. '
                     'Este modo NO determina rechazo, breakout, TP/SL, tamaño ni ejecución. '
-                    'Es una referencia de preparación sin resultados futuros.')
+                    'Solo se muestran etapas causales. Si revelás POST, la banda '
+                    'se proyecta fija exclusivamente como referencia visual, '
+                    'sin modificar su geometría PRE ni determinar resultados.')
+        if replay_post_status == 'CUTOFF_CENSORED' and reveal_post:
+            st.warning('POST limitado por el final del freeze BTC 60D: CENSORED. '
+                       'No equivale a ausencia de reacción.')
         st.caption('No hay integración HLL/REACTION ni estrategias operativas habilitadas aquí. '
                    'La investigación de triggers se desarrollará y validará por separado.')
         return

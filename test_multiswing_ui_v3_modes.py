@@ -140,9 +140,12 @@ class _UI:
     def __init__(self, mode):
         self.mode = mode
         self.plot_keys = []
+        self.session_state = {}
     def radio(self, label, options, **kwargs):
         return self.mode
     def date_input(self, label, **kwargs):
+        return kwargs['value']
+    def time_input(self, label, **kwargs):
         return kwargs['value']
     def selectbox(self, label, options, **kwargs):
         return options[kwargs.get('index',0)]
