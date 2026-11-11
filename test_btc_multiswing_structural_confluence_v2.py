@@ -123,7 +123,11 @@ class CausalRegionsV2(unittest.TestCase):
         from pathlib import Path
         path=Path(__file__).parent/'dashboard/views/reaction_multiswing_btc60d_view_v1.py'
         source=path.read_text(encoding='utf-8')
-        self.assertIn('V2 · Regiones geométricas de swings físicos independientes',source)
+        # V3 makes geometric bands available in all three research modes;
+        # the legacy toggle label no longer exists.
+        self.assertIn('show_regions=True', source)
+        self.assertIn('Parámetros geométricos V2 · avanzados', source)
+        self.assertIn('V2 · Regiones por extremos físicos independientes · PRE', source)
         self.assertIn('construct_regions(',source)
         self.assertNotIn('from hll_',source)
         self.assertNotIn('requests.get(',source)
@@ -160,6 +164,7 @@ class DashboardV2Smoke(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self,*a): return False
             def markdown(self,*a,**k): pass
+            def radio(self,label,options,**k): return 'MAPA'
             def caption(self,*a,**k): pass
             def columns(self,n): return [self]*(n if isinstance(n,int) else len(n))
             def date_input(self,*a,**k): return k['value']
@@ -185,4 +190,5 @@ class DashboardV2Smoke(unittest.TestCase):
         self.assertEqual(len(fake.figures),1)
         self.assertGreaterEqual(len(fake.figures[0].layout.shapes),1)
         self.assertEqual(fake.figures[0].data[0].type,'candlestick')
-        self.assertTrue(fake.tables)
+        # MAPA intentionally has no verbose pivot or region tables.
+        self.assertEqual(len(fake.tables),0)

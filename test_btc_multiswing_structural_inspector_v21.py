@@ -125,7 +125,12 @@ class RegionInspectorV21(unittest.TestCase):
         from pathlib import Path
         view=Path(__file__).parent/'dashboard/views/reaction_multiswing_btc60d_view_v1.py'
         s=view.read_text(encoding='utf-8')
-        self.assertIn('V2.1 · Inspección de regiones sin saturar el gráfico',s)
+        # V3 moved the old V2.1 heading into the INSPECTOR mode, but kept
+        # causal candidate selection, limits and physical-member inspection.
+        self.assertIn("V3_MODES = ('MAPA', 'INSPECTOR', 'EJECUCION')", s)
+        self.assertIn('Mínimo de extremos independientes', s)
+        self.assertIn('Máximo de regiones dibujadas', s)
+        self.assertIn("if mode == 'INSPECTOR' and inspect_history", s)
         self.assertIn('region_member_evidence(',s)
         self.assertIn('visible_region_candidates(',s)
         self.assertNotIn('from hll_',s)
