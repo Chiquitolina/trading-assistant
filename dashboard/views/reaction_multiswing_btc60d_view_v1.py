@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 import math
+import numpy as np
 from pathlib import Path
 
 from btc_multiswing_structural_confluence_v2 import (
@@ -339,6 +340,135 @@ def v32_build_context_chart(full, *, stages, selected_region, region_id: str,
     return fig,len(candles),context_start
 
 
+
+# V3.1.2 | Retrospective navigation only. Events locate a historical decision
+# instant, but are NEVER used as PRE features, signals, trading outcomes, or
+# evidence for the selected band. The charts still reconstruct at the cutoff.
+V33_REPLAY_ORIGINS = ('ARRIVAL', 'VISIT', 'CONFIRMATION', 'MANUAL')
+V33_NAVIGATION_GAP_MINUTES = 30
+
+
+def v33_structural_event_index(full, stages, *, region_id: str,
+                               source_end: int, gap_minutes: int = 30):
+    """Find causal decision anchors for one region across its known stages.
+
+    Stage events: cutoff at the closed confirmation minute.
+    CONTACT events: cutoff at the OPEN of the first touching 1m bar, before
+      its range or closing price is known.
+    VISIT events: contacts grouped when the gap is <= `gap_minutes`; cutoff
+      remains the *first* touching bar's open, NOT the visit closure.
+
+    Scanning historical high/low is permitted ONLY for navigation. Its results
+    must never be read by the PRE renderer or used to claim a predicted touch.
+    The fixed-band V2.3 retrospective visit audit remains unchanged.
+    """
+    import pandas as pd
+    if not region_id or int(source_end) % M or gap_minutes not in (5, 15, 30, 60):
+        raise ValueError('INVALID_EVENT_NAVIGATION_SETTINGS')
+    needed={'region_id','known_from','known_until','band_low','band_high',
+            'independent_extrema','side'}
+    if stages is None or not needed.issubset(stages.columns):
+        raise ValueError('INVALID_EVENT_NAVIGATION_STAGES')
+    if not {'timestamp','high','low'}.issubset(full.columns):
+        raise ValueError('INVALID_EVENT_NAVIGATION_CANDLES')
+    region=stages.loc[stages.region_id.eq(region_id)].sort_values(
+        ['known_from','known_until'],kind='mergesort').copy()
+    out_cols=['event_id','event_type','decision_ts','stage_known_from',
+              'band_low','band_high','extrema_at_event','visit_number']
+    if region.empty:
+        return pd.DataFrame(columns=out_cols)
+    if ((region.known_until < region.known_from).any() or
+        (region.band_low <= 0).any() or
+        (region.band_high < region.band_low).any()):
+        raise ValueError('INVALID_EVENT_NAVIGATION_STAGE_TIMELINE')
+    if any(region.known_from.iloc[i] < region.known_until.iloc[i-1]
+           for i in range(1,len(region))):
+        raise ValueError('OVERLAPPING_EVENT_NAVIGATION_STAGES')
+    # Several independent extrema may be confirmed in the same minute.
+    # Only the last stage of that minute is operative, without leaking later
+    # minutes. Zero-duration earlier stages are still legitimate history.
+    region=region.drop_duplicates('known_from',keep='last').reset_index(drop=True)
+    if (full.timestamp.duplicated().any() or
+        (full.timestamp.diff().dropna() != M).any()):
+        raise ValueError('NONCONTIGUOUS_EVENT_NAVIGATION_1M')
+    events=[]
+    for n,row in enumerate(region.itertuples(index=False)):
+        stamp=int(row.known_from)
+        if stamp <= int(source_end):
+            events.append({'event_id':f'{region_id}:C:{stamp}',
+                'event_type':'CONFIRMATION','decision_ts':stamp,
+                'stage_known_from':stamp,'band_low':float(row.band_low),
+                'band_high':float(row.band_high),
+                'extrema_at_event':int(row.independent_extrema),
+                'visit_number':None})
+    # Every minute is evaluated against the region stage that existed at the
+    # OPEN of that bar. A future geometry cannot change an earlier touch.
+    start=int(region.known_from.min())
+    bars=full.loc[(full.timestamp>=start)&(full.timestamp<int(source_end)),
+                  ['timestamp','high','low']]
+    if not bars.empty:
+        stamp=bars.timestamp.to_numpy(dtype=np.int64)
+        hi=bars.high.to_numpy(dtype=float)
+        lo=bars.low.to_numpy(dtype=float)
+        if (not np.isfinite(hi).all() or not np.isfinite(lo).all() or
+            (hi<lo).any()):
+            raise ValueError('INVALID_EVENT_NAVIGATION_OHLC')
+        known=region.known_from.to_numpy(dtype=np.int64)
+        until=region.known_until.to_numpy(dtype=np.int64)
+        idx=np.searchsorted(known,stamp,side='right')-1
+        safe=np.maximum(idx,0)
+        valid=(idx>=0)&(stamp<until[safe])
+        bandlow=region.band_low.to_numpy(dtype=float)[safe]
+        bandhigh=region.band_high.to_numpy(dtype=float)[safe]
+        touched=valid&(hi>=bandlow)&(lo<=bandhigh)
+        starts=np.flatnonzero(touched & ~np.r_[False,touched[:-1]])
+        # A new contact begins only after a non-contact 1m bar (V2.2 rule).
+        # To group visits we use the last touching close, like V2.3.
+        contact_records=[]
+        for i in starts:
+            last=int(i)
+            while last+1<len(touched) and touched[last+1]:
+                last+=1
+            si=int(safe[i]); ts=int(stamp[i])
+            contact_records.append((ts,int(stamp[last])+M,si))
+            events.append({'event_id':f'{region_id}:T:{ts}',
+                'event_type':'ARRIVAL','decision_ts':ts,
+                'stage_known_from':int(known[si]),
+                'band_low':float(bandlow[i]),'band_high':float(bandhigh[i]),
+                'extrema_at_event':int(region.iloc[si].independent_extrema),
+                'visit_number':None})
+        previous_end=None
+        visit_n=0
+        for ts,last_close,si in contact_records:
+            if previous_end is None or ts-previous_end>gap_minutes*M:
+                visit_n+=1
+                events.append({'event_id':f'{region_id}:V:{ts}',
+                    'event_type':'VISIT','decision_ts':ts,
+                    'stage_known_from':int(known[si]),
+                    'band_low':float(region.iloc[si].band_low),
+                    'band_high':float(region.iloc[si].band_high),
+                    'extrema_at_event':int(region.iloc[si].independent_extrema),
+                    'visit_number':visit_n})
+            previous_end=last_close
+    return pd.DataFrame(events,columns=out_cols).sort_values(
+        ['decision_ts','event_type','event_id'],
+        ascending=[False,True,True],kind='mergesort').reset_index(drop=True)
+
+
+def v33_auto_decision_cutoff(event_row, *, source_start: int,
+                             source_end: int, event_type: str) -> int:
+    """Validate a retrospective anchor; the returned minute is PRE decision time."""
+    if event_type not in ('ARRIVAL','VISIT','CONFIRMATION'):
+        raise ValueError('INVALID_AUTO_REPLAY_EVENT_TYPE')
+    if str(event_row['event_type']) != event_type:
+        raise ValueError('AUTO_REPLAY_EVENT_MISMATCH')
+    stamp=int(event_row['decision_ts'])
+    known=int(event_row['stage_known_from'])
+    if not (int(source_start)<stamp<=int(source_end) and
+            known<=stamp and stamp % M==0):
+        raise ValueError('INVALID_AUTO_REPLAY_CUTOFF')
+    return stamp
+
 def render_btc_multiswing_60d_view(project):
     import pandas as pd
     import streamlit as st
@@ -352,6 +482,16 @@ def render_btc_multiswing_60d_view(project):
             'EJECUCION': '③ Preparación multi-TF · experimental',
         }[m], key='ms60_v3_mode')
     policy = v3_view_policy(mode)
+    replay_origin='MANUAL'
+    if mode == 'EJECUCION':
+        replay_origin=st.selectbox('Ubicar PRE automáticamente según',
+            list(V33_REPLAY_ORIGINS),index=0,
+            format_func=lambda x:{
+                'ARRIVAL':'Llegada del precio · PRE antes del primer contacto',
+                'VISIT':'Visita histórica · PRE al comenzar la visita',
+                'CONFIRMATION':'Confirmación de banda · PRE al confirmar la etapa',
+                'MANUAL':'Exploración libre · fecha y hora manuales'}[x],
+            key='ms60_v33_event_origin')
     ui_state = getattr(st, 'session_state', None)
     if ui_state is not None:
         previous_mode = ui_state.get('ms60_v31_last_mode')
@@ -381,13 +521,17 @@ def render_btc_multiswing_60d_view(project):
     start, end = source['start'], source['end']
     d1,d2,d3,d4=st.columns([2,1,2,1])
     with d1:
-        selected_date=st.date_input(
-            'Fecha del replay PRE (UTC)' if mode == 'EJECUCION'
-            else 'Corte de exploración (UTC)',
-            value=_selected_cutoff_date(end),
-            min_value=datetime.fromtimestamp(start/1000,timezone.utc).date(),
-            max_value=_selected_cutoff_date(end),
-            key='ms60_cutoff_date')
+        if mode == 'EJECUCION' and replay_origin != 'MANUAL':
+            selected_date=_selected_cutoff_date(end)
+            st.caption('Fecha PRE: automática al seleccionar un evento de la banda')
+        else:
+            selected_date=st.date_input(
+                'Fecha del replay PRE (UTC)' if mode == 'EJECUCION'
+                else 'Corte de exploración (UTC)',
+                value=_selected_cutoff_date(end),
+                min_value=datetime.fromtimestamp(start/1000,timezone.utc).date(),
+                max_value=_selected_cutoff_date(end),
+                key='ms60_cutoff_date')
     with d2:
         span_days=st.selectbox('Ventana (días)',[1,3,7,14,30,60],index=2,key='ms60_days')
     with d3:
@@ -466,30 +610,121 @@ def render_btc_multiswing_60d_view(project):
     reveal_post = False
     replay_post_horizon = 60
     replay_post_status = 'HIDDEN'
+    event_anchor_region=''
+    event_id=''
+    if mode == 'EJECUCION' and replay_origin != 'MANUAL':
+        # This full-history index is RETROSPECTIVE NAVIGATION ONLY. Every PRE
+        # feature/region/chart below is rebuilt at the chosen event timestamp.
+        nav_known=asof_rows(catalog,end,selected_tfs,side)
+        nav_regions,nav_stages,_=construct_regions(
+            nav_known,end,tolerance_pct=tolerance_pct,
+            lookback_days=lookback_days,min_separation_minutes=separation)
+        nav_regions=nav_regions.sort_values(
+            ['born_ts','region_id'],ascending=[False,True],
+            kind='mergesort')
+        region_lookup={str(r.region_id):r for r in nav_regions.itertuples(index=False)}
+        birth_rows=(nav_stages.sort_values(['known_from','region_id'],kind='mergesort')
+                    .drop_duplicates('region_id',keep='first'))
+        birth_lookup={str(r.region_id):r for r in birth_rows.itertuples(index=False)}
+        region_options=['']+nav_regions.region_id.astype(str).tolist()
+        # On entry from map/inspector, reuse the selected structural identity.
+        # In the replay itself, keep the user's explicit navigation selection.
+        if ui_state is not None:
+            previous=str(ui_state.get('ms60_v21_region_selection') or '')
+            if (previous in region_lookup and
+                (previous_mode in ('MAPA','INSPECTOR') or
+                 'ms60_v33_region_anchor' not in ui_state)):
+                ui_state['ms60_v33_region_anchor']=previous
+        if (ui_state is not None and ui_state.get('ms60_v33_region_anchor','')
+                not in region_options):
+            ui_state['ms60_v33_region_anchor']=''
+        event_anchor_region=st.selectbox('Banda para replay automático',
+            region_options,
+            format_func=lambda rid:'Seleccioná una banda para explorar sus eventos'
+            if not rid else (
+                f'{region_lookup[rid].side} · '
+                f'{(float(birth_lookup[rid].band_low)+float(birth_lookup[rid].band_high))/2:,.2f} USD'
+                f' (geometría de nacimiento) · {iso(int(region_lookup[rid].born_ts))}'
+                f' · {rid[:12]}'),
+            key='ms60_v33_region_anchor')
+        if not event_anchor_region:
+            st.info('Elegí una banda. El momento PRE se configurará automáticamente; '
+                    'la hora manual queda disponible en Exploración libre.')
+            return
+        nav_events=v33_structural_event_index(full,nav_stages,
+                    region_id=event_anchor_region,source_end=end,
+                    gap_minutes=V33_NAVIGATION_GAP_MINUTES)
+        relevant=nav_events.loc[nav_events.event_type.eq(replay_origin)].copy()
+        if relevant.empty:
+            st.info('No hay eventos de este tipo para la banda seleccionada. '
+                    'Podés consultar su confirmación u optar por exploración libre.')
+            return
+        event_lookup={str(r.event_id):r for r in relevant.itertuples(index=False)}
+        if ui_state is not None:
+            event_signature=(str(event_anchor_region),str(replay_origin),
+                float(tolerance_pct),int(lookback_days),int(separation),
+                tuple(selected_tfs),str(side))
+            if ui_state.get('ms60_v33_last_event_catalog')!=event_signature:
+                ui_state['ms60_v33_event_choice']=str(relevant.event_id.iloc[0])
+                ui_state['ms60_v33_last_event_catalog']=event_signature
+        event_id=st.selectbox('Evento histórico · ubicar corte PRE',
+            relevant.event_id.astype(str).tolist(),
+            format_func=lambda eid: (
+                f'{iso(int(event_lookup[eid].decision_ts))} UTC'
+                f' · {"etapa confirmada" if replay_origin=="CONFIRMATION" else ("primer contacto" if replay_origin=="ARRIVAL" else "inicio de visita")}'
+                f' · {int(event_lookup[eid].extrema_at_event)} extremos PRE'),
+            key='ms60_v33_event_choice')
+        selected_event=relevant.loc[relevant.event_id.eq(event_id)].iloc[0]
+        try:
+            exploration_cutoff=v33_auto_decision_cutoff(selected_event,
+                source_start=start,source_end=end,event_type=replay_origin)
+        except ValueError as exc:
+            st.error(f'Evento histórico inválido: {exc}')
+            return
+        st.caption('Navegación retrospectiva: los contactos se localizan con el '
+            'historial para elegir un instante, pero su vela y desenlace NO forman '
+            'parte del PRE. Una visita se agrupa con 30m entre contactos y se '
+            'abre en su primer toque; no equivale a una señal de REACTION.')
     if mode == 'EJECUCION':
-        initial_clock = (datetime.fromtimestamp(end/1000,timezone.utc).time()
-                         if selected_date == datetime.fromtimestamp(end/1000,timezone.utc).date()
-                         else time(12,0))
-        rc1,rc2=st.columns([2,1])
-        with rc1:
-            replay_clock=st.time_input('Instante PRE exacto (UTC) · HH:MM',
-                         value=initial_clock,step=timedelta(minutes=1),
-                         key='ms60_v31_replay_clock')
-        with rc2:
+        if replay_origin == 'MANUAL':
+            initial_clock = (datetime.fromtimestamp(end/1000,timezone.utc).time()
+                             if selected_date == datetime.fromtimestamp(end/1000,timezone.utc).date()
+                             else time(12,0))
+            rc1,rc2=st.columns([2,1])
+            with rc1:
+                replay_clock=st.time_input('Instante PRE exacto (UTC) · HH:MM',
+                             value=initial_clock,step=timedelta(minutes=1),
+                             key='ms60_v31_replay_clock')
+            with rc2:
+                replay_hours=int(st.selectbox('Contexto anterior (horas)',
+                                  [2,4,8,12,24,48],index=4,
+                                  key='ms60_v31_pre_hours'))
+            try:
+                exploration_cutoff=v31_replay_cutoff_utc(
+                    selected_date,replay_clock,source_start=start,source_end=end)
+            except ValueError as exc:
+                st.warning(f'Replay PRE fuera del historial congelado: {exc}. '
+                           'Elegí un instante UTC dentro del período disponible.')
+                return
+        else:
             replay_hours=int(st.selectbox('Contexto anterior (horas)',
                               [2,4,8,12,24,48],index=4,
                               key='ms60_v31_pre_hours'))
-        try:
-            exploration_cutoff=v31_replay_cutoff_utc(
-                selected_date,replay_clock,source_start=start,source_end=end)
-        except ValueError as exc:
-            st.warning(f'Replay PRE fuera del historial congelado: {exc}. '
-                       'Elegí un instante UTC dentro del período disponible.')
-            return
-        if st.session_state.get('ms60_v31_last_cutoff') != exploration_cutoff:
-            # Do this BEFORE creating the widget. A moved replay never carries
-            # an already-open POST from another decision time.
-            st.session_state['ms60_v31_reveal_post'] = False
+        replay_signature=(int(exploration_cutoff),str(replay_origin),
+                          str(event_anchor_region if replay_origin!='MANUAL'
+                              else (ui_state.get('ms60_v21_region_selection','')
+                                    if ui_state is not None else '')),
+                          str(event_id))
+        if ui_state is not None:
+            last_signature=ui_state.get('ms60_v33_last_replay_signature')
+            # Keep compatibility with pre-V3.1.2 MANUAL replay sessions. Only
+            # the initial migration may reuse a revealed POST at the same UTC.
+            legacy_unchanged=(last_signature is None and replay_origin=='MANUAL'
+                and ui_state.get('ms60_v31_last_cutoff') == exploration_cutoff)
+            if last_signature != replay_signature and not legacy_unchanged:
+                # Before the widget: changing band/event or time hides POST.
+                st.session_state['ms60_v31_reveal_post'] = False
+            ui_state['ms60_v33_last_replay_signature']=replay_signature
             st.session_state['ms60_v31_last_cutoff'] = exploration_cutoff
         rp1,rp2=st.columns([2,1])
         with rp1:
@@ -648,14 +883,28 @@ def render_btc_multiswing_60d_view(project):
                 return
             candidates = v3_rank_regions_near_price(candidates,float(recent_closes.iloc[-1]))
         candidates_by_id = {str(r.region_id):r for r in candidates.itertuples(index=False)}
-        region_selection = st.selectbox('Inspeccionar una región candidata',
-            ['']+candidates.region_id.astype(str).tolist(),
-            format_func=lambda rid:'Vista general · regiones seleccionadas por orden descriptivo'
-            if not rid else (
-                f"{candidates_by_id[rid].side} · {candidates_by_id[rid].center:,.2f} USD"
-                f" · {int(candidates_by_id[rid].independent_extrema)} extremos PRE"
-                f" · {iso(int(candidates_by_id[rid].known_from))} · {rid[:12]}"),
-            key='ms60_v21_region_selection')
+        if mode == 'EJECUCION' and replay_origin != 'MANUAL':
+            region_selection=event_anchor_region
+            if region_selection not in candidates_by_id:
+                st.warning('La banda elegida para navegar no tiene una etapa '
+                           'elegible en este instante PRE con los filtros actuales. '
+                           'No se dibuja una estructura futura; elegí otro evento '
+                           'o disminuí el mínimo de extremos.')
+                return
+            stage=candidates_by_id[region_selection]
+            st.caption(f'Banda PRE seleccionada automáticamente: {stage.side} '
+                f'{float(stage.center):,.2f} USD · '
+                f'{int(stage.independent_extrema)} extremos conocidos · '
+                f'{region_selection[:12]}')
+        else:
+            region_selection = st.selectbox('Inspeccionar una región candidata',
+                ['']+candidates.region_id.astype(str).tolist(),
+                format_func=lambda rid:'Vista general · regiones seleccionadas por orden descriptivo'
+                if not rid else (
+                    f"{candidates_by_id[rid].side} · {candidates_by_id[rid].center:,.2f} USD"
+                    f" · {int(candidates_by_id[rid].independent_extrema)} extremos PRE"
+                    f" · {iso(int(candidates_by_id[rid].known_from))} · {rid[:12]}"),
+                key='ms60_v21_region_selection')
         draw_region_ids, draw_stats = display_region_ids(
             candidates,max_regions,region_selection)
         if mode in ('INSPECTOR','EJECUCION') and not region_selection:

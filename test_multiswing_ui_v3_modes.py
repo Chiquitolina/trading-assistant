@@ -148,6 +148,10 @@ class _UI:
     def time_input(self, label, **kwargs):
         return kwargs['value']
     def selectbox(self, label, options, **kwargs):
+        # Legacy render regressions explicitly exercise the unchanged manual
+        # replay. New event-navigation tests cover the automatic default.
+        if kwargs.get('key')=='ms60_v33_event_origin':
+            return 'MANUAL'
         return options[kwargs.get('index',0)]
     def multiselect(self, label, options, **kwargs):
         return kwargs.get('default',[])
