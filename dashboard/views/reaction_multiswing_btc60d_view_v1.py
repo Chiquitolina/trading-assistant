@@ -3,7 +3,8 @@
 No reconstruye pivotes al abrir el dashboard. Solo lee freeze y catálogo 6TF
 verificados, agrupando identidades físicas *as-of* antes de cada corte.
 POST es exclusivamente visual: nunca incorpora swings confirmados después del
-corte seleccionado. No altera event journal, HLL, scores ni LIVE.
+corte seleccionado. Los paneles multi-TF comparten el mismo instante causal,
+pero NO conectan todavía HLL, REACTION, órdenes ni LIVE.
 """
 from __future__ import annotations
 
@@ -32,14 +33,19 @@ from btc_multiswing_60d_explorer_v1 import (
 
 
 def build_figure(candles, swings, *, display_tf: str, selected=None, cutoff=None,
-                 chart_end=None):
+                 chart_end=None, candle_x_at_close: bool = False):
     import pandas as pd
     import plotly.graph_objects as go
     if candles.empty:
         raise ValueError('NO_CANDLES_TO_DRAW')
     fig = go.Figure()
+    # For execution replay, place HTF candles at their CLOSE timestamps.
+    # A 4h candle 12:00–16:00 may only appear at 16:00, never left of a
+    # 13:30 PRE boundary when its POST content is revealed.
+    xstamps=(candles.timestamp + TF_MINUTES[display_tf]*M
+             if candle_x_at_close else candles.timestamp)
     fig.add_trace(go.Candlestick(
-        x=pd.to_datetime(candles.timestamp,unit='ms',utc=True),
+        x=pd.to_datetime(xstamps,unit='ms',utc=True),
         open=candles.open, high=candles.high, low=candles.low,close=candles.close,
         name=f'BTCUSDT {display_tf}', increasing_line_color='#43ae90',
         decreasing_line_color='#df7070', showlegend=False,
@@ -154,7 +160,7 @@ def v3_rank_regions_near_price(candidates, price: float):
 
 def v3_execution_visual_window(*, source_start: int, cutoff: int,
                                minutes: int = 24 * 60) -> tuple[int, int]:
-    """Closed PRE history for visual-only 1m/5m preparation; never POST."""
+    """Closed PRE history for the visual-only multi-TF replay; never POST."""
     if int(source_start) >= int(cutoff) or not (1 <= int(minutes) <= 24 * 60):
         raise ValueError('INVALID_EXECUTION_VISUAL_WINDOW')
     return max(int(source_start), int(cutoff) - int(minutes) * M), int(cutoff)
@@ -252,6 +258,87 @@ def v31_replay_candidates(regions, stages, start: int, cutoff: int, *,
                         min_extrema=min_extrema,side=side,order=order)
 
 
+V32_PANEL_TFS = tuple(TF_MINUTES)
+V32_CONTEXT_DAYS = (1, 3, 7, 14, 30, 60)
+
+
+def v32_context_window(*, source_start: int, cutoff: int, days: int) -> tuple[int, int]:
+    """Optional HTF context: independent lookback, shared PRE decision minute."""
+    if int(days) not in V32_CONTEXT_DAYS or int(source_start) >= int(cutoff):
+        raise ValueError('INVALID_V32_CONTEXT_WINDOW')
+    return max(int(source_start), int(cutoff)-int(days)*DAY), int(cutoff)
+
+
+def v32_build_context_chart(full, *, stages, selected_region, region_id: str,
+                            timeframe: str, source_start: int, pre_cutoff: int,
+                            chart_end: int, days: int, min_extrema: int = 2):
+    """Second synchronized, read-only panel. Does not load HLL or REACTION.
+
+    The same cutoff drives both charts and all stage eligibility. Historical
+    bands retain their own timestamped geometries; the reference over a
+    revealed POST is ONLY the selected PRE geometry. Candles plot at close.
+
+    Returns (figure or None, bar_count, context_start). Empty/sparse history
+    is explicitly reported by the caller; no silent truncation is performed.
+    """
+    import pandas as pd
+    if timeframe not in V32_PANEL_TFS:
+        raise ValueError('INVALID_V32_TIMEFRAME')
+    if not (int(source_start) < int(pre_cutoff) <= int(chart_end)):
+        raise ValueError('INVALID_V32_REPLAY_TIMELINE')
+    context_start,_=v32_context_window(
+        source_start=source_start,cutoff=pre_cutoff,days=days)
+    candles=aggregate_closed(full,timeframe,context_start,chart_end)
+    if candles.empty or len(candles)>4000:
+        return None, len(candles), context_start
+    empty_markers=pd.DataFrame(columns=['timeframe','side'])
+    fig=build_figure(candles,empty_markers,display_tf=timeframe,
+            cutoff=pre_cutoff,chart_end=chart_end,candle_x_at_close=True)
+    fig.update_layout(
+        title=f'BTCUSDT · contexto estructural {timeframe} · mismo corte PRE',
+        height=510,showlegend=False,
+    )
+    if chart_end>pre_cutoff:
+        fig.add_shape(type='rect',xref='x',yref='paper',
+            x0=pd.to_datetime(pre_cutoff,unit='ms',utc=True),
+            x1=pd.to_datetime(chart_end,unit='ms',utc=True),
+            y0=0,y1=1,fillcolor='#9e7ed3',opacity=0.055,
+            line={'width':0},layer='below')
+    if selected_region is not None and region_id:
+        color='#4fd3ae' if selected_region.side=='LOW' else '#ffb36a'
+        segments=v31_pre_region_segments(stages,region_id=str(region_id),
+               pre_start=context_start,pre_cutoff=pre_cutoff,
+               min_extrema=min_extrema)
+        if len(segments)>400:
+            raise ValueError('V32_TOO_MANY_REGION_STAGES')
+        for stage in segments.itertuples(index=False):
+            fig.add_shape(type='rect',xref='x',yref='y',
+                x0=pd.to_datetime(int(stage.visible_from),unit='ms',utc=True),
+                x1=pd.to_datetime(int(stage.visible_until),unit='ms',utc=True),
+                y0=float(stage.band_low),y1=float(stage.band_high),
+                line={'color':color,'dash':'dot','width':1.2},
+                fillcolor=color,opacity=0.16)
+        if chart_end>pre_cutoff:
+            fig.add_shape(type='rect',xref='x',yref='y',
+                x0=pd.to_datetime(pre_cutoff,unit='ms',utc=True),
+                x1=pd.to_datetime(chart_end,unit='ms',utc=True),
+                y0=float(selected_region.band_low),
+                y1=float(selected_region.band_high),
+                line={'color':color,'dash':'dash','width':1},
+                fillcolor=color,opacity=0.06)
+            fig.add_annotation(
+                x=pd.to_datetime(pre_cutoff,unit='ms',utc=True),
+                y=float(selected_region.band_high),xref='x',yref='y',
+                text='POST · banda PRE fija',showarrow=False,
+                yanchor='bottom',font={'size':10,'color':color})
+    fig.update_xaxes(
+        range=[pd.to_datetime(context_start,unit='ms',utc=True),
+               pd.to_datetime(chart_end,unit='ms',utc=True)],
+        autorange=False,
+    )
+    return fig,len(candles),context_start
+
+
 def render_btc_multiswing_60d_view(project):
     import pandas as pd
     import streamlit as st
@@ -262,7 +349,7 @@ def render_btc_multiswing_60d_view(project):
         format_func=lambda m: {
             'MAPA': '① Mapa estructural',
             'INSPECTOR': '② Inspector de región',
-            'EJECUCION': '③ Preparación 1m/5m · experimental',
+            'EJECUCION': '③ Preparación multi-TF · experimental',
         }[m], key='ms60_v3_mode')
     policy = v3_view_policy(mode)
     ui_state = getattr(st, 'session_state', None)
@@ -279,7 +366,7 @@ def render_btc_multiswing_60d_view(project):
         st.caption('Elegí una región para revisar miembros físicos, evolución PRE, '
                    'contactos V2.2 y visitas V2.3 en paneles separados.')
     else:
-        st.caption('Replay UTC de velas 1m/5m: PRE cerrado por minuto y POST oculto '
+        st.caption('Replay UTC de velas 1m a 4h: PRE cerrado por minuto y POST oculto '
                    'hasta revelar explícitamente. SIN triggers validados, órdenes, backtest ni LIVE.')
     st.caption('Catálogo congelado 1m / 5m / 15m / 30m / 1h / 4h. '
                'Los pivotes solo son elegibles cuando su confirmación está cerrada. '
@@ -312,9 +399,26 @@ def render_btc_multiswing_60d_view(project):
                           key='ms60_side')
     group_mode = 'Una marca por extremo'
     multi_only = False
+    show_context_panel = False
+    context_tf = '1h'
+    context_days = 7
     if mode == 'EJECUCION':
-        display_tf=st.selectbox('Velas del contexto PRE', ['1m','5m'], index=1,
+        display_tf=st.selectbox('Gráfico principal · temporalidad',
+                                list(V32_PANEL_TFS),index=1,
                                 key='ms60_v3_execution_tf')
+        show_context_panel=st.checkbox('Mostrar segundo gráfico de contexto multi-TF',
+                               value=False,key='ms60_v32_show_context')
+        if show_context_panel:
+            ct1,ct2=st.columns(2)
+            with ct1:
+                context_tf=st.selectbox('Contexto · temporalidad',
+                   list(V32_PANEL_TFS),index=4,key='ms60_v32_context_tf')
+            with ct2:
+                context_days=int(st.selectbox('Contexto · días anteriores',
+                   list(V32_CONTEXT_DAYS),index=2,key='ms60_v32_context_days'))
+        st.caption('Ambos gráficos comparten el mismo corte UTC PRE/POST. '
+            'En el replay las velas se posicionan en su hora de CIERRE. '
+            'El segundo gráfico es opcional; HLL y REACTION aún no se superponen.')
     else:
         display_tf=st.selectbox('Velas del gráfico',list(TF_MINUTES),
                                 index=3,key='ms60_display_tf')
@@ -572,7 +676,8 @@ def render_btc_multiswing_60d_view(project):
     fig=build_figure(candles,plot_markers,display_tf=display_tf,
                      selected=chosen_row,
                      cutoff=cutoff if (chosen_row is not None or mode == 'EJECUCION') else None,
-                     chart_end=chart_end)
+                     chart_end=chart_end,
+                     candle_x_at_close=(mode == 'EJECUCION'))
     if mode == 'EJECUCION' and reveal_post and chart_end > cutoff:
         import pandas as pd
         fig.add_shape(type='rect',xref='x',yref='paper',
@@ -682,7 +787,7 @@ def render_btc_multiswing_60d_view(project):
     fig.update_xaxes(range=[pd.to_datetime(chart_start,unit='ms',utc=True),
                             pd.to_datetime(chart_end,unit='ms',utc=True)],
                      autorange=False)
-    st.caption(f'{"Mapa estructural" if mode == "MAPA" else ("Inspector" if mode == "INSPECTOR" else "Contexto PRE 1m/5m")} '
+    st.caption(f'{"Mapa estructural" if mode == "MAPA" else ("Inspector" if mode == "INSPECTOR" else "Contexto PRE multi-TF")} '
                f'· velas cerradas {display_tf}: {len(candles):,} '
                f'· contexto {iso(chart_start)} → {iso(chart_end)}. '
                'La ventana se dibuja completa; ningún dato se recorta silenciosamente.')
@@ -701,7 +806,7 @@ def render_btc_multiswing_60d_view(project):
         return
     if mode == 'EJECUCION':
         if region_inspection is None:
-            st.info('Seleccioná una banda en el desplegable para verla en el contexto PRE 1m/5m. '
+            st.info('Seleccioná una banda en el desplegable para verla en el contexto PRE multi-TF. '
                     'Aún no hay señales ejecutables ni órdenes.')
         else:
             st.info(f'Zona {region_inspection.side} · '
@@ -715,8 +820,30 @@ def render_btc_multiswing_60d_view(project):
         if replay_post_status == 'CUTOFF_CENSORED' and reveal_post:
             st.warning('POST limitado por el final del freeze BTC 60D: CENSORED. '
                        'No equivale a ausencia de reacción.')
-        st.caption('No hay integración HLL/REACTION ni estrategias operativas habilitadas aquí. '
+        st.caption('Próximas capas: HLL as-of, eventos REACTION confirmados y triggers 1m/5m. '
                    'La investigación de triggers se desarrollará y validará por separado.')
+        if show_context_panel:
+            try:
+                second_fig,second_count,second_start=v32_build_context_chart(
+                    full,stages=region_stages,selected_region=region_inspection,
+                    region_id=str(region_selection or ''),
+                    timeframe=context_tf,source_start=start,pre_cutoff=cutoff,
+                    chart_end=chart_end,days=context_days,min_extrema=region_min)
+                if second_fig is None:
+                    st.warning(f'Segundo gráfico {context_tf}: {second_count:,} velas '
+                        'completas. Sin velas suficientes o supera el máximo visual '
+                        'de 4.000; elegí más días o una temporalidad mayor.')
+                else:
+                    st.caption(f'Contexto multi-TF {context_tf}: {second_count:,} velas '
+                        f'cerradas · {iso(second_start)} → {iso(chart_end)}. '
+                        f'Corte PRE común: {iso(cutoff)}. '
+                        'Banda seleccionada y POST congelados al mismo PRE.')
+                    st.plotly_chart(second_fig,use_container_width=True,
+                        key='ms60_v32_context_chart',
+                        config={'displaylogo':False,'scrollZoom':True})
+            except ValueError as exc:
+                st.warning(f'Contexto secundario no disponible: {exc}. '
+                           'El gráfico principal permanece intacto.')
         return
     if region_inspection is None:
         st.info('Elegí una región para ver su evidencia física y su historial V2.2/V2.3.')
