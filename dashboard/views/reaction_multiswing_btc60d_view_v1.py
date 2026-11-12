@@ -9,7 +9,10 @@ pero NO conectan todavía HLL, REACTION, órdenes ni LIVE.
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from collections import OrderedDict
+from threading import RLock
 import math
+import re
 import numpy as np
 from pathlib import Path
 
@@ -31,6 +34,125 @@ from btc_multiswing_60d_explorer_v1 import (
     chart_window, group_asof, iso, load_snapshot, selected_inspection_window,
     window_evidence_stats,
 )
+
+
+# V3.1.3 — Bounded read-only caches for verified frozen datasets only.
+# Streamlit reruns the whole script after a selector changes. The source loader
+# already caches disk reads; these caches avoid repeating geometric detection,
+# repeated physical grouping, the retrospective navigation scan, and full-history
+# 1m->HTF resampling. Each PRE cutoff is a distinct key — no lookahead reuse.
+_V313_CACHE_LOCK = RLock()
+_V313_CACHES: dict[str, OrderedDict] = {
+    'regions': OrderedDict(),
+    'group': OrderedDict(),
+    'stats': OrderedDict(),
+    'events': OrderedDict(),
+    'bars': OrderedDict(),
+}
+_V313_CAPACITY = {'regions': 12, 'group': 8, 'stats': 12,
+                  'events': 12, 'bars': 6}
+
+
+def v313_verified_cache_source(source: dict) -> bool:
+    """Cache only immutable, hash-verified freezes; never fake/test/live data."""
+    if not isinstance(source, dict):
+        return False
+    return all(bool(re.fullmatch(r'[0-9a-fA-F]{64}', str(source.get(k, ''))))
+               for k in ('source_sha256', 'catalog_sha256'))
+
+
+def v313_memo(kind: str, key: tuple, refs: tuple, compute, *, enabled: bool):
+    """Process-local bounded cache, keyed by exact inputs and object identity.
+
+    Strong references prevent id reuse. Results must be treated as read-only;
+    all render-specific sorting/filtering must return new frames. No network,
+    filesystem mutation, or Streamlit state is owned by this cache.
+    """
+    if kind not in _V313_CACHES:
+        raise ValueError('INVALID_V313_CACHE_KIND')
+    if not enabled:
+        return compute()
+    cache=_V313_CACHES[kind]
+    with _V313_CACHE_LOCK:
+        item=cache.get(key)
+        if item is not None and len(item[0]) == len(refs) and all(
+                obj is expected for obj,expected in zip(item[0],refs)):
+            cache.move_to_end(key)
+            return item[1]
+    value=compute()
+    with _V313_CACHE_LOCK:
+        cache[key]=(tuple(refs),value)
+        cache.move_to_end(key)
+        while len(cache)>_V313_CAPACITY[kind]:
+            cache.popitem(last=False)
+    return value
+
+
+def v313_region_build(catalog, known, *, cutoff: int, selected_tfs: tuple,
+                       side: str, tolerance_pct: float, lookback_days: int,
+                       separation: int, enabled: bool):
+    key=(id(catalog),int(cutoff),tuple(selected_tfs),str(side),
+         float(tolerance_pct),int(lookback_days),int(separation))
+    return v313_memo('regions',key,(catalog,),lambda:construct_regions(
+        known,cutoff,tolerance_pct=tolerance_pct,
+        lookback_days=lookback_days,min_separation_minutes=separation),
+        enabled=enabled)
+
+
+def v313_group_build(catalog, known, *, cutoff: int, selected_tfs: tuple,
+                     side: str, collapse: bool, multi_only: bool,
+                     enabled: bool):
+    key=(id(catalog),int(cutoff),tuple(selected_tfs),str(side),
+         bool(collapse),bool(multi_only))
+    return v313_memo('group',key,(catalog,),lambda:group_asof(
+        known,collapse=collapse,multi_only=multi_only),enabled=enabled)
+
+
+def v313_stats_build(catalog, known, *, cutoff: int, start: int,
+                      selected_tfs: tuple, side: str, multi_only: bool,
+                      enabled: bool):
+    key=(id(catalog),int(cutoff),int(start),tuple(selected_tfs),
+         str(side),bool(multi_only))
+    return v313_memo('stats',key,(catalog,),lambda:window_evidence_stats(
+        known,start,cutoff,multi_only=multi_only),enabled=enabled)
+
+
+def v313_events_build(full, stages, *, region_id: str, source_end: int,
+                       gap_minutes: int, enabled: bool):
+    key=(id(full),id(stages),str(region_id),int(source_end),int(gap_minutes))
+    return v313_memo('events',key,(full,stages),
+        lambda:v33_structural_event_index(full,stages,region_id=region_id,
+            source_end=source_end,gap_minutes=gap_minutes),enabled=enabled)
+
+
+def v313_preaggregated(full, tf: str, *, enabled: bool):
+    """Precompute complete, UTC-aligned OHLC once per TF per frozen snapshot.
+
+    It is safe to precompute from the offline full history ONLY because
+    v313_slice_bars strictly removes any candle whose close exceeds the chosen
+    PRE/POST boundary. No future-derived feature or swing is added.
+    """
+    if tf not in TF_MINUTES:
+        raise ValueError('INVALID_V313_TIMEFRAME')
+    key=(id(full),str(tf))
+    return v313_memo('bars',key,(full,),lambda:aggregate_closed(
+        full,tf,int(full.timestamp.iloc[0]),int(full.timestamp.iloc[-1])+M),
+        enabled=enabled)
+
+
+def v313_slice_bars(preaggregated, tf: str, start: int, end: int):
+    """Equivalent to aggregate_closed(...,tf,start,end), no partial candle."""
+    if tf not in TF_MINUTES or int(end)<=int(start):
+        raise ValueError('INVALID_CHART_INTERVAL')
+    step=TF_MINUTES[tf]*M
+    return preaggregated.loc[(preaggregated.timestamp+step>int(start)) &
+                             (preaggregated.timestamp+step<=int(end))].copy().reset_index(drop=True)
+
+
+def v313_render_bars(full, tf: str, start: int, end: int, *, enabled: bool):
+    if not enabled:
+        return aggregate_closed(full,tf,start,end)
+    return v313_slice_bars(v313_preaggregated(full,tf,enabled=True),tf,start,end)
 
 
 def build_figure(candles, swings, *, display_tf: str, selected=None, cutoff=None,
@@ -272,7 +394,8 @@ def v32_context_window(*, source_start: int, cutoff: int, days: int) -> tuple[in
 
 def v32_build_context_chart(full, *, stages, selected_region, region_id: str,
                             timeframe: str, source_start: int, pre_cutoff: int,
-                            chart_end: int, days: int, min_extrema: int = 2):
+                            chart_end: int, days: int, min_extrema: int = 2,
+                            preaggregated=None):
     """Second synchronized, read-only panel. Does not load HLL or REACTION.
 
     The same cutoff drives both charts and all stage eligibility. Historical
@@ -289,7 +412,9 @@ def v32_build_context_chart(full, *, stages, selected_region, region_id: str,
         raise ValueError('INVALID_V32_REPLAY_TIMELINE')
     context_start,_=v32_context_window(
         source_start=source_start,cutoff=pre_cutoff,days=days)
-    candles=aggregate_closed(full,timeframe,context_start,chart_end)
+    candles=(aggregate_closed(full,timeframe,context_start,chart_end)
+             if preaggregated is None else
+             v313_slice_bars(preaggregated,timeframe,context_start,chart_end))
     if candles.empty or len(candles)>4000:
         return None, len(candles), context_start
     empty_markers=pd.DataFrame(columns=['timeframe','side'])
@@ -344,7 +469,7 @@ def v32_build_context_chart(full, *, stages, selected_region, region_id: str,
 # V3.1.2 | Retrospective navigation only. Events locate a historical decision
 # instant, but are NEVER used as PRE features, signals, trading outcomes, or
 # evidence for the selected band. The charts still reconstruct at the cutoff.
-V33_REPLAY_ORIGINS = ('ARRIVAL', 'VISIT', 'CONFIRMATION', 'MANUAL')
+V33_REPLAY_ORIGINS = ('ARRIVAL', 'VISIT', 'BIRTH', 'CONFIRMATION', 'MANUAL')
 V33_NAVIGATION_GAP_MINUTES = 30
 
 
@@ -489,7 +614,8 @@ def render_btc_multiswing_60d_view(project):
             format_func=lambda x:{
                 'ARRIVAL':'Llegada del precio · PRE antes del primer contacto',
                 'VISIT':'Visita histórica · PRE al comenzar la visita',
-                'CONFIRMATION':'Confirmación de banda · PRE al confirmar la etapa',
+                'BIRTH':'Nacimiento original · PRE al confirmar el segundo extremo',
+                'CONFIRMATION':'Nueva confirmación · evolución posterior de la banda',
                 'MANUAL':'Exploración libre · fecha y hora manuales'}[x],
             key='ms60_v33_event_origin')
     ui_state = getattr(st, 'session_state', None)
@@ -519,6 +645,7 @@ def render_btc_multiswing_60d_view(project):
         return
 
     start, end = source['start'], source['end']
+    cache_verified=v313_verified_cache_source(source)
     d1,d2,d3,d4=st.columns([2,1,2,1])
     with d1:
         if mode == 'EJECUCION' and replay_origin != 'MANUAL':
@@ -616,9 +743,10 @@ def render_btc_multiswing_60d_view(project):
         # This full-history index is RETROSPECTIVE NAVIGATION ONLY. Every PRE
         # feature/region/chart below is rebuilt at the chosen event timestamp.
         nav_known=asof_rows(catalog,end,selected_tfs,side)
-        nav_regions,nav_stages,_=construct_regions(
-            nav_known,end,tolerance_pct=tolerance_pct,
-            lookback_days=lookback_days,min_separation_minutes=separation)
+        nav_regions,nav_stages,_=v313_region_build(catalog,nav_known,
+            cutoff=end,selected_tfs=selected_tfs,side=side,
+            tolerance_pct=tolerance_pct,lookback_days=lookback_days,
+            separation=separation,enabled=cache_verified)
         nav_regions=nav_regions.sort_values(
             ['born_ts','region_id'],ascending=[False,True],
             kind='mergesort')
@@ -651,10 +779,16 @@ def render_btc_multiswing_60d_view(project):
             st.info('Elegí una banda. El momento PRE se configurará automáticamente; '
                     'la hora manual queda disponible en Exploración libre.')
             return
-        nav_events=v33_structural_event_index(full,nav_stages,
+        nav_events=v313_events_build(full,nav_stages,
                     region_id=event_anchor_region,source_end=end,
-                    gap_minutes=V33_NAVIGATION_GAP_MINUTES)
-        relevant=nav_events.loc[nav_events.event_type.eq(replay_origin)].copy()
+                    gap_minutes=V33_NAVIGATION_GAP_MINUTES,enabled=cache_verified)
+        if replay_origin in ('BIRTH','CONFIRMATION'):
+            confirmations=nav_events.loc[nav_events.event_type.eq('CONFIRMATION')].sort_values(
+                ['decision_ts','event_id'],kind='mergesort').reset_index(drop=True)
+            relevant=(confirmations.head(1) if replay_origin=='BIRTH'
+                      else confirmations.iloc[1:]).copy()
+        else:
+            relevant=nav_events.loc[nav_events.event_type.eq(replay_origin)].copy()
         if relevant.empty:
             st.info('No hay eventos de este tipo para la banda seleccionada. '
                     'Podés consultar su confirmación u optar por exploración libre.')
@@ -677,7 +811,8 @@ def render_btc_multiswing_60d_view(project):
         selected_event=relevant.loc[relevant.event_id.eq(event_id)].iloc[0]
         try:
             exploration_cutoff=v33_auto_decision_cutoff(selected_event,
-                source_start=start,source_end=end,event_type=replay_origin)
+                source_start=start,source_end=end,
+                event_type='CONFIRMATION' if replay_origin=='BIRTH' else replay_origin)
         except ValueError as exc:
             st.error(f'Evento histórico inválido: {exc}')
             return
@@ -734,6 +869,10 @@ def render_btc_multiswing_60d_view(project):
             replay_post_horizon=int(st.selectbox('POST a revelar (minutos)',
                     [15,30,60,240,720],index=2,disabled=not reveal_post,
                     key='ms60_v31_post_minutes'))
+        available_post_minutes=max(0,(int(end)-int(exploration_cutoff))//M)
+        st.caption(f'POST disponible en freeze desde este evento: '
+                   f'{available_post_minutes:,} minutos · '
+                   'al pedir un horizonte mayor, se marca CENSORED.')
         _,replay_post_status=v31_reveal_post_window(
             pre_cutoff=exploration_cutoff,source_end=end,
             reveal=reveal_post,horizon_minutes=replay_post_horizon)
@@ -743,12 +882,16 @@ def render_btc_multiswing_60d_view(project):
                    'NO actualiza evidencias ni geometría.')
     explore_start,_=chart_window(exploration_cutoff,start,int(span_days))
     known=asof_rows(catalog,exploration_cutoff,selected_tfs,side)
-    display=group_asof(known,collapse=group_mode.startswith('Una'),multi_only=multi_only)
+    display=v313_group_build(catalog,known,cutoff=exploration_cutoff,
+        selected_tfs=selected_tfs,side=side,collapse=group_mode.startswith('Una'),
+        multi_only=multi_only,enabled=cache_verified)
     pool=display[(display['plot_ts']>=explore_start) & (display['plot_ts']<exploration_cutoff)].copy()
     pool=pool.sort_values(['plot_ts','timeframe'],ascending=[False,True]).reset_index(drop=True)
     # Las cifras deben corresponder a la misma ventana espacial del grafico;
     # las agrupaciones siguen siendo causales al corte, sin confirmar pivotes futuros.
-    stats=window_evidence_stats(known,explore_start,exploration_cutoff,multi_only=multi_only)
+    stats=v313_stats_build(catalog,known,cutoff=exploration_cutoff,
+        start=explore_start,selected_tfs=selected_tfs,side=side,
+        multi_only=multi_only,enabled=cache_verified)
     x1,x2,x3,x4=st.columns(4)
     x1.metric('Representaciones PRE · ventana',stats['representations'])
     x2.metric('Extremos físicos verificados · ventana',stats['verified_extrema'])
@@ -812,7 +955,7 @@ def render_btc_multiswing_60d_view(project):
                    (f' · hasta {iso(chart_end)}; solo velas, no evidencia nueva.'
                     if reveal_post else ' · completamente oculto.') +
                    ' El contexto de la banda sigue siendo una hipótesis geométrica.')
-    candles=aggregate_closed(full,display_tf,chart_start,chart_end)
+    candles=v313_render_bars(full,display_tf,chart_start,chart_end,enabled=cache_verified)
     if candles.empty:
         st.warning('No hay velas completas en la temporalidad elegida hasta ese corte. '
                    'Elegí un timeframe menor o una ventana mayor.')
@@ -841,9 +984,10 @@ def render_btc_multiswing_60d_view(project):
         # Always reconstruct from representations known at selected PRE cutoff.
         # Do not apply the >=2 TF VISUAL filter: this is a test of *independent*
         # physical extrema, including ones detected by only one timeframe.
-        regions, region_stages, region_stats = construct_regions(
-            asof, cutoff, tolerance_pct=tolerance_pct,
-            lookback_days=lookback_days,min_separation_minutes=separation)
+        regions, region_stages, region_stats = v313_region_build(catalog,asof,
+            cutoff=cutoff,selected_tfs=selected_tfs,side=side,
+            tolerance_pct=tolerance_pct,lookback_days=lookback_days,
+            separation=separation,enabled=cache_verified)
         st.caption(f"V2 · {region_stats['candidate_regions']} regiones geométricas conocidas "
                    f"al corte (historia completa) · {region_stats['physical_extrema_evaluated']} "
                    f"extremos físicos evaluados · {region_stats['ambiguous_excluded']} "
@@ -1077,7 +1221,9 @@ def render_btc_multiswing_60d_view(project):
                     full,stages=region_stages,selected_region=region_inspection,
                     region_id=str(region_selection or ''),
                     timeframe=context_tf,source_start=start,pre_cutoff=cutoff,
-                    chart_end=chart_end,days=context_days,min_extrema=region_min)
+                    chart_end=chart_end,days=context_days,min_extrema=region_min,
+                    preaggregated=(v313_preaggregated(full,context_tf,enabled=True)
+                                   if cache_verified else None))
                 if second_fig is None:
                     st.warning(f'Segundo gráfico {context_tf}: {second_count:,} velas '
                         'completas. Sin velas suficientes o supera el máximo visual '
