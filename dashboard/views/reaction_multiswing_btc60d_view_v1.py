@@ -1169,6 +1169,11 @@ def render_btc_multiswing_60d_view(project):
                         # over POST, even if the stage was just born at cutoff.
                         # It is never updated using a future pivot.
                         stage=region_inspection
+                        # POST can begin immediately after a stage is confirmed:
+                        # in that case no PRE segment is visible and the loop
+                        # above never assigns its local `color`. Resolve the
+                        # reference color from the selected PRE band itself.
+                        color='#4fd3ae' if stage.side=='LOW' else '#ffb36a'
                         x0=pd.to_datetime(cutoff,unit='ms',utc=True)
                         x1=pd.to_datetime(chart_end,unit='ms',utc=True)
                         fig.add_shape(type='rect',xref='x',yref='y',
