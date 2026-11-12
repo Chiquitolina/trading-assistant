@@ -6,6 +6,7 @@ import unittest
 
 import pandas as pd
 
+from dashboard.views import reaction_multiswing_btc60d_view_v1 as view
 from dashboard.views.reaction_multiswing_btc60d_view_v1 import (
     V3_MODES, build_figure, render_btc_multiswing_60d_view,
     v3_execution_visual_window, v3_rank_regions_near_price,
@@ -115,7 +116,8 @@ class V3Modes(unittest.TestCase):
 
     def test_ui_does_not_change_detector_or_execute_trades(self):
         source=inspect.getsource(render_btc_multiswing_60d_view)
-        self.assertIn('construct_regions(',source)
+        self.assertIn('v313_region_build(',source)
+        self.assertIn('construct_regions(',inspect.getsource(view.v313_region_build))
         self.assertIn('region_member_evidence(',source)
         self.assertNotIn('order.place',source)
         self.assertNotIn('RedisMarketDataProvider',source)
