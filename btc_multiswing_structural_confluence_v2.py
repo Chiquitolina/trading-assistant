@@ -32,6 +32,14 @@ class _Candidate:
     members: list[dict] = field(default_factory=list)
     born_ts: int | None = None
     stages: list[dict] = field(default_factory=list)
+    # V3.1.4: cached incremental extrema. These are derived solely from
+    # confirmed members and replace repeated O(member_count) list creation.
+    member_times: list[int] = field(default_factory=list)
+    min_member_ts: int | None = None
+    max_member_ts: int | None = None
+    min_member_price: float | None = None
+    max_member_price: float | None = None
+    sum_member_price: float = 0.0
 
 
 def _region_id(side: str, first_id: str, second_id: str) -> str:
@@ -117,15 +125,19 @@ def construct_regions(known: pd.DataFrame, cutoff: int, *,
         for cluster in clusters:
             if cluster.side != event['side']:
                 continue
-            moments = [m['pivot_ts'] for m in cluster.members]
-            prices = [m['price'] for m in cluster.members]
-            if (max([*moments, ts]) - min([*moments, ts]) > interval
-                    or not _price_spread_ok(prices,price,tolerance_pct)):
+            # The candidate's price/time extrema are updated at each closed
+            # confirmation. Never inspect unconfirmed future members.
+            if (max(int(cluster.max_member_ts), ts) -
+                    min(int(cluster.min_member_ts), ts) > interval):
                 continue
-            if any(abs(ts - other) < gap for other in moments):
+            lo = min(float(cluster.min_member_price), price)
+            hi = max(float(cluster.max_member_price), price)
+            if (hi - lo) / ((lo + hi) / 2) * 100 > tolerance_pct + 1e-12:
+                continue
+            if any(abs(ts - other) < gap for other in cluster.member_times):
                 close_without_gap = True
                 continue
-            center = sum(prices)/len(prices)
+            center = cluster.sum_member_price/len(cluster.members)
             options.append((abs(price-center)/center,cluster.first_pivot_ts,cluster.first_id,cluster))
         if options:
             cluster = min(options, key=lambda o:o[:3])[3]
@@ -136,6 +148,12 @@ def construct_regions(known: pd.DataFrame, cutoff: int, *,
             cluster = _Candidate(event['side'],event['physical_id'],price,ts)
             clusters.append(cluster)
         cluster.members.append(event)
+        cluster.member_times.append(ts)
+        cluster.min_member_ts = ts if cluster.min_member_ts is None else min(cluster.min_member_ts, ts)
+        cluster.max_member_ts = ts if cluster.max_member_ts is None else max(cluster.max_member_ts, ts)
+        cluster.min_member_price = price if cluster.min_member_price is None else min(cluster.min_member_price, price)
+        cluster.max_member_price = price if cluster.max_member_price is None else max(cluster.max_member_price, price)
+        cluster.sum_member_price += price
         if len(cluster.members) >= min_extrema:
             if cluster.born_ts is None:
                 cluster.born_ts = event['known_ts']

@@ -12,6 +12,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from collections import OrderedDict
 from threading import RLock
 import math
+import time as _perf_time
 import re
 import numpy as np
 from pathlib import Path
@@ -417,7 +418,7 @@ def v32_build_context_chart(full, *, stages, selected_region, region_id: str,
              v313_slice_bars(preaggregated,timeframe,context_start,chart_end))
     if candles.empty or len(candles)>4000:
         return None, len(candles), context_start
-    empty_markers=pd.DataFrame(columns=['timeframe','side'])
+    empty_markers=pd.DataFrame(columns=['timeframe','side','plot_ts'])
     fig=build_figure(candles,empty_markers,display_tf=timeframe,
             cutoff=pre_cutoff,chart_end=chart_end,candle_x_at_close=True)
     fig.update_layout(
@@ -637,6 +638,7 @@ def render_btc_multiswing_60d_view(project):
     st.caption('Catálogo congelado 1m / 5m / 15m / 30m / 1h / 4h. '
                'Los pivotes solo son elegibles cuando su confirmación está cerrada. '
                'Sin nuevos detectores de pivotes, sin consultas de red y sin modificar LIVE.')
+    v314_load_started = _perf_time.perf_counter()
     try:
         full, catalog, source = load_snapshot(Path(project))
     except (FileNotFoundError, KeyError, ValueError, OSError) as exc:
@@ -644,6 +646,7 @@ def render_btc_multiswing_60d_view(project):
         st.info('Comprobá el freeze y el catálogo 6TF; no se sustituyen por datos LIVE.')
         return
 
+    v314_load_ms = (_perf_time.perf_counter()-v314_load_started)*1000
     start, end = source['start'], source['end']
     cache_verified=v313_verified_cache_source(source)
     d1,d2,d3,d4=st.columns([2,1,2,1])
@@ -739,6 +742,7 @@ def render_btc_multiswing_60d_view(project):
     replay_post_status = 'HIDDEN'
     event_anchor_region=''
     event_id=''
+    v314_navigation_started = _perf_time.perf_counter()
     if mode == 'EJECUCION' and replay_origin != 'MANUAL':
         # This full-history index is RETROSPECTIVE NAVIGATION ONLY. Every PRE
         # feature/region/chart below is rebuilt at the chosen event timestamp.
@@ -880,18 +884,29 @@ def render_btc_multiswing_60d_view(project):
                    f'POST: {replay_post_status}. Todos los swings y las bandas '
                    'se reconstruyen exclusivamente al corte PRE; revelar POST '
                    'NO actualiza evidencias ni geometría.')
+    v314_navigation_ms = (_perf_time.perf_counter()-v314_navigation_started)*1000
+    v314_evidence_started = _perf_time.perf_counter()
     explore_start,_=chart_window(exploration_cutoff,start,int(span_days))
     known=asof_rows(catalog,exploration_cutoff,selected_tfs,side)
-    display=v313_group_build(catalog,known,cutoff=exploration_cutoff,
-        selected_tfs=selected_tfs,side=side,collapse=group_mode.startswith('Una'),
-        multi_only=multi_only,enabled=cache_verified)
-    pool=display[(display['plot_ts']>=explore_start) & (display['plot_ts']<exploration_cutoff)].copy()
-    pool=pool.sort_values(['plot_ts','timeframe'],ascending=[False,True]).reset_index(drop=True)
+    # V3.1.4: the MAP and execution preview do not use an individual pivot
+    # selector. Do not materialize thousands of physical-group rows just to
+    # throw them away. The inspector still provides its full original selector.
+    if mode == 'INSPECTOR':
+        display=v313_group_build(catalog,known,cutoff=exploration_cutoff,
+            selected_tfs=selected_tfs,side=side,collapse=group_mode.startswith('Una'),
+            multi_only=multi_only,enabled=cache_verified)
+        pool=display[(display['plot_ts']>=explore_start) &
+                     (display['plot_ts']<exploration_cutoff)].copy()
+        pool=pool.sort_values(['plot_ts','timeframe'],ascending=[False,True]).reset_index(drop=True)
+    else:
+        display=None
+        pool=pd.DataFrame(columns=['plot_ts','timeframe','group_key','pivot_id'])
     # Las cifras deben corresponder a la misma ventana espacial del grafico;
     # las agrupaciones siguen siendo causales al corte, sin confirmar pivotes futuros.
     stats=v313_stats_build(catalog,known,cutoff=exploration_cutoff,
         start=explore_start,selected_tfs=selected_tfs,side=side,
         multi_only=multi_only,enabled=cache_verified)
+    v314_evidence_ms = (_perf_time.perf_counter()-v314_evidence_started)*1000
     x1,x2,x3,x4=st.columns(4)
     x1.metric('Representaciones PRE · ventana',stats['representations'])
     x2.metric('Extremos físicos verificados · ventana',stats['verified_extrema'])
@@ -920,7 +935,7 @@ def render_btc_multiswing_60d_view(project):
             if len(pool)>selector_count:
                 st.caption(f'Selector: últimos {selector_count} de {len(pool)} pivotes visibles. '
                            'Para inspeccionar anteriores, cambiá la fecha del corte y/o temporalidades.')
-    elif pool.empty:
+    elif mode == 'INSPECTOR' and pool.empty:
         st.info('No hay pivotes nuevos en esta ventana; las bandas históricas conocidas '
                 'al corte siguen siendo inspeccionables cuando sus etapas se intersectan.')
     chosen_row=None
@@ -955,6 +970,7 @@ def render_btc_multiswing_60d_view(project):
                    (f' · hasta {iso(chart_end)}; solo velas, no evidencia nueva.'
                     if reveal_post else ' · completamente oculto.') +
                    ' El contexto de la banda sigue siendo una hipótesis geométrica.')
+    v314_chart_started = _perf_time.perf_counter()
     candles=v313_render_bars(full,display_tf,chart_start,chart_end,enabled=cache_verified)
     if candles.empty:
         st.warning('No hay velas completas en la temporalidad elegida hasta ese corte. '
@@ -967,9 +983,25 @@ def render_btc_multiswing_60d_view(project):
         return
     # Recompute as-of evidence at selected pivot's first/last confirmation.
     # Even with POST candles visible, never add future swing markers.
-    asof = asof_rows(catalog,cutoff,selected_tfs,side)
-    markers = group_asof(asof,collapse=group_mode.startswith('Una'),multi_only=multi_only)
-    markers = markers[(markers['plot_ts']>=chart_start) & (markers['plot_ts']<cutoff)].copy()
+    v314_candles_ms = (_perf_time.perf_counter()-v314_chart_started)*1000
+    v314_structural_started = _perf_time.perf_counter()
+    asof = known if int(cutoff) == int(exploration_cutoff) else asof_rows(
+        catalog,cutoff,selected_tfs,side)
+    # In normal operation triangles are disabled. Passing a genuinely empty
+    # marker frame avoids an O(catalog) regrouping on EVERY Streamlit widget
+    # rerun; only inspector/map explicit opt-in rebuilds the pivot overlays.
+    if show_all_pivots:
+        if mode == 'INSPECTOR' and display is not None and int(cutoff)==int(exploration_cutoff):
+            markers=display
+        else:
+            markers=v313_group_build(catalog,asof,cutoff=cutoff,
+                selected_tfs=selected_tfs,side=side,
+                collapse=group_mode.startswith('Una'),multi_only=multi_only,
+                enabled=cache_verified)
+        markers=markers[(markers['plot_ts']>=chart_start) &
+                        (markers['plot_ts']<cutoff)].copy()
+    else:
+        markers=pd.DataFrame(columns=['timeframe','side','plot_ts'])
     max_markers=3500
     if show_all_pivots and len(markers)>max_markers:
         st.warning(f'{len(markers):,} marcadores, sobre el límite visual {max_markers:,}. '
@@ -1186,6 +1218,19 @@ def render_btc_multiswing_60d_view(project):
                'La ventana se dibuja completa; ningún dato se recorta silenciosamente.')
     st.plotly_chart(fig,use_container_width=True,key='ms60_chart',
                     config={'displaylogo':False,'scrollZoom':True})
+    v314_structural_plot_ms = (_perf_time.perf_counter()-v314_structural_started)*1000
+    with st.expander('⏱️ Diagnóstico de rendimiento · BTC 60D', expanded=False):
+        st.json({'freeze_load_ms':round(v314_load_ms,1),
+                 'navigation_and_controls_ms':round(v314_navigation_ms,1),
+                 'physical_evidence_ms':round(v314_evidence_ms,1),
+                 'candles_ms':round(v314_candles_ms,1),
+                 'regions_plus_main_chart_ms':round(v314_structural_plot_ms,1),
+                 'total_main_view_ms':round(v314_load_ms+v314_navigation_ms+
+                       v314_evidence_ms+v314_candles_ms+v314_structural_plot_ms,1),
+                 'validated_freeze_cache':bool(cache_verified)})
+        st.caption('Tiempos internos del visor hasta el primer gráfico; no incluye '
+                   'todo dashboard/app.py, la red ni el dibujo en el navegador. '
+                   'El segundo gráfico y los detalles desplegados añaden trabajo.')
     if mode == 'MAPA':
         if region_inspection is not None:
             st.info(f'Región {region_inspection.side} · {float(region_inspection.center):,.2f} USD. '

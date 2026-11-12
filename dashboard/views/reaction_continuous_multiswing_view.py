@@ -8,6 +8,8 @@ eligible as causal evidence for the selected REACTION.
 from __future__ import annotations
 
 from contextlib import closing
+from functools import lru_cache
+import time as _perf_time
 import json
 import math
 from pathlib import Path
@@ -124,12 +126,24 @@ def confluence_matches(points_by_tf, *, pivot_ts, pivot_price, side,
     return sorted(matches, key=lambda v: TF_MS[v['timeframe']])
 
 
-def read_frozen_event(project, event_key, known_ts):
-    """Read original event timestamp-matched OHLC snapshots; no network reads."""
-    path = Path(project) / CONTEXT_DB
-    if not path.is_file():
-        return None, 'NO_CONTEXT_DB'
-    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True, timeout=10)) as con:
+def _frozen_db_version(path: Path):
+    """Detect SQLite DB and WAL updates; never cache a mutable journal blindly."""
+    result = []
+    for item in (path, Path(str(path) + '-wal')):
+        try:
+            stat = item.stat()
+        except FileNotFoundError:
+            result.append(None)
+        else:
+            result.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return tuple(result)
+
+
+@lru_cache(maxsize=64)
+def _cached_original_context(path_str: str, event_key: str, known_ts: int, version):
+    """Read-only frozen JSON, invalidated on any DB/WAL file change."""
+    with closing(sqlite3.connect(Path(path_str).resolve().as_uri()+'?mode=ro',
+                                 uri=True, timeout=10)) as con:
         con.execute('PRAGMA query_only=ON')
         row = con.execute('SELECT known_ts, status, candles_json FROM contexts WHERE event_key=?',
                           (str(event_key),)).fetchone()
@@ -144,6 +158,19 @@ def read_frozen_event(project, event_key, known_ts):
     if not isinstance(snapshots, dict):
         return None, 'INVALID_FROZEN_JSON'
     return snapshots, str(row[1])
+
+
+def read_frozen_event(project, event_key, known_ts):
+    """Read original event snapshot, reusing only identical frozen DB versions.
+
+    No Redis, exchange or current-price fallback. Snapshot dict is read-only for
+    downstream callers, who build their own Pandas copies.
+    """
+    path = Path(project) / CONTEXT_DB
+    if not path.is_file():
+        return None, 'NO_CONTEXT_DB'
+    return _cached_original_context(str(path.resolve()), str(event_key),
+                                    int(known_ts), _frozen_db_version(path))
 
 
 def simultaneous_journal_pivots(project, symbol, retest_ts):
@@ -165,11 +192,13 @@ def simultaneous_journal_pivots(project, symbol, retest_ts):
     return [dict(zip(cols,row)) for row in rows]
 
 
-def _post_path(project, key, known_ts, max_bars):
-    """Optional descriptive POST view. Never input to the swing detector."""
+@lru_cache(maxsize=48)
+def _cached_post_path(project_root: str, event_key: str, known_ts: int,
+                      max_bars: int, signature):
+    """Descriptive POST cache, invalidated when offline auto-path DB/WAL changes."""
     import pandas as pd
-    if int(max_bars) <= 0:
-        return pd.DataFrame()
+    project = Path(project_root)
+    key = str(event_key)
     try:
         from reaction_lab_auto_paths import read_auto_paths_dataframe
         frame = read_auto_paths_dataframe(
@@ -195,6 +224,18 @@ def _post_path(project, key, known_ts, max_bars):
     return out.iloc[:end].copy()
 
 
+
+def _post_path(project, key, known_ts, max_bars):
+    """Optional POST, never a swing-detector input; refresh on DB/WAL change."""
+    import pandas as pd
+    if int(max_bars) <= 0:
+        return pd.DataFrame()
+    db = Path(project) / 'reports/reaction_lab/auto_paths_v1.sqlite3'
+    result = _cached_post_path(str(Path(project).resolve()), str(key),
+        int(known_ts), int(max_bars), _frozen_db_version(db))
+    return result.copy()
+
+
 def assemble_chart_1m(pre, post, known_ts, before, after):
     """A finite, event-anchored 1m view: no present-day market data."""
     import pandas as pd
@@ -212,6 +253,7 @@ def render_continuous_multiswing_view(project, *, timezone='UTC', chart_builder=
     import pandas as pd
     import streamlit as st
     import plotly.graph_objects as go
+    view_started = _perf_time.perf_counter()
     # El historico BTC 60D vive en el mismo Event swing structure: no se toca
     # dashboard/app.py ni el visor de First Touch existente.
     modality = st.selectbox(
@@ -287,7 +329,9 @@ def render_continuous_multiswing_view(project, *, timezone='UTC', chart_builder=
         st.warning('Pivot price no está persistido. No inferimos un nuevo nivel.')
         return
     event_key=str(touch.get('legacy_event_key') or f'{symbol}|{side}|{retest}')
+    snapshots_started = _perf_time.perf_counter()
     snapshots, state=read_frozen_event(project,event_key,known)
+    snapshots_ms = (_perf_time.perf_counter() - snapshots_started) * 1000
     if not snapshots:
         st.warning(f'No hay snapshots causales 1m/5m/15m para este Event ID: {state}. '
                    'No se sustituyen por velas de Redis de hoy.')
@@ -310,12 +354,14 @@ def render_continuous_multiswing_view(project, *, timezone='UTC', chart_builder=
     with d3: tolerance=st.number_input('Proximidad precio %',min_value=0.0,max_value=5.0,
                                      value=0.10,step=0.05,format='%.2f',key='rcms_tolerance')
     buck=st.selectbox('Coincidencia temporal', ['15m','5m'], key='rcms_bucket')
+    detector_started = _perf_time.perf_counter()
     points={};frames={};diag=[]
     for tf in selected_tfs:
         f, p=confirmed_points(snapshots.get(tf,[]),tf,known,detectors[tf],prominence)
         points[tf]=p;frames[tf]=f
         diag.append({'tf':tf,'closed_bars':len(f),'confirmed_swings':len(p),
                      'contiguous_segments':len(_runs_of_contiguous(f,tf))})
+    detectors_ms = (_perf_time.perf_counter() - detector_started) * 1000
     pre=normalized_snapshot(snapshots.get('1m',[]),'1m',known)
     post=_post_path(project,event_key,known,post_count)
     chart_frame=assemble_chart_1m(pre,post,known,candle_count,post_count)
@@ -390,6 +436,14 @@ def render_continuous_multiswing_view(project, *, timezone='UTC', chart_builder=
     st.caption('Conteo descriptivo de timeframes, NO cantidad de fuerzas independientes. '
                '1m/5m/15m pueden describir exactamente el mismo máximo/mínimo. '
                'Todas las confirmaciones deben estar disponibles cuando cerró la REACTION.')
+    with st.expander('⏱️ Diagnóstico de rendimiento · Continuous',expanded=False):
+        st.json({'snapshot_ms':round(snapshots_ms,1),
+                 'swing_detectors_ms':round(detectors_ms,1),
+                 'total_view_ms':round((_perf_time.perf_counter()-view_started)*1000,1),
+                 'frozen_context_cache':str(_cached_original_context.cache_info()),
+                 'post_path_cache':str(_cached_post_path.cache_info())})
+        st.caption('Tiempos de esta vista, no del dashboard principal completo. '
+                   'No se mide aquí el tiempo de transmisión o dibujo en el navegador.')
     with st.expander('Cobertura y procedencia',expanded=False):
         st.dataframe(pd.DataFrame(diag),use_container_width=True,hide_index=True)
         st.json({'touch_key':selected,'legacy_event_key':event_key,'state':state,

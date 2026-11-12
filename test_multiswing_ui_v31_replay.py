@@ -242,7 +242,7 @@ class ReplayRenderIsolation(unittest.TestCase):
             self.assertEqual(ui.plot_keys,['ms60_chart'])
             self.assertEqual(ui.session_state['ms60_v31_last_cutoff'],t)
             rendered.append(ui.fig)
-        self.assertEqual(known_cutoffs,[t,t,t,t])
+        self.assertEqual(known_cutoffs,[t,t])
         pre,post=rendered
         self.assertEqual(len(pre.data[0].x),288)
         self.assertEqual(len(post.data[0].x),300)  # 60m POST / 5m

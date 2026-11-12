@@ -177,10 +177,12 @@ def asof_rows(catalog: pd.DataFrame, cutoff: int, timeframes: tuple[str, ...], s
 
 
 def group_asof(rows: pd.DataFrame, *, collapse: bool, multi_only: bool = False) -> pd.DataFrame:
-    """As-of physical groups computed only from already confirmed representations.
+    """Causal physical groups, vectorized without changing V1 grouping rules.
 
-    TIED_EXTREMA retain a unique pivot identity and never become independent
-    'known physical extrema'.
+    V3.1.4 performance: group metadata is computed in columnar batches instead
+    of one Python loop and four Python mapping lambdas for each physical group.
+    TIED_EXTREMA keep their own pivot ID, never a fabricated physical identity.
+    Only already-confirmed rows supplied by the caller are used.
     """
     if rows.empty:
         return pd.DataFrame(columns=[*rows.columns, 'representations_asof', 'tf_set_asof',
@@ -189,28 +191,41 @@ def group_asof(rows: pd.DataFrame, *, collapse: bool, multi_only: bool = False) 
     known = frame['physical_identity_state'].eq('VERIFIED') & frame['physical_id'].ne('')
     frame['group_key'] = frame['pivot_id'].astype(str)
     frame.loc[known, 'group_key'] = frame.loc[known, 'physical_id'].astype(str)
-    # A group can never contain different sides, physical positions or prices.
-    for _, g in frame.loc[known].groupby('group_key'):
-        if len(set(g['side'])) != 1 or g['physical_minute_ts'].nunique(dropna=True) != 1 or g['price'].nunique() != 1:
+
+    # Preserve the exact physical identity conflict guard from the reference.
+    # Count all side values (including null), and ignore nulls for the original
+    # physical-minute/price nunique checks.
+    valid = frame.loc[known]
+    if not valid.empty:
+        verified_groups = valid.groupby('group_key', sort=False)
+        if ((verified_groups['side'].nunique(dropna=False) != 1).any()
+            or (verified_groups['physical_minute_ts'].nunique(dropna=True) != 1).any()
+            or (verified_groups['price'].nunique(dropna=True) != 1).any()):
             raise ValueError('PHYSICAL_GROUP_CONFLICT')
-    info = {}
-    for key, g in frame.groupby('group_key',sort=False):
-        tfs = tuple(sorted(g.timeframe.unique(),key=lambda tf: TF_MINUTES[tf]))
-        info[key] = (len(g), ','.join(tfs), int(g.available_ts.min()),int(g.available_ts.max()))
-    for i, col in enumerate(('representations_asof','tf_set_asof','first_available_asof','last_available_asof')):
-        frame[col] = frame['group_key'].map(lambda k: info[k][i])
+
+    groups = frame.groupby('group_key', sort=False)
+    counts = groups.size()
+    first = groups['available_ts'].min()
+    last = groups['available_ts'].max()
+    # Unique timeframe names in canonical minute order, not lexical order.
+    tf_text = groups['timeframe'].agg(
+        lambda values: ','.join(sorted(set(values), key=lambda tf: TF_MINUTES[tf]))
+    )
+    frame['representations_asof'] = frame['group_key'].map(counts)
+    frame['tf_set_asof'] = frame['group_key'].map(tf_text)
+    frame['first_available_asof'] = frame['group_key'].map(first)
+    frame['last_available_asof'] = frame['group_key'].map(last)
     frame['plot_ts'] = frame['pivot_ts'].astype('int64')
     frame.loc[known, 'plot_ts'] = frame.loc[known, 'physical_minute_ts'].astype('int64')
     if collapse:
-        # Keep member with highest TF for context, but the group's first/last
-        # confirmation dates come from all as-of members, never full hindsight.
         frame['_tf_rank'] = frame['timeframe'].map(TF_MINUTES)
-        frame = (frame.sort_values(['group_key','_tf_rank','available_ts'])
-                 .drop_duplicates('group_key',keep='last')
+        frame = (frame.sort_values(['group_key', '_tf_rank', 'available_ts'])
+                 .drop_duplicates('group_key', keep='last')
                  .drop(columns='_tf_rank'))
     if multi_only:
-        frame = frame[(frame['physical_identity_state'] == 'VERIFIED') & (frame['representations_asof'] >= 2)]
-    return frame.sort_values(['plot_ts','side','timeframe']).reset_index(drop=True)
+        frame = frame[(frame['physical_identity_state'] == 'VERIFIED') &
+                      (frame['representations_asof'] >= 2)]
+    return frame.sort_values(['plot_ts', 'side', 'timeframe']).reset_index(drop=True)
 
 
 def window_evidence_stats(known: pd.DataFrame, start: int, end: int, *,

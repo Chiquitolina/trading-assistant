@@ -251,7 +251,7 @@ class DualPanelIntegration(unittest.TestCase):
                 self.assertTrue(any(x>t for x in xsecondary))
                 self.assertEqual(float([x for x in secondary.layout.shapes
                      if x.yref=='y'][-1].y0),98.5)
-        self.assertEqual(observed,[t,t,t,t])
+        self.assertEqual(observed,[t,t])
 
     def test_second_panel_is_optional(self):
         # Preserve the original one-chart UX when unchecked.
