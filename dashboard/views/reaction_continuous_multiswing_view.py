@@ -248,25 +248,32 @@ def assemble_chart_1m(pre, post, known_ts, before, after):
     return pd.concat([x, future], ignore_index=True).sort_values('timestamp').drop_duplicates('timestamp')
 
 
-def render_continuous_multiswing_view(project, *, timezone='UTC', chart_builder=None):
-    """Attach below the original Continuous Event swing structure; no writes."""
-    import pandas as pd
+def render_continuous_multiswing_view(project, *, timezone='UTC',
+                                      chart_builder=None, mode_override=None):
+    """Read-only event or BTC view; parent can preselect mode without extra rerun."""
     import streamlit as st
-    import plotly.graph_objects as go
     view_started = _perf_time.perf_counter()
-    # El historico BTC 60D vive en el mismo Event swing structure: no se toca
-    # dashboard/app.py ni el visor de First Touch existente.
-    modality = st.selectbox(
-        'Modo de investigacion Multi-Swing',
-        ['Evento REACTION · Continuous', 'Mapa BTC 60D · 6 TF'],
-        key='rcms_study_mode_v1',
-    )
+    choices = ('Evento REACTION · Continuous', 'Mapa BTC 60D · 6 TF')
+    if mode_override is None:
+        # Compatibility with direct callers and older dashboards.
+        modality = st.selectbox(
+            'Modo de investigacion Multi-Swing', choices,
+            key='rcms_study_mode_v1',
+        )
+    else:
+        if mode_override not in choices:
+            raise ValueError('Unsupported Multi-Swing mode')
+        modality = mode_override
     if modality == 'Mapa BTC 60D · 6 TF':
+        # Avoid even importing Pandas/Plotly and the frozen-event journal
+        # when routing to the stand-alone BTC 60D research path.
         from dashboard.views.reaction_multiswing_btc60d_view_v1 import (
             render_btc_multiswing_60d_view,
         )
         render_btc_multiswing_60d_view(project)
         return
+    import pandas as pd
+    import plotly.graph_objects as go
     from dashboard.views.reaction_lab_first_touches_view import (
         get_page, get_touch, get_symbols,
     )

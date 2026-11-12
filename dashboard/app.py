@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+_APP_RUN_STARTED_AT = time.perf_counter()  # Rerun wall-clock baseline (server-side)
 import hashlib
 from pathlib import Path
 
@@ -84796,6 +84797,38 @@ if selected_section == "reaction_swing_lab":
             "Todos los presenta por separado, sin mezclar portfolios."
         )
 
+        # Fast entry into historical Multi-Swing: choose the destination BEFORE
+        # loading/flattening the Continuous cohort.  The BTC freeze is a separate
+        # read-only source and does not depend on the REACTION Event ID frame.
+        # Keep the original rcms_study_mode_v1 key to preserve existing sessions.
+        event_swing_mode = None
+        event_swing_load_cohort = False
+        if (
+            lab_mode == "📍 Event swing structure"
+            and cohort_mode in ("Continuous V1", "Todos")
+        ):
+            event_swing_mode = st.selectbox(
+                "Modo de investigacion Multi-Swing",
+                ["Evento REACTION · Continuous", "Mapa BTC 60D · 6 TF"],
+                key="rcms_study_mode_v1",
+            )
+            if event_swing_mode == "Evento REACTION · Continuous":
+                event_swing_load_cohort = st.checkbox(
+                    "Mostrar explorador global de Event IDs y contextos (carga pesada)",
+                    value=False,
+                    key="reaction_event_swing_load_cohort_v1",
+                    help=(
+                        "Opcional: carga el explorador general, contextos y paths "
+                        "de la cohorte. La inspección Multi-Swing de REACTIONs "
+                        "persistidas funciona sin ese cálculo."
+                    ),
+                )
+            else:
+                st.caption(
+                    "Mapa congelado BTC 60D: acceso directo, sin materializar "
+                    "el explorador general Continuous ni las herramientas Legacy."
+                )
+
         # Runner search always reads only LIVE_OBSERVED; never triggers legacy
         # materialization, returns results only in Streamlit session memory.
         if lab_mode == "🔬 Retest Quality Lab":
@@ -84842,12 +84875,23 @@ if selected_section == "reaction_swing_lab":
         # Continuous always reads the same persisted Event IDs in EVERY view.
         # Legacy engines are intentionally unchanged and never run in Continuous.
         if lab_mode not in ("🔬 Retest Quality Lab", "🏃 Runner Discovery", "⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition") and cohort_mode in ("Continuous V1", "Todos"):
-            from reaction_lab_research_view import render_cohort_research
-            render_cohort_research(
-                BASE_DIR, "Continuous V1", lab_mode, structural_symbols,
-                shared_retest_inspector=render_confirmed_swing_retest_inspector,
-                cohort_timezone=TZ,
-            )
+            # The global cohort assembles large SQLite context/path tables.
+            # It is NOT a prerequisite for historical BTC or event-scoped
+            # Multi-Swing.  In this view, load it only on explicit opt-in.
+            if lab_mode != "📍 Event swing structure" or event_swing_load_cohort:
+                from reaction_lab_research_view import render_cohort_research
+                _cohort_started = time.perf_counter()
+                render_cohort_research(
+                    BASE_DIR, "Continuous V1", lab_mode, structural_symbols,
+                    shared_retest_inspector=render_confirmed_swing_retest_inspector,
+                    cohort_timezone=TZ,
+                )
+                if lab_mode == "📍 Event swing structure":
+                    st.caption(
+                        "⏱️ Explorador global Continuous: "
+                        f"{time.perf_counter() - _cohort_started:.2f} s "
+                        "(medición solo de esta sección)."
+                    )
             # Read-only historical multi-swing viewer under the existing
             # Continuous Event swing structure, never a parallel dashboard.
             # Uses event-frozen candles_json, not current Redis OHLC.
@@ -84855,15 +84899,32 @@ if selected_section == "reaction_swing_lab":
                 from dashboard.views.reaction_continuous_multiswing_view import (
                     render_continuous_multiswing_view,
                 )
+                _multi_started = time.perf_counter()
                 render_continuous_multiswing_view(
                     BASE_DIR, timezone=TZ,
                     chart_builder=build_volume_exhaustion_chart,
+                    mode_override=event_swing_mode,
+                )
+                st.caption(
+                    "⏱️ Multi-Swing (vista seleccionada): "
+                    f"{time.perf_counter() - _multi_started:.2f} s. "
+                    "No incluye la carga global de app.py ni el navegador."
+                )
+                st.caption(
+                    "⏱️ app.py desde inicio de ejecución: "
+                    f"{time.perf_counter() - _APP_RUN_STARTED_AT:.2f} s "
+                    "(aproximado, servidor; no mide transferencia ni navegador)."
                 )
             if cohort_mode == "Todos":
                 st.divider()
                 st.markdown("### 🗄️ Legacy — herramientas existentes")
 
-        if cohort_mode == "Continuous V1" or lab_mode in ("🔬 Retest Quality Lab", "⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition"):
+        # The frozen BTC map is an independent research view even in "Todos".
+        # Do not also execute the Legacy Event swing reconstruction underneath.
+        if (cohort_mode == "Continuous V1"
+            or (lab_mode == "📍 Event swing structure"
+                and event_swing_mode == "Mapa BTC 60D · 6 TF")
+            or lab_mode in ("🔬 Retest Quality Lab", "⚙️ Runner Optimization", "📈 Runner Portfolio", "🎯 Candidate Competition")):
             pass  # No hidden legacy rebuild; portfolio and optimizer are isolated read-only views.
         elif lab_mode == "📡 REACTION journal":
             st.caption(
