@@ -470,7 +470,7 @@ def v32_build_context_chart(full, *, stages, selected_region, region_id: str,
 # V3.1.2 | Retrospective navigation only. Events locate a historical decision
 # instant, but are NEVER used as PRE features, signals, trading outcomes, or
 # evidence for the selected band. The charts still reconstruct at the cutoff.
-V33_REPLAY_ORIGINS = ('ARRIVAL', 'VISIT', 'BIRTH', 'CONFIRMATION', 'MANUAL')
+V33_REPLAY_ORIGINS = ('ARRIVAL', 'VISIT', 'BIRTH', 'CONFIRMATION', 'MANUAL', 'BEHAVIOR')
 V33_NAVIGATION_GAP_MINUTES = 30
 
 
@@ -617,7 +617,8 @@ def render_btc_multiswing_60d_view(project):
                 'VISIT':'Visita histórica · PRE al comenzar la visita',
                 'BIRTH':'Nacimiento original · PRE al confirmar el segundo extremo',
                 'CONFIRMATION':'Nueva confirmación · evolución posterior de la banda',
-                'MANUAL':'Exploración libre · fecha y hora manuales'}[x],
+                'MANUAL':'Exploración libre · fecha y hora manuales',
+                'BEHAVIOR':'Structural Behavior V1.2 · episodio → visita → evento'}[x],
             key='ms60_v33_event_origin')
     ui_state = getattr(st, 'session_state', None)
     if ui_state is not None:
@@ -649,6 +650,17 @@ def render_btc_multiswing_60d_view(project):
     v314_load_ms = (_perf_time.perf_counter()-v314_load_started)*1000
     start, end = source['start'], source['end']
     cache_verified=v313_verified_cache_source(source)
+    # The frozen V1.1 census uses the original full six-TF structural
+    # universe. Switching from an older four-TF replay selection must not
+    # make its region IDs silently disappear. Other replay modes keep state.
+    if ui_state is not None:
+        last_v12_origin=ui_state.get('ms60_v12_last_origin')
+        if mode == 'EJECUCION' and replay_origin == 'BEHAVIOR':
+            if last_v12_origin != 'BEHAVIOR':
+                ui_state['ms60_tfs']=list(TF_MINUTES)
+            ui_state['ms60_v12_last_origin']='BEHAVIOR'
+        else:
+            ui_state['ms60_v12_last_origin']=replay_origin
     d1,d2,d3,d4=st.columns([2,1,2,1])
     with d1:
         if mode == 'EJECUCION' and replay_origin != 'MANUAL':
@@ -666,7 +678,8 @@ def render_btc_multiswing_60d_view(project):
         span_days=st.selectbox('Ventana (días)',[1,3,7,14,30,60],index=2,key='ms60_days')
     with d3:
         selected_tfs=tuple(st.multiselect('Temporalidades',list(TF_MINUTES),
-              default=['15m','30m','1h','4h'],key='ms60_tfs'))
+              default=(list(TF_MINUTES) if replay_origin=='BEHAVIOR'
+                       else ['15m','30m','1h','4h']),key='ms60_tfs'))
     with d4:
         side=st.selectbox('Tipo', ['BOTH','LOW','HIGH'],
                           format_func=lambda s: {'BOTH':'Ambos','LOW':'LOW','HIGH':'HIGH'}[s],
@@ -677,16 +690,26 @@ def render_btc_multiswing_60d_view(project):
     context_tf = '1h'
     context_days = 7
     if mode == 'EJECUCION':
-        display_tf=st.selectbox('Gráfico principal · temporalidad',
-                                list(V32_PANEL_TFS),index=1,
-                                key='ms60_v3_execution_tf')
-        show_context_panel=st.checkbox('Mostrar segundo gráfico de contexto multi-TF',
-                               value=False,key='ms60_v32_show_context')
+        if replay_origin == 'BEHAVIOR':
+            display_tf=st.selectbox('Gráfico principal · temporalidad',
+                                    ['15m','1h'],index=0,key='ms60_v12_execution_tf')
+            show_context_panel=st.checkbox('Mostrar segundo gráfico de contexto multi-TF',
+                                    value=True,key='ms60_v12_show_context')
+        else:
+            display_tf=st.selectbox('Gráfico principal · temporalidad',
+                                    list(V32_PANEL_TFS),index=1,
+                                    key='ms60_v3_execution_tf')
+            show_context_panel=st.checkbox('Mostrar segundo gráfico de contexto multi-TF',
+                                   value=False,key='ms60_v32_show_context')
         if show_context_panel:
             ct1,ct2=st.columns(2)
             with ct1:
-                context_tf=st.selectbox('Contexto · temporalidad',
-                   list(V32_PANEL_TFS),index=4,key='ms60_v32_context_tf')
+                if replay_origin == 'BEHAVIOR':
+                    context_tf=st.selectbox('Contexto · temporalidad',
+                        ['1h','4h'],index=0,key='ms60_v12_context_tf')
+                else:
+                    context_tf=st.selectbox('Contexto · temporalidad',
+                       list(V32_PANEL_TFS),index=4,key='ms60_v32_context_tf')
             with ct2:
                 context_days=int(st.selectbox('Contexto · días anteriores',
                    list(V32_CONTEXT_DAYS),index=2,key='ms60_v32_context_days'))
@@ -743,7 +766,111 @@ def render_btc_multiswing_60d_view(project):
     event_anchor_region=''
     event_id=''
     v314_navigation_started = _perf_time.perf_counter()
-    if mode == 'EJECUCION' and replay_origin != 'MANUAL':
+    if mode == 'EJECUCION' and replay_origin == 'BEHAVIOR':
+        # A read-only, SHA-verified V1.2 study index. No recalculation of all
+        # contacts or detection in the Streamlit rerun. Retrospective choices
+        # select a UTC cutoff; only causal as-of evidence below may be plotted.
+        from btc_multiswing_structural_behavior_v12 import read_ui_index
+        try:
+            v12_episodes,v12_visits,v12_transitions=read_ui_index(Path(project))
+        except (FileNotFoundError,ValueError,OSError,KeyError) as exc:
+            st.info(f'Behavior V1.2: {exc}. Este estudio se genera offline; '
+                    'no se sustituye por datos LIVE ni por un resultado inventado.')
+            return
+        if side!='BOTH':
+            v12_episodes=v12_episodes.loc[v12_episodes.band_origin_side.eq(side)]
+        if v12_episodes.empty:
+            st.info('No hay episodios V1.2 bajo el filtro de lado elegido.')
+            return
+        v12_episodes=v12_episodes.sort_values('pre_cutoff_ts',ascending=False,kind='mergesort')
+        ep_by={str(r.episode_id):r for r in v12_episodes.itertuples(index=False)}
+        ep_ids=list(ep_by)
+        if ui_state is not None and ui_state.get('ms60_v12_episode') not in ep_ids:
+            ui_state['ms60_v12_episode']=ep_ids[0]
+        ep_id=st.selectbox('① Episodio estructural (BTC 60D)',ep_ids,
+            format_func=lambda x:(
+                f'{iso(int(ep_by[x].pre_cutoff_ts))} · {ep_by[x].band_origin_side} · '
+                f'{(float(ep_by[x].stage_low)+float(ep_by[x].stage_high))/2:,.2f} USD · '
+                f'{ep_by[x].region_id[:13]}'),key='ms60_v12_episode')
+        ep=ep_by[ep_id]
+        event_anchor_region=str(ep.region_id)
+        v12_visits=v12_visits.loc[v12_visits.episode_id.eq(ep_id)].sort_values(
+            ['pre_cutoff_ts','event_id'],kind='mergesort')
+        visit_by={str(r.event_id):r for r in v12_visits.itertuples(index=False)}
+        visit_ids=list(visit_by)
+        if not visit_ids:
+            st.error('V1.2: episodio sin visitas; índice incompleto.')
+            return
+        if ui_state is not None and ui_state.get('ms60_v12_visit') not in visit_ids:
+            ui_state['ms60_v12_visit']=visit_ids[0]
+        visit_id=st.selectbox('② Visita / llegada PRE',visit_ids,
+            format_func=lambda x:(f'{iso(int(visit_by[x].pre_cutoff_ts))} · '
+                    f'visita #{int(visit_by[x].visit_number)} · '
+                    f'desde {visit_by[x].approach_position}'),key='ms60_v12_visit')
+        visit=visit_by[visit_id]
+        # Bind events to the selected member visit, not just the episode.
+        # The next contact starts a new observational visit context.
+        later_visits=v12_visits.loc[v12_visits.pre_cutoff_ts>int(visit.pre_cutoff_ts)]
+        next_touch=(int(later_visits.pre_cutoff_ts.min()) if not later_visits.empty
+                    else None)
+        event_rows=v12_transitions.loc[
+            v12_transitions.episode_id.eq(ep_id) &
+            (v12_transitions.confirmation_ts>int(visit.pre_cutoff_ts))].copy()
+        if next_touch is not None:
+            event_rows=event_rows.loc[event_rows.confirmation_ts<=next_touch]
+        event_tf=st.selectbox('Temporalidad de eventos', ['Ambas','15m','1h'],
+                              key='ms60_v12_event_tf')
+        if event_tf!='Ambas':
+            event_rows=event_rows.loc[event_rows.source_tf.eq(
+                'M15_CLOSED' if event_tf=='15m' else 'H1_CLOSED')]
+        event_rows=event_rows.sort_values(['confirmation_ts','source_tf','transition_id'],
+                                        kind='mergesort')
+        event_by={str(r.transition_id):r for r in event_rows.itertuples(index=False)}
+        event_ids=['']+list(event_by)
+        if ui_state is not None and ui_state.get('ms60_v12_transition','') not in event_ids:
+            ui_state['ms60_v12_transition']=''
+        v12_event=st.selectbox('③ Evento estructural (opcional)',event_ids,
+            format_func=lambda x:('Solo visita · PRE antes del toque' if not x else
+                 f'{iso(int(event_by[x].confirmation_ts))} · '
+                 f'{event_by[x].source_tf} · {event_by[x].event_type}'),
+            key='ms60_v12_transition')
+        # A visit navigates to OPEN of first physical touch (still blind).
+        # A transition can navigate to the close just before confirmation, or
+        # the exact CLOSED bar that first makes the classification knowable.
+        if v12_event:
+            event_info=event_by[v12_event]
+            v12_cut_kind=st.radio('Corte del evento ③',
+                ['ANTES_DE_VELA_CONFIRMADORA','CIERRE_CONFIRMADO'],horizontal=True,
+                key='ms60_v12_cut_kind',
+                format_func=lambda x:('PRE antes de la vela confirmadora' if
+                      x=='ANTES_DE_VELA_CONFIRMADORA' else 'PRE en cierre ya confirmado'))
+            exploration_cutoff=int(event_info.bar_open_ts if
+                 v12_cut_kind=='ANTES_DE_VELA_CONFIRMADORA' else event_info.confirmation_ts)
+            if str(event_info.source_tf)=='H1_CLOSED':
+                st.caption(f'Enlace 1h → 15m: '
+                           f'{getattr(event_info,"h1_m15_link_status","NO_EVALUADO")}. '
+                           'La coincidencia no prueba una señal operativa.')
+            st.caption('Selección de evento RETROSPECTIVA. El tipo de evento se conoce '
+                'porque usamos el índice histórico; no constituye una característica '
+                'PRE. El evento solo es conocido en su cierre de confirmación.')
+        else:
+            v12_cut_kind='VISITA_ANTES_DEL_CONTACTO'
+            exploration_cutoff=int(visit.pre_cutoff_ts)
+            st.caption('La vela 1m de contacto todavía NO está cerrada en este PRE. '
+                'La geometría se reconstruye exclusivamente al instante elegido.')
+        if not (start<exploration_cutoff<=end and exploration_cutoff % M == 0):
+            st.error('Instante estructural fuera del freeze BTC.')
+            return
+        if int(ep.stage_known_from)>exploration_cutoff:
+            st.warning('La banda de referencia del episodio todavía no existía en este corte. '
+                       'No se proyecta geometría futura: elegí otra visita o el cierre confirmado.')
+            return
+        event_id=(f'{ep_id}|{visit_id}|{v12_event}|{v12_cut_kind}')
+        st.caption(f'Banda V1.2 · {ep.band_origin_side} · '
+            f'{float(ep.stage_low):,.2f}–{float(ep.stage_high):,.2f} USD · '
+            'referencia geométrica congelada al PRE del episodio, no ACTIVE. '
+            'V1.2 no presume que esa geometría siga vigente en todas las transiciones.')
+    if mode == 'EJECUCION' and replay_origin not in ('MANUAL','BEHAVIOR'):
         # This full-history index is RETROSPECTIVE NAVIGATION ONLY. Every PRE
         # feature/region/chart below is rebuilt at the chosen event timestamp.
         nav_known=asof_rows(catalog,end,selected_tfs,side)
