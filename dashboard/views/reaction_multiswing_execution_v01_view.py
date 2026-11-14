@@ -1,4 +1,4 @@
-"""Read-only 1m/5m execution-trigger inspector in the existing dashboard."""
+"""Read-only execution inspector; UI 0.1.1 adds a POST-blind PRE review batch."""
 from __future__ import annotations
 
 import json
@@ -23,6 +23,53 @@ LABELS={'CONTACT':'Contacto 1m','DEFENSE_CONFIRMED':'Defensa / rechazo 5m',
         'REENTER_BAND':'Reingreso dentro','ACCEPT_INSIDE':'Aceptación dentro · 3 cierres 5m',
         'ACCEPT_OUTSIDE':'Permanencia exterior · sin retest','GEOMETRY_REVALIDATE':'Geometría revisada · cadena reiniciada'}
 FAMILIES={'DEFENSE':'Defensa / rechazo','BREAK_DIRECT':'Ruptura directa','BREAK_RETEST':'Ruptura + retest sostenido'}
+REVIEW_SIZE=12
+REVIEW_COLUMNS=('event_id','region_id','pre_cutoff_ts','flip_direction','reaction_pre',
+                'band_age_hours','prior_h1_defenses','max_separation_pct','pre_position')
+
+
+def reference_visit_ids():
+    return {replay.SELECTED_CASE,DEFENSE_CASE}|{value[2] for value in structural.BOOKMARKS.values()}
+
+
+def build_review_batch(eligible, *, excluded_regions=(), size=REVIEW_SIZE):
+    """Sample the frozen PRE catalogue by date rank, never by later behavior.
+
+    Keep the first eligible visit per band, exclude entire reviewed bands,
+    and spread the sample over the available date range. This is a
+    retrospective review sample, not an online eligibility rule.
+    """
+    if not isinstance(size,int) or isinstance(size,bool) or size<=0:
+        raise ValueError('El tamaño del lote debe ser un entero positivo')
+    required={'event_id','region_id','pre_cutoff_ts'}
+    if not required.issubset(eligible.columns):
+        raise ValueError('Faltan identificadores PRE para construir el lote')
+    frame=eligible.loc[:,[c for c in REVIEW_COLUMNS if c in eligible.columns]].copy()
+    frame=frame.loc[~frame.region_id.isin(set(excluded_regions))]
+    frame=frame.sort_values(['pre_cutoff_ts','event_id']).drop_duplicates('region_id',keep='first')
+    count=min(size,len(frame))
+    positions=[0] if count==1 else [i*(len(frame)-1)//(count-1) for i in range(count)]
+    result=frame.iloc[positions].reset_index(drop=True)
+    result.insert(0,'review_order',range(1,len(result)+1))
+    return result
+
+
+def review_sheet(batch,visits):
+    """Only whitelisted PRE metadata and empty, manually completed fields."""
+    meta=visits[['event_id','band_origin_side','approach_position']]
+    frame=batch.merge(meta,on='event_id',how='left',validate='one_to_one')
+    sides={'ABOVE':'Arriba','BELOW':'Abajo','INSIDE':'Dentro','UNKNOWN':'Desconocido'}
+    sheet=pd.DataFrame({'Caso':frame.review_order,'Llegada UTC':frame.pre_cutoff_ts.map(replay.utc),
+        'Origen de banda':frame.band_origin_side,'Llegada desde PRE':frame.approach_position.map(sides),
+        'Banda ID':frame.region_id,'Visita ID':frame.event_id,
+        'Cambio de función PRE':frame.flip_direction.map(structural.FLIP_LABELS),
+        'Antigüedad PRE horas':frame.band_age_hours.round(1),
+        'Defensas previas 1h':frame.prior_h1_defenses,
+        'Alejamiento previo %':frame.max_separation_pct.round(3)})
+    for name in ('Lectura PRE (manual)','Familia confirmada (manual)',
+                 'Hipótesis LONG-SHORT (manual)','Invalidación (manual)','Observación POST (manual)'):
+        sheet[name]=''
+    return sheet
 
 
 @lru_cache(maxsize=2)
@@ -117,19 +164,41 @@ def render_execution_v01(project,st=None):
         return {'status':'RUN_NOT_AVAILABLE'}
     except (ValueError,KeyError,OSError) as exc:
         state[POST_KEY]=False;st.error('No se pudo verificar el replay: '+str(exc));return {'status':'INVALID_RUN'}
-    study=data['study'];visits=study['visits'].copy()
-    scope=structural._safe_select(st,'Casos de ejecución',('REFERENCES','FLIPS_PRE','ALL'),PREFIX+'scope','REFERENCES',
-        lambda x:{'REFERENCES':'Ejemplos de auditoría','FLIPS_PRE':'Flips con historia · filtro PRE inicial','ALL':'Todas las llegadas BTC'}[x])
+    study=data['study'];all_visits=study['visits'];visits=all_visits.copy();batch=None
+    reference_ids=reference_visit_ids()
+    references=all_visits.loc[all_visits.event_id.isin(reference_ids)]
+    scope=structural._safe_select(st,'Casos de ejecución',('REFERENCES','REVIEW_PRE','FLIPS_PRE','ALL'),PREFIX+'scope','REFERENCES',
+        lambda x:{'REFERENCES':f'Ejemplos de auditoría · {len(references)} seleccionados',
+                  'REVIEW_PRE':'Lote PRE · 12 casos adicionales',
+                  'FLIPS_PRE':'Flips con historia · filtro PRE inicial',
+                  'ALL':f'Todas las llegadas BTC · {len(all_visits)} visitas'}[x])
     if scope=='REFERENCES':
-        ids={replay.SELECTED_CASE,DEFENSE_CASE}|{value[2] for value in structural.BOOKMARKS.values()}
-        visits=visits.loc[visits.event_id.isin(ids)]
-    elif scope=='FLIPS_PRE':
+        visits=references.copy()
+        st.info('Estos ejemplos fueron seleccionados para auditar la lógica; no son todos los casos encontrados. '
+                'Para ampliar, elegí el lote PRE o los flips con historia.')
+    elif scope in ('REVIEW_PRE','FLIPS_PRE'):
         eligible=structural.filter_flip_catalog(structural.load_flip_catalog(root))
-        visits=visits.loc[visits.event_id.isin(eligible.event_id)]
-    visits=visits.sort_values('pre_cutoff_ts')
+        if scope=='REVIEW_PRE':
+            batch=build_review_batch(eligible,excluded_regions=references.region_id)
+            visits=visits.loc[visits.event_id.isin(batch.event_id)].copy()
+            st.caption('Una visita por banda, excluyendo las cinco bandas ya revisadas. Reparto por fecha '
+                       'dentro del catálogo PRE congelado; el resultado posterior no interviene en la selección.')
+            sheet=review_sheet(batch,all_visits)
+            with st.expander('Lote PRE · lista y ficha de revisión'):
+                st.dataframe(sheet[['Caso','Llegada UTC','Origen de banda','Llegada desde PRE',
+                                    'Antigüedad PRE horas','Defensas previas 1h']],**width)
+                st.download_button('Descargar ficha del lote PRE',sheet.to_csv(index=False).encode('utf-8-sig'),
+                    file_name='LOTE_PRE_12_BTC_REVISION.csv',mime='text/csv',key=PREFIX+'download_review')
+        else:visits=visits.loc[visits.event_id.isin(eligible.event_id)].copy()
+    visits=visits.sort_values(['pre_cutoff_ts','event_id'])
+    st.caption(f'Mostrando {len(visits)} visitas a {visits.region_id.nunique()} bandas. '
+               f'Replay completo BTC: {len(all_visits)} visitas a {all_visits.region_id.nunique()} bandas.')
+    st.caption('HIGH / LOW indica el origen de la banda. Las reglas operativas LONG / SHORT todavía no están cerradas.')
     visitmap=visits.set_index('event_id').to_dict('index')
+    review_numbers={} if batch is None else batch.set_index('event_id').review_order.to_dict()
     vid=structural._safe_select(st,'Llegada para estudiar',visits.event_id,PREFIX+'visit',DEFENSE_CASE,
-        lambda x:replay.utc(visitmap[x]['pre_cutoff_ts'])+' · '+visitmap[x]['band_origin_side']+
+        lambda x:(f'Caso {review_numbers[x]}/{len(batch)} · ' if batch is not None else '')+
+                  replay.utc(visitmap[x]['pre_cutoff_ts'])+' · Origen: '+visitmap[x]['band_origin_side']+
                   f" · visita {int(visitmap[x]['visit_number'])} · "+visitmap[x]['region_id'])
     if vid is None:state[POST_KEY]=False;st.info('No hay visitas bajo este filtro.');return {'status':'NO_VISITS'}
     visit={**visitmap[vid],'event_id':vid};region=visit['region_id'];arrival=int(visit['pre_cutoff_ts'])
@@ -213,5 +282,6 @@ def render_execution_v01(project,st=None):
     health=data['health'].loc[data['health'].visit_id.eq(vid)].iloc[0]
     if end>=int(health.observed_until_ts) and bool(health.right_censored):
         st.info('Ventana incompleta/censurada: '+str(health.terminal_reason))
-    return dict(status='OK',visit_id=vid,cutoff=cutoff,visible_end=end,post_revealed=bool(reveal),
+    return dict(status='OK',visit_id=vid,scope=scope,case_count=len(visits),band_count=visits.region_id.nunique(),
+                cutoff=cutoff,visible_end=end,post_revealed=bool(reveal),
                 visible_events=len(events),visible_triggers=len(triggers),visible_references=len(refs),visible_outcomes=len(outcomes))
