@@ -27,7 +27,7 @@ CATALOG = BASE/'btc_sep09_nov08_swing_catalog_6tf_v1'
 VERSION = 'btc-multiswing-structural-behavior-fixed-vs-causal-stage-v1.3'
 PREFIX = 'ms60_v13_'
 POST_KEY = PREFIX+'reveal_post'
-PRESETS = ('LOW_23_OCT', 'HIGH_22_OCT', 'HIGH_18_SEP', 'CATALOG')
+PRESETS = ('LOW_23_OCT', 'HIGH_22_OCT', 'HIGH_18_SEP', 'FLIPS_PRE', 'CATALOG')
 BOOKMARKS = {
     'LOW_23_OCT': ('msv2_69f4a7f7cf54ab7a4214', 'msv2_69f4a7f7cf54ab7a4214|EP|1792722660000',
                    'msv2_69f4a7f7cf54ab7a4214|V29|1792775940000'),
@@ -107,15 +107,30 @@ def load_index(project):
 
 @lru_cache(maxsize=2)
 def _load_prices(root_string, token):
-    from btc_multiswing_60d_explorer_v1 import load_snapshot, aggregate_closed
+    from btc_multiswing_60d_explorer_v1 import load_snapshot
     full,_,source=load_snapshot(Path(root_string))
     start,end=int(full.timestamp.iloc[0]),int(source['end'])
     bars={}
     for tf,name in [(15,'15m'),(60,'1h'),(240,'4h')]:
-        b=aggregate_closed(full,name,start,end).copy()
-        b['closed_ts']=b.timestamp+tf*M
-        bars[tf]=b
+        bars[tf]=closed_price_bars(full,tf,start,end)
     return bars,source
+
+
+def closed_price_bars(full, width_minutes, start, end):
+    """UTC buckets in integer milliseconds, independent of datetime units.
+
+    The verified minute source is contiguous. Count only complete buckets;
+    retain the legacy epoch-aligned OHLC and close-time visibility contract.
+    """
+    width=int(width_minutes);step=width*M
+    frame=full[['timestamp','open','high','low','close']]
+    key=(frame.timestamp.astype('int64')//step)*step
+    result=frame.groupby(key,sort=True).agg(open=('open','first'),high=('high','max'),
+        low=('low','min'),close=('close','last'),count=('timestamp','size'))
+    result=result.loc[result['count'].eq(width)].drop(columns='count')
+    result.index.name='timestamp';result=result.reset_index()
+    result['closed_ts']=result.timestamp+step
+    return result.loc[result.closed_ts.gt(int(start))&result.closed_ts.le(int(end))].reset_index(drop=True)
 
 
 def load_prices(project, study):
@@ -142,6 +157,213 @@ def load_comparison(project):
 
 def clear_caches():
     _load_index.cache_clear();_load_prices.cache_clear();_load_comparison.cache_clear()
+    _load_flip_catalog.cache_clear()
+
+
+FLIP_COLUMNS = ['event_id','episode_id','region_id','pre_cutoff_ts','flip_direction','reaction_pre',
+                'band_age_hours','first_known_ts','break_ts','break_event_id','prior_h1_defenses',
+                'prior_h1_holds','max_separation_pct','max_separation_widths','m15_opposite_reactions',
+                'h1_opposite_reactions','geometry_changed_since_break','pre_position','pre_h1_position',
+                'pre_h4_position','pre_h4_return_12h_pct']
+
+
+def build_flip_catalog(study, bars):
+    """Descriptive PRE cohort from existing H1 evidence, never POST outcomes.
+
+    For each historical visit: prior role defenses -> latest H1 BREAK in the
+    opposite direction -> return from that side. Reject failed/recovered
+    breaks. Measure separation using only closed H1 prices and their own
+    contemporaneous stages. Missing evidence is not a confirmed flip.
+    """
+    events=study['events']
+    required=['data_complete','parent_asof_transition_id','asof_physical_transition_id']
+    if not all(c in events for c in required):raise ValueError('Faltan campos de evidencia para el filtro PRE')
+    output=[]
+    for region,visits in study['visits'].groupby('region_id',sort=False):
+        stages=study['stages'].loc[study['stages'].region_id.eq(region)].sort_values(['known_from','independent_extrema'])
+        stages=stages.drop_duplicates('known_from',keep='last')
+        if stages.empty:continue
+        stage_ts=stages.known_from.to_numpy(dtype='int64')
+        low=stages.band_low.to_numpy(dtype=float);high=stages.band_high.to_numpy(dtype=float)
+        all_events=events.loc[events.region_id.eq(region)].sort_values('confirmation_ts')
+        known=all_events.data_complete.fillna(False).eq(True)&all_events.stage_known_from.le(all_events.confirmation_ts)
+        known &= np.isfinite(all_events.band_low_asof)&np.isfinite(all_events.band_high_asof)
+        good=all_events.loc[known].copy()
+        h1=good.loc[good.source_tf.eq('H1_CLOSED')].copy()
+        m15=good.loc[good.source_tf.eq('M15_CLOSED')].copy()
+        hour_clocks=bars[60].closed_ts.to_numpy(dtype='int64')
+        hour_prices=bars[60].close.to_numpy(dtype=float)
+        hour_stage=np.searchsorted(stage_ts,hour_clocks,side='right')-1
+        positions=np.full(len(hour_clocks),-9,dtype='int8')
+        available=np.flatnonzero(hour_stage>=0)
+        si=hour_stage[available]
+        finite=np.isfinite(hour_prices[available])&np.isfinite(low[si])&np.isfinite(high[si])&(low[si]<high[si])
+        available=available[finite];si=hour_stage[available]
+        positions[available]=np.where(hour_prices[available]<low[si],-1,np.where(hour_prices[available]>high[si],1,0))
+        previous_outside=np.full(len(hour_clocks),-9,dtype='int8');last_side=-9
+        for n,p in enumerate(positions):
+            if p in (-9,-1,1):last_side=int(p)
+            previous_outside[n]=last_side
+        def physical_hourly_cross(row):
+            k=int(np.searchsorted(hour_clocks,int(row.confirmation_ts)))
+            far=1 if row.direction=='ABOVE' else -1
+            # Episode seeding can re-emit a break in an already long outside
+            # streak. This cohort requires the real second consecutive H1
+            # close, preceded by the opposite outside side (inside allowed).
+            return bool(k>=2 and k<len(hour_clocks) and hour_clocks[k]==int(row.confirmation_ts)
+                        and hour_clocks[k]-hour_clocks[k-1]==60*M
+                        and positions[k]==far and positions[k-1]==far and positions[k-2]!=far
+                        and previous_outside[k-2]==-far)
+        break_rows=h1.loc[h1.event_type.isin(['BREAK_ABOVE_2C','BREAK_BELOW_2C'])]
+        valid_cross_ids={row.asof_transition_id for row in break_rows.itertuples(index=False) if physical_hourly_cross(row)}
+        # Alias map is used only after slicing to a visit's available prefix.
+        for visit in visits.itertuples(index=False):
+            cutoff=int(visit.pre_cutoff_ts)
+            stage_index=int(np.searchsorted(stage_ts,cutoff,side='right'))-1
+            if stage_index<0 or not np.isfinite([low[stage_index],high[stage_index]]).all() or low[stage_index]>=high[stage_index]:continue
+            if int(visit.pre_last_1h_close_ts)>cutoff or int(visit.pre_last_1m_close_ts)>cutoff or int(visit.pre_last_4h_close_ts)>cutoff:continue
+            history=h1.loc[h1.confirmation_ts.le(cutoff)]
+            breaks=history.loc[history.asof_transition_id.isin(valid_cross_ids)]
+            if breaks.empty:continue
+            cross=breaks.iloc[-1]
+            ts=int(cross.confirmation_ts);far=str(cross.direction)
+            origin='BELOW' if far=='ABOVE' else 'ABOVE'
+            if cross.origin_position!=origin:continue
+            concurrent=breaks.loc[breaks.confirmation_ts.eq(ts)]
+            if concurrent.direction.nunique()!=1:continue
+            aliases=set(history.loc[history.asof_physical_transition_id.eq(cross.asof_physical_transition_id)].asof_transition_id)
+            after=history.loc[history.confirmation_ts.gt(ts)]
+            failed=after.event_type.str.startswith('FAILED_BREAK_')&after.parent_asof_transition_id.isin(aliases)
+            recovered=after.event_type.isin(['BREAK_'+origin+'_2C','EXIT_'+origin+'_2C'])
+            if failed.any() or recovered.any():continue
+            # A later incomplete structural observation prevents a clean PRE
+            # classification, rather than silently reviving an older break.
+            incomplete=all_events.loc[~known & all_events.source_tf.eq('H1_CLOSED')
+                                      & all_events.confirmation_ts.between(ts,cutoff)]
+            if len(incomplete):continue
+            def position(price):
+                if not np.isfinite(price):return 'UNKNOWN'
+                return 'BELOW' if price<low[stage_index] else 'ABOVE' if price>high[stage_index] else 'INSIDE'
+            current=position(float(visit.pre_1m_close));hour_position=position(float(visit.pre_1h_close))
+            if current not in (far,'INSIDE') or hour_position not in (far,'INSIDE'):continue
+            before=history.loc[history.confirmation_ts.lt(ts)]
+            defenses=before.loc[before.event_type.eq('DEFEND_ORIGIN_2C')&before.direction.eq(origin)]
+            count=int(defenses.confirmation_ts.nunique())
+            if not count:continue
+            holds=before.loc[before.event_type.eq('RETEST_HOLD_'+origin+'_2C')]
+            # All prices are closed by cutoff. No wick of the arrival hour is
+            # included before that hour closes; no geometry from PRE is
+            # projected backward to manufacture separation.
+            q=bars[60].loc[bars[60].closed_ts.between(ts,cutoff)]
+            indices=np.searchsorted(stage_ts,q.closed_ts.to_numpy(dtype='int64'),side='right')-1
+            valid=indices>=0
+            indices=indices[valid];closes=q.close.to_numpy(dtype=float)[valid]
+            if not len(indices):continue
+            edges=high[indices] if far=='ABOVE' else low[indices]
+            widths=high[indices]-low[indices]
+            deltas=closes-edges if far=='ABOVE' else edges-closes
+            finite=np.isfinite(edges)&np.isfinite(widths)&np.isfinite(deltas)&(edges>0)&(widths>0)
+            if not finite.all():continue
+            separation=np.maximum(deltas,0)
+            def reactions(frame):
+                f=frame.loc[frame.confirmation_ts.gt(ts)&frame.confirmation_ts.le(cutoff)&frame.direction.eq(far)]
+                return int(f.loc[f.event_type.isin(['DEFEND_ORIGIN_2C','RETEST_HOLD_'+far+'_2C'])].confirmation_ts.nunique())
+            hr=reactions(h1);local=reactions(m15)
+            output.append(dict(event_id=visit.event_id,episode_id=visit.episode_id,region_id=region,
+                pre_cutoff_ts=cutoff,flip_direction='RESISTANCE_TO_SUPPORT' if far=='ABOVE' else 'SUPPORT_TO_RESISTANCE',
+                reaction_pre='H1' if hr else 'M15' if local else 'PENDING',
+                band_age_hours=(cutoff-int(stage_ts[0]))/(60*M),first_known_ts=int(stage_ts[0]),
+                break_ts=ts,break_event_id=cross.asof_transition_id,prior_h1_defenses=count,
+                prior_h1_holds=int(holds.confirmation_ts.nunique()),
+                max_separation_pct=float(np.max(separation/edges*100)),
+                max_separation_widths=float(np.max(separation/widths)),
+                m15_opposite_reactions=local,h1_opposite_reactions=hr,
+                geometry_changed_since_break=bool(low[stage_index]!=cross.band_low_asof or high[stage_index]!=cross.band_high_asof),
+                pre_position=current,pre_h1_position=hour_position,pre_h4_position=position(float(visit.pre_4h_close)),
+                pre_h4_return_12h_pct=float(visit.pre_4h_ret_12h_pct)))
+    return pd.DataFrame(output,columns=FLIP_COLUMNS)
+
+
+def filter_flip_catalog(frame, *, min_age_hours=72, min_defenses=2, min_separation_pct=.25,
+                        direction='BOTH', reaction='M15_OR_H1', unique_bands=True):
+    if frame.empty:return frame.copy()
+    keep=frame.band_age_hours.ge(min_age_hours)&frame.prior_h1_defenses.ge(min_defenses)
+    keep &= frame.max_separation_pct.ge(min_separation_pct)
+    if direction!='BOTH':keep &= frame.flip_direction.eq(direction)
+    if reaction=='H1':keep &= frame.reaction_pre.eq('H1')
+    elif reaction=='M15_OR_H1':keep &= frame.reaction_pre.isin(['M15','H1'])
+    result=frame.loc[keep].sort_values(['pre_cutoff_ts','event_id']).copy()
+    if unique_bands:result=result.drop_duplicates('region_id',keep='first')
+    return result.sort_values(['pre_cutoff_ts','event_id'],ascending=[False,True]).copy()
+
+
+@lru_cache(maxsize=2)
+def _load_flip_catalog(root_string, token):
+    study=load_index(root_string);bars,_=load_prices(root_string,study)
+    return build_flip_catalog(study,bars)
+
+
+def load_flip_catalog(project):
+    root=Path(project).resolve()
+    paths=[RUN/'manifest.json',P12/'manifest.json',P121/'manifest.json']+[p/n for p,n in INDEX_FILES]
+    paths += [FREEZE/'manifest.json',FREEZE/'BTCUSDT_1m.csv',FREEZE/'BTCUSDT_1m_warmup.csv',
+              CATALOG/'manifest.json',CATALOG/'confirmed_swings.csv']
+    return _load_flip_catalog(str(root),signature(root,paths))
+
+
+FLIP_LABELS={'SUPPORT_TO_RESISTANCE':'Soporte → resistencia','RESISTANCE_TO_SUPPORT':'Resistencia → soporte'}
+REACTION_LABELS={'H1':'Reacción opuesta registrada en 1h','M15':'Reacción opuesta 15m · 1h pendiente',
+                 'PENDING':'Candidato · reacción opuesta pendiente'}
+
+
+def render_flip_selector(st, project, width):
+    catalog=load_flip_catalog(project)
+    st.markdown('##### Casos con historia de cambio de función · filtro PRE')
+    with st.expander('Filtros estructurales PRE'):
+        a,b,c=st.columns(3)
+        with a:age=_safe_select(st,'Antigüedad mínima de banda · horas',(0,24,48,72,168,336),PREFIX+'flip_age',72)
+        with b:defenses=_safe_select(st,'Defensas registradas 1h previas · mínimo',(1,2,3,4),PREFIX+'flip_defenses',2)
+        with c:distance=_safe_select(st,'Alejamiento cerrado 1h previo · mínimo %',(0.0,.1,.25,.5,1.0),PREFIX+'flip_distance',.25)
+        a,b=st.columns(2)
+        with a:direction=_safe_select(st,'Cambio de función',('BOTH','SUPPORT_TO_RESISTANCE','RESISTANCE_TO_SUPPORT'),
+            PREFIX+'flip_direction','BOTH',lambda x:'Ambos' if x=='BOTH' else FLIP_LABELS[x])
+        with b:reaction=_safe_select(st,'Reacción opuesta ya conocida',('M15_OR_H1','H1','ANY'),PREFIX+'flip_reaction','M15_OR_H1',
+            lambda x:{'M15_OR_H1':'Registrada en 15m o 1h','H1':'Registrada en 1h','ANY':'Incluir candidatos pendientes'}[x])
+        unique=st.checkbox('Primera llegada elegible por banda',key=PREFIX+'flip_unique',value=True)
+        st.caption('Criterio descriptivo: defensas del rol anterior, ruptura opuesta confirmada en 1h y regreso desde el nuevo lado. '
+                   'El cruce se contrasta con la secuencia de cierres 1h; reiniciar un episodio no crea una ruptura nueva. '
+                   'Se excluyen rupturas ya fallidas o recuperadas y evidencia horaria incompleta. '
+                   'La separación se mide con cierres 1h y límites conocidos en cada cierre. '
+                   'El filtro usa registros V1.3; no constituye un censo continuo de todas las defensas posibles ni una tasa de éxito. '
+                   'Varias visitas de una banda o un mismo movimiento de BTC pueden estar relacionadas.')
+    args=dict(min_age_hours=age,min_defenses=defenses,min_separation_pct=distance,direction=direction,reaction=reaction)
+    eligible=filter_flip_catalog(catalog,**args,unique_bands=False)
+    cases=filter_flip_catalog(catalog,**args,unique_bands=unique)
+    st.caption(f'{len(eligible)} llegadas elegibles · {eligible.region_id.nunique()} bandas · {len(cases)} casos en el selector. '
+               f'Filtro: ≥{age} h de historia, ≥{defenses} defensas 1h, alejamiento ≥{distance:g}%. '
+               'Todos los criterios se conocen antes de la llegada; POST permanece oculto.')
+    if cases.empty:
+        st.info('No hay casos con estos criterios. Podés reducir los umbrales o incluir candidatos pendientes.')
+        return None,(age,defenses,distance,direction,reaction,unique)
+    rows=cases.set_index('event_id').to_dict('index')
+    case_id=_safe_select(st,'Caso estructural PRE',cases.event_id,PREFIX+'flip_case',format_func=lambda x:
+        utc(rows[x]['pre_cutoff_ts'])+' · '+FLIP_LABELS[rows[x]['flip_direction']]+
+        f" · {rows[x]['band_age_hours']/24:.1f} días · {rows[x]['prior_h1_defenses']} defensas 1h · "+
+        {'H1':'reacción 1h','M15':'reacción 15m','PENDING':'pendiente'}[rows[x]['reaction_pre']])
+    case={**rows[case_id],'event_id':case_id}
+    with st.expander('Por qué aparece este caso · evidencia disponible en PRE'):
+        values=[('Referencia de llegada',utc(case['pre_cutoff_ts'])),('Cambio de función en estudio',FLIP_LABELS[case['flip_direction']]),
+                ('Banda conocida desde',utc(case['first_known_ts'])),('Antigüedad en la llegada',f"{case['band_age_hours']/24:.2f} días"),
+                ('Defensas 1h del rol anterior',int(case['prior_h1_defenses'])),('Ruptura opuesta 1h',utc(case['break_ts'])),
+                ('Máximo alejamiento cerrado conocido',f"{case['max_separation_pct']:.3f}% · {case['max_separation_widths']:.2f} anchos de banda"),
+                ('Reacción opuesta',REACTION_LABELS[case['reaction_pre']]),('Posición PRE del último 1h cerrado',case['pre_h1_position']),
+                ('Posición PRE del último 4h cerrado',case['pre_h4_position']),
+                ('Retorno 4h sobre 12h, conocido en PRE',f"{case['pre_h4_return_12h_pct']:.3f}%"),
+                ('Límites cambiaron desde la ruptura','Sí' if case['geometry_changed_since_break'] else 'No')]
+        st.dataframe(pd.DataFrame([(name,str(value)) for name,value in values],columns=['Criterio','Valor']),**width)
+        st.caption('Una reacción 15m no confirma automáticamente el cambio horario. Los retests sostenidos conservan la regla V1.3. '
+                   'Los criterios de selección se fijan en la llegada; las transiciones de este modo avanzan desde esa referencia.')
+    return case,(age,defenses,distance,direction,reaction,unique)
 
 
 def stage_at(stages, region, cutoff):
@@ -550,7 +772,8 @@ def render_multiswing_behavior_v13(project, st=None):
     width=width_options(st)
     presets={'LOW_23_OCT':'LOW · 23 octubre · visita 29',
              'HIGH_22_OCT':'HIGH · 22 octubre · visita 19',
-             'HIGH_18_SEP':'HIGH · 18 septiembre · visita 1', 'CATALOG':'Explorar todos los episodios BTC'}
+             'HIGH_18_SEP':'HIGH · 18 septiembre · visita 1',
+             'FLIPS_PRE':'Flips con historia · selección estructural PRE', 'CATALOG':'Explorar todos los episodios BTC'}
     preset=_safe_select(st,'Punto de partida',PRESETS,PREFIX+'preset','LOW_23_OCT',presets.get)
     changed_preset=state.get(PREFIX+'last_preset')!=preset
     if changed_preset:
@@ -560,8 +783,22 @@ def render_multiswing_behavior_v13(project, st=None):
             state[PREFIX+'region']=r;state[PREFIX+'episode']=e;state[PREFIX+'visit']=v
             state[PREFIX+'anchor']='VISIT'
         state[PREFIX+'last_preset']=preset
+    flip_case=None;flip_filters=()
     eps=study['episodes']
     if preset in BOOKMARKS:eps=eps.loc[eps.region_id.eq(BOOKMARKS[preset][0])]
+    elif preset=='FLIPS_PRE':
+        try:flip_case,flip_filters=render_flip_selector(st,root,width)
+        except (ValueError,KeyError,OSError) as exc:
+            st.error('No se pudo construir el catálogo de flips PRE: '+str(exc));return {'status':'INVALID_FLIP_CATALOG'}
+        if flip_case is None:
+            state[POST_KEY]=False
+            return {'status':'NO_FLIP_CASES'}
+        if changed_preset or state.get(PREFIX+'last_flip_case')!=flip_case['event_id']:
+            state[POST_KEY]=False
+            state[PREFIX+'region']=flip_case['region_id'];state[PREFIX+'episode']=flip_case['episode_id']
+            state[PREFIX+'visit']=flip_case['event_id'];state[PREFIX+'anchor']='VISIT'
+        state[PREFIX+'last_flip_case']=flip_case['event_id']
+        eps=eps.loc[eps.episode_id.eq(flip_case['episode_id'])]
     else:
         side=_safe_select(st,'Origen de la banda',('BOTH','LOW','HIGH'),PREFIX+'side','BOTH',
                           lambda x:{'BOTH':'Ambos','LOW':'LOW','HIGH':'HIGH'}[x])
@@ -578,7 +815,7 @@ def render_multiswing_behavior_v13(project, st=None):
     with episode_col:
         eid=_safe_select(st,'Episodio',eps.episode_id,PREFIX+'episode',format_func=lambda x:'Desde '+utc(epmap[x]['pre_cutoff_ts']))
     ep={**epmap[eid],'episode_id':eid}
-    nav=_safe_select(st,'Situar el corte PRE',('VISIT','EPISODE','TRANSITION'),PREFIX+'anchor','VISIT',
+    nav=_safe_select(st,'Situar el corte PRE',('VISIT','TRANSITION') if flip_case is not None else ('VISIT','EPISODE','TRANSITION'),PREFIX+'anchor','VISIT',
         lambda x:{'VISIT':'Antes del minuto de una visita','EPISODE':'Inicio del episodio',
                   'TRANSITION':'Vela de una transición'}[x])
     follow_region=st.checkbox('Seguir la misma banda en otros episodios',key=PREFIX+'follow_region',value=True,
@@ -586,6 +823,7 @@ def render_multiswing_behavior_v13(project, st=None):
     visit=None;transition=None;tid=None;vid=None;transition_cut='BEFORE_CANDLE'
     if nav=='VISIT':
         visits=study['visits'].loc[study['visits'].episode_id.eq(eid)].sort_values('pre_cutoff_ts')
+        if flip_case is not None:visits=visits.loc[visits.event_id.eq(flip_case['event_id'])]
         vmap=visits.set_index('event_id').to_dict('index')
         vid=_safe_select(st,'Visita',visits.event_id,PREFIX+'visit',format_func=lambda x:
                          f"Visita {int(vmap[x]['visit_number'])} · {utc(vmap[x]['pre_cutoff_ts'])} · desde {vmap[x]['approach_position']}")
@@ -593,6 +831,7 @@ def render_multiswing_behavior_v13(project, st=None):
         visit=vmap[vid]
     elif nav=='TRANSITION':
         candidates=transition_candidates(study['events'],ep,follow_region)
+        if flip_case is not None:candidates=candidates.loc[candidates.bar_open_ts.ge(int(flip_case['pre_cutoff_ts']))]
         emap=candidates.set_index('asof_transition_id').to_dict('index')
         numbers={x:i+1 for i,x in enumerate(candidates.asof_transition_id)}
         tid=_safe_select(st,'Vela de estudio',candidates.asof_transition_id,PREFIX+'transition',
@@ -611,7 +850,7 @@ def render_multiswing_behavior_v13(project, st=None):
     with c1:local_hours=_safe_select(st,'Historia 15m · horas',(12,24,48,72),PREFIX+'local_hours',24)
     with c2:h1_days=_safe_select(st,'Historia 1h · días',(1,3,7,14,30),PREFIX+'h1_days',7)
     with c3:h4_days=_safe_select(st,'Contexto 4h · días',(1,3,7,14,30,60),PREFIX+'h4_days',14)
-    blind_navigation(state,(preset,region,eid,nav,vid or '',tid or '',transition_cut,cutoff,local_hours,h1_days,h4_days,follow_region))
+    blind_navigation(state,(preset,region,eid,nav,vid or '',tid or '',transition_cut,cutoff,local_hours,h1_days,h4_days,follow_region,flip_filters))
     post_col,horizon_col,compare_col=st.columns(3)
     with post_col:reveal=st.checkbox('Revelar POST',key=POST_KEY,value=False)
     with horizon_col:post_minutes=_safe_select(st,'POST · minutos',(15,30,60,180,360,720,1440),PREFIX+'post_minutes',720)
@@ -623,11 +862,16 @@ def render_multiswing_behavior_v13(project, st=None):
     st.caption('Corte común: '+utc(cutoff)+' · '+('POST revelado hasta '+utc(end) if reveal else 'POST oculto')+
                ' · Las tres vistas utilizan únicamente velas cerradas dentro de su tramo.')
     st.dataframe(snapshot_table(bars,study['stages'],region,cutoff),**width)
+    known_stages=study['stages'].loc[study['stages'].region_id.eq(region)&study['stages'].known_from.le(cutoff)]
+    if len(known_stages):
+        first_known=int(known_stages.known_from.min())
+        st.caption('Banda conocida desde '+utc(first_known)+f' · historia disponible en PRE: {(cutoff-first_known)/(60*M):.2f} h. '
+                   'El tramo coloreado representa su historia confirmada dentro de la ventana.')
     if stage_at(study['stages'],region,cutoff) is None:
         st.info('Todavía no había una etapa geométrica confirmada en este corte; se conservan los precios cerrados sin atribuirles una banda futura.')
     if reveal and end<cutoff+post_minutes*M:
         st.caption('El POST está recortado por el final de la fuente congelada.')
-    arrival=int(visit['pre_cutoff_ts']) if visit is not None else int(ep['pre_cutoff_ts'])
+    arrival=int(flip_case['pre_cutoff_ts']) if flip_case is not None else int(visit['pre_cutoff_ts']) if visit is not None else int(ep['pre_cutoff_ts'])
     confirmations=arrival_confirmations(study['events'],region=region,arrival=arrival,end=end,
                                        selected_episode=eid,follow_region=follow_region)
     render_arrival_confirmations(st,confirmations,arrival,eid,follow_region,width)
@@ -669,7 +913,7 @@ def render_multiswing_behavior_v13(project, st=None):
         except (ValueError,FileNotFoundError,KeyError,OSError) as exc:
             st.warning('Comparación no disponible: '+str(exc))
     st.caption('La navegación recorre episodios históricos. 4h aporta contexto cerrado; los eventos de esta versión se calculan en 15m y 1h.')
-    st.caption(f'Vista V1.3.1: {time.perf_counter()-started:.2f} s · datos calculados offline; sin reconstrucción de episodios al navegar.')
+    st.caption(f'Vista V1.3.2: {time.perf_counter()-started:.2f} s · datos calculados offline; sin reconstrucción de episodios al navegar.')
     return {'status':'OK','cutoff':cutoff,'visible_end':end,'post_revealed':bool(reveal),
             'episode_id':eid,'region_id':region,'visible_timeline_rows':len(shown),
             'visible_confirmation_rows':len(confirmations)}

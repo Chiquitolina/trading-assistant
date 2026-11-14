@@ -124,6 +124,16 @@ class ClosedVisibility(unittest.TestCase):
 
 
 class NavigationRules(unittest.TestCase):
+    def test_price_aggregation_uses_millisecond_clocks_and_complete_buckets(self):
+        stamps=np.arange(61)*u.M
+        prices=100+np.arange(61)/10
+        full=pd.DataFrame(dict(timestamp=stamps,open=prices,high=prices+.3,low=prices-.2,close=prices+.1))
+        h1=u.closed_price_bars(full,60,0,61*u.M)
+        self.assertEqual(h1.closed_ts.tolist(),[60*u.M])
+        self.assertAlmostEqual(h1.open.iloc[0],100)
+        self.assertAlmostEqual(h1.close.iloc[0],106)
+        self.assertTrue(u.closed_price_bars(full,60,0,59*u.M).empty)
+        self.assertEqual(len(u.closed_price_bars(full,15,0,61*u.M)),4)
     def test_same_selection_preserves_explicit_post_but_navigation_hides_it(self):
         state={}
         self.assertTrue(u.blind_navigation(state,('ep',100)))
@@ -366,6 +376,20 @@ class RealFrozenStudy(unittest.TestCase):
         t=u.snapshot_table(self.bars,self.study['stages'],r,1792775940000)
         self.assertEqual(t['Posición con la etapa conocida al corte'].tolist(),['INSIDE','BELOW','BELOW'])
 
+    def test_real_prices_are_present_and_match_legacy_aggregation_when_supported(self):
+        from btc_multiswing_60d_explorer_v1 import load_snapshot,aggregate_closed
+        full,_,source=load_snapshot(ROOT)
+        for width,name in [(15,'15m'),(60,'1h'),(240,'4h')]:
+            current=self.bars[width]
+            self.assertGreater(len(current),100)
+            self.assertTrue(current.closed_ts.diff().dropna().eq(width*u.M).all())
+            legacy=aggregate_closed(full,name,int(full.timestamp.iloc[0]),int(source['end']))
+            # Older aggregation assumes nanosecond datetime indices. Compare
+            # exact OHLC parity where that API still returns actual candles.
+            if len(legacy):
+                for col in ('timestamp','open','high','low','close'):
+                    self.assertEqual(current[col].tolist(),legacy[col].tolist())
+
     def test_unchanged_run_reuses_verified_index_without_reading_csv_again(self):
         u._load_index.cache_clear()
         with patch.object(u,'verified_csv',wraps=u.verified_csv) as reader:
@@ -426,6 +450,153 @@ class RealFrozenStudy(unittest.TestCase):
         matched=known.loc[known.event_type.eq('EXIT_ABOVE_2C')]
         self.assertEqual(len(matched),1)
         self.assertEqual(float(matched.lag_minutes.iloc[0]),75)
+
+    def test_real_flip_catalog_keeps_mature_low_and_excludes_new_short_band(self):
+        catalog=u.load_flip_catalog(ROOT)
+        selected=catalog.loc[catalog.event_id.eq(u.BOOKMARKS['LOW_23_OCT'][2])]
+        self.assertEqual(len(selected),1)
+        row=selected.iloc[0]
+        self.assertEqual(row.flip_direction,'SUPPORT_TO_RESISTANCE')
+        self.assertEqual(row.reaction_pre,'M15')
+        self.assertEqual(int(row.h1_opposite_reactions),0)
+        self.assertEqual(int(row.prior_h1_defenses),2)
+        self.assertGreater(row.band_age_hours,7*24)
+        self.assertGreater(row.max_separation_pct,.7)
+        defaults=u.filter_flip_catalog(catalog,unique_bands=False)
+        self.assertIn(row.event_id,set(defaults.event_id))
+        self.assertFalse(defaults.event_id.eq('msv2_328a9f856221c0e15000|V1|1789115100000').any())
+        self.assertTrue(defaults.band_age_hours.ge(72).all())
+        self.assertTrue(defaults.prior_h1_defenses.ge(2).all())
+        self.assertTrue(defaults.max_separation_pct.ge(.25).all())
+        self.assertFalse(defaults.reaction_pre.eq('PENDING').any())
+        self.assertFalse(u.filter_flip_catalog(catalog).region_id.duplicated().any())
+
+    def test_real_flip_catalog_reuses_cache_for_changed_filters(self):
+        u._load_flip_catalog.cache_clear()
+        with patch.object(u,'build_flip_catalog',wraps=u.build_flip_catalog) as builder:
+            first=u.load_flip_catalog(ROOT)
+            u.filter_flip_catalog(first,min_age_hours=168)
+            second=u.load_flip_catalog(ROOT)
+            self.assertIs(first,second)
+            self.assertEqual(builder.call_count,1)
+
+
+class FlipPreSelection(unittest.TestCase):
+    def setUp(self):
+        self.hour=60*u.M
+        visit=dict(event_id='v',episode_id='ep',region_id='r',pre_cutoff_ts=96*self.hour,
+                   pre_last_1m_close_ts=96*self.hour,pre_last_1h_close_ts=95*self.hour,
+                   pre_last_4h_close_ts=92*self.hour,pre_1m_close=98.,pre_1h_close=98.,
+                   pre_4h_close=99.,pre_4h_ret_12h_pct=-1.2)
+        stage=dict(region_id='r',known_from=0,independent_extrema=2,band_low=100.,band_high=102.)
+        events=[]
+        for ident,hour,tf,kind,direction,origin,parent in [
+            ('d1',12,'H1_CLOSED','DEFEND_ORIGIN_2C','ABOVE','ABOVE',''),
+            ('d2',24,'H1_CLOSED','DEFEND_ORIGIN_2C','ABOVE','ABOVE',''),
+            ('b',73,'H1_CLOSED','BREAK_BELOW_2C','BELOW','ABOVE',''),
+            ('m',80,'M15_CLOSED','DEFEND_ORIGIN_2C','BELOW','BELOW','')]:
+            events.append(dict(asof_transition_id=ident,asof_physical_transition_id='p_'+ident,
+                region_id='r',episode_id='ep',source_tf=tf,event_type=kind,direction=direction,origin_position=origin,
+                confirmation_ts=hour*self.hour,stage_known_from=0,band_low_asof=100.,band_high_asof=102.,
+                data_complete=True,parent_asof_transition_id=parent))
+        self.study=dict(visits=pd.DataFrame([visit]),stages=pd.DataFrame([stage]),events=pd.DataFrame(events))
+        self.bars={60:pd.DataFrame({'closed_ts':np.array([70,71,72,73,80,95])*self.hour,'close':[103.,101.,97.,96.,97.,98.]})}
+
+    def build(self):return u.build_flip_catalog(self.study,self.bars)
+    def append_event(self,hour,kind,direction='ABOVE',parent='b',complete=True):
+        row=self.study['events'].iloc[-1].copy()
+        row['asof_transition_id']='new_'+str(hour);row['asof_physical_transition_id']='p_new_'+str(hour)
+        row['confirmation_ts']=hour*self.hour;row['event_type']=kind;row['direction']=direction
+        row['parent_asof_transition_id']=parent;row['source_tf']='H1_CLOSED';row['data_complete']=complete
+        self.study['events']=pd.concat([self.study['events'],pd.DataFrame([row])],ignore_index=True)
+
+    def test_selection_requires_prior_role_break_return_and_known_local_reaction(self):
+        row=self.build().iloc[0]
+        self.assertEqual(row.prior_h1_defenses,2)
+        self.assertEqual(row.flip_direction,'SUPPORT_TO_RESISTANCE')
+        self.assertEqual(row.reaction_pre,'M15')
+        self.assertEqual(row.max_separation_pct,4)
+        self.assertEqual(len(u.filter_flip_catalog(self.build())),1)
+
+    def test_failed_or_recovered_break_is_not_an_active_flip_candidate(self):
+        for kind in ('FAILED_BREAK_RETURN_ORIGIN_2C','EXIT_ABOVE_2C'):
+            with self.subTest(kind=kind):
+                original=self.study['events'].copy()
+                self.append_event(90,kind)
+                self.assertTrue(self.build().empty)
+                self.study['events']=original
+
+    def test_post_failure_future_stage_and_future_prices_do_not_change_pre_features(self):
+        before=self.build()
+        self.append_event(100,'FAILED_BREAK_RETURN_ORIGIN_2C')
+        stage=self.study['stages'].iloc[0].copy();stage['known_from']=100*self.hour
+        stage['band_low']=1.;stage['band_high']=9999.;stage['independent_extrema']=3
+        self.study['stages']=pd.concat([self.study['stages'],pd.DataFrame([stage])],ignore_index=True)
+        self.bars[60]=pd.concat([self.bars[60],pd.DataFrame([dict(closed_ts=100*self.hour,close=1.)])],ignore_index=True)
+        pd.testing.assert_frame_equal(before,self.build())
+
+    def test_duplicate_contexts_do_not_inflate_prior_defenses(self):
+        duplicate=self.study['events'].iloc[[0]].copy()
+        duplicate['asof_transition_id']='another_context';duplicate['episode_id']='other_ep'
+        self.study['events']=pd.concat([self.study['events'],duplicate],ignore_index=True)
+        self.assertEqual(self.build().prior_h1_defenses.iloc[0],2)
+
+    def test_incomplete_hourly_evidence_fails_closed(self):
+        self.append_event(90,'RETEST_TOUCH',direction='BELOW',complete=False)
+        self.assertTrue(self.build().empty)
+
+    def test_price_on_old_side_or_future_hourly_source_is_not_admitted(self):
+        self.study['visits'].loc[0,'pre_1m_close']=104.
+        self.assertTrue(self.build().empty)
+        self.study['visits'].loc[0,'pre_1m_close']=98.
+        self.study['visits'].loc[0,'pre_last_1h_close_ts']=97*self.hour
+        self.assertTrue(self.build().empty)
+
+    def test_hourly_reaction_is_not_invented_from_local_or_future_event(self):
+        self.assertEqual(self.build().reaction_pre.iloc[0],'M15')
+        self.append_event(100,'DEFEND_ORIGIN_2C',direction='BELOW')
+        self.assertEqual(self.build().reaction_pre.iloc[0],'M15')
+        self.append_event(90,'DEFEND_ORIGIN_2C',direction='BELOW')
+        self.assertEqual(self.build().reaction_pre.iloc[0],'H1')
+
+    def test_separation_uses_stage_at_each_closed_hour_not_geometry_from_later_pre(self):
+        stage=self.study['stages'].iloc[0].copy();stage['known_from']=90*self.hour
+        stage['band_low']=95.;stage['band_high']=103.;stage['independent_extrema']=3
+        self.study['stages']=pd.concat([self.study['stages'],pd.DataFrame([stage])],ignore_index=True)
+        self.study['visits'].loc[0,['pre_1m_close','pre_1h_close']]=94.
+        self.bars[60].loc[self.bars[60].closed_ts.eq(95*self.hour),'close']=94.
+        row=self.build().iloc[0]
+        self.assertEqual(row.max_separation_pct,4)
+        self.assertTrue(row.geometry_changed_since_break)
+
+    def test_thresholds_pending_reactions_and_first_case_per_band_are_explicit(self):
+        frame=self.build()
+        self.assertTrue(u.filter_flip_catalog(frame,min_age_hours=168).empty)
+        self.assertTrue(u.filter_flip_catalog(frame,min_defenses=3).empty)
+        self.assertTrue(u.filter_flip_catalog(frame,reaction='H1').empty)
+        self.assertTrue(u.filter_flip_catalog(frame,direction='RESISTANCE_TO_SUPPORT').empty)
+        later=frame.copy();later['event_id']='later';later['pre_cutoff_ts']+=self.hour
+        later['max_separation_pct']=999.
+        combined=pd.concat([frame,later],ignore_index=True)
+        selected=u.filter_flip_catalog(combined)
+        self.assertEqual(selected.event_id.tolist(),['v'])
+        self.assertEqual(len(u.filter_flip_catalog(combined,unique_bands=False)),2)
+        pending=frame.copy();pending['reaction_pre']='PENDING'
+        self.assertTrue(u.filter_flip_catalog(pending).empty)
+        self.assertEqual(len(u.filter_flip_catalog(pending,reaction='ANY')),1)
+
+    def test_episode_seeded_break_without_actual_hourly_cross_is_rejected(self):
+        self.bars[60].loc[self.bars[60].closed_ts.eq(70*self.hour),'close']=97.
+        self.assertTrue(self.build().empty)
+
+    def test_new_episode_does_not_restart_a_long_hourly_outside_streak(self):
+        self.bars[60].loc[self.bars[60].closed_ts.eq(71*self.hour),'close']=98.
+        self.assertTrue(self.build().empty)
+
+    def test_unknown_hourly_price_cannot_bridge_a_role_transition(self):
+        self.bars[60]=pd.concat([pd.DataFrame([dict(closed_ts=69*self.hour,close=103.)]),self.bars[60]],ignore_index=True)
+        self.bars[60].loc[self.bars[60].closed_ts.eq(70*self.hour),'close']=np.nan
+        self.assertTrue(self.build().empty)
 
 
 if __name__=='__main__':unittest.main()
