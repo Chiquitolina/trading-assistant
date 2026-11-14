@@ -27,12 +27,14 @@ CATALOG = BASE/'btc_sep09_nov08_swing_catalog_6tf_v1'
 VERSION = 'btc-multiswing-structural-behavior-fixed-vs-causal-stage-v1.3'
 PREFIX = 'ms60_v13_'
 POST_KEY = PREFIX+'reveal_post'
-PRESETS = ('LOW_23_OCT', 'HIGH_22_OCT', 'CATALOG')
+PRESETS = ('LOW_23_OCT', 'HIGH_22_OCT', 'HIGH_18_SEP', 'CATALOG')
 BOOKMARKS = {
     'LOW_23_OCT': ('msv2_69f4a7f7cf54ab7a4214', 'msv2_69f4a7f7cf54ab7a4214|EP|1792722660000',
                    'msv2_69f4a7f7cf54ab7a4214|V29|1792775940000'),
     'HIGH_22_OCT': ('msv2_f2cf7789ed5ecf4f4f81', 'msv2_f2cf7789ed5ecf4f4f81|EP|1792653540000',
                     'msv2_f2cf7789ed5ecf4f4f81|V19|1792663380000'),
+    'HIGH_18_SEP': ('msv2_a90a10e0f9eff24e9799', 'msv2_a90a10e0f9eff24e9799|EP|1789709580000',
+                    'msv2_a90a10e0f9eff24e9799|V1|1789709580000'),
 }
 INDEX_FILES = ((RUN,'episode_sequences_v13.csv'), (RUN,'asof_transition_observations_v13.csv'),
                (RUN,'h1_m15_links_asof_v13.csv'), (P12,'visit_pre_v12.csv'),
@@ -221,6 +223,145 @@ def event_label(kind, direction=''):
     return kind
 
 
+def confirmation_family(kind):
+    if kind.startswith(('FAILED_BREAK_', 'FAILED_EXIT_')):return 'FAILURE'
+    if kind.startswith(('BREAK_', 'EXIT_')):return 'CROSS'
+    if kind.startswith('DEFEND_'):return 'DEFENSE'
+    if kind.startswith('RETEST_HOLD_'):return 'HOLD'
+    if kind == 'RETEST_TOUCH':return 'RETEST'
+    if kind.startswith('REENTER_'):return 'REENTRY'
+    if kind == 'ACCEPT_INSIDE_3C':return 'ACCEPTANCE'
+    if kind.startswith('DEPART_'):return 'DEPARTURE'
+    return ''
+
+
+def confirmation_label(kind, direction=''):
+    if kind == 'DEFEND_ORIGIN_2C':
+        return {'BELOW':'Rechazo desde abajo', 'ABOVE':'Defensa desde arriba'}.get(str(direction),event_label(kind,direction))
+    if kind.startswith('RETEST_HOLD_'):
+        side={'ABOVE':'arriba','BELOW':'debajo'}.get(str(direction),'')
+        return 'Retest sostenido '+side+' · regla V1.3'
+    if kind == 'RETEST_TOUCH':return 'Retest observado · contacto de rango'
+    return event_label(kind,direction)
+
+
+def transition_candidates(events, episode, follow_region=True):
+    """Retrospective clock navigation, with no outcome labels in its selector."""
+    mask=events.region_id.eq(episode['region_id'])
+    mask &= events.confirmation_ts.gt(int(episode['pre_cutoff_ts']))
+    mask &= events.confirmation_ts.le(int(episode['observed_until_ts']))
+    if not follow_region:mask &= events.episode_id.eq(episode['episode_id'])
+    return events.loc[mask].sort_values(['confirmation_ts','source_tf','asof_transition_id'],kind='mergesort').copy()
+
+
+def arrival_confirmations(events, *, region, arrival, end, selected_episode, follow_region=True, tf=None):
+    """Read existing V1.3 events only; do not infer missing crosses or holds.
+
+    Region follow-up is a temporal association, not a rewrite of the selected
+    episode's state machine. Preserve parent aliases before physical dedup so
+    a retest/hold cannot be attached to a different cross or direction.
+    """
+    mask=events.region_id.eq(region)&events.confirmation_ts.gt(int(arrival))&events.confirmation_ts.le(int(end))
+    if not follow_region:mask &= events.episode_id.eq(selected_episode)
+    if tf is not None:mask &= events.source_tf.eq({15:'M15_CLOSED',60:'H1_CLOSED'}[tf])
+    result=events.loc[mask].copy()
+    result['confirmation_family']=result.event_type.map(confirmation_family)
+    result=result.loc[result.confirmation_family.ne('')].copy()
+    # Fail closed for missing evidence metadata. Range contact is observable,
+    # while OHLC_INTRABAR_SEQUENCE_UNKNOWN still does not prove intrabar order.
+    complete=result['data_complete'].fillna(False).eq(True) if 'data_complete' in result else pd.Series(False,index=result.index)
+    result['confirmation_evaluable']=complete & result.stage_known_from.le(result.confirmation_ts)
+    for field in ('confirmation_close','band_low_asof','band_high_asof'):
+        result['confirmation_evaluable'] &= np.isfinite(pd.to_numeric(result[field],errors='coerce'))
+    result['confirmation_evaluable'] &= result.band_low_asof.le(result.band_high_asof)
+    aliases=result.groupby('asof_physical_transition_id',sort=False).asof_transition_id.agg(tuple).to_dict()
+    result['_transition_aliases']=result.asof_physical_transition_id.map(aliases)
+    result['_selected_context']=result.episode_id.eq(selected_episode)
+    result=result.sort_values(['confirmation_ts','confirmation_evaluable','_selected_context','asof_transition_id'],
+                              ascending=[True,False,False,True],kind='mergesort')
+    return result.drop_duplicates('asof_physical_transition_id').copy()
+
+
+def confirmation_track(frame, tf):
+    rows=frame.loc[frame.source_tf.eq({15:'M15_CLOSED',60:'H1_CLOSED'}[tf])&frame.confirmation_evaluable].sort_values('confirmation_ts')
+    def last(q):return None if q.empty else q.iloc[-1]
+    cross=last(rows.loc[rows.confirmation_family.eq('CROSS')])
+    defense=last(rows.loc[rows.confirmation_family.eq('DEFENSE')])
+    retest=hold=failure=reentry=None
+    headline='Sin confirmación posterior visible'
+    if cross is not None:
+        if 'parent_asof_transition_id' in rows:
+            children=rows.loc[rows.parent_asof_transition_id.isin(cross['_transition_aliases'])
+                              & rows.confirmation_ts.ge(int(cross.confirmation_ts))]
+        else:children=rows.iloc[0:0]
+        retest=last(children.loc[children.confirmation_family.eq('RETEST')])
+        hold=last(children.loc[children.confirmation_family.eq('HOLD')])
+        failure=last(children.loc[children.confirmation_family.eq('FAILURE')])
+        reentry=last(children.loc[children.confirmation_family.eq('REENTRY')])
+        headline='Cruce / salida confirmados'
+        latest=last(children.loc[children.confirmation_family.isin(['RETEST','HOLD','FAILURE','REENTRY'])])
+        if latest is not None:
+            headline={'RETEST':'Retest observado · sostén pendiente', 'HOLD':'Retest sostenido · regla V1.3',
+                      'FAILURE':'Cruce / salida fallidos','REENTRY':'Reingreso observado'}[latest.confirmation_family]
+    elif defense is not None:headline=confirmation_label(defense.event_type,defense.direction)
+    elif len(rows):headline=confirmation_label(rows.iloc[-1].event_type,rows.iloc[-1].direction)
+    elif len(frame.loc[frame.source_tf.eq({15:'M15_CLOSED',60:'H1_CLOSED'}[tf])]):headline='Evidencia incompleta · sin confirmar'
+    return dict(headline=headline,cross=cross,defense=defense,retest=retest,hold=hold,failure=failure,reentry=reentry)
+
+
+def arrival_links(links, *, region, arrival, end, selected_episode, follow_region=True):
+    mask=links.region_id.eq(region)&links.h1_confirmation_ts.gt(int(arrival))&links.h1_confirmation_ts.le(int(end))
+    mask &= links.m15_confirmation_ts.gt(int(arrival))&links.m15_confirmation_ts.le(int(end))
+    mask &= links.h1_confirmation_ts.ge(links.m15_confirmation_ts)
+    mask &= links.link_status.isin(['LAGGED_CONFIRMATION','SAME_CLOSE'])
+    if not follow_region:mask &= links.episode_id.eq(selected_episode)
+    return links.loc[mask].sort_values('h1_confirmation_ts').copy()
+
+
+def confirmation_table(frame, arrival, selected_episode):
+    rows=[]
+    for r in frame.itertuples(index=False):
+        direction='' if pd.isna(r.direction) else str(r.direction)
+        rows.append({'Confirmación UTC':utc(r.confirmation_ts),'TF':'15m' if r.source_tf=='M15_CLOSED' else '1h',
+            'Evento':confirmation_label(r.event_type,direction),
+            'Minutos desde la visita':round((int(r.confirmation_ts)-int(arrival))/M,1),
+            'Contexto':'Episodio seleccionado' if r.episode_id==selected_episode else 'Otro episodio de la misma banda',
+            'Evidencia':'Incompleta' if not r.confirmation_evaluable else
+                        'Contacto por rango; orden intraminuto desconocido' if r.evidence_status=='OHLC_INTRABAR_SEQUENCE_UNKNOWN' else 'Cierres confirmados',
+            'ID de evento':r.asof_transition_id,'ID físico':r.asof_physical_transition_id,
+            'ID de episodio':r.episode_id,
+            'ID de cruce asociado':getattr(r,'parent_asof_transition_id','')})
+    return pd.DataFrame(rows)
+
+
+def render_arrival_confirmations(st, frame, arrival, selected_episode, follow_region, width):
+    st.markdown('##### Seguimiento de la llegada · confirmaciones conocidas')
+    st.caption('Referencia de visita: '+utc(arrival)+' · '+
+               ('Sigue la misma banda, incluidos otros episodios.' if follow_region else 'Solo el episodio seleccionado.')+
+               ' Los horarios indican disponibilidad; una confirmación puede fallar después.')
+    for col,tf in zip(st.columns(2),(15,60)):
+        track=confirmation_track(frame,tf)
+        with col:
+            st.markdown('**'+('15m' if tf==15 else '1h')+' · '+track['headline']+'**')
+            for field,label in [('defense','Defensa / rechazo'),('cross','Cruce / salida'),('retest','Retest'),
+                                ('hold','Sostén registrado'),('failure','Fallo'),('reentry','Primer reingreso')]:
+                event=track[field]
+                if event is not None:
+                    other=' · otro episodio' if event.episode_id!=selected_episode else ''
+                    st.caption(label+': '+utc(event.confirmation_ts)+' · '+confirmation_label(event.event_type,event.direction)+other)
+    shown=confirmation_table(frame,arrival,selected_episode)
+    with st.expander('Secuencia y evidencia de las confirmaciones'):
+        if shown.empty:st.caption('Todavía no hay eventos posteriores a la visita dentro del tramo visible.')
+        else:
+            st.dataframe(shown.drop(columns=['ID de evento','ID físico','ID de episodio','ID de cruce asociado']),**width)
+            st.download_button('Descargar confirmaciones visibles',shown.to_csv(index=False).encode('utf-8-sig'),
+                file_name='multiswing_v13_confirmaciones_visibles.csv',mime='text/csv',key=PREFIX+'download_confirmations')
+        st.caption('Se muestran etiquetas ya calculadas por V1.3. Salida significa que el episodio comenzó dentro; '
+                   'cruce parte de un lado conocido. El retest por rango no resuelve el orden intraminuto. '
+                   'El sostén V1.3 conserva la racha global de cierres: no exige dos cierres nuevos después del retest. '
+                   'Seguir otro episodio es una asociación temporal de la misma banda; no reescribe la secuencia del episodio original.')
+
+
 def band_points(stages, region, start, end):
     known=stages.loc[stages.region_id.eq(region)&stages.known_from.le(int(end))]
     known=known.sort_values(['known_from','independent_extrema'],kind='mergesort').drop_duplicates('known_from',keep='last')
@@ -245,10 +386,13 @@ def snapshot_table(bars, stages, region, cutoff):
 
 def build_figure(bars, stages, events, *, region, episode, cutoff, end, tf_minutes,
                  lookback_minutes, origin_side, compare_fixed=False, details=False,
-                 selected_transition_id=None):
+                 selected_transition_id=None, followup_start=None, follow_region=True):
     start=int(cutoff)-int(lookback_minutes)*M
     candles=slice_bars(bars,start,end)
-    visible=visible_events(events,region,start,end,tf_minutes,details=details)
+    chart_events=events
+    if followup_start is not None and not follow_region:
+        chart_events=events.loc[events.confirmation_ts.le(int(followup_start))|events.episode_id.eq(episode['episode_id'])]
+    visible=visible_events(chart_events,region,start,end,tf_minutes,details=details)
     color='#48c7aa' if origin_side=='LOW' else '#e3af59'
     fill='rgba(72,199,170,.17)' if origin_side=='LOW' else 'rgba(227,175,89,.17)'
     bx,lo,hi=band_points(stages,region,start,end)
@@ -282,16 +426,44 @@ def build_figure(bars, stages, events, *, region, episode, cutoff, end, tf_minut
                      'y':visible.confirmation_close.astype(float).tolist(),'mode':'markers','name':'Eventos confirmados',
                      'marker':{'size':8,'color':'#a7d7ff','line':{'color':'#0c1320','width':1}},
                      'text':text,'hovertemplate':'%{text}<br>Precio: %{y:.2f}<extra></extra>'})
+    follow=None
+    if followup_start is not None and tf_minutes in (15,60):
+        follow=arrival_confirmations(events,region=region,arrival=max(start,int(followup_start)),end=end,
+                                     selected_episode=str(episode['episode_id']),follow_region=follow_region,tf=tf_minutes)
+        follow=follow.loc[follow.confirmation_evaluable].copy()
+        styles={'CROSS':('Cruce / salida','triangle-up','#ffd166'),
+                'DEFENSE':('Defensa / rechazo','diamond','#bba7ff'),
+                'RETEST':('Retest','circle-open','#f0bb6a'),
+                'HOLD':('Sostén V1.3','square','#63d9b0'),
+                'FAILURE':('Fallo','x','#f17e86')}
+        for family,(name,symbol,tint) in styles.items():
+            q=follow.loc[follow.confirmation_family.eq(family)]
+            if q.empty:continue
+            symbols=['triangle-down' if family=='CROSS' and r.direction=='BELOW' else symbol for r in q.itertuples(index=False)]
+            hover=[confirmation_label(r.event_type,r.direction)+'<br>'+utc(r.confirmation_ts)+
+                   ('<br>Otro episodio de la misma banda' if r.episode_id!=episode['episode_id'] else '<br>Episodio seleccionado')+
+                   ('<br>Orden intraminuto sin resolver' if r.evidence_status=='OHLC_INTRABAR_SEQUENCE_UNKNOWN' else '')
+                   for r in q.itertuples(index=False)]
+            data.append({'type':'scatter','x':iso_values(q.confirmation_ts.to_numpy()),
+                         'y':q.confirmation_close.astype(float).tolist(),'mode':'markers','name':name,
+                         'marker':{'size':10,'symbol':symbols,'color':tint,'line':{'width':1}},
+                         'text':hover,'hovertemplate':'%{text}<br>Precio: %{y:.2f}<extra></extra>'})
     annotations=[]
     # Filter the chosen episode BEFORE physical deduplication. The same event
     # can belong to several episodes; a representative from another episode
     # must not make the selected transition disappear from navigation.
     selected_events=visible_events(events,region,start,end,tf_minutes,episode=str(episode['episode_id']),details=True)
     focus=selected_events
+    if follow is not None:
+        # Follow the region after the chosen visit, even if V1.3 recorded a
+        # later cross in a different episode. Keep episode-only PRE history.
+        focus=pd.concat([selected_events.loc[selected_events.confirmation_ts.le(int(followup_start))],follow])
     focus=focus.loc[focus.event_type.str.startswith(('BREAK_','EXIT_','FAILED_','DEFEND_','RETEST_HOLD_'))|focus.event_type.eq('RETEST_TOUCH')]
-    focus=focus.sort_values('confirmation_ts').drop_duplicates('event_type',keep='last').tail(5)
-    if selected_transition_id and selected_transition_id in set(selected_events.asof_transition_id):
-        selected=selected_events.loc[selected_events.asof_transition_id.eq(selected_transition_id)]
+    focus=focus.sort_values('confirmation_ts').drop_duplicates('event_type',keep='last').tail(7 if follow is not None else 5)
+    exact=events.loc[events.asof_transition_id.eq(selected_transition_id)] if selected_transition_id else events.iloc[0:0]
+    if not follow_region:exact=exact.loc[exact.episode_id.eq(episode['episode_id'])]
+    selected=visible_events(exact,region,start,end,tf_minutes,details=True)
+    if len(selected):
         focus=pd.concat([focus,selected]).drop_duplicates('asof_transition_id')
         data.append({'type':'scatter','x':iso_values(selected.confirmation_ts.to_numpy()),
                      'y':selected.confirmation_close.astype(float).tolist(),'mode':'markers',
@@ -300,7 +472,8 @@ def build_figure(bars, stages, events, *, region, episode, cutoff, end, tf_minut
     for i,r in enumerate(focus.itertuples(index=False)):
         fraction=(int(r.confirmation_ts)-start)/max(1,end-start)
         right=fraction>.5
-        label='<br>'.join(textwrap.wrap(event_label(r.event_type,'' if pd.isna(r.direction) else str(r.direction)),28))
+        labeler=confirmation_label if follow is not None and int(r.confirmation_ts)>int(followup_start) else event_label
+        label='<br>'.join(textwrap.wrap(labeler(r.event_type,'' if pd.isna(r.direction) else str(r.direction)),28))
         annotations.append({'x':iso_values([r.confirmation_ts])[0],'y':float(r.confirmation_close),
             'text':label,'xanchor':'right' if right else 'left',
             'showarrow':True,'arrowhead':0,'ax':-28 if right else 28,'ay':-42 if i%2==0 else 44,
@@ -376,7 +549,8 @@ def render_multiswing_behavior_v13(project, st=None):
     state=st.session_state
     width=width_options(st)
     presets={'LOW_23_OCT':'LOW · 23 octubre · visita 29',
-             'HIGH_22_OCT':'HIGH · 22 octubre · visita 19', 'CATALOG':'Explorar todos los episodios BTC'}
+             'HIGH_22_OCT':'HIGH · 22 octubre · visita 19',
+             'HIGH_18_SEP':'HIGH · 18 septiembre · visita 1', 'CATALOG':'Explorar todos los episodios BTC'}
     preset=_safe_select(st,'Punto de partida',PRESETS,PREFIX+'preset','LOW_23_OCT',presets.get)
     changed_preset=state.get(PREFIX+'last_preset')!=preset
     if changed_preset:
@@ -407,6 +581,8 @@ def render_multiswing_behavior_v13(project, st=None):
     nav=_safe_select(st,'Situar el corte PRE',('VISIT','EPISODE','TRANSITION'),PREFIX+'anchor','VISIT',
         lambda x:{'VISIT':'Antes del minuto de una visita','EPISODE':'Inicio del episodio',
                   'TRANSITION':'Vela de una transición'}[x])
+    follow_region=st.checkbox('Seguir la misma banda en otros episodios',key=PREFIX+'follow_region',value=True,
+        help='Vincula por tiempo las confirmaciones de la región desde esta visita. Conserva el episodio de origen de cada evento.')
     visit=None;transition=None;tid=None;vid=None;transition_cut='BEFORE_CANDLE'
     if nav=='VISIT':
         visits=study['visits'].loc[study['visits'].episode_id.eq(eid)].sort_values('pre_cutoff_ts')
@@ -416,11 +592,12 @@ def render_multiswing_behavior_v13(project, st=None):
         if vid is None:st.info('Este episodio no tiene visitas disponibles.');return {'status':'NO_VISITS'}
         visit=vmap[vid]
     elif nav=='TRANSITION':
-        candidates=study['events'].loc[study['events'].episode_id.eq(eid)].sort_values(['confirmation_ts','source_tf','asof_transition_id'])
+        candidates=transition_candidates(study['events'],ep,follow_region)
         emap=candidates.set_index('asof_transition_id').to_dict('index')
         numbers={x:i+1 for i,x in enumerate(candidates.asof_transition_id)}
         tid=_safe_select(st,'Vela de estudio',candidates.asof_transition_id,PREFIX+'transition',
-            format_func=lambda x:f"#{numbers[x]} · {'15m' if emap[x]['source_tf']=='M15_CLOSED' else '1h'} · abre {utc(emap[x]['bar_open_ts'])}")
+            format_func=lambda x:f"#{numbers[x]} · {'15m' if emap[x]['source_tf']=='M15_CLOSED' else '1h'} · abre {utc(emap[x]['bar_open_ts'])}"+
+                (' · otro episodio' if emap[x]['episode_id']!=eid else ''))
         if tid is None:st.info('Este episodio no tiene transiciones disponibles.');return {'status':'NO_TRANSITIONS'}
         transition=emap[tid]
         transition_cut=_safe_select(st,'Instante de la vela',('BEFORE_CANDLE','AT_CONFIRMATION'),PREFIX+'transition_cut','BEFORE_CANDLE',
@@ -434,7 +611,7 @@ def render_multiswing_behavior_v13(project, st=None):
     with c1:local_hours=_safe_select(st,'Historia 15m · horas',(12,24,48,72),PREFIX+'local_hours',24)
     with c2:h1_days=_safe_select(st,'Historia 1h · días',(1,3,7,14,30),PREFIX+'h1_days',7)
     with c3:h4_days=_safe_select(st,'Contexto 4h · días',(1,3,7,14,30,60),PREFIX+'h4_days',14)
-    blind_navigation(state,(preset,region,eid,nav,vid or '',tid or '',transition_cut,cutoff,local_hours,h1_days,h4_days))
+    blind_navigation(state,(preset,region,eid,nav,vid or '',tid or '',transition_cut,cutoff,local_hours,h1_days,h4_days,follow_region))
     post_col,horizon_col,compare_col=st.columns(3)
     with post_col:reveal=st.checkbox('Revelar POST',key=POST_KEY,value=False)
     with horizon_col:post_minutes=_safe_select(st,'POST · minutos',(15,30,60,180,360,720,1440),PREFIX+'post_minutes',720)
@@ -450,10 +627,14 @@ def render_multiswing_behavior_v13(project, st=None):
         st.info('Todavía no había una etapa geométrica confirmada en este corte; se conservan los precios cerrados sin atribuirles una banda futura.')
     if reveal and end<cutoff+post_minutes*M:
         st.caption('El POST está recortado por el final de la fuente congelada.')
+    arrival=int(visit['pre_cutoff_ts']) if visit is not None else int(ep['pre_cutoff_ts'])
+    confirmations=arrival_confirmations(study['events'],region=region,arrival=arrival,end=end,
+                                       selected_episode=eid,follow_region=follow_region)
+    render_arrival_confirmations(st,confirmations,arrival,eid,follow_region,width)
     for tf,minutes in [(15,local_hours*60),(60,h1_days*1440),(240,h4_days*1440)]:
         figure=build_figure(bars[tf],study['stages'],study['events'],region=region,episode=ep,
             cutoff=cutoff,end=end,tf_minutes=tf,lookback_minutes=minutes,origin_side=ep['band_origin_side'],
-            compare_fixed=compare,details=details,selected_transition_id=tid)
+            compare_fixed=compare,details=details,selected_transition_id=tid,followup_start=arrival,follow_region=follow_region)
         st.plotly_chart(figure,**width,key=PREFIX+'chart_'+str(tf),
                         config={'displaylogo':False,'scrollZoom':True})
     st.markdown('##### Cronología conocida en el tramo visible')
@@ -465,18 +646,18 @@ def render_multiswing_behavior_v13(project, st=None):
         st.dataframe(shown,**width)
         st.download_button('Descargar cronología visible',shown.to_csv(index=False).encode('utf-8-sig'),
             file_name='multiswing_v13_cronologia_visible.csv',mime='text/csv',key=PREFIX+'download_timeline')
-    with st.expander('Relación entre eventos 15m y 1h del episodio'):
-        links=visible_links(study['links'],eid,end)
-        links=links.loc[links.link_status.isin(['LAGGED_CONFIRMATION','SAME_CLOSE'])]
+    with st.expander('Relación entre eventos 15m y 1h desde la visita'):
+        links=arrival_links(study['links'],region=region,arrival=arrival,end=end,selected_episode=eid,follow_region=follow_region)
         display=[]
         for r in links.itertuples(index=False):
             display.append({'Evento':event_label(r.event_type,'' if pd.isna(r.direction) else str(r.direction)),
                 'Cierre 15m UTC':utc(r.m15_confirmation_ts),'Cierre 1h UTC':utc(r.h1_confirmation_ts),
                 'Retraso · minutos':int(r.lag_minutes),
                 'Relación':'Mismo cierre' if r.link_status=='SAME_CLOSE' else 'Confirmación posterior',
+                'Contexto':'Episodio seleccionado' if r.episode_id==eid else 'Otro episodio de la misma banda',
                 'Cambian los límites entre confirmaciones':bool(r.geometry_changed_between_confirmations)})
         if display:st.dataframe(pd.DataFrame(display),**width)
-        else:st.caption('No hay un vínculo confirmado visible para este episodio.')
+        else:st.caption('No hay un vínculo confirmado visible desde esta visita.')
     if compare:
         try:
             audit=visible_comparison(load_comparison(root),eid,end)
@@ -488,6 +669,7 @@ def render_multiswing_behavior_v13(project, st=None):
         except (ValueError,FileNotFoundError,KeyError,OSError) as exc:
             st.warning('Comparación no disponible: '+str(exc))
     st.caption('La navegación recorre episodios históricos. 4h aporta contexto cerrado; los eventos de esta versión se calculan en 15m y 1h.')
-    st.caption(f'Vista V1.3: {time.perf_counter()-started:.2f} s · datos calculados offline; sin reconstrucción de episodios al navegar.')
+    st.caption(f'Vista V1.3.1: {time.perf_counter()-started:.2f} s · datos calculados offline; sin reconstrucción de episodios al navegar.')
     return {'status':'OK','cutoff':cutoff,'visible_end':end,'post_revealed':bool(reveal),
-            'episode_id':eid,'region_id':region,'visible_timeline_rows':len(shown)}
+            'episode_id':eid,'region_id':region,'visible_timeline_rows':len(shown),
+            'visible_confirmation_rows':len(confirmations)}
