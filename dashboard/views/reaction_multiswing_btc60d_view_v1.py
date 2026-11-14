@@ -470,7 +470,7 @@ def v32_build_context_chart(full, *, stages, selected_region, region_id: str,
 # V3.1.2 | Retrospective navigation only. Events locate a historical decision
 # instant, but are NEVER used as PRE features, signals, trading outcomes, or
 # evidence for the selected band. The charts still reconstruct at the cutoff.
-V33_REPLAY_ORIGINS = ('ARRIVAL', 'VISIT', 'BIRTH', 'CONFIRMATION', 'MANUAL', 'BEHAVIOR')
+V33_REPLAY_ORIGINS = ('ARRIVAL', 'VISIT', 'BIRTH', 'CONFIRMATION', 'MANUAL', 'BEHAVIOR', 'BEHAVIOR_V13')
 V33_NAVIGATION_GAP_MINUTES = 30
 
 
@@ -618,9 +618,27 @@ def render_btc_multiswing_60d_view(project):
                 'BIRTH':'Nacimiento original · PRE al confirmar el segundo extremo',
                 'CONFIRMATION':'Nueva confirmación · evolución posterior de la banda',
                 'MANUAL':'Exploración libre · fecha y hora manuales',
-                'BEHAVIOR':'Structural Behavior V1.2 · episodio → visita → evento'}[x],
+                'BEHAVIOR':'Structural Behavior V1.2 · episodio → visita → evento',
+                'BEHAVIOR_V13':'Structural Behavior V1.3 · 15m + 1h + contexto 4h'}[x],
             key='ms60_v33_event_origin')
     ui_state = getattr(st, 'session_state', None)
+    # V1.3 is a read-only branch BEFORE the general explorer's loading/builds.
+    active_v13 = mode == 'EJECUCION' and replay_origin == 'BEHAVIOR_V13'
+    if ui_state is not None:
+        was_v13 = bool(ui_state.get('ms60_v13_active', False))
+        if not active_v13 or not was_v13:
+            ui_state['ms60_v13_reveal_post'] = False
+        if active_v13 != was_v13:
+            ui_state['ms60_v31_reveal_post'] = False
+            ui_state['ms60_reveal_post'] = False
+        ui_state['ms60_v13_active'] = active_v13
+    if active_v13:
+        if ui_state is not None:
+            ui_state['ms60_v31_last_mode'] = mode
+            ui_state['ms60_v12_last_origin'] = replay_origin
+        from dashboard.views.reaction_multiswing_behavior_v13_view import render_multiswing_behavior_v13
+        render_multiswing_behavior_v13(Path(project))
+        return
     if ui_state is not None:
         previous_mode = ui_state.get('ms60_v31_last_mode')
         if mode == 'EJECUCION' and previous_mode in ('MAPA', 'INSPECTOR'):
