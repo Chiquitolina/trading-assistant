@@ -27,7 +27,7 @@ CATALOG = BASE/'btc_sep09_nov08_swing_catalog_6tf_v1'
 VERSION = 'btc-multiswing-structural-behavior-fixed-vs-causal-stage-v1.3'
 PREFIX = 'ms60_v13_'
 POST_KEY = PREFIX+'reveal_post'
-PRESETS = ('LOW_23_OCT', 'HIGH_22_OCT', 'HIGH_18_SEP', 'FLIPS_PRE', 'CATALOG')
+PRESETS = ('LOW_23_OCT', 'HIGH_22_OCT', 'HIGH_18_SEP', 'FLIPS_PRE', 'CATALOG', 'EXECUTION_V01')
 BOOKMARKS = {
     'LOW_23_OCT': ('msv2_69f4a7f7cf54ab7a4214', 'msv2_69f4a7f7cf54ab7a4214|EP|1792722660000',
                    'msv2_69f4a7f7cf54ab7a4214|V29|1792775940000'),
@@ -773,7 +773,8 @@ def render_multiswing_behavior_v13(project, st=None):
     presets={'LOW_23_OCT':'LOW · 23 octubre · visita 29',
              'HIGH_22_OCT':'HIGH · 22 octubre · visita 19',
              'HIGH_18_SEP':'HIGH · 18 septiembre · visita 1',
-             'FLIPS_PRE':'Flips con historia · selección estructural PRE', 'CATALOG':'Explorar todos los episodios BTC'}
+             'FLIPS_PRE':'Flips con historia · selección estructural PRE', 'CATALOG':'Explorar todos los episodios BTC',
+             'EXECUTION_V01':'Ejecución experimental · gatillos 1m / 5m · V0.1'}
     preset=_safe_select(st,'Punto de partida',PRESETS,PREFIX+'preset','LOW_23_OCT',presets.get)
     changed_preset=state.get(PREFIX+'last_preset')!=preset
     if changed_preset:
@@ -783,6 +784,9 @@ def render_multiswing_behavior_v13(project, st=None):
             state[PREFIX+'region']=r;state[PREFIX+'episode']=e;state[PREFIX+'visit']=v
             state[PREFIX+'anchor']='VISIT'
         state[PREFIX+'last_preset']=preset
+    if preset=='EXECUTION_V01':
+        from dashboard.views.reaction_multiswing_execution_v01_view import render_execution_v01
+        return render_execution_v01(root)
     flip_case=None;flip_filters=()
     eps=study['episodes']
     if preset in BOOKMARKS:eps=eps.loc[eps.region_id.eq(BOOKMARKS[preset][0])]
@@ -913,7 +917,7 @@ def render_multiswing_behavior_v13(project, st=None):
         except (ValueError,FileNotFoundError,KeyError,OSError) as exc:
             st.warning('Comparación no disponible: '+str(exc))
     st.caption('La navegación recorre episodios históricos. 4h aporta contexto cerrado; los eventos de esta versión se calculan en 15m y 1h.')
-    st.caption(f'Vista V1.3.2: {time.perf_counter()-started:.2f} s · datos calculados offline; sin reconstrucción de episodios al navegar.')
+    st.caption(f'Vista V1.3.3: {time.perf_counter()-started:.2f} s · datos calculados offline; sin reconstrucción de episodios al navegar.')
     return {'status':'OK','cutoff':cutoff,'visible_end':end,'post_revealed':bool(reveal),
             'episode_id':eid,'region_id':region,'visible_timeline_rows':len(shown),
             'visible_confirmation_rows':len(confirmations)}
