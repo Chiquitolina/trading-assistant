@@ -1,6 +1,7 @@
 """PRE/POST, closed clocks, route preservation and real-data checks for V1.3 UI."""
 from __future__ import annotations
 import ast
+import copy
 import hashlib
 import importlib.util
 import json
@@ -124,6 +125,16 @@ class ClosedVisibility(unittest.TestCase):
 
 
 class NavigationRules(unittest.TestCase):
+    def test_price_aggregation_uses_millisecond_clocks_and_complete_buckets(self):
+        stamps=np.arange(61)*u.M
+        prices=100+np.arange(61)/10
+        full=pd.DataFrame(dict(timestamp=stamps,open=prices,high=prices+.3,low=prices-.2,close=prices+.1))
+        h1=u.closed_price_bars(full,60,0,61*u.M)
+        self.assertEqual(h1.closed_ts.tolist(),[60*u.M])
+        self.assertAlmostEqual(h1.open.iloc[0],100)
+        self.assertAlmostEqual(h1.close.iloc[0],106)
+        self.assertTrue(u.closed_price_bars(full,60,0,59*u.M).empty)
+        self.assertEqual(len(u.closed_price_bars(full,15,0,61*u.M)),4)
     def test_same_selection_preserves_explicit_post_but_navigation_hides_it(self):
         state={}
         self.assertTrue(u.blind_navigation(state,('ep',100)))
@@ -190,7 +201,23 @@ class ExistingRoutePreservation(unittest.TestCase):
         fn=next(x for x in self.tree.body if isinstance(x,ast.FunctionDef) and x.name=='render_btc_multiswing_60d_view')
         for i,node in enumerate(fn.body):
             if isinstance(node,ast.If) and any(isinstance(x,ast.Name) and x.id=='previous_mode' for x in ast.walk(node)):
-                tail=ast.Module(body=fn.body[i:],type_ignores=[]);break
+                tail=ast.Module(body=copy.deepcopy(fn.body[i:]),type_ignores=[]);break
+        # Allow only the optional overlay; retain the original hash guard
+        # for all price, PRE/POST, viewport and structural rendering code.
+        class OverlayStatements(ast.NodeTransformer):
+            def visit_Assign(self,node):
+                if len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id in {'rx_stages','rx_start','rx'}:
+                    return None
+                return self.generic_visit(node)
+            def visit_Expr(self,node):
+                if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and isinstance(node.value.func.value,ast.Name) and node.value.func.value.id=='reaction_overlay':
+                    return None
+                return self.generic_visit(node)
+            def visit_Constant(self,node):
+                if node.value=='Las REACTIONs opcionales se comparan con las bandas conocidas al retest. HLL as-of y las reglas operativas se mantienen como capas separadas.':
+                    node.value='Próximas capas: HLL as-of, eventos REACTION confirmados y triggers 1m/5m. La investigación de triggers se desarrollará y validará por separado.'
+                return node
+        tail=OverlayStatements().visit(tail)
         actual=hashlib.sha256(ast.dump(tail,include_attributes=False).encode()).hexdigest()
         self.assertEqual(actual,'d52ded82585d87f922f18b2e62aec6cdaae5ac6966d0399f3a26254ef7253469')
 
@@ -226,6 +253,133 @@ class ExistingRoutePreservation(unittest.TestCase):
         self.assertFalse(fake.session_state['ms60_v13_active'])
 
 
+class ArrivalFollowup(unittest.TestCase):
+    def setUp(self):
+        self.bars,self.stages,_,self.ep=fixtures()
+        rows=[]
+        for ident,ts,episode,kind,direction,parent in [
+            ('defense',210,'ep','DEFEND_ORIGIN_2C','BELOW',''),
+            ('down',225,'ep','EXIT_BELOW_2C','BELOW',''),
+            ('down_touch',255,'ep','RETEST_TOUCH','BELOW','down'),
+            ('up',270,'next_ep','EXIT_ABOVE_2C','ABOVE',''),
+            ('up_touch',300,'next_ep','RETEST_TOUCH','ABOVE','up'),
+            ('up_hold',315,'next_ep','RETEST_HOLD_ABOVE_2C','ABOVE','up'),
+            ('depart',330,'next_ep','DEPART_ABOVE_2C','ABOVE','')]:
+            rows.append(dict(asof_transition_id=ident,asof_physical_transition_id='p_'+ident,
+                region_id='r',episode_id=episode,confirmation_ts=ts*u.M,bar_open_ts=(ts-15)*u.M,
+                source_tf='M15_CLOSED',event_type=kind,direction=direction,confirmation_close=112,
+                band_low_asof=100,band_high_asof=110,stage_known_from=0,data_complete=True,
+                evidence_status='OHLC_INTRABAR_SEQUENCE_UNKNOWN' if kind=='RETEST_TOUCH' else 'CLOSED_BAR_CONFIRMED',
+                parent_asof_transition_id=parent))
+        self.events=pd.DataFrame(rows)
+
+    def frame(self,end=400,follow=True):
+        return u.arrival_confirmations(self.events,region='r',arrival=180*u.M,end=end*u.M,
+                                       selected_episode='ep',follow_region=follow)
+
+    def test_region_followup_reaches_next_episode_without_rewriting_original(self):
+        original=self.events.copy(deep=True)
+        self.assertEqual(u.confirmation_track(self.frame(),15)['hold'].asof_transition_id,'up_hold')
+        selected=u.confirmation_track(self.frame(follow=False),15)
+        self.assertEqual(selected['cross'].asof_transition_id,'down')
+        self.assertIsNone(selected['hold'])
+        pd.testing.assert_frame_equal(self.events,original)
+
+    def test_no_confirmation_before_its_available_close_or_in_hourly_context(self):
+        early=self.frame(end=269)
+        self.assertNotIn('up',set(early.asof_transition_id))
+        self.assertIsNone(u.confirmation_track(self.frame(end=314),15)['hold'])
+        self.assertEqual(u.confirmation_track(self.frame(end=315),15)['hold'].asof_transition_id,'up_hold')
+        self.assertEqual(u.confirmation_track(self.frame(),60)['headline'],'Sin confirmación posterior visible')
+
+    def test_future_rows_and_changed_future_outcomes_do_not_change_visible_download(self):
+        before=u.confirmation_table(self.frame(end=260),180*u.M,'ep').to_csv(index=False)
+        self.events.loc[self.events.confirmation_ts.gt(260*u.M),'event_type']='FAILED_BREAK_FUTURE_ONLY'
+        after=u.confirmation_table(self.frame(end=260),180*u.M,'ep').to_csv(index=False)
+        self.assertEqual(before,after)
+        self.assertNotIn('FUTURE_ONLY',after)
+
+    def test_future_followup_changes_do_not_change_chart_payload(self):
+        kw=dict(region='r',episode=self.ep,cutoff=180*u.M,end=260*u.M,tf_minutes=15,
+                lookback_minutes=180,origin_side='HIGH',followup_start=180*u.M)
+        before=u.build_figure(self.bars[15],self.stages,self.events,**kw)
+        self.events.loc[self.events.confirmation_ts.gt(260*u.M),'event_type']='FAILED_BREAK_FUTURE_ONLY'
+        self.bars[15].loc[self.bars[15].closed_ts.gt(260*u.M),['open','high','low','close']]=9999
+        self.assertEqual(before,u.build_figure(self.bars[15],self.stages,self.events,**kw))
+
+    def test_retest_does_not_claim_hold_and_keeps_intrabar_uncertainty(self):
+        frame=self.frame(end=300)
+        track=u.confirmation_track(frame,15)
+        self.assertIn('pendiente',track['headline'])
+        shown=u.confirmation_table(frame,180*u.M,'ep')
+        self.assertIn('orden intraminuto desconocido',shown.Evidencia.iloc[-1])
+
+    def test_hold_from_a_different_cross_is_not_attached_to_latest_cross(self):
+        self.events.loc[self.events.asof_transition_id.eq('up_hold'),'parent_asof_transition_id']='down'
+        track=u.confirmation_track(self.frame(),15)
+        self.assertEqual(track['cross'].asof_transition_id,'up')
+        self.assertIsNone(track['hold'])
+
+    def test_alias_of_same_physical_cross_preserves_child_lineage_after_dedup(self):
+        alias=self.events.loc[self.events.asof_transition_id.eq('up')].copy()
+        alias['asof_transition_id']='up_alias';alias['episode_id']='ep'
+        self.events=pd.concat([self.events,alias],ignore_index=True)
+        frame=self.frame()
+        self.assertEqual(len(frame.loc[frame.asof_physical_transition_id.eq('p_up')]),1)
+        track=u.confirmation_track(frame,15)
+        self.assertEqual(track['cross'].asof_transition_id,'up_alias')
+        self.assertEqual(track['hold'].asof_transition_id,'up_hold')
+
+    def test_incomplete_evidence_does_not_become_a_confirmed_hold(self):
+        self.events.loc[self.events.asof_transition_id.eq('up_hold'),'data_complete']=False
+        track=u.confirmation_track(self.frame(),15)
+        self.assertIsNone(track['hold'])
+        self.assertIn('pendiente',track['headline'])
+
+    def test_missing_evidence_metadata_fails_closed(self):
+        self.events=self.events.drop(columns='data_complete')
+        self.assertFalse(self.frame().confirmation_evaluable.any())
+        self.assertIn('incompleta',u.confirmation_track(self.frame(),15)['headline'])
+
+    def test_visible_later_failure_supersedes_positive_hold(self):
+        failure=self.events.loc[self.events.asof_transition_id.eq('up_hold')].copy()
+        failure['asof_transition_id']='failure';failure['asof_physical_transition_id']='p_failure'
+        failure['confirmation_ts']=345*u.M;failure['event_type']='FAILED_BREAK_RETURN_ORIGIN_2C'
+        failure['direction']='BELOW'
+        self.events=pd.concat([self.events,failure],ignore_index=True)
+        self.assertIn('sostenido',u.confirmation_track(self.frame(end=344),15)['headline'])
+        self.assertIn('fallidos',u.confirmation_track(self.frame(end=345),15)['headline'])
+
+    def test_chart_annotations_include_known_followup_from_later_episode(self):
+        kwargs=dict(region='r',episode=self.ep,cutoff=180*u.M,end=330*u.M,tf_minutes=15,
+                    lookback_minutes=180,origin_side='HIGH',followup_start=180*u.M)
+        fig=u.build_figure(self.bars[15],self.stages,self.events,**kwargs)
+        self.assertTrue(any('Retest sostenido' in a.get('text','') for a in fig['layout']['annotations']))
+        hidden=u.build_figure(self.bars[15],self.stages,self.events,**{**kwargs,'end':180*u.M})
+        self.assertNotIn('Retest sostenido',json.dumps(hidden,ensure_ascii=False))
+        scoped=u.build_figure(self.bars[15],self.stages,self.events,**{**kwargs,'follow_region':False})
+        self.assertNotIn('Retest sostenido',json.dumps(scoped,ensure_ascii=False))
+
+    def test_transition_navigation_can_reach_and_highlight_later_context(self):
+        ep={**self.ep,'observed_until_ts':400*u.M}
+        self.assertIn('up_hold',set(u.transition_candidates(self.events,ep).asof_transition_id))
+        self.assertNotIn('up_hold',set(u.transition_candidates(self.events,ep,False).asof_transition_id))
+        kwargs=dict(region='r',episode=self.ep,cutoff=315*u.M,end=315*u.M,tf_minutes=15,
+                    lookback_minutes=180,origin_side='HIGH',followup_start=180*u.M,selected_transition_id='up_hold')
+        fig=u.build_figure(self.bars[15],self.stages,self.events,**kwargs)
+        self.assertTrue(any(t.get('name')=='Transición elegida' for t in fig['data']))
+
+    def test_region_links_require_both_clocks_and_keep_scope(self):
+        links=pd.DataFrame([dict(region_id='r',episode_id=ep,link_status='LAGGED_CONFIRMATION',
+                                h1_confirmation_ts=h*u.M,m15_confirmation_ts=m*u.M)
+                           for ep,h,m in [('ep',300,270),('next_ep',360,330),('next_ep',300,330)]])
+        kw=dict(region='r',arrival=180*u.M,end=300*u.M,selected_episode='ep')
+        self.assertEqual(len(u.arrival_links(links,**kw)),1)
+        kw['end']=360*u.M
+        self.assertEqual(len(u.arrival_links(links,**kw)),2)
+        self.assertEqual(len(u.arrival_links(links,**kw,follow_region=False)),1)
+
+
 class RealFrozenStudy(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -238,6 +392,20 @@ class RealFrozenStudy(unittest.TestCase):
         self.assertIn(vid,set(self.study['visits'].event_id))
         t=u.snapshot_table(self.bars,self.study['stages'],r,1792775940000)
         self.assertEqual(t['Posición con la etapa conocida al corte'].tolist(),['INSIDE','BELOW','BELOW'])
+
+    def test_real_prices_are_present_and_match_legacy_aggregation_when_supported(self):
+        from btc_multiswing_60d_explorer_v1 import load_snapshot,aggregate_closed
+        full,_,source=load_snapshot(ROOT)
+        for width,name in [(15,'15m'),(60,'1h'),(240,'4h')]:
+            current=self.bars[width]
+            self.assertGreater(len(current),100)
+            self.assertTrue(current.closed_ts.diff().dropna().eq(width*u.M).all())
+            legacy=aggregate_closed(full,name,int(full.timestamp.iloc[0]),int(source['end']))
+            # Older aggregation assumes nanosecond datetime indices. Compare
+            # exact OHLC parity where that API still returns actual candles.
+            if len(legacy):
+                for col in ('timestamp','open','high','low','close'):
+                    self.assertEqual(current[col].tolist(),legacy[col].tolist())
 
     def test_unchanged_run_reuses_verified_index_without_reading_csv_again(self):
         u._load_index.cache_clear()
@@ -258,6 +426,194 @@ class RealFrozenStudy(unittest.TestCase):
                     episode=ep,cutoff=cut,end=cut,tf_minutes=tf,lookback_minutes=7*1440,origin_side=ep['band_origin_side'])
                 for trace in f['data']:
                     self.assertTrue(all(int(pd.Timestamp(x).timestamp()*1000)<=cut for x in trace.get('x',[])))
+
+    def test_real_september_high_follows_the_band_without_future_confirmation(self):
+        r,e,vid=u.BOOKMARKS['HIGH_18_SEP'];arrival=1789709580000
+        def frame(clock):
+            end=int(pd.Timestamp(clock).timestamp()*1000)
+            return u.arrival_confirmations(self.study['events'],region=r,arrival=arrival,end=end,selected_episode=e)
+        pre=frame('2026-09-18T05:33Z')
+        self.assertTrue(pre.empty)
+        self.assertEqual(u.confirmation_track(pre,15)['headline'],'Sin confirmación posterior visible')
+        observed=u.confirmation_track(frame('2026-09-18T08:15Z'),15)
+        self.assertIsNotNone(observed['retest']);self.assertIsNone(observed['hold'])
+        track=u.confirmation_track(frame('2026-09-18T08:30Z'),15)
+        self.assertEqual(u.utc(track['cross'].confirmation_ts),'2026-09-18 07:45 UTC')
+        self.assertEqual(u.utc(track['retest'].confirmation_ts),'2026-09-18 08:15 UTC')
+        self.assertEqual(u.utc(track['hold'].confirmation_ts),'2026-09-18 08:30 UTC')
+        self.assertNotEqual(track['cross'].episode_id,e)
+        shown=u.confirmation_table(frame('2026-09-18T08:30Z'),arrival,e)
+        self.assertIn('Otro episodio de la misma banda',set(shown.Contexto))
+
+    def test_real_september_high_does_not_invent_hourly_hold_or_change_parent_scope(self):
+        r,e,_=u.BOOKMARKS['HIGH_18_SEP'];arrival=1789709580000
+        end=int(pd.Timestamp('2026-09-18T09:00Z').timestamp()*1000)
+        kw=dict(region=r,arrival=arrival,end=end,selected_episode=e)
+        full=u.arrival_confirmations(self.study['events'],**kw)
+        h=u.confirmation_track(full,60)
+        self.assertEqual(u.utc(h['cross'].confirmation_ts),'2026-09-18 09:00 UTC')
+        self.assertIsNone(h['hold'])
+        original=u.confirmation_track(u.arrival_confirmations(self.study['events'],**kw,follow_region=False),15)
+        self.assertEqual(original['cross'].event_type,'EXIT_BELOW_2C')
+        self.assertIsNone(original['hold'])
+
+    def test_real_september_cross_link_appears_only_at_hourly_confirmation(self):
+        r,e,_=u.BOOKMARKS['HIGH_18_SEP'];arrival=1789709580000
+        def links(clock):
+            return u.arrival_links(self.study['links'],region=r,arrival=arrival,
+                                   end=int(pd.Timestamp(clock).timestamp()*1000),selected_episode=e)
+        self.assertFalse(links('2026-09-18T08:59Z').event_type.eq('EXIT_ABOVE_2C').any())
+        known=links('2026-09-18T09:00Z')
+        matched=known.loc[known.event_type.eq('EXIT_ABOVE_2C')]
+        self.assertEqual(len(matched),1)
+        self.assertEqual(float(matched.lag_minutes.iloc[0]),75)
+
+    def test_real_flip_catalog_keeps_mature_low_and_excludes_new_short_band(self):
+        catalog=u.load_flip_catalog(ROOT)
+        selected=catalog.loc[catalog.event_id.eq(u.BOOKMARKS['LOW_23_OCT'][2])]
+        self.assertEqual(len(selected),1)
+        row=selected.iloc[0]
+        self.assertEqual(row.flip_direction,'SUPPORT_TO_RESISTANCE')
+        self.assertEqual(row.reaction_pre,'M15')
+        self.assertEqual(int(row.h1_opposite_reactions),0)
+        self.assertEqual(int(row.prior_h1_defenses),2)
+        self.assertGreater(row.band_age_hours,7*24)
+        self.assertGreater(row.max_separation_pct,.7)
+        defaults=u.filter_flip_catalog(catalog,unique_bands=False)
+        self.assertIn(row.event_id,set(defaults.event_id))
+        self.assertFalse(defaults.event_id.eq('msv2_328a9f856221c0e15000|V1|1789115100000').any())
+        self.assertTrue(defaults.band_age_hours.ge(72).all())
+        self.assertTrue(defaults.prior_h1_defenses.ge(2).all())
+        self.assertTrue(defaults.max_separation_pct.ge(.25).all())
+        self.assertFalse(defaults.reaction_pre.eq('PENDING').any())
+        self.assertFalse(u.filter_flip_catalog(catalog).region_id.duplicated().any())
+
+    def test_real_flip_catalog_reuses_cache_for_changed_filters(self):
+        u._load_flip_catalog.cache_clear()
+        with patch.object(u,'build_flip_catalog',wraps=u.build_flip_catalog) as builder:
+            first=u.load_flip_catalog(ROOT)
+            u.filter_flip_catalog(first,min_age_hours=168)
+            second=u.load_flip_catalog(ROOT)
+            self.assertIs(first,second)
+            self.assertEqual(builder.call_count,1)
+
+
+class FlipPreSelection(unittest.TestCase):
+    def setUp(self):
+        self.hour=60*u.M
+        visit=dict(event_id='v',episode_id='ep',region_id='r',pre_cutoff_ts=96*self.hour,
+                   pre_last_1m_close_ts=96*self.hour,pre_last_1h_close_ts=95*self.hour,
+                   pre_last_4h_close_ts=92*self.hour,pre_1m_close=98.,pre_1h_close=98.,
+                   pre_4h_close=99.,pre_4h_ret_12h_pct=-1.2)
+        stage=dict(region_id='r',known_from=0,independent_extrema=2,band_low=100.,band_high=102.)
+        events=[]
+        for ident,hour,tf,kind,direction,origin,parent in [
+            ('d1',12,'H1_CLOSED','DEFEND_ORIGIN_2C','ABOVE','ABOVE',''),
+            ('d2',24,'H1_CLOSED','DEFEND_ORIGIN_2C','ABOVE','ABOVE',''),
+            ('b',73,'H1_CLOSED','BREAK_BELOW_2C','BELOW','ABOVE',''),
+            ('m',80,'M15_CLOSED','DEFEND_ORIGIN_2C','BELOW','BELOW','')]:
+            events.append(dict(asof_transition_id=ident,asof_physical_transition_id='p_'+ident,
+                region_id='r',episode_id='ep',source_tf=tf,event_type=kind,direction=direction,origin_position=origin,
+                confirmation_ts=hour*self.hour,stage_known_from=0,band_low_asof=100.,band_high_asof=102.,
+                data_complete=True,parent_asof_transition_id=parent))
+        self.study=dict(visits=pd.DataFrame([visit]),stages=pd.DataFrame([stage]),events=pd.DataFrame(events))
+        self.bars={60:pd.DataFrame({'closed_ts':np.array([70,71,72,73,80,95])*self.hour,'close':[103.,101.,97.,96.,97.,98.]})}
+
+    def build(self):return u.build_flip_catalog(self.study,self.bars)
+    def append_event(self,hour,kind,direction='ABOVE',parent='b',complete=True):
+        row=self.study['events'].iloc[-1].copy()
+        row['asof_transition_id']='new_'+str(hour);row['asof_physical_transition_id']='p_new_'+str(hour)
+        row['confirmation_ts']=hour*self.hour;row['event_type']=kind;row['direction']=direction
+        row['parent_asof_transition_id']=parent;row['source_tf']='H1_CLOSED';row['data_complete']=complete
+        self.study['events']=pd.concat([self.study['events'],pd.DataFrame([row])],ignore_index=True)
+
+    def test_selection_requires_prior_role_break_return_and_known_local_reaction(self):
+        row=self.build().iloc[0]
+        self.assertEqual(row.prior_h1_defenses,2)
+        self.assertEqual(row.flip_direction,'SUPPORT_TO_RESISTANCE')
+        self.assertEqual(row.reaction_pre,'M15')
+        self.assertEqual(row.max_separation_pct,4)
+        self.assertEqual(len(u.filter_flip_catalog(self.build())),1)
+
+    def test_failed_or_recovered_break_is_not_an_active_flip_candidate(self):
+        for kind in ('FAILED_BREAK_RETURN_ORIGIN_2C','EXIT_ABOVE_2C'):
+            with self.subTest(kind=kind):
+                original=self.study['events'].copy()
+                self.append_event(90,kind)
+                self.assertTrue(self.build().empty)
+                self.study['events']=original
+
+    def test_post_failure_future_stage_and_future_prices_do_not_change_pre_features(self):
+        before=self.build()
+        self.append_event(100,'FAILED_BREAK_RETURN_ORIGIN_2C')
+        stage=self.study['stages'].iloc[0].copy();stage['known_from']=100*self.hour
+        stage['band_low']=1.;stage['band_high']=9999.;stage['independent_extrema']=3
+        self.study['stages']=pd.concat([self.study['stages'],pd.DataFrame([stage])],ignore_index=True)
+        self.bars[60]=pd.concat([self.bars[60],pd.DataFrame([dict(closed_ts=100*self.hour,close=1.)])],ignore_index=True)
+        pd.testing.assert_frame_equal(before,self.build())
+
+    def test_duplicate_contexts_do_not_inflate_prior_defenses(self):
+        duplicate=self.study['events'].iloc[[0]].copy()
+        duplicate['asof_transition_id']='another_context';duplicate['episode_id']='other_ep'
+        self.study['events']=pd.concat([self.study['events'],duplicate],ignore_index=True)
+        self.assertEqual(self.build().prior_h1_defenses.iloc[0],2)
+
+    def test_incomplete_hourly_evidence_fails_closed(self):
+        self.append_event(90,'RETEST_TOUCH',direction='BELOW',complete=False)
+        self.assertTrue(self.build().empty)
+
+    def test_price_on_old_side_or_future_hourly_source_is_not_admitted(self):
+        self.study['visits'].loc[0,'pre_1m_close']=104.
+        self.assertTrue(self.build().empty)
+        self.study['visits'].loc[0,'pre_1m_close']=98.
+        self.study['visits'].loc[0,'pre_last_1h_close_ts']=97*self.hour
+        self.assertTrue(self.build().empty)
+
+    def test_hourly_reaction_is_not_invented_from_local_or_future_event(self):
+        self.assertEqual(self.build().reaction_pre.iloc[0],'M15')
+        self.append_event(100,'DEFEND_ORIGIN_2C',direction='BELOW')
+        self.assertEqual(self.build().reaction_pre.iloc[0],'M15')
+        self.append_event(90,'DEFEND_ORIGIN_2C',direction='BELOW')
+        self.assertEqual(self.build().reaction_pre.iloc[0],'H1')
+
+    def test_separation_uses_stage_at_each_closed_hour_not_geometry_from_later_pre(self):
+        stage=self.study['stages'].iloc[0].copy();stage['known_from']=90*self.hour
+        stage['band_low']=95.;stage['band_high']=103.;stage['independent_extrema']=3
+        self.study['stages']=pd.concat([self.study['stages'],pd.DataFrame([stage])],ignore_index=True)
+        self.study['visits'].loc[0,['pre_1m_close','pre_1h_close']]=94.
+        self.bars[60].loc[self.bars[60].closed_ts.eq(95*self.hour),'close']=94.
+        row=self.build().iloc[0]
+        self.assertEqual(row.max_separation_pct,4)
+        self.assertTrue(row.geometry_changed_since_break)
+
+    def test_thresholds_pending_reactions_and_first_case_per_band_are_explicit(self):
+        frame=self.build()
+        self.assertTrue(u.filter_flip_catalog(frame,min_age_hours=168).empty)
+        self.assertTrue(u.filter_flip_catalog(frame,min_defenses=3).empty)
+        self.assertTrue(u.filter_flip_catalog(frame,reaction='H1').empty)
+        self.assertTrue(u.filter_flip_catalog(frame,direction='RESISTANCE_TO_SUPPORT').empty)
+        later=frame.copy();later['event_id']='later';later['pre_cutoff_ts']+=self.hour
+        later['max_separation_pct']=999.
+        combined=pd.concat([frame,later],ignore_index=True)
+        selected=u.filter_flip_catalog(combined)
+        self.assertEqual(selected.event_id.tolist(),['v'])
+        self.assertEqual(len(u.filter_flip_catalog(combined,unique_bands=False)),2)
+        pending=frame.copy();pending['reaction_pre']='PENDING'
+        self.assertTrue(u.filter_flip_catalog(pending).empty)
+        self.assertEqual(len(u.filter_flip_catalog(pending,reaction='ANY')),1)
+
+    def test_episode_seeded_break_without_actual_hourly_cross_is_rejected(self):
+        self.bars[60].loc[self.bars[60].closed_ts.eq(70*self.hour),'close']=97.
+        self.assertTrue(self.build().empty)
+
+    def test_new_episode_does_not_restart_a_long_hourly_outside_streak(self):
+        self.bars[60].loc[self.bars[60].closed_ts.eq(71*self.hour),'close']=98.
+        self.assertTrue(self.build().empty)
+
+    def test_unknown_hourly_price_cannot_bridge_a_role_transition(self):
+        self.bars[60]=pd.concat([pd.DataFrame([dict(closed_ts=69*self.hour,close=103.)]),self.bars[60]],ignore_index=True)
+        self.bars[60].loc[self.bars[60].closed_ts.eq(70*self.hour),'close']=np.nan
+        self.assertTrue(self.build().empty)
 
 
 if __name__=='__main__':unittest.main()

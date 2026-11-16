@@ -1,4 +1,4 @@
-"""Read-only execution inspector; UI 0.1.1 adds a POST-blind PRE review batch."""
+"""Read-only execution inspector; UI 0.1.2 adds optional causal REACTION overlays."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 import btc_multiswing_execution_replay_v01 as replay
+import btc_multiswing_reaction_overlay_v1 as reaction_overlay
 from dashboard.views import reaction_multiswing_behavior_v13_view as structural
 
 PREFIX='ms60_execution_v01_'
@@ -239,12 +240,15 @@ def render_execution_v01(project,st=None):
             st.markdown('**'+label+'**')
             st.caption('Sin gatillo confirmado en lo visible' if q.empty else
                        'Último: '+replay.utc(q.available_ts.max())+f' · {len(q)} registrado(s)')
+    rx=reaction_overlay.render_overlay(st,root,stages=study['stages'],region_ids=(region,),
+        cutoff=cutoff,start=cutoff-14*1440*replay.M,end=end,prefix=PREFIX+'rx_')
     market=study['market']
     minute=market.frame.assign(closed_ts=market.closes)
     five=replay.closed_bars(market.frame,5,int(market.opens[0]),int(market.closes[-1]))
     for tf,frame,lookback in [(1,minute,history1),(5,five,history5*60)]:
         fig=execution_figure(frame,study['stages'],events,region=region,cutoff=cutoff,end=end,
                              start=cutoff-int(lookback)*replay.M,tf=tf,origin_side=visit['band_origin_side'])
+        reaction_overlay.add_to_figure(fig,rx,start=cutoff-int(lookback)*replay.M,end=end)
         st.plotly_chart(fig,**width,key=PREFIX+'chart'+str(tf),config={'displaylogo':False,'scrollZoom':True})
     with st.expander('Contexto estructural · 15m / 1h / 4h'):
         bars,_=structural.load_prices(root,structural.load_index(root))
@@ -253,8 +257,10 @@ def render_execution_v01(project,st=None):
         for tf,lookback in [(15,24*60),(60,7*1440),(240,14*1440)]:
             fig=structural.build_figure(bars[tf],study['stages'],study['legacy'],region=region,episode=ep,
                 cutoff=cutoff,end=end,tf_minutes=tf,lookback_minutes=lookback,origin_side=visit['band_origin_side'])
+            reaction_overlay.add_to_figure(fig,rx,start=cutoff-lookback*replay.M,end=end)
             st.plotly_chart(fig,**width,key=PREFIX+'context'+str(tf),config={'displaylogo':False})
         st.caption('Estas marcas mantienen las definiciones estructurales V1.3. Los gatillos 5m se muestran aparte.')
+    reaction_overlay.render_table(st,rx,width=width)
     st.markdown('##### Secuencia conocida de esta visita')
     if events.empty:st.caption('Todavía no hay eventos posteriores a la llegada dentro del corte visible.')
     else:

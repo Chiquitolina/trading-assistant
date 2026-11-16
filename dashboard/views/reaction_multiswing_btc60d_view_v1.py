@@ -4,7 +4,8 @@ No reconstruye pivotes al abrir el dashboard. Solo lee freeze y catálogo 6TF
 verificados, agrupando identidades físicas *as-of* antes de cada corte.
 POST es exclusivamente visual: nunca incorpora swings confirmados después del
 corte seleccionado. Los paneles multi-TF comparten el mismo instante causal,
-pero NO conectan todavía HLL, REACTION, órdenes ni LIVE.
+con REACTIONs opcionales del histórico canónico HLL o journal de solo lectura.
+No conectan órdenes ni LIVE ni alteran las bandas.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import math
 import time as _perf_time
 import re
 import numpy as np
+import btc_multiswing_reaction_overlay_v1 as reaction_overlay
 from pathlib import Path
 
 from btc_multiswing_structural_confluence_v2 import (
@@ -1243,6 +1245,11 @@ def render_btc_multiswing_60d_view(project):
     # Never clutter the initial map. In the inspector only selected physical
     # members are highlighted unless the user explicitly enables all pivots.
     plot_markers = markers if show_all_pivots else markers.iloc[0:0].copy()
+    rx_stages=(region_stages.loc[region_stages.independent_extrema.ge(region_min)]
+               if region_stages is not None else pd.DataFrame(columns=['region_id','known_from','band_low','band_high']))
+    rx_start=min(chart_start,cutoff-context_days*DAY) if mode=='EJECUCION' and show_context_panel else chart_start
+    rx=reaction_overlay.render_overlay(st,project,stages=rx_stages,
+        region_ids=draw_region_ids,cutoff=cutoff,start=rx_start,end=chart_end,prefix='ms60_rx_')
     fig=build_figure(candles,plot_markers,display_tf=display_tf,
                      selected=chosen_row,
                      cutoff=cutoff if (chosen_row is not None or mode == 'EJECUCION') else None,
@@ -1366,8 +1373,10 @@ def render_btc_multiswing_60d_view(project):
                f'· velas cerradas {display_tf}: {len(candles):,} '
                f'· contexto {iso(chart_start)} → {iso(chart_end)}. '
                'La ventana se dibuja completa; ningún dato se recorta silenciosamente.')
+    reaction_overlay.add_to_figure(fig,rx,start=chart_start,end=chart_end)
     st.plotly_chart(fig,use_container_width=True,key='ms60_chart',
                     config={'displaylogo':False,'scrollZoom':True})
+    reaction_overlay.render_table(st,rx,width=dict(use_container_width=True))
     v314_structural_plot_ms = (_perf_time.perf_counter()-v314_structural_started)*1000
     with st.expander('⏱️ Diagnóstico de rendimiento · BTC 60D', expanded=False):
         st.json({'freeze_load_ms':round(v314_load_ms,1),
@@ -1408,8 +1417,8 @@ def render_btc_multiswing_60d_view(project):
         if replay_post_status == 'CUTOFF_CENSORED' and reveal_post:
             st.warning('POST limitado por el final del freeze BTC 60D: CENSORED. '
                        'No equivale a ausencia de reacción.')
-        st.caption('Próximas capas: HLL as-of, eventos REACTION confirmados y triggers 1m/5m. '
-                   'La investigación de triggers se desarrollará y validará por separado.')
+        st.caption('Las REACTIONs opcionales se comparan con las bandas conocidas al retest. '
+                   'HLL as-of y las reglas operativas se mantienen como capas separadas.')
         if show_context_panel:
             try:
                 second_fig,second_count,second_start=v32_build_context_chart(
@@ -1428,6 +1437,7 @@ def render_btc_multiswing_60d_view(project):
                         f'cerradas · {iso(second_start)} → {iso(chart_end)}. '
                         f'Corte PRE común: {iso(cutoff)}. '
                         'Banda seleccionada y POST congelados al mismo PRE.')
+                    reaction_overlay.add_to_figure(second_fig,rx,start=second_start,end=chart_end)
                     st.plotly_chart(second_fig,use_container_width=True,
                         key='ms60_v32_context_chart',
                         config={'displaylogo':False,'scrollZoom':True})

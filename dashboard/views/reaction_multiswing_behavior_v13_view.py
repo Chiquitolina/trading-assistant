@@ -6,6 +6,8 @@ the same closed-data boundary. All Streamlit imports are render-time only.
 """
 from __future__ import annotations
 
+import btc_multiswing_reaction_overlay_v1 as reaction_overlay
+
 import hashlib
 import json
 import time
@@ -879,12 +881,17 @@ def render_multiswing_behavior_v13(project, st=None):
     confirmations=arrival_confirmations(study['events'],region=region,arrival=arrival,end=end,
                                        selected_episode=eid,follow_region=follow_region)
     render_arrival_confirmations(st,confirmations,arrival,eid,follow_region,width)
+    rx=reaction_overlay.render_overlay(st,root,stages=study['stages'],region_ids=(region,),
+        cutoff=cutoff,start=cutoff-max(local_hours*60,h1_days*1440,h4_days*1440)*M,
+        end=end,prefix=PREFIX+'rx_')
     for tf,minutes in [(15,local_hours*60),(60,h1_days*1440),(240,h4_days*1440)]:
         figure=build_figure(bars[tf],study['stages'],study['events'],region=region,episode=ep,
             cutoff=cutoff,end=end,tf_minutes=tf,lookback_minutes=minutes,origin_side=ep['band_origin_side'],
             compare_fixed=compare,details=details,selected_transition_id=tid,followup_start=arrival,follow_region=follow_region)
+        reaction_overlay.add_to_figure(figure,rx,start=cutoff-minutes*M,end=end)
         st.plotly_chart(figure,**width,key=PREFIX+'chart_'+str(tf),
                         config={'displaylogo':False,'scrollZoom':True})
+    reaction_overlay.render_table(st,rx,width=width)
     st.markdown('##### Cronología conocida en el tramo visible')
     first=cutoff-max(local_hours*60,h1_days*1440)*M
     timeline=visible_events(study['events'],region,first,end,episode=None if history else eid,details=details)
