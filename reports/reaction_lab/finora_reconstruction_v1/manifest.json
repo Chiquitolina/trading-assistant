@@ -1,0 +1,50 @@
+{
+  "version": "finora-reconstruction-v1",
+  "datasets": [
+    {
+      "symbol": "BTCUSDT",
+      "market": "perpetual",
+      "url": "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&startTime=1794355200000&endTime=1795546799999&limit=1000",
+      "source_sha256": "93550a184a51f42f47a8119a65946144efa99e5ad4b987c01203b91d0b0871d3",
+      "sha256": "ba5df302b64ab0cf0a96774aabce82d9bb8efbbb52a84df76f7db6b255e50dfb",
+      "first_open": 1794355200000,
+      "end_exclusive": 1795546800000,
+      "bars": 331,
+      "key": "BTCUSDT_perpetual",
+      "file": "BTCUSDT_perpetual_1h.csv",
+      "image": "BTCUSDT_perpetual.png",
+      "image_time": "UNKNOWN",
+      "default_cutoff_utc": "2026-11-24T14:00:00+00:00"
+    },
+    {
+      "symbol": "NVDAUSDT",
+      "market": "perpetual",
+      "url": "https://fapi.binance.com/fapi/v1/klines?symbol=NVDAUSDT&interval=1h&startTime=1794355200000&endTime=1795546799999&limit=1000",
+      "source_sha256": "a87690a106ecc7ef8f3c83994e0c90c2f4fb75d605b075f4fab26a73b37fd706",
+      "sha256": "c6b9acd5032127a2f400c0edf17f4e8bdc9f63bade2d218260c0fc2c7d644207",
+      "first_open": 1794355200000,
+      "end_exclusive": 1795546800000,
+      "bars": 331,
+      "key": "NVDAUSDT_perpetual",
+      "file": "NVDAUSDT_perpetual_1h.csv",
+      "image": "NVDAUSDT_perpetual.png",
+      "image_time": "UNKNOWN",
+      "default_cutoff_utc": "2026-11-24T14:00:00+00:00"
+    },
+    {
+      "symbol": "SHELLUSDT",
+      "market": "spot",
+      "url": "https://api.binance.com/api/v3/klines?symbol=SHELLUSDT&interval=1h&startTime=1794355200000&endTime=1795546799999&limit=1000",
+      "source_sha256": "b1b7b377901109736175f530cac91d53f8a260a6412542767ba9cf13b58417b6",
+      "sha256": "d70fe6ea4f1391dda7a156676cc54586996f20ef223284d33d1e42b28cf4a6e8",
+      "first_open": 1794355200000,
+      "end_exclusive": 1795546800000,
+      "bars": 331,
+      "key": "SHELLUSDT_spot",
+      "file": "SHELLUSDT_spot_1h.csv",
+      "image": "SHELLUSDT_spot.png",
+      "image_time": "UNKNOWN",
+      "default_cutoff_utc": "2026-11-24T14:00:00+00:00"
+    }
+  ]
+}
