@@ -13,6 +13,7 @@ import pandas as pd
 
 HOUR = 3_600_000
 DAY = 24 * HOUR
+MODEL_VERSION = '1.1'
 BASE = Path('reports/reaction_lab/finora_reconstruction_v1')
 FIELDS = ['timestamp', 'open', 'high', 'low', 'close']
 
@@ -24,6 +25,9 @@ class Model:
     days: int = 12
     supply_count: int = 2
     merge_level_pct: float = 0.20
+    supply_rule: str = 'structure_v11'
+    neutral_body_fraction: float = 0.25
+    max_supply_width_pct: float = 3.0
 
 
 def stamp(value):
@@ -159,7 +163,7 @@ def demand_zone(hourly, major, last_price):
     return None
 
 
-def supply_zones(hourly, local, model, last_price):
+def supply_zones_v1(hourly, local, model, last_price):
     candidates = []
     bars = list(hourly.itertuples(index=False))
     # The last rising candle preceding a bearish gap is an explicit hypothesis.
@@ -199,10 +203,127 @@ def supply_zones(hourly, local, model, last_price):
     return selected
 
 
+def bearish_gaps(hourly):
+    """Each gap is available only at the close of its third candle."""
+    bars = list(hourly.itertuples(index=False))
+    result = []
+    for i in range(1, len(bars) - 1):
+        left, middle, right = bars[i - 1:i + 2]
+        if middle.close >= middle.open or right.high >= left.low:
+            continue
+        up = [bar for bar in bars[max(0, i - 8):i] if bar.close > bar.open]
+        later = hourly[hourly.timestamp >= right.available_ts]
+        filled = later[later.high >= left.low]
+        result.append(dict(low=float(right.high), high=float(left.low),
+                           origin_ts=int(left.timestamp), impulse_ts=int(middle.timestamp),
+                           known_ts=int(right.available_ts),
+                           filled_ts=None if filled.empty else int(filled.available_ts.iloc[0]),
+                           base_ts=int(left.timestamp), last_up_ts=int(up[-1].timestamp) if up else None))
+    return result
+
+
+def supply_v11(hourly, major, local, model, last_price):
+    """Experimental compact bases, one representative per confirmed 4h downswing.
+
+    Parameters are shared by all instruments. Neither symbols nor reference
+    prices enter the detector. Highest and latest eligible contexts are retained.
+    """
+    gaps = bearish_gaps(hourly)
+    lookup = {int(bar.timestamp): bar for bar in hourly.itertuples(index=False)}
+    highs = sorted((p for p in major if p['side'] == 'HIGH'), key=lambda p: p['anchor_ts'])
+    lows = [p for p in major if p['side'] == 'LOW']
+    representatives = []
+    start = int(hourly.available_ts.iloc[-1]) - model.days * DAY
+
+    def candidate(origin, formed, context, rule, gap=None):
+        bar = lookup[origin]
+        lo, hi = float(bar.low), float(bar.high)
+        if (origin < start or hi <= lo or lo <= last_price
+                or (hi - lo) / hi * 100 > model.max_supply_width_pct
+                or failed_at(hourly, 'SELL', lo, hi, formed) is not None):
+            return None
+        return dict(side='SELL', low=lo, high=hi, entry_edge=lo, origin_ts=origin,
+                    formed_ts=formed, known_ts=max(formed, context), rule=rule,
+                    gap_low=None if gap is None else gap['low'],
+                    gap_high=None if gap is None else gap['high'])
+
+    for peak in highs:
+        later_lows = [p for p in lows if p['anchor_ts'] > peak['anchor_ts']]
+        end = min(later_lows, key=lambda p: p['anchor_ts']) if later_lows else None
+        until = end['anchor_ts'] if end else int(hourly.available_ts.iloc[-1])
+        evidence_ts = max(peak['known_ts'], end['known_ts'] if end else 0)
+        leg = [g for g in gaps if peak['anchor_ts'] <= g['impulse_ts'] <= until]
+        neutral, opposing = [], []
+        for gap in leg:
+            bar = lookup[gap['base_ts']]
+            fraction = abs(bar.close - bar.open) / (bar.high - bar.low) if bar.high > bar.low else 0.0
+            if fraction <= model.neutral_body_fraction:
+                row = candidate(gap['base_ts'], gap['known_ts'], evidence_ts,
+                                'Base neutra anterior a hueco bajista · tramo 4h', gap)
+                if row is not None:
+                    neutral.append(row)
+            if gap['last_up_ts'] is not None:
+                row = candidate(gap['last_up_ts'], gap['known_ts'], evidence_ts,
+                                'Última vela alcista anterior a hueco bajista · tramo 4h', gap)
+                if row is not None:
+                    opposing.append(row)
+        caps = []
+        for point in local:
+            if (point['side'] != 'HIGH' or point['anchor_count'] != 1
+                    or not peak['anchor_ts'] - 8 * HOUR <= point['anchor_ts'] <= peak['anchor_ts']
+                    or abs(point['price'] - peak['price']) / peak['price'] * 100 > model.merge_level_pct):
+                continue
+            row = candidate(point['anchor_ts'], point['known_ts'], evidence_ts,
+                            'Vela compacta del máximo horario junto al máximo 4h')
+            if row is not None:
+                caps.append(row)
+        if neutral:
+            chosen = min(neutral, key=lambda row: (row['formed_ts'], row['origin_ts']))
+        elif caps:
+            chosen = min(caps, key=lambda row: ((row['high'] - row['low']) / row['high'], row['origin_ts']))
+        elif opposing:
+            chosen = min(opposing, key=lambda row: (row['formed_ts'], row['origin_ts']))
+        else:
+            continue
+        chosen.update(peak_price=peak['price'], peak_ts=peak['anchor_ts'],
+                      context_known_ts=evidence_ts, context_end_ts=until)
+        representatives.append(chosen)
+
+    selected = []
+    if representatives:
+        dominant = max(representatives, key=lambda row: (row['peak_price'], -row['peak_ts']))
+        recent = max(representatives, key=lambda row: row['peak_ts'])
+        order = [dominant, recent] + sorted(representatives, key=lambda row: row['peak_ts'], reverse=True)
+        for row in order:
+            if any(max(row['low'], old['low']) < min(row['high'], old['high']) for old in selected):
+                continue
+            selected.append(dict(row))
+            if len(selected) == model.supply_count:
+                break
+
+    nearby = []
+    for gap in gaps:
+        if gap['filled_ts'] is not None:
+            continue
+        for zone in selected:
+            distance = max(0., gap['low'] - zone['high'], zone['low'] - gap['high'])
+            if (zone['peak_ts'] <= gap['impulse_ts'] <= zone['context_end_ts']
+                    and distance <= zone['high'] - zone['low']):
+                nearby.append(dict(gap, formed_ts=gap['known_ts'],
+                                   known_ts=max(gap['known_ts'], zone['context_known_ts'])))
+                break
+    for row in representatives:
+        row['selected'] = any(row['peak_ts'] == x['peak_ts'] and row['origin_ts'] == x['origin_ts'] for x in selected)
+    return selected, nearby, representatives
+
+
 def reconstruct(frame, cutoff, model=Model()):
     if (not 1 <= model.major_left_right <= 8 or not 1 <= model.local_left_right <= 8
             or not 2 <= model.days <= 30 or not 1 <= model.supply_count <= 4
-            or not 0 <= model.merge_level_pct <= 1):
+            or not 0 <= model.merge_level_pct <= 1
+            or model.supply_rule not in ('structure_v11', 'compact_v1')
+            or not 0 <= model.neutral_body_fraction <= 1
+            or not 0 < model.max_supply_width_pct <= 100):
         raise ValueError('Parámetros de reconstrucción inválidos')
     frame = validate_hourly(frame)
     if not int(frame.timestamp.iloc[0]) < cutoff <= int(frame.available_ts.iloc[-1]):
@@ -218,9 +339,12 @@ def reconstruct(frame, cutoff, model=Model()):
     last_price = float(hourly.close.iloc[-1])
     lines = structural_lines(major, model.merge_level_pct)
     demand = demand_zone(hourly, major, last_price)
-    zones = supply_zones(hourly, local, model, last_price)
+    if model.supply_rule == 'structure_v11':
+        zones, gaps, candidates = supply_v11(hourly, major, local, model, last_price)
+    else:
+        zones, gaps, candidates = supply_zones_v1(hourly, local, model, last_price), [], []
     if demand is not None:
         zones.append(demand)
     return dict(cutoff=int(cutoff), start=start, last_price=last_price, lines=lines, zones=zones,
                 bars=hourly[hourly.timestamp >= start].reset_index(drop=True),
-                major_pivots=major)
+                major_pivots=major, supply_rule=model.supply_rule, gaps=gaps, supply_candidates=candidates)
