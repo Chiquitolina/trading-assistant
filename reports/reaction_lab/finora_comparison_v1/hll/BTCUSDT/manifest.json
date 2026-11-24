@@ -1,0 +1,10 @@
+{
+  "symbol": "BTCUSDT",
+  "version": "horizontal-level-lifecycle-v2.1-geometry",
+  "input_1m_sha256": "f4fba17f80f4ff6acc0277e43e2228d554f297da79d65081c3fbd23b5996e113",
+  "formations_sha256": "36a9e6cfb0692c417f4c554a91dd46b6830c16d8a77a617c2e3b0924e0fc1eb5",
+  "engine_sha256": "a14765194aa2db6bff815441141e3831137ea78a5f19180c1d41aab445bb25fa",
+  "source": "30m UTC agregado con closed_bars del piloto desde CSV 1m validado; scanner original de HLL V2.1 sobre velas en memoria.",
+  "formation_prefix_check": true,
+  "bars_30m": 608
+}

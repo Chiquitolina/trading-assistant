@@ -1,0 +1,9 @@
+{
+  "symbol": "BTCUSDT",
+  "timeframe": "4h",
+  "market": "BINANCE_USDT_M_PERPETUAL",
+  "filename": "BTCUSDT_4h.csv",
+  "sha256": "8ce81dd43fd7f557838abb415d021bec12b7900e3c9ab76d74694cc0535bcff5",
+  "source_url": "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=4h&endTime=1795535999999&limit=253",
+  "response_sha256": "3e3cfc128e727506d5d5dec4671a5c79ce6dc0b421c7dab9ef99b51808fa6e1e"
+}

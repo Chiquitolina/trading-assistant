@@ -1,0 +1,21 @@
+{
+  "checked_through_ts": 1795532400000,
+  "first_contact_closed_ts": 1795455060000,
+  "closes_5m": [
+    {
+      "closed_ts": 1795455600000,
+      "close": 9.128,
+      "relation": "ABOVE"
+    },
+    {
+      "closed_ts": 1795455900000,
+      "close": 9.06,
+      "relation": "INSIDE"
+    },
+    {
+      "closed_ts": 1795456200000,
+      "close": 9.073,
+      "relation": "INSIDE"
+    }
+  ]
+}

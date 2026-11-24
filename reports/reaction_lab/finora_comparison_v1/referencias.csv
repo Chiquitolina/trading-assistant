@@ -1,0 +1,8 @@
+case_id,symbol,timeframe,asof_utc,kind,label,low,high,source_url,context,pivot_open_utc
+link_fvg,LINKUSDT,1h,2026-11-23T15:43:00Z,ZONE,Hueco citado de LINK,9.024,9.126,https://finorabot.com/analysis/link/,Retroceso esperado al publicar.,
+shell_rejection,SHELLUSDT,1h,2026-11-20T21:01:00Z,ZONE,Zona de rechazo de SHELL,0.02556,0.02607,https://finorabot.com/analysis/shell/,El texto describe un rechazo anterior. Contrato de la ficha usado como hipótesis para el extracto.,
+btc_reclaim,BTCUSDT,4h,2026-11-24T09:03:00Z,ZONE,Zona a recuperar en BTC,60407,60748,https://finorabot.com/analysis/btc/,El texto sitúa el precio por debajo de la zona.,
+sol_liquidity,SOLUSDT,1h,2026-11-24T10:07:00Z,ZONE,Liquidez en mínimos de SOL,69.83,70.04,https://finorabot.com/analysis/sol/,El informe sitúa el precio en la zona.,
+link_swing_high,LINKUSDT,1h,2026-11-24T13:20:00Z,LEVEL,Último máximo mayor de LINK,9.559,9.559,https://finorabot.com/analysis/link/,Pivote de 1h citado en la ficha pública.,2026-11-23T14:00:00Z
+btc_swing_high,BTCUSDT,1h,2026-11-24T15:20:00Z,LEVEL,Máximo decreciente de BTC,61663.1,61663.1,https://finorabot.com/analysis/btc/,Pivote de 1h citado en la ficha pública.,2026-11-24T01:00:00Z
+btc_swing_low,BTCUSDT,1h,2026-11-24T15:20:00Z,LEVEL,Mínimo decreciente de BTC,59427.9,59427.9,https://finorabot.com/analysis/btc/,Pivote de 1h citado en la ficha pública.,2026-11-24T03:00:00Z

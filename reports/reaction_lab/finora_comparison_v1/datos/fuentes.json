@@ -1,0 +1,266 @@
+[
+  {
+    "symbol": "LINKUSDT",
+    "market": "BINANCE_USDT_M_PERPETUAL",
+    "filename": "LINKUSDT_1m.csv",
+    "timeframe": "1m",
+    "start_ms": 1794355200000,
+    "end_exclusive_ms": 1795532400000,
+    "sha256": "6d8886ee7e1a844112a8776e5081da52f467462696d44645baf08b77fbe79d58",
+    "sources": [
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-11.zip",
+        "sha256": "5b285e7b8e316dce1aefde7e510c2868656320d33f351b22b4dbbba23adc7b29"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-12.zip",
+        "sha256": "0a51010d9fdaf0e332cdd02f21d5f3d019ae71ab59e0cd3f38f43d3015114219"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-13.zip",
+        "sha256": "24302501762b19437f93302fcd7c8c465b06cf2128dd89e20581c30198f41b6c"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-14.zip",
+        "sha256": "f4749d520005404f7fcc078cbbd194308810c2b3f46867b374ad6b5280cfafee"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-15.zip",
+        "sha256": "b6558d5b317558208f3f604b026ea62062ff1c9eee21e9b79b832ec9870b0b08"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-16.zip",
+        "sha256": "0335c648b6dc77b799ca10b12c943c3f0184acbe6ace8f6b2d09acf0226d8442"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-17.zip",
+        "sha256": "cb1bf98cad02060a35e11cb3ef26ccf4855c739276f8a30827dad8d7fea8292e"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-18.zip",
+        "sha256": "ec42671636e5788109ed6913714b85548cbed1d97893ce0425c30c1fdb651612"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-19.zip",
+        "sha256": "95ba34fd3ddab82f983ff2746a97e391ae09059a56509fe634bdf6b5ed8c1faf"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-20.zip",
+        "sha256": "09ee4dc1057ceed2bdec18d4fcd9a1cf5b781fab649bab55219c4c7347ac2706"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-21.zip",
+        "sha256": "106f0536f757299eb318ca49f8ffcac5894e0f3d79cc8a1d40bd0682f1293244"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-22.zip",
+        "sha256": "22a2e107f0bb838b5746d8c61c76065c123c86425132e2e0a850b17f87badb85"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/LINKUSDT/1m/LINKUSDT-1m-2026-11-23.zip",
+        "sha256": "4f6f2b58e5c6f7e21f58fa7d1d69c5a913c214740f1e1342e3263f5d7f22fd7d"
+      },
+      {
+        "request": "https://fapi.binance.com/fapi/v1/klines?symbol=LINKUSDT&interval=1m&startTime=1795478400000&endTime=1795532399999&limit=1500",
+        "sha256": "698a44d2a7056891a7ed27e86c301a275860befd85461ce6dd223a76a7d5edb8"
+      }
+    ]
+  },
+  {
+    "symbol": "BTCUSDT",
+    "market": "BINANCE_USDT_M_PERPETUAL",
+    "filename": "BTCUSDT_1m.csv",
+    "timeframe": "1m",
+    "start_ms": 1794441600000,
+    "end_exclusive_ms": 1795536000000,
+    "sha256": "f4fba17f80f4ff6acc0277e43e2228d554f297da79d65081c3fbd23b5996e113",
+    "sources": [
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-12.zip",
+        "sha256": "1273d85a7b5009051287868a7743447771faa4f56b98c06a40323de318c28681"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-13.zip",
+        "sha256": "c5cb0fcda4e063da5a3ffcc192fd6371d036cce962ede1e13da4038b8af6ec5c"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-14.zip",
+        "sha256": "92c5862735bdca6b821068ab7be2c97ba4bc0cc9b1cdf955caa7c018fd6df7e8"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-15.zip",
+        "sha256": "9eef3b4d54a096f2b0e29e8fbc9fff080b31c03a932740c8055fe12117348a49"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-16.zip",
+        "sha256": "feb5928c6af1a205b6cc2a061be49d62113c14d311e05ea270806d6ef47385c4"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-17.zip",
+        "sha256": "5f40e4477b496704acdca86c0970cc7d2f1bbf8964ed667d027417e43985fcfe"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-18.zip",
+        "sha256": "3ee647dcac1fe73dff3158762bd5ad24c23f92e13b669050f4b48f8fc818700d"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-19.zip",
+        "sha256": "b5e3b3c6697fb40eff1b44bce4e0a4b1dfe3579b8d7c32ce7f16ef26e6ec3a0f"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-20.zip",
+        "sha256": "967651c78d2fe0e1786dd56127803de2f26e5f6e961c8232ac29f6a709046d91"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-21.zip",
+        "sha256": "9b77ba367bd7f7229e542933432a8a0cb3b4c680bda57001ac3b3471cd62e81c"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-22.zip",
+        "sha256": "83a7212cc51179f6edcef4e52aa90cc4a133d809cc6e17b7ce6029ebf7be5bda"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-11-23.zip",
+        "sha256": "3707c3e5ffd834cde583eed80ad30e0f5b93fc0c410d52e148890d45b3b2a166"
+      },
+      {
+        "request": "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&startTime=1795478400000&endTime=1795535999999&limit=1500",
+        "sha256": "be3b5cec74fe5aa625f860df796f55f2fe54363214c0316f0e04850bdf1d5222"
+      }
+    ]
+  },
+  {
+    "symbol": "SOLUSDT",
+    "market": "BINANCE_USDT_M_PERPETUAL",
+    "filename": "SOLUSDT_1m.csv",
+    "timeframe": "1m",
+    "start_ms": 1794441600000,
+    "end_exclusive_ms": 1795532400000,
+    "sha256": "8d64779aba3d9c001bd25d2132c19264e4e38426c9787509e4d13464086bd89d",
+    "sources": [
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-12.zip",
+        "sha256": "2b03dbe3e9bc2ecceb62475848711b2f84035e1d891347a4369babd18beb0606"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-13.zip",
+        "sha256": "18a6a560ddf8873dbbd53ef2da5d659f65125a7a27c7725485493c620f811ff8"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-14.zip",
+        "sha256": "0eb080c8556546f70fcb796c7b4e263788e6165b4af2637f9839a6a4e1771377"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-15.zip",
+        "sha256": "82ad6d4df3f84144b8363cccbd71c117571209d5ad7726a45dde94825e7d38ce"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-16.zip",
+        "sha256": "0c0d4302ce6f1e2dc4d9f54ac72b3a2ac8056309b3fb3a8926b09974af1be228"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-17.zip",
+        "sha256": "4e90df8eea9f5f1a9a014315bc4ace061e77711f51ff76737b589cf84edf23b4"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-18.zip",
+        "sha256": "e5c2e65fbe306edfd4f674a873172f523ca8b2672cc4b308b688475769634fc8"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-19.zip",
+        "sha256": "c5c3842d47049846efea61dc67801208b890dd888738628f78513f05f96b8573"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-20.zip",
+        "sha256": "ead16ef5cba883ade87902400dc77a23731fa26b21e8e705396a932d961483b5"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-21.zip",
+        "sha256": "011e447ed668842fabd6f1dfd0f12d2f1e9e0dc6dab0c921908a408b98b78fcf"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-22.zip",
+        "sha256": "b98ff9efd4acc79d6c65b560f68871383784d7ad78d39386d946f4453156a9de"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SOLUSDT/1m/SOLUSDT-1m-2026-11-23.zip",
+        "sha256": "d868e409a8fe6f74cb3f731ccd649040e4f50c39866b49caf890deee8c67c567"
+      },
+      {
+        "request": "https://fapi.binance.com/fapi/v1/klines?symbol=SOLUSDT&interval=1m&startTime=1795478400000&endTime=1795532399999&limit=1500",
+        "sha256": "2cc0b84bed4b9ee993467cff89ff7522abe4d6e4f68620ffff377dc022d34f4c"
+      }
+    ]
+  },
+  {
+    "symbol": "SHELLUSDT",
+    "market": "BINANCE_USDT_M_PERPETUAL",
+    "filename": "SHELLUSDT_1m.csv",
+    "timeframe": "1m",
+    "start_ms": 1794096000000,
+    "end_exclusive_ms": 1795381260000,
+    "sha256": "19715deae6ab2ffe8efe1642c226a7e1ccd07a3a1fcc57617e48b8611b7a9d39",
+    "sources": [
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-08.zip",
+        "sha256": "09288a318763a18b044d2ba6316b5987035964395b385b4ea9bdaa0f70255508"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-09.zip",
+        "sha256": "36597c29211e24a4c6270f9b1ff3a3fb582dd5e89b220b58f7eaf5c5076bde26"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-10.zip",
+        "sha256": "6a6a7718eb11ef6f8162ded62297c6c1111fda2dd66f73c4ea334cdf6264cd9c"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-11.zip",
+        "sha256": "6c100ef85fa94c94957676ad88bc17364b34ba8404a63b1ca979e3c289673fae"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-12.zip",
+        "sha256": "fc3de1c614f422c6aad4bbf6bcd1db44c3cd79f0e04b7be4bc71f88d6a06385f"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-13.zip",
+        "sha256": "e1be9429dd97cd74675f22a09ef271451699fbe19a215d5ed107c34064712991"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-14.zip",
+        "sha256": "930cc6916fd7dca3e1df32a3b4658a55866dd89e9449c6b7338b50432e60e397"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-15.zip",
+        "sha256": "f4cae62fab30bd5bf0995c2870c48092f16230de353c9040093bc564f067ce5a"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-16.zip",
+        "sha256": "06fca80290bc1bd11d962457af08582deb9465271d2af30a57718c79c97bb6cc"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-17.zip",
+        "sha256": "b6f0420554822b15474e82c07f9a3e726bfcc4a5914bb1bf284f4e1dcd1972b5"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-18.zip",
+        "sha256": "566ef0b7869c542ecebf38de0f5120f9ff41e1e6bd722198eac6e7de0824ea81"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-19.zip",
+        "sha256": "b6803bac74f78d4cf0a3a9c843b86a1c935f32ecea345fc809f050295307e094"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-20.zip",
+        "sha256": "a539917613eb7dc7a2967b64ae38759839462ab4b68918036fe4a7587eaaef5b"
+      },
+      {
+        "archive": "https://data.binance.vision/data/futures/um/daily/klines/SHELLUSDT/1m/SHELLUSDT-1m-2026-11-21.zip",
+        "sha256": "cc9d2420abc9adc575500c654f8fece20701004519c122b1b22d2abca629faab"
+      },
+      {
+        "request": "https://fapi.binance.com/fapi/v1/klines?symbol=SHELLUSDT&interval=1m&startTime=1795305600000&endTime=1795381259999&limit=1500",
+        "sha256": "afc7d17c565e2c4ceb2df557fba852dd991d06f1dc46c3fb763b05c7fc1d7a36"
+      }
+    ]
+  }
+]

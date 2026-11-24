@@ -1,0 +1,10 @@
+{
+  "symbol": "LINKUSDT",
+  "version": "horizontal-level-lifecycle-v2.1-geometry",
+  "input_1m_sha256": "6d8886ee7e1a844112a8776e5081da52f467462696d44645baf08b77fbe79d58",
+  "formations_sha256": "ef91785d864a14e36b40024694bed95ce2bcd3684bf68c3d9a191ccc06646a7d",
+  "engine_sha256": "a14765194aa2db6bff815441141e3831137ea78a5f19180c1d41aab445bb25fa",
+  "source": "30m UTC agregado con closed_bars del piloto desde CSV 1m validado; scanner original de HLL V2.1 sobre velas en memoria.",
+  "formation_prefix_check": true,
+  "bars_30m": 654
+}

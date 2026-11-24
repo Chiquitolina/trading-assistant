@@ -1,0 +1,51 @@
+{
+  "version": "finora-comparison-v1",
+  "cases": [
+    "link_fvg",
+    "link_swing_high",
+    "shell_rejection",
+    "btc_reclaim",
+    "btc_swing_high",
+    "btc_swing_low",
+    "sol_liquidity"
+  ],
+  "market": "BINANCE_USDT_M_PERPETUAL",
+  "reference_sha256": "cc2711a42a404fa43860217154bd5f468fe5c1711dd75589befc9ac3dbcecc24",
+  "input_manifest_sha256": "988802fa51543bf4c26c88d967a6f4f5e3b2254484c69f7b5a8d969a614f6097",
+  "market_sha256": {
+    "LINKUSDT": "6d8886ee7e1a844112a8776e5081da52f467462696d44645baf08b77fbe79d58",
+    "SHELLUSDT": "19715deae6ab2ffe8efe1642c226a7e1ccd07a3a1fcc57617e48b8611b7a9d39",
+    "BTCUSDT": "f4fba17f80f4ff6acc0277e43e2228d554f297da79d65081c3fbd23b5996e113",
+    "SOLUSDT": "8d64779aba3d9c001bd25d2132c19264e4e38426c9787509e4d13464086bd89d"
+  },
+  "files_sha256": {
+    "btc_reclaim/candidatos.csv": "bc9272d1a7551fbacc391a35929795cb5282a020fbcda49ac818a259271ef1b3",
+    "btc_reclaim/post.json": "b74ca0317f83f00a90883b905e89e2652f5b5ae12b8de3f6052fd28c1d8d9556",
+    "btc_reclaim/referencia.json": "2e91fe0754a3e1daedf435ae32c134c2b6ec949f1b08b54d95ea20232c419e91",
+    "btc_reclaim/velas_1m.csv": "b7212ac486b1c440ff7feaf4fc38c2562a5d3dfb0f6747d2975a2091e96ee40e",
+    "btc_swing_high/candidatos.csv": "e70977fa30cb3e59581ecae41c981b80498d67bece73b0476ac1e6327bdcda56",
+    "btc_swing_high/post.json": "9913115fe96db1485b6e7772a5a50bfe511e99d0b0a770e7169cc6ce45d66c09",
+    "btc_swing_high/referencia.json": "05004b7771bfc90267e9f8661dd2f745419fc83365f23b5e5783d95fd3c2475c",
+    "btc_swing_high/velas_1m.csv": "0ea769bc6b7178223a46dbe67bed769d84b5605652923f7ed9fbf5a810b5fd0b",
+    "btc_swing_low/candidatos.csv": "5e1ce8a79cac1cbc678ccc7d9d14e743ec6869b679b84a7bd946526a6e1174f2",
+    "btc_swing_low/post.json": "9913115fe96db1485b6e7772a5a50bfe511e99d0b0a770e7169cc6ce45d66c09",
+    "btc_swing_low/referencia.json": "b7de4576fc96bedbf3ac0a7f06b5be3c859104168bcd1c76d0fa81f111dd2ba6",
+    "btc_swing_low/velas_1m.csv": "0ea769bc6b7178223a46dbe67bed769d84b5605652923f7ed9fbf5a810b5fd0b",
+    "link_fvg/candidatos.csv": "25c62ccf2f8701860937751017fbc71602dc60863c478f67a4b98053c691e796",
+    "link_fvg/post.json": "83281acfed60759aeb64093a5c5b7d138d42f344f603b452897b16924714a8b6",
+    "link_fvg/referencia.json": "1dfd76fe780779d55656022dbcf11df841bd4344b2babe7c2474465ed0527660",
+    "link_fvg/velas_1m.csv": "860f5a88218c4861c6f243ca76c0179a98838bd900aa53505232d46358b87f47",
+    "link_swing_high/candidatos.csv": "b64abcd04d6cda6d9affaf1a1254f93ab5f38d4b777866336524b4fc6423ae2b",
+    "link_swing_high/post.json": "8143fe934636c173a9f57a9cd2664254758c0b40c1d2c22579217136005f8627",
+    "link_swing_high/referencia.json": "2cd38dd9f9f0595b465b5864197ad8cae562ff20b961663cc805d81fd1334d6b",
+    "link_swing_high/velas_1m.csv": "cdec0969b44b408f2785870288699869638f073adaba5ca97e5f24c8cc6a8049",
+    "shell_rejection/candidatos.csv": "8c6f42c64ae54da6e24c07229f5b778159fed02a81f4e9f99ae2017431f06914",
+    "shell_rejection/post.json": "16d83ab410703ee7f66f3e77d147cfe050b1beeb7931d72843a3bb5486dc5328",
+    "shell_rejection/referencia.json": "e932f3b1fb8312fe67515516f412523180c70b728d2ad725234e8ac17d9e3d2d",
+    "shell_rejection/velas_1m.csv": "067052b72b07aa185fb10fd4b575bbda6898fd321eeaa2c9e418fe14ee087e38",
+    "sol_liquidity/candidatos.csv": "f6a7df0add9eb4ae718aaab5e94bccdfde49a12e65e379b8d9b3cd208b935075",
+    "sol_liquidity/post.json": "9bd609b00ce4b81459c846366a005cc207181811cd4928628021e53a4278c8b1",
+    "sol_liquidity/referencia.json": "4f0f8d60d73f46d8071cebb5ceb987ab15e9043a4ae6fd616a961b115d9bc05c",
+    "sol_liquidity/velas_1m.csv": "c74af381feff0f5a1fc25ce596d31f778037c1acacfd0f30582c7b504425d474"
+  }
+}

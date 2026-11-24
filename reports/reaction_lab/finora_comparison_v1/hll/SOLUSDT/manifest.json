@@ -1,0 +1,10 @@
+{
+  "symbol": "SOLUSDT",
+  "version": "horizontal-level-lifecycle-v2.1-geometry",
+  "input_1m_sha256": "8d64779aba3d9c001bd25d2132c19264e4e38426c9787509e4d13464086bd89d",
+  "formations_sha256": "fc8e15b712cf32424e8ae1d0898363c4c99627981a19c2de02b6bca0eba9169d",
+  "engine_sha256": "a14765194aa2db6bff815441141e3831137ea78a5f19180c1d41aab445bb25fa",
+  "source": "30m UTC agregado con closed_bars del piloto desde CSV 1m validado; scanner original de HLL V2.1 sobre velas en memoria.",
+  "formation_prefix_check": true,
+  "bars_30m": 606
+}

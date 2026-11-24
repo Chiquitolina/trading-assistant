@@ -1,0 +1,31 @@
+{
+  "case_id": "btc_swing_low",
+  "symbol": "BTCUSDT",
+  "timeframe": "1h",
+  "asof_ts": 1795533600000,
+  "kind": "LEVEL",
+  "label": "Mínimo decreciente de BTC",
+  "low": 59427.9,
+  "high": 59427.9,
+  "source_url": "https://finorabot.com/analysis/btc/",
+  "context": "Pivote de 1h citado en la ficha pública.",
+  "pivot_open_ts": 1795489200000,
+  "data_end_ts": 1795536000000,
+  "last_tf_close_ts": 1795532400000,
+  "last_1m_close": 59603.9,
+  "coverage": {
+    "1h": 250
+  },
+  "hll_status": "FORMATIONS_VERIFIED",
+  "exact_swing_at_expected_time": true,
+  "counts": {
+    "HLL 30m": 35,
+    "MULTI_SWING": 54,
+    "SWING_5X5 1h": 31
+  },
+  "exact_counts": {
+    "HLL 30m": 0,
+    "MULTI_SWING": 0,
+    "SWING_5X5 1h": 1
+  }
+}
