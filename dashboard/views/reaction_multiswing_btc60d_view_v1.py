@@ -601,6 +601,26 @@ def render_btc_multiswing_60d_view(project):
     import pandas as pd
     import streamlit as st
 
+    scope = st.selectbox('Ámbito del laboratorio', ('BTC60D', 'MULTISYMBOL', 'FINORA'),
+        format_func=lambda x: {'BTC60D': 'BTC 60D · laboratorio existente',
+                              'MULTISYMBOL': 'Varios símbolos · respuesta de bandas V1',
+                              'FINORA': 'Comparación con Finora · replay'}[x],
+        key='ms60_lab_scope')
+    scope_state = getattr(st, 'session_state', None)
+    if scope_state is not None:
+        if scope_state.get('ms60_last_scope') != scope:
+            for post_key in ('ms60_v13_reveal_post', 'ms60_v31_reveal_post',
+                             'ms60_reveal_post', 'brpilot_post', 'brpilot_summary', 'finora_reveal_post'):
+                scope_state[post_key] = False
+        scope_state['ms60_last_scope'] = scope
+    if scope == 'MULTISYMBOL':
+        from dashboard.views.reaction_multiswing_band_response_pilot_v1_view import render_band_response_pilot
+        render_band_response_pilot(Path(project))
+        return
+    if scope == 'FINORA':
+        from dashboard.views.reaction_multiswing_finora_v1_view import render_finora_comparison
+        render_finora_comparison(Path(project))
+        return
     st.markdown('### 🧭 Multi-Swing Structural Lab · BTC 60D')
     mode = st.radio(
         'Modo de investigación', V3_MODES, horizontal=True, index=0,
