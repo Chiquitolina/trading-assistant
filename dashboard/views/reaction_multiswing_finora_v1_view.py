@@ -112,6 +112,16 @@ def ranked_table(rows, top, kind):
 
 
 def render_finora_comparison(project):
+    mode = st.radio('Modo de trabajo', ['Reconstrucción desde las velas', 'Referencias publicadas'],
+                    horizontal=True, key='finora_work_mode')
+    if mode == 'Reconstrucción desde las velas':
+        from dashboard.views.reaction_multiswing_finora_reconstruction_v1_view import render_reconstruction
+        render_reconstruction(project)
+        return
+    render_published_references(project)
+
+
+def render_published_references(project):
     st.subheader('Comparación con Finora')
     base = Path(project) / BASE / 'runs'
     runs = sorted(p.parent.name for p in base.glob('*/manifest.json') if not p.parent.name.startswith('.'))
