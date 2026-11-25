@@ -1,6 +1,7 @@
 """Show immutable band births and observed endings from the causal hourly journal."""
 from datetime import datetime, time, timezone
 from pathlib import Path
+from math import log10
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,7 +10,7 @@ import streamlit as st
 from finora_chart_reconstruction_v1 import HOUR, stamp, utc
 from finora_band_lifecycle_v12 import at_cutoff, load_sources, read_journal
 
-VIEW_VERSION = '1.2.1'
+VIEW_VERSION = '1.2.2'
 
 EVENT_NAMES = {'DETECTED': 'Primera detección', 'CONTACT': 'Contacto', 'INVALIDATED': 'Invalidación',
                'FILLED': 'Hueco rellenado por mecha',
@@ -27,6 +28,7 @@ def band_table(rows):
     return pd.DataFrame([{'Banda': z['band_id'], 'Tipo': 'Hueco' if z['family'] == 'GAP' else
         ('Demanda' if z['side'] == 'BUY' else 'Oferta'),
         'Inferior': z['low'], 'Superior': z['high'], 'Origen UTC': when(z['origin_ts']),
+        'Ancho (%)': round(100 * (z['high'] - z['low']) / z['low'], 3),
         'Geometría UTC': when(z['formed_ts']), 'Primera detección UTC': when(z['first_detected_ts']),
         'Primer contacto UTC': when(z['first_contact_ts']), 'Invalidada UTC': when(z['invalidated_ts']),
         'Hueco rellenado UTC': when(z['filled_ts']),
@@ -35,7 +37,7 @@ def band_table(rows):
         for z in rows])
 
 
-def lifecycle_figure(result, identities, show_origin=True, show_contacts=True):
+def lifecycle_figure(result, identities, show_origin=True, show_contacts=True, include_distant=False):
     left = pd.to_datetime(result['start'], unit='ms', utc=True)
     right = pd.to_datetime(result['cutoff'], unit='ms', utc=True)
     bars = result['bars']
@@ -47,7 +49,7 @@ def lifecycle_figure(result, identities, show_origin=True, show_contacts=True):
     sides = set()
     for z in zones.values():
         born = pd.to_datetime(z['first_detected_ts'], unit='ms', utc=True)
-        end = pd.to_datetime(z['ended_ts'], unit='ms', utc=True) if z['ended_ts'] is not None else right
+        end = min(right, pd.to_datetime(z['ended_ts'], unit='ms', utc=True)) if z['ended_ts'] is not None else right
         color = '#abb5c6' if z['family'] == 'GAP' else ('#47baa3' if z['side'] == 'BUY' else '#ed7d8b')
         fill = 'rgba(171,181,198,.17)' if z['family'] == 'GAP' else (
                'rgba(71,186,163,.17)' if z['side'] == 'BUY' else 'rgba(237,125,139,.17)')
@@ -71,6 +73,11 @@ def lifecycle_figure(result, identities, show_origin=True, show_contacts=True):
                 legendgroup=category, showlegend=category not in sides,
                 hovertemplate=text + '<extra></extra>')
             sides.add(category)
+            if z['ended_ts'] is not None and result['start'] <= z['ended_ts'] <= result['cutoff']:
+                fig.add_scatter(x=[end, end], y=[z['low'], z['high']], mode='lines', showlegend=False,
+                    line=dict(color='#bfc8d7' if z['family'] == 'GAP' else '#ff6074', width=2.5),
+                    hovertemplate=f"Fin de {kind.lower()} {z['low']:g}–{z['high']:g}<br>"
+                                  f"{when(z['ended_ts'])}<extra></extra>")
     # Price stays above the historical fills when many bands overlap.
     fig.add_trace(candles)
     events = result['events'][result['events'].band_id.isin(zones)]
@@ -84,7 +91,8 @@ def lifecycle_figure(result, identities, show_origin=True, show_contacts=True):
         frame = events[(events.kind == kind) & (events.available_ts >= result['start'])]
         if frame.empty:
             continue
-        text = [f"{EVENT_NAMES[kind]} · {row.band_id}<br>{when(row.available_ts)}"
+        text = [f"{EVENT_NAMES[kind]} · {row.band_id}<br>Franja {zones[row.band_id]['low']:g}–{zones[row.band_id]['high']:g}"
+                f"<br>{when(row.available_ts)}"
                 f"<br>Vela abierta: {when(row.bar_open_ts)}<br>Rango: {row.low:g}–{row.high:g}"
                 f"<br>Cierre: {row.close:g}" for row in frame.itertuples(index=False)]
         fig.add_scatter(x=pd.to_datetime(frame.available_ts, unit='ms', utc=True), y=frame.price,
@@ -98,6 +106,8 @@ def lifecycle_figure(result, identities, show_origin=True, show_contacts=True):
         xaxis_rangeslider_visible=False,
         legend=dict(orientation='h', y=1.16, font=dict(size=10)))
     fig.update_xaxes(range=[left, right + pd.Timedelta(hours=2)])
+    if not include_distant and not bars.empty:
+        fig.update_yaxes(range=[log10(float(bars.low.min()) * .985), log10(float(bars.high.max()) * 1.015)])
     return fig
 
 
@@ -132,6 +142,9 @@ def render_lifecycle(project):
         if at - days * 24 * HOUR < int(source.timestamp.iloc[0]):
             st.info('El encuadre solicita más historia que la disponible antes de este corte; se muestra la cobertura real.')
         in_view = [z for z in result['bands'] if z['ended_ts'] is None or z['ended_ts'] >= result['start']]
+        alive_only = st.checkbox('Solo franjas vigentes al corte', value=False, key='finora_life_alive_only_v122')
+        if alive_only:
+            in_view = [z for z in in_view if z['ended_ts'] is None]
         in_view.sort(key=lambda z: (z['first_detected_ts'], z['band_id']), reverse=True)
         mapping = {z['band_id']: z for z in in_view}
         def label(identity):
@@ -148,20 +161,32 @@ def render_lifecycle(project):
             wanted = [z['band_id'] for z in in_view if z['selected']]
             wanted += [z['band_id'] for z in in_view if z['band_id'] not in wanted][:max(0, 8 - len(wanted))]
             chosen = st.multiselect('Bandas en el gráfico', list(mapping), default=wanted,
-                format_func=label, key=f'finora_life_bands_manual_v121_{key}_{at}_{days}')
+                format_func=label, key=f'finora_life_bands_manual_v121_{key}_{at}_{days}_{int(alive_only)}')
         st.caption(f'Mostrando {len(chosen)} de {len(mapping)} franjas del período. '
                    'Se incluyen las antiguas e invalidadas cuyo ciclo atraviesa el encuadre; '
                    'cada una conserva su primera detección y su final observado.')
         d, e = st.columns(2)
         origin = d.checkbox('Mostrar origen previo a la confirmación', value=True, key='finora_life_origin')
         contact = e.checkbox('Marcar contactos', value=True, key='finora_life_contacts')
-        st.plotly_chart(lifecycle_figure(result, chosen, origin, contact),
+        distant = st.checkbox('Incluir franjas lejanas en la escala de precio', value=False,
+                              key='finora_life_distant_v122')
+        st.plotly_chart(lifecycle_figure(result, chosen, origin, contact, distant),
             use_container_width=True, key='finora_life_chart')
+        lower = float(result['bars'].low.min()) * .985
+        upper = float(result['bars'].high.max()) * 1.015
+        outside = sum(mapping[k]['high'] < lower or mapping[k]['low'] > upper for k in chosen)
+        if outside and not distant:
+            st.caption(f'{outside} franjas quedan fuera de la escala centrada en las velas. '
+                       'Activá Incluir franjas lejanas para verlas. Permanecen en las tablas.')
         st.caption('Rombo amarillo: primera detección. Círculo azul: inicio de un contacto. Cruz roja: '
                    'primer cierre de invalidación. Cuadrado gris: hueco rellenado por mecha. '
                    'Las horas son cierres de velas de 1h; el orden intravela '
                    'y el precio de ejecución no se infieren. El contacto puede compartir vela con la invalidación.')
         shown = [mapping[k] for k in chosen]
+        wide = [z for z in shown if z['family'] == 'BAND' and (z['high'] - z['low']) / z['low'] > .03]
+        if wide:
+            st.info(f'{len(wide)} bandas superan el 3 % de ancho. El modelo toma el rango completo de su vela '
+                    'de origen; estas zonas aún requieren revisar su geometría. El ancho figura en la tabla.')
         table = band_table(shown)
         st.markdown('**Ciclo de las bandas mostradas**')
         st.dataframe(table, hide_index=True, use_container_width=True)

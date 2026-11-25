@@ -1,5 +1,31 @@
 # Finora: ciclo de vida V1.2 y gráficos de hasta 60 días
 
+## Ajuste visual V1.2.2: finales y escala de precio
+
+La escala inicial sigue el rango de las velas visibles, con un margen del 1,5 %. Las ofertas antiguas muy alejadas siguen en el registro, pero ya no comprimen el precio. **Incluir franjas lejanas en la escala de precio** recupera la escala con todas las zonas. El contador y las tablas conservan las franjas seleccionadas y el visor informa cuántas quedan fuera de la escala centrada.
+
+Cada banda invalidada y cada hueco rellenado termina en su evento, con un borde vertical destacado. Los marcadores indican qué rango terminó. **Solo franjas vigentes al corte** permite ocultar completamente las terminadas; desmarcarlo conserva sus segmentos históricos hasta el final observado. El modo Todas sigue mostrando todos los ciclos del período, sin prolongar los terminados después de su final.
+
+La columna **Ancho (%)** informa el tamaño real. Las bandas de más del 3 % se señalan para revisión. Este ajuste conserva sus bordes y las reglas del detector: una oferta solo se invalida por cierre sobre su techo, una demanda por cierre bajo su suelo. La caída del precio desde una oferta no la invalida por esa regla. La demanda BTC 55.126,7–58.097,0 mide un 5,39 % porque proviene de una vela entera; su precisión sigue pendiente de revisión geométrica.
+
+Para instalar V1.2.2 sobre los datos actuales, copiar el ZIP combinando carpetas y subir solo los dos archivos modificados:
+
+```powershell
+git add -- dashboard/views/reaction_multiswing_finora_lifecycle_v12_view.py LEEME_FINORA_CICLO_VIDA_V12.md
+git commit -m "fix: aclara finales de franjas y centra la escala en el precio visible"
+git push origin microservices
+```
+
+En el VPS:
+
+```bash
+cd /home/multiservices-1m
+git pull --ff-only origin microservices
+pm2 restart dash-micro1m
+```
+
+Recargar con Ctrl+F5. La cabecera debe indicar **V1.2.2**. En BTC, 7 días, corte 24 nov 2026 14:00 UTC, la escala inicial debe quedar alrededor del precio observado, en vez de expandirse hasta 87 mil. Activar Incluir franjas lejanas debe permitir ver las ofertas superiores. Elegir SHELL y aislar manualmente la oferta 0,02479–0,02551: su franja y su borde final terminan el 24 nov a las 06:00, aunque existan velas posteriores. Activar Solo franjas vigentes debe retirarla del gráfico al corte posterior a esa hora. Las fuentes de reports y el journal V1.2 se conservan sin cambios.
+
 ## Ajuste visual V1.2.1: todas las franjas del período
 
 El visor abre con **Franjas visibles → Todas las del período**. Al ampliar a 30 o 60 días incorpora automáticamente las franjas históricas de ese encuadre, incluidas las ya invalidadas o rellenadas. Las franjas vigentes que comenzaron antes también permanecen cuando su ciclo atraviesa el período. El contador informa cuántas se muestran. Las velas se dibujan sobre los rellenos para que sigan legibles cuando se superponen muchas franjas.
