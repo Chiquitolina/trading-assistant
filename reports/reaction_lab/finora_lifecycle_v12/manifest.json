@@ -1,0 +1,128 @@
+{
+  "version": "finora-lifecycle-v1.2",
+  "detection_rule": "structure_v11",
+  "calculation_days": 12,
+  "datasets": [
+    {
+      "key": "BTCUSDT_perpetual",
+      "symbol": "BTCUSDT",
+      "market": "perpetual",
+      "file": "BTCUSDT_perpetual_1h.csv",
+      "sha256": "3a44ba158d6f8be6fe9b2fdcb54c56d474594a95c3e7a3a04bcf4e55dd2ccb33",
+      "first_open": 1788912000000,
+      "end_exclusive": 1795546800000,
+      "bars": 1843,
+      "requests": [
+        {
+          "url": "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&startTime=1788912000000&endTime=1795546799999&limit=1000",
+          "response_sha256": "a069cfa1969e5cf20e44f5e64a233b11128aa7b8efbc5ff633cc2f7f6ac24d5b",
+          "bars": 1000
+        },
+        {
+          "url": "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&startTime=1792512000000&endTime=1795546799999&limit=1000",
+          "response_sha256": "046eab9aaf202cf222a00f8098c8f4e9cf562503df6ad9804e5fe764eac2d6c9",
+          "bars": 843
+        }
+      ],
+      "default_cutoff_utc": "2026-11-24T14:00:00+00:00",
+      "model": {
+        "major_left_right": 3,
+        "local_left_right": 2,
+        "days": 12,
+        "supply_count": 2,
+        "merge_level_pct": 0.2,
+        "supply_rule": "structure_v11",
+        "neutral_body_fraction": 0.25,
+        "max_supply_width_pct": 3.0
+      },
+      "journal_source_sha256": "3a44ba158d6f8be6fe9b2fdcb54c56d474594a95c3e7a3a04bcf4e55dd2ccb33",
+      "journal_bands": 148,
+      "journal_events": 1142,
+      "bands_file": "BTCUSDT_perpetual_bands.csv",
+      "bands_sha256": "589cc5f44d2872eb7fa3fb1d4533ab99e40def99695cdbb7af7f8bae5028d7b4",
+      "events_file": "BTCUSDT_perpetual_events.csv",
+      "events_sha256": "88921e2ea3e1c0d2238ed925c8cf1e6564ba64260cbf047169d430e835a9264b"
+    },
+    {
+      "key": "NVDAUSDT_perpetual",
+      "symbol": "NVDAUSDT",
+      "market": "perpetual",
+      "file": "NVDAUSDT_perpetual_1h.csv",
+      "sha256": "a49c6e9522417e045f078f49445582f33d225b47e2678c74684796fae95a853c",
+      "first_open": 1788912000000,
+      "end_exclusive": 1795546800000,
+      "bars": 1843,
+      "requests": [
+        {
+          "url": "https://fapi.binance.com/fapi/v1/klines?symbol=NVDAUSDT&interval=1h&startTime=1788912000000&endTime=1795546799999&limit=1000",
+          "response_sha256": "b65d5a4030f1ca83ff092807d4e70f90aec8275c885eb31b29d8ce0c2e5cb7ca",
+          "bars": 1000
+        },
+        {
+          "url": "https://fapi.binance.com/fapi/v1/klines?symbol=NVDAUSDT&interval=1h&startTime=1792512000000&endTime=1795546799999&limit=1000",
+          "response_sha256": "6de9f4582c5c6291623f33faa2980727a7bb5cd8defe1a140cba87c64293df99",
+          "bars": 843
+        }
+      ],
+      "default_cutoff_utc": "2026-11-24T14:00:00+00:00",
+      "model": {
+        "major_left_right": 3,
+        "local_left_right": 2,
+        "days": 12,
+        "supply_count": 2,
+        "merge_level_pct": 0.2,
+        "supply_rule": "structure_v11",
+        "neutral_body_fraction": 0.25,
+        "max_supply_width_pct": 3.0
+      },
+      "journal_source_sha256": "a49c6e9522417e045f078f49445582f33d225b47e2678c74684796fae95a853c",
+      "journal_bands": 140,
+      "journal_events": 897,
+      "bands_file": "NVDAUSDT_perpetual_bands.csv",
+      "bands_sha256": "9994927df4f197136df9771e7eabe227f3133b2c078f1236bce56ac40bb8fb50",
+      "events_file": "NVDAUSDT_perpetual_events.csv",
+      "events_sha256": "095c915919bb205e742c70355bcbf5c6a1ad028eaf1d45fdb67c1166bcc9a419"
+    },
+    {
+      "key": "SHELLUSDT_spot",
+      "symbol": "SHELLUSDT",
+      "market": "spot",
+      "file": "SHELLUSDT_spot_1h.csv",
+      "sha256": "891e4a9231dd9d95737286bc351ded7ee1cbc426557fdbc6823a540f48166116",
+      "first_open": 1788912000000,
+      "end_exclusive": 1795546800000,
+      "bars": 1843,
+      "requests": [
+        {
+          "url": "https://api.binance.com/api/v3/klines?symbol=SHELLUSDT&interval=1h&startTime=1788912000000&endTime=1795546799999&limit=1000",
+          "response_sha256": "3be6a28e48963207767c7c4e2f32c2b2325da4ef63deb67d5fc53d227757ae96",
+          "bars": 1000
+        },
+        {
+          "url": "https://api.binance.com/api/v3/klines?symbol=SHELLUSDT&interval=1h&startTime=1792512000000&endTime=1795546799999&limit=1000",
+          "response_sha256": "90178a7c61a2cb99f0ecc7a0751e534b63be9fc55405faad01656dfaaa57aa7d",
+          "bars": 843
+        }
+      ],
+      "default_cutoff_utc": "2026-11-24T14:00:00+00:00",
+      "model": {
+        "major_left_right": 3,
+        "local_left_right": 2,
+        "days": 12,
+        "supply_count": 2,
+        "merge_level_pct": 0.2,
+        "supply_rule": "structure_v11",
+        "neutral_body_fraction": 0.25,
+        "max_supply_width_pct": 3.0
+      },
+      "journal_source_sha256": "891e4a9231dd9d95737286bc351ded7ee1cbc426557fdbc6823a540f48166116",
+      "journal_bands": 121,
+      "journal_events": 936,
+      "bands_file": "SHELLUSDT_spot_bands.csv",
+      "bands_sha256": "ec43757675264f0d28731b8cd7b778639e36548fea6ce83e4d6e9a33025538c8",
+      "events_file": "SHELLUSDT_spot_events.csv",
+      "events_sha256": "b6270e4e273ee0f005e1836308d82b9ff60a5aaebaf516170e158c5272fa84b0"
+    }
+  ],
+  "journal_version": "1.2"
+}
