@@ -7,7 +7,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from finora_chart_reconstruction_v1 import HOUR, stamp, utc
-from finora_band_lifecycle_v12 import VERSION, at_cutoff, load_sources, read_journal
+from finora_band_lifecycle_v12 import at_cutoff, load_sources, read_journal
+
+VIEW_VERSION = '1.2.1'
 
 EVENT_NAMES = {'DETECTED': 'Primera detección', 'CONTACT': 'Contacto', 'INVALIDATED': 'Invalidación',
                'FILLED': 'Hueco rellenado por mecha',
@@ -37,9 +39,10 @@ def lifecycle_figure(result, identities, show_origin=True, show_contacts=True):
     left = pd.to_datetime(result['start'], unit='ms', utc=True)
     right = pd.to_datetime(result['cutoff'], unit='ms', utc=True)
     bars = result['bars']
-    fig = go.Figure(go.Candlestick(x=pd.to_datetime(bars.available_ts, unit='ms', utc=True),
+    candles = go.Candlestick(x=pd.to_datetime(bars.available_ts, unit='ms', utc=True),
         open=bars.open, high=bars.high, low=bars.low, close=bars.close,
-        increasing_line_color='#47baa3', decreasing_line_color='#ed7d8b', name='Velas cerradas 1h'))
+        increasing_line_color='#47baa3', decreasing_line_color='#ed7d8b', name='Velas cerradas 1h', legendrank=0)
+    fig = go.Figure()
     zones = {z['band_id']: z for z in result['bands'] if z['band_id'] in identities}
     sides = set()
     for z in zones.values():
@@ -68,6 +71,8 @@ def lifecycle_figure(result, identities, show_origin=True, show_contacts=True):
                 legendgroup=category, showlegend=category not in sides,
                 hovertemplate=text + '<extra></extra>')
             sides.add(category)
+    # Price stays above the historical fills when many bands overlap.
+    fig.add_trace(candles)
     events = result['events'][result['events'].band_id.isin(zones)]
     definitions = [('DETECTED', 'Primera detección', '#ffd166', 'diamond'),
                    ('CONTACT', 'Contacto de vela', '#8cc9ef', 'circle-open'),
@@ -97,7 +102,7 @@ def lifecycle_figure(result, identities, show_origin=True, show_contacts=True):
 
 
 def render_lifecycle(project):
-    st.subheader(f'Bandas y ciclo de vida · V{VERSION}')
+    st.subheader(f'Bandas y ciclo de vida · V{VIEW_VERSION}')
     st.caption('Primera detección conservada por banda. El tramo punteado es su origen retrospectivo; '
                'la franja de color comienza cuando el detector pudo seleccionarla.')
     try:
@@ -128,16 +133,25 @@ def render_lifecycle(project):
             st.info('El encuadre solicita más historia que la disponible antes de este corte; se muestra la cobertura real.')
         in_view = [z for z in result['bands'] if z['ended_ts'] is None or z['ended_ts'] >= result['start']]
         in_view.sort(key=lambda z: (z['first_detected_ts'], z['band_id']), reverse=True)
-        wanted = [z['band_id'] for z in in_view if z['selected']]
-        wanted += [z['band_id'] for z in in_view if z['band_id'] not in wanted][:max(0, 8 - len(wanted))]
         mapping = {z['band_id']: z for z in in_view}
         def label(identity):
             z = mapping[identity]
             kind = 'Hueco' if z['family'] == 'GAP' else ('Compra' if z['side'] == 'BUY' else 'Venta')
             return f"{kind} {z['low']:g}–{z['high']:g} · " + \
                    f"{when(z['first_detected_ts'])} · {STATUS_NAMES[z['status']]}"
-        chosen = st.multiselect('Bandas en el gráfico', list(mapping), default=wanted,
-            format_func=label, key=f'finora_life_bands_{key}_{at}_{days}')
+        scope = st.radio('Franjas visibles', ['ALL', 'MANUAL'], horizontal=True,
+            format_func=lambda value: 'Todas las del período' if value == 'ALL' else 'Selección manual',
+            key='finora_life_scope_v121')
+        if scope == 'ALL':
+            chosen = list(mapping)
+        else:
+            wanted = [z['band_id'] for z in in_view if z['selected']]
+            wanted += [z['band_id'] for z in in_view if z['band_id'] not in wanted][:max(0, 8 - len(wanted))]
+            chosen = st.multiselect('Bandas en el gráfico', list(mapping), default=wanted,
+                format_func=label, key=f'finora_life_bands_manual_v121_{key}_{at}_{days}')
+        st.caption(f'Mostrando {len(chosen)} de {len(mapping)} franjas del período. '
+                   'Se incluyen las antiguas e invalidadas cuyo ciclo atraviesa el encuadre; '
+                   'cada una conserva su primera detección y su final observado.')
         d, e = st.columns(2)
         origin = d.checkbox('Mostrar origen previo a la confirmación', value=True, key='finora_life_origin')
         contact = e.checkbox('Marcar contactos', value=True, key='finora_life_contacts')

@@ -1,5 +1,32 @@
 # Finora: ciclo de vida V1.2 y gráficos de hasta 60 días
 
+## Ajuste visual V1.2.1: todas las franjas del período
+
+El visor abre con **Franjas visibles → Todas las del período**. Al ampliar a 30 o 60 días incorpora automáticamente las franjas históricas de ese encuadre, incluidas las ya invalidadas o rellenadas. Las franjas vigentes que comenzaron antes también permanecen cuando su ciclo atraviesa el período. El contador informa cuántas se muestran. Las velas se dibujan sobre los rellenos para que sigan legibles cuando se superponen muchas franjas.
+
+Para aislar una o varias, cambiar **Franjas visibles → Selección manual** y usar **Bandas en el gráfico**. Al regresar a **Todas las del período**, se recupera el histórico completo, aunque la selección manual tuviera solo ocho franjas o una sola. El journal sigue siendo V1.2 y los datos ya instalados son los mismos.
+
+En BTC al corte 24 nov 2026, 14:00 UTC, doce días muestran **49 franjas** y sesenta días **135 franjas**: 91 de oferta/demanda y 44 huecos. El conteo incluye los ciclos que atraviesan el encuadre, aunque su detección sea anterior; los terminados antes quedan fuera.
+
+Para actualizar desde una instalación V1.2 que ya tiene los datos, copiar las fuentes completas de este ZIP y registrar únicamente estos dos archivos:
+
+```powershell
+git add -- dashboard/views/reaction_multiswing_finora_lifecycle_v12_view.py LEEME_FINORA_CICLO_VIDA_V12.md
+git diff --cached --stat
+git commit -m "fix: muestra todas las franjas del periodo en el ciclo Finora"
+git push origin microservices
+```
+
+En el VPS:
+
+```bash
+cd /home/multiservices-1m
+git pull --ff-only origin microservices
+pm2 restart dash-micro1m
+```
+
+Recargar con Ctrl+F5. El encabezado debe decir **Bandas y ciclo de vida · V1.2.1**. Elegir BTC, corte 24 nov 14:00 y 60 días: debe indicar **Mostrando 135 de 135 franjas del período**. Las franjas de septiembre y octubre deben quedar distribuidas sobre su propia historia. En selección manual se pueden elegir menos; al volver a Todas se deben recuperar las 135. La carpeta de reports incluida se conserva sin cambios.
+
 Esta entrega conserva la primera detección de cada franja y sus contactos y terminaciones, aunque el selector posteriormente deje de elegirla. El gráfico diferencia el origen retrospectivo de la franja disponible y termina cada franja en su invalidación o llenado observado.
 
 El selector geométrico sigue siendo la hipótesis V1.1, con ventana de cálculo de doce días. El ciclo V1.2 observa sus decisiones en cada cierre horario y las conserva en un journal. Extender el encuadre a sesenta días no modifica los nacimientos ni las reglas geométricas. Confirmación significa primera selección por este detector; no confirma una entrada ni reproduce por sí misma la lógica interna de Finora.
@@ -105,6 +132,8 @@ El proceso `dash-micro1m` debe corresponder al directorio `/home/multiservices-1
 
 ## Prueba paso a paso del dashboard
 
+En V1.2.1, para los pasos que piden elegir una franja en **Bandas en el gráfico**, primero cambiar **Franjas visibles → Selección manual**. Para el histórico completo usar **Todas las del período**.
+
 1. Abrir **Modo de investigación Multi-Swing → Mapa BTC 60D · 6 TF → Ámbito del laboratorio → Comparación con Finora · replay**.
 2. En **Modo de trabajo**, elegir **Reconstrucción desde las velas**. En el nuevo selector **Vista de reconstrucción**, elegir **Ciclo de vida · V1.2**. El título debe ser **Bandas y ciclo de vida · V1.2**.
 3. Elegir **SHELLUSDT · Binance spot**, fecha **2026/11/24**, hora **14:00 UTC** e historia **12 días**. En **Bandas en el gráfico**, dejar solo **Venta 0.02682–0.02729**. Se pueden borrar las otras etiquetas con su cruz. Deben verse el origen punteado, el rombo del 19 a las 04:00 y el círculo del 24 a las 08:00. La tabla debe mostrar detección 19 nov 04:00, primer contacto 24 nov 08:00 y estado vigente.
@@ -118,7 +147,7 @@ El proceso `dash-micro1m` debe corresponder al directorio `/home/multiservices-1
 11. Descargar **ciclo de bandas al corte** y **eventos conocidos al corte**. Ambas descargas corresponden a las bandas seleccionadas y omiten los eventos posteriores al corte.
 12. En **Vista de reconstrucción → Corte aislado · V1.1**, comprobar las bandas anteriores y el selector V1/V1.1. En **Modo de trabajo → Referencias publicadas**, abrir LINK y activar Revelar POST. Finalmente, regresar al mapa BTC 60D.
 
-El gráfico elige inicialmente las franjas seleccionadas al corte y completa con las más recientes, hasta ocho por defecto. El catálogo permite agregar otras o concentrarse en una sola. Ampliar los días cambia el encuadre y el catálogo; no reconstruye los nacimientos.
+El gráfico muestra inicialmente todas las franjas cuyos ciclos atraviesan el período. Selección manual permite concentrarse en una sola o elegir un subconjunto; su selección inicial ofrece las franjas elegidas al corte y completa hasta ocho recientes. Ampliar los días cambia el encuadre y el catálogo; no reconstruye los nacimientos.
 
 ## Reproducción offline opcional
 
