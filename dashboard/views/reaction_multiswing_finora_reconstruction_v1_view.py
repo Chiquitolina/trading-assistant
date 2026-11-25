@@ -57,7 +57,7 @@ def figure(result, visible_days=None):
     return chart
 
 
-def render_reconstruction(project):
+def render_snapshot(project):
     st.subheader('Reconstrucción desde las velas')
     st.caption(f'Hipótesis V{MODEL_VERSION}. Calcula líneas y bandas desde las velas cerradas y el corte. '
                'Las capturas de Finora sirven para revisar los resultados.')
@@ -149,3 +149,14 @@ def render_reconstruction(project):
                        'Los bordes candidatos requieren contraste con las entradas publicadas por Finora.')
     except (OSError, ValueError, KeyError, StopIteration) as exc:
         st.error(f'No se pudo reconstruir el gráfico. {exc}')
+
+
+def render_reconstruction(project):
+    mode = st.radio('Vista de reconstrucción', ['LIFECYCLE', 'SNAPSHOT'],
+                    format_func=lambda value: 'Ciclo de vida · V1.2' if value == 'LIFECYCLE'
+                    else 'Corte aislado · V1.1', horizontal=True, key='finora_rebuild_view')
+    if mode == 'LIFECYCLE':
+        from dashboard.views.reaction_multiswing_finora_lifecycle_v12_view import render_lifecycle
+        render_lifecycle(project)
+    else:
+        render_snapshot(project)
